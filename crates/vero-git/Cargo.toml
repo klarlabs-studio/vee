@@ -1,0 +1,11 @@
+[package]
+name = "vero-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vero-core = { path = "../vero-core" }
+
+[dev-dependencies]
+tempfile.workspace = true

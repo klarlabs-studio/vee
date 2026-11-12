@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/impact-assessment-v1.schema.json",
+  "title": "Vero Impact Assessment v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "snapshot_id",
+    "coverage_complete",
+    "changed_paths",
+    "changed_symbols",
+    "groups",
+    "paths",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "snapshot_id": { "type": "string", "minLength": 1 },
+    "coverage_complete": { "type": "boolean" },
+    "changed_paths": { "type": "array", "items": { "type": "string" } },
+    "changed_symbols": { "type": "array", "items": { "type": "string" } },
+    "groups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["package_id", "changed_paths", "member_paths", "certainty"],
+        "properties": {
+          "package_id": { "type": "string" },
+          "changed_paths": { "type": "array", "items": { "type": "string" } },
+          "member_paths": { "type": "array", "items": { "type": "string" } },
+          "certainty": { "const": "heuristic_package_membership" }
+        }
+      }
+    },
+    "paths": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source_path", "affected_path", "relationship", "symbol", "certainty", "evidence_line"],
+        "properties": {
+          "source_path": { "type": "string" },
+          "affected_path": { "type": "string" },
+          "relationship": { "enum": ["textual_symbol_reference", "likely_test_reference"] },
+          "symbol": { "type": "string" },
+          "certainty": { "const": "inferred_heuristic" },
+          "evidence_line": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "limitations": { "type": "array", "items": { "type": "string" } }
+  }
+}

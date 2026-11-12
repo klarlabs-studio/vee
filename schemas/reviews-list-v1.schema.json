@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/reviews-list-v1.schema.json",
+  "title": "Vero reviews list v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "reviews"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "reviews": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["review_id", "snapshot_id", "status", "created_at"],
+        "properties": {
+          "review_id": { "type": "string", "minLength": 1 },
+          "snapshot_id": { "type": "string", "minLength": 1 },
+          "status": { "type": "string", "enum": ["pass", "block", "incomplete"] },
+          "created_at": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

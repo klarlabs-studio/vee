@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/review-output-v2.schema.json",
+  "title": "Vero review output v2",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "review_id",
+    "snapshot_id",
+    "status",
+    "findings",
+    "evidence",
+    "verification_runs",
+    "reviewer_outcomes",
+    "analysis_complete",
+    "reasons",
+    "gate",
+    "change_set",
+    "effective_config_digest",
+    "selected_reviewers",
+    "policy_profile"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "review_id": {
+      "type": "string",
+      "pattern": "^rev_"
+    },
+    "snapshot_id": {
+      "type": "string",
+      "pattern": "^sha256:"
+    },
+    "status": {
+      "enum": [
+        "pass",
+        "block",
+        "incomplete"
+      ]
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "evidence_ids"
+        ],
+        "properties": {
+          "evidence_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "verification_runs": {
+      "type": "array",
+      "items": {
+        "$ref": "verification-run-v1.schema.json"
+      }
+    },
+    "reviewer_outcomes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "reviewer_id",
+          "provider_id",
+          "provider_kind",
+          "model",
+          "provider_version",
+          "status"
+        ],
+        "properties": {
+          "reviewer_id": {
+            "type": "string"
+          },
+          "provider_id": {
+            "type": "string"
+          },
+          "provider_kind": {
+            "enum": ["cli", "codex_cli", "gemini_cli", "claude_cli", "openai_compatible"]
+          },
+          "model": {
+            "type": ["string", "null"]
+          },
+          "provider_version": {
+            "type": ["string", "null"]
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "analysis_complete": {
+      "type": "boolean"
+    },
+    "reasons": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "gate": {
+      "$ref": "gate-decision-v1.schema.json"
+    },
+    "change_set": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "base_oid",
+        "head_oid",
+        "scope",
+        "files",
+        "warnings",
+        "digest"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "base_oid": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "head_oid": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "mode",
+              "content_digest",
+              "status"
+            ],
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "mode": {
+                "type": "integer"
+              },
+              "content_digest": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "effective_config_digest": {
+      "type": "string",
+      "pattern": "^sha256:"
+    },
+    "selected_reviewers": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "policy_profile": {
+      "type": ["string", "null"]
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "evidence-v1.schema.json"
+      }
+    }
+  },
+  "additionalProperties": false
+}

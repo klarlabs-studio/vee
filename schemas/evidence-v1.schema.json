@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/evidence-v1.schema.json",
+  "title": "Vero evidence v1",
+  "type": "object",
+  "required": ["id", "kind", "provenance", "source_path", "start_line", "end_line", "content_digest", "classification", "verification"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^ev_"},
+    "kind": {"enum": ["source", "static_analysis", "test", "model_inference", "dependency_path"]},
+    "provenance": {"type": "string"},
+    "source_path": {"type": ["string", "null"]},
+    "start_line": {"type": ["integer", "null"], "minimum": 1},
+    "end_line": {"type": ["integer", "null"], "minimum": 1},
+    "content_digest": {"type": "string", "pattern": "^sha256:"},
+    "classification": {"enum": ["observed", "inferred", "unknown"]},
+    "verification": {"enum": ["unverified", "supported", "reproduced", "refuted", "inconclusive"]}
+  },
+  "additionalProperties": false
+}

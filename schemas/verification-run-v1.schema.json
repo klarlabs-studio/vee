@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/verification-run-v1.schema.json",
+  "title": "Vero verification run v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "snapshot_id",
+    "profile_id",
+    "command_digest",
+    "status",
+    "exit_code",
+    "stdout_digest",
+    "stderr_digest",
+    "stdout_artifact",
+    "stderr_artifact",
+    "finding_id"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "snapshot_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "profile_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "command_digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "status": {
+      "enum": [
+        "passed",
+        "failed",
+        "timed_out"
+      ]
+    },
+    "exit_code": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "stdout_digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "stderr_digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "stdout_artifact": { "$ref": "#/$defs/artifact_reference" },
+    "stderr_artifact": { "$ref": "#/$defs/artifact_reference" },
+    "finding_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    }
+  },
+  "$defs": {
+    "artifact_reference": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["digest", "path", "size_bytes"],
+          "properties": {
+            "digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+            "path": { "type": "string", "pattern": "^\\.vero/artifacts/sha256/[a-f0-9]{64}$" },
+            "size_bytes": { "type": "integer", "minimum": 0 }
+          }
+        }
+      ]
+    }
+  }
+}

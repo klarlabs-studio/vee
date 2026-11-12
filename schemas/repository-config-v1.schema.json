@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/repository-config-v1.schema.json",
+  "title": "Vero repository configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version"],
+  "properties": {
+    "version": { "const": 1 },
+    "offline": { "type": "boolean" },
+    "review": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "include": { "type": "array", "items": { "type": "string" } },
+        "exclude": { "type": "array", "items": { "type": "string" } },
+        "max_concurrency": { "type": "integer", "minimum": 1, "maximum": 32 }
+      }
+    },
+    "providers": { "type": "object", "additionalProperties": { "$ref": "#/$defs/provider" } },
+    "reviewers": { "type": "object", "additionalProperties": { "$ref": "#/$defs/reviewer" } },
+    "verification": { "type": "object", "additionalProperties": { "$ref": "#/$defs/verification" } },
+    "policy": { "$ref": "#/$defs/policy" },
+    "policy_profiles": { "type": "object", "additionalProperties": { "$ref": "#/$defs/policy" } }
+  },
+  "$defs": {
+    "provider": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["cli", "codex_cli", "gemini_cli", "claude_cli", "openai_compatible"] },
+        "egress": { "enum": ["local", "network"] },
+        "executable": { "type": "string", "minLength": 1 },
+        "endpoint": { "type": "string", "format": "uri", "minLength": 1 },
+        "args": { "type": "array", "items": { "type": "string" } },
+        "version_args": { "type": "array", "items": { "type": "string" } },
+        "model": { "type": ["string", "null"] },
+        "env_allowlist": { "type": "array", "items": { "type": "string" } },
+        "timeout_seconds": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "reviewer": {
+      "type": "object", "additionalProperties": false,
+      "required": ["provider", "instructions_file"],
+      "properties": {
+        "provider": { "type": "string" }, "instructions_file": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "include": { "type": "array", "items": { "type": "string" } },
+        "exclude": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "verification": {
+      "type": "object", "additionalProperties": false, "required": ["executable"],
+      "properties": {
+        "executable": { "type": "string", "minLength": 1 },
+        "args": { "type": "array", "items": { "type": "string" } },
+        "timeout_seconds": { "type": "integer", "minimum": 1 },
+        "output_limit_bytes": { "type": "integer", "minimum": 1 },
+        "env_allowlist": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "policy": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "required_reviewers": { "type": "array", "items": { "type": "string" } },
+        "required_verifications": { "type": "array", "items": { "type": "string" } },
+        "block_severities": { "type": "array", "items": { "enum": ["critical", "high", "medium", "low", "info"] } },
+        "minimum_confidence": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "on_incomplete": { "enum": ["block", "allow"] }
+      }
+    }
+  }
+}

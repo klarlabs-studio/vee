@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/waivers-list-v1.schema.json",
+  "title": "Vero waiver list v1",
+  "type": "object",
+  "required": ["schema_version", "waivers"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "waivers": {
+      "type": "array",
+      "items": { "$ref": "waiver-v1.schema.json" }
+    }
+  },
+  "additionalProperties": false
+}

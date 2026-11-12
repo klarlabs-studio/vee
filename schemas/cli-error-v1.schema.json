@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/cli-error-v1.schema.json",
+  "title": "Vero CLI error v1",
+  "type": "object",
+  "required": ["schema_version", "error"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "error": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+          "code": {
+            "enum": ["usage_error", "configuration_error", "execution_failed"],
+            "type": "string"
+          },
+        "message": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/waiver-v1.schema.json",
+  "title": "Vero snapshot-scoped waiver v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "id",
+    "finding_fingerprint",
+    "snapshot_id",
+    "reason",
+    "author",
+    "provenance",
+    "created_at_unix",
+    "expires_at_unix"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "id": { "type": "string", "pattern": "^waiver_" },
+    "finding_fingerprint": { "type": "string", "minLength": 1 },
+    "snapshot_id": { "type": "string", "minLength": 1 },
+    "reason": { "type": "string", "minLength": 1 },
+    "author": { "type": "string", "minLength": 1 },
+    "provenance": { "type": "string", "minLength": 1 },
+    "created_at_unix": { "type": "integer", "minimum": 0 },
+    "expires_at_unix": { "type": "integer", "minimum": 1 }
+  },
+  "additionalProperties": false
+}

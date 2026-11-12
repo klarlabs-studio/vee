@@ -1,0 +1,21 @@
+version: 1
+review:
+  include: ["**/*.rs", "**/*.go"]
+  exclude: ["**/generated/**"]
+providers:
+  codex:
+    kind: codex_cli
+    egress: network
+    executable: codex
+    env_allowlist: [PATH, HOME, CODEX_HOME]
+reviewers:
+  correctness:
+    provider: codex
+    instructions_file: .vero/reviewers/correctness.md
+verification: {}
+policy:
+  required_reviewers: []
+  required_verifications: []
+  block_severities: [critical, high]
+  minimum_confidence: 80
+  on_incomplete: block

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/user-config-v1.schema.json",
+  "title": "Vero user provider configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version"],
+  "properties": {
+    "version": { "const": 1 },
+    "providers": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/provider" }
+    }
+  },
+  "$defs": {
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["cli", "codex_cli", "gemini_cli", "claude_cli", "openai_compatible"] },
+        "egress": { "enum": ["local", "network"] },
+        "executable": { "type": "string", "minLength": 1 },
+        "endpoint": { "type": "string", "format": "uri", "minLength": 1 },
+        "args": { "type": "array", "items": { "type": "string" } },
+        "version_args": { "type": "array", "items": { "type": "string" } },
+        "model": { "type": ["string", "null"] },
+        "env_allowlist": { "type": "array", "items": { "type": "string" } },
+        "timeout_seconds": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}
