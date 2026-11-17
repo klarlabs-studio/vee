@@ -48,7 +48,13 @@ pub fn commit_scope(specification: &str) -> Result<ChangeScope, String> {
 }
 
 pub fn repository_root(path: &Path) -> Result<PathBuf, String> {
-    let output = git(path, &["rev-parse", "--show-toplevel"])?;
+    let output = git(path, &["rev-parse", "--show-toplevel"]).map_err(|error| {
+        if error.starts_with("git command failed") {
+            format!("{} is not inside a Git repository", path.display())
+        } else {
+            error
+        }
+    })?;
     let root = String::from_utf8(output).map_err(|error| error.to_string())?;
     Ok(PathBuf::from(root.trim()))
 }
@@ -101,7 +107,7 @@ pub fn read_tree_file(
         .arg(root)
         .args(["show", spec.as_str()])
         .output()
-        .map_err(|error| error.to_string())?;
+        .map_err(git_spawn_error)?;
     if output.status.success() {
         Ok(Some(output.stdout))
     } else {
@@ -634,7 +640,7 @@ pub fn read_captured_file(
             .arg(root)
             .args(["show", spec.as_str()])
             .output()
-            .map_err(|error| error.to_string())?;
+            .map_err(git_spawn_error)?;
         if output.status.success() {
             Ok(Some(output.stdout))
         } else {
@@ -647,7 +653,7 @@ pub fn read_captured_file(
             .arg(root)
             .args(["show", path.as_str()])
             .output()
-            .map_err(|error| error.to_string())?;
+            .map_err(git_spawn_error)?;
         if output.status.success() {
             Ok(Some(output.stdout))
         } else {
@@ -718,13 +724,21 @@ fn add_paths(paths: &mut Vec<PathBuf>, bytes: Vec<u8>) -> Result<(), String> {
     Ok(())
 }
 
+fn git_spawn_error(error: std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        "git is not installed or not on PATH".into()
+    } else {
+        format!("could not run git: {error}")
+    }
+}
+
 fn git(path: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(path)
         .args(args)
         .output()
-        .map_err(|error| error.to_string())?;
+        .map_err(git_spawn_error)?;
     if !output.status.success() {
         return Err(format!("git command failed: {}", args.join(" ")));
     }
