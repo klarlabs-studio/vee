@@ -1,0 +1,1 @@
+Review only for concrete correctness defects introduced by the changed code. Ignore style and speculative risks. Return no findings when no actionable defect is evident. Do not edit files or run commands.

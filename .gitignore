@@ -1,2 +1,7 @@
 target/
-.vero/
+node_modules/
+.vero/*
+!.vero/reviewers/
+.vero/reviewers/*
+!.vero/reviewers/*.md
+*.rlib
