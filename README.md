@@ -275,6 +275,18 @@ Run it on the same scope as the review (`vero verify --profile semgrep --base ma
 
 For Go repositories, a profile can opt into package-level test targeting from impact results by placing `{impacted_test_packages}` as a standalone argument, for example `args: [test, -json, "{impacted_test_packages}"]` with `executable: go`. Go targeted verification requires JSON package and individual-test pass events so a package where every test was skipped cannot be counted as tested. For Rust workspaces, use `{impacted_rust_test_filters}` with a Cargo test profile, for example `args: [test, --workspace, "{impacted_rust_test_filters}"]` and `executable: cargo`. Since Vero clears inherited environment variables, configure required names such as `PATH`, `HOME`, `CARGO_HOME`, and `RUSTUP_HOME` in each profile's `env_allowlist`. Run either with `vero verify --profile <profile> --impacted-tests --base main`. Vero expands Go targets to sorted, unique packages, or Rust targets to package-qualified test names and invokes Cargo with an explicit `--package` selection for each target. Changed Rust test files are included directly even when their tests have no impact-reference edges. It records the selected targets in the verification run and fails closed if impact coverage is incomplete, a Rust impact location cannot be mapped to a test function and package, no test target is found, or Go/Cargo reports success without running tests for every selected target. No shell interpolation is used. Targeted runs do not satisfy snapshot-wide required verification profiles.
 
+## Provenance attestations
+
+Export a gate decision as an in-toto attestation that supply-chain tools (Sigstore/cosign, SLSA policy engines, Witness, GUAC) can consume:
+
+```sh
+vero reviews keygen --private-key ci.pk8 --public-key ci.pub
+vero reviews attest <review-id> --private-key ci.pk8 --key-id ci-2026 > gate.intoto.json
+vero reviews verify-attestation gate.intoto.json --public-key ci.pub
+```
+
+The output is a DSSE envelope (`application/vnd.in-toto+json`) around an in-toto Statement v1 with predicate type `https://vero.dev/attestations/review-gate/v1`. Its subjects are the reviewed snapshot digest and, only when the snapshot is exactly a commit's change (`--commit`, commit ranges, or a base review whose worktree matches the committed diff), the Git commit. The predicate records the decision, policy and configuration digests, reviewer outcomes, verification and analyzer results, and the evidence bundle's manifest digest. `--format statement` prints the unsigned statement for external signers; `--decision-id` attests a specific persisted decision. Formats: [review-gate-attestation-v1](schemas/review-gate-attestation-v1.schema.json) and [attestation-verification-v1](schemas/attestation-verification-v1.schema.json). See [ADR 0004](docs/adr/0004-gate-decisions-as-in-toto-attestations.md).
+
 ## Policy packs
 
 A policy pack shares reviewers, gate policy, policy profiles, selected verification profiles, and approved rules across repositories. Export one from a repository that already has the setup you want, then pin it in others:
