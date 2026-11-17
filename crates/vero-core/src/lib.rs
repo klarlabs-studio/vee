@@ -33,18 +33,104 @@ pub enum FindingStatus {
     Waived,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingFeedbackLabel {
+    Confirmed,
+    FalsePositive,
+    Actionable,
+    NotActionable,
+}
+
+impl FindingFeedbackLabel {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::FalsePositive => "false_positive",
+            Self::Actionable => "actionable",
+            Self::NotActionable => "not_actionable",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FindingFeedback {
+    pub schema_version: u32,
+    pub feedback_id: String,
+    pub finding_id: String,
+    pub snapshot_id: String,
+    pub label: FindingFeedbackLabel,
+    pub reason: String,
+    pub reviewer: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuleApproval {
+    pub schema_version: u32,
+    pub approval_id: String,
+    #[serde(default = "default_rule_approval_version")]
+    pub version: u32,
+    pub candidate_id: String,
+    pub evidence_digest: String,
+    #[serde(default)]
+    pub source_feedback_ids: Vec<String>,
+    #[serde(default)]
+    pub activated_at_unix: Option<i64>,
+    pub category: String,
+    pub feedback_label: FindingFeedbackLabel,
+    pub scope: String,
+    pub instruction: String,
+    pub approver: String,
+    pub approval_reason: String,
+    #[serde(default)]
+    pub supersedes_approval_id: Option<String>,
+    #[serde(default)]
+    pub expires_at_unix: Option<i64>,
+    pub created_at: String,
+    pub status: String,
+    pub events: Vec<RuleApprovalEvent>,
+}
+
+fn default_rule_approval_version() -> u32 {
+    1
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuleApprovalEvent {
+    pub event_id: String,
+    pub event: String,
+    pub actor: String,
+    pub reason: String,
+    pub created_at: String,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationStatus {
     Passed,
     Failed,
     TimedOut,
+    Incomplete,
+}
+
+/// Durable webhook claim result. An expired or released claim may be retried;
+/// a completed delivery is never claimed again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WebhookClaim {
+    Acquired { lease_token: String },
+    InProgress,
+    AlreadyProcessed,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct VerificationProfile {
     pub executable: String,
+    /// Declared network behavior of the configured check. `local` is an
+    /// operator assertion; it does not provide OS-level network isolation.
+    #[serde(default)]
+    pub egress: ProviderEgress,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
@@ -88,6 +174,9 @@ pub struct VerificationRun {
     pub profile_id: String,
     #[serde(default)]
     pub finding_id: Option<String>,
+    /// Package or test targets selected from the snapshot's impact assessment.
+    #[serde(default)]
+    pub targets: Vec<String>,
     pub command_digest: String,
     pub status: VerificationStatus,
     pub exit_code: Option<i32>,
@@ -97,6 +186,16 @@ pub struct VerificationRun {
     pub stdout_artifact: Option<ArtifactReference>,
     #[serde(default)]
     pub stderr_artifact: Option<ArtifactReference>,
+}
+
+/// Bounded metadata view used by local analytics without loading stored logs.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerificationSummary {
+    pub run_id: String,
+    pub snapshot_id: String,
+    pub profile_id: String,
+    pub status: String,
+    pub created_at: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -141,10 +240,22 @@ pub fn execute_verification_capture(
     if profile.executable.trim().is_empty() || profile.timeout_seconds == 0 {
         return Err("verification executable and positive timeout are required".into());
     }
-    let command_digest = digest(&serde_json::to_vec(profile).map_err(|error| error.to_string())?);
     let environment =
         resolve_environment_allowlist(&profile.env_allowlist, |name| std::env::var(name).ok())?;
-    let mut command = Command::new(&profile.executable);
+    let executable = resolve_verification_executable(&profile.executable, working_directory)?;
+    let executable_digest = digest_file(&executable)?;
+    let executable_identity = verification_executable_identity(&profile.executable, &executable);
+    let environment_digests = environment
+        .iter()
+        .map(|(name, value)| (name, digest(value.as_bytes())))
+        .collect::<Vec<_>>();
+    let command_digest = verification_invocation_digest(
+        profile,
+        &executable_identity,
+        &executable_digest,
+        &environment_digests,
+    )?;
+    let mut command = Command::new(&executable);
     command.args(&profile.args);
     configure_process_group(&mut command);
     let mut child = command
@@ -170,7 +281,7 @@ pub fn execute_verification_capture(
         bytes
     });
     let started = Instant::now();
-    let status = loop {
+    let mut status = loop {
         if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
             break if status.success() {
                 VerificationStatus::Passed
@@ -195,8 +306,25 @@ pub fn execute_verification_capture(
     let mut stderr = stderr_thread
         .join()
         .map_err(|_| "verification stderr reader failed")?;
+    if status == VerificationStatus::Failed
+        && is_known_incomplete_verification_output(&stdout, &stderr)
+    {
+        status = VerificationStatus::Incomplete;
+    }
     if stdout.len().saturating_add(stderr.len()) > limit {
         return Err("verification output exceeded configured limit".into());
+    }
+    if digest_file(&executable)? != executable_digest {
+        return Err("verification executable changed while the command was running".into());
+    }
+    let current_environment =
+        resolve_environment_allowlist(&profile.env_allowlist, |name| std::env::var(name).ok())?;
+    let current_environment_digests = current_environment
+        .iter()
+        .map(|(name, value)| (name, digest(value.as_bytes())))
+        .collect::<Vec<_>>();
+    if current_environment_digests != environment_digests {
+        return Err("verification environment changed while the command was running".into());
     }
     redact_output_values(&mut stdout, &environment);
     redact_output_values(&mut stderr, &environment);
@@ -221,6 +349,7 @@ pub fn execute_verification_capture(
             snapshot_id: snapshot_id.into(),
             profile_id: profile_id.into(),
             finding_id: None,
+            targets: Vec::new(),
             command_digest,
             status,
             exit_code,
@@ -232,6 +361,227 @@ pub fn execute_verification_capture(
         stdout,
         stderr,
     })
+}
+
+/// Classify well-known offline dependency-resolution failures as incomplete
+/// verification, not failing tests. Markers are deliberately narrow: generic
+/// nonzero exits remain test failures, and the raw output remains available.
+fn is_known_incomplete_verification_output(stdout: &[u8], stderr: &[u8]) -> bool {
+    const MARKERS: [&str; 3] = [
+        "module lookup disabled by GOPROXY",
+        "module lookup disabled by GOSUMDB",
+        "attempting to make an HTTP request, but --offline was specified",
+    ];
+    MARKERS.iter().any(|marker| {
+        stdout
+            .windows(marker.len())
+            .any(|window| window == marker.as_bytes())
+            || stderr
+                .windows(marker.len())
+                .any(|window| window == marker.as_bytes())
+    })
+}
+
+/// Fingerprint the configured invocation together with the resolved executable bytes and
+/// digests of present allowlisted environment values. Raw environment values are never returned.
+pub fn verification_command_digest(
+    profile: &VerificationProfile,
+    working_directory: &Path,
+) -> Result<String, String> {
+    let environment =
+        resolve_environment_allowlist(&profile.env_allowlist, |name| std::env::var(name).ok())?;
+    let executable = resolve_verification_executable(&profile.executable, working_directory)?;
+    let executable_digest = digest_file(&executable)?;
+    let executable_identity = verification_executable_identity(&profile.executable, &executable);
+    let environment_digests = environment
+        .iter()
+        .map(|(name, value)| (name, digest(value.as_bytes())))
+        .collect::<Vec<_>>();
+    verification_invocation_digest(
+        profile,
+        &executable_identity,
+        &executable_digest,
+        &environment_digests,
+    )
+}
+
+fn verification_invocation_digest(
+    profile: &VerificationProfile,
+    executable_identity: &str,
+    executable_digest: &str,
+    environment_digests: &[(&String, String)],
+) -> Result<String, String> {
+    Ok(digest(
+        &serde_json::to_vec(&(
+            "vero-verification-invocation-v2",
+            profile,
+            executable_identity,
+            executable_digest,
+            environment_digests,
+        ))
+        .map_err(|error| error.to_string())?,
+    ))
+}
+
+fn verification_executable_identity(requested: &str, resolved: &Path) -> String {
+    let path = Path::new(requested);
+    if path.is_absolute() || path.components().count() > 1 {
+        requested.replace('\\', "/")
+    } else {
+        resolved.to_string_lossy().replace('\\', "/")
+    }
+}
+
+fn resolve_verification_executable(
+    executable: &str,
+    working_directory: &Path,
+) -> Result<PathBuf, String> {
+    resolve_verification_executable_with_path(
+        executable,
+        working_directory,
+        std::env::var_os("PATH"),
+    )
+}
+
+fn default_verification_search_path() -> std::ffi::OsString {
+    #[cfg(unix)]
+    {
+        "/usr/bin:/bin".into()
+    }
+    #[cfg(windows)]
+    {
+        let system_root = std::env::var_os("SystemRoot")
+            .or_else(|| std::env::var_os("WINDIR"))
+            .unwrap_or_else(|| r"C:\Windows".into());
+        let system32 = PathBuf::from(&system_root).join("System32");
+        std::env::join_paths([system32, PathBuf::from(system_root)]).unwrap_or_default()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        std::ffi::OsString::new()
+    }
+}
+
+fn resolve_verification_executable_with_path(
+    executable: &str,
+    working_directory: &Path,
+    path: Option<std::ffi::OsString>,
+) -> Result<PathBuf, String> {
+    let requested = Path::new(executable);
+    let has_path_component = requested.components().count() > 1 || requested.is_absolute();
+    let mut candidates = Vec::new();
+    if has_path_component {
+        let explicit_path = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            working_directory.join(requested)
+        };
+        candidates.push(explicit_path.clone());
+        #[cfg(windows)]
+        if requested.extension().is_none() {
+            let extensions =
+                std::env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+            for extension in extensions.to_string_lossy().split(';') {
+                candidates.push(PathBuf::from(format!(
+                    "{}{extension}",
+                    explicit_path.display()
+                )));
+            }
+        }
+    } else {
+        let search_path = path.unwrap_or_else(default_verification_search_path);
+        for directory in std::env::split_paths(&search_path) {
+            let directory = if directory.is_absolute() {
+                directory
+            } else {
+                working_directory.join(directory)
+            };
+            candidates.push(directory.join(requested));
+            #[cfg(windows)]
+            if requested.extension().is_none() {
+                let extensions =
+                    std::env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+                for extension in extensions.to_string_lossy().split(';') {
+                    candidates.push(directory.join(format!("{executable}{extension}")));
+                }
+            }
+        }
+    }
+    if let Some(candidate) = first_executable_candidate(candidates)? {
+        let absolute = if candidate.is_absolute() {
+            candidate
+        } else {
+            std::env::current_dir()
+                .map_err(|error| error.to_string())?
+                .join(candidate)
+        };
+        if std::fs::symlink_metadata(&absolute)
+            .map_err(|error| error.to_string())?
+            .file_type()
+            .is_symlink()
+        {
+            // Preserve argv[0] for command-name-dispatching shims such as
+            // rustup's `cargo` and `rustc` symlinks. File reads still follow
+            // the link, so executable hashing binds the underlying bytes.
+            return Ok(absolute);
+        }
+        return absolute.canonicalize().map_err(|error| {
+            format!(
+                "resolving verification executable {}: {error}",
+                absolute.display()
+            )
+        });
+    }
+    Err(format!(
+        "verification executable {executable:?} was not found as an executable file"
+    ))
+}
+
+fn first_executable_candidate(
+    candidates: impl IntoIterator<Item = PathBuf>,
+) -> Result<Option<PathBuf>, String> {
+    for candidate in candidates {
+        if candidate.is_file() && is_executable_file(&candidate)? {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
+fn is_executable_file(path: &Path) -> Result<bool, String> {
+    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        Ok(metadata.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(true)
+    }
+}
+
+fn digest_file(path: &Path) -> Result<String, String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).map_err(|error| {
+        format!(
+            "reading verification executable {}: {error}",
+            path.display()
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("sha256:{}", hex(&hasher.finalize())))
 }
 
 fn redact_output_values(output: &mut Vec<u8>, environment: &[(String, String)]) {
@@ -283,6 +633,8 @@ impl FindingStatus {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FindingRecord {
     pub finding: Finding,
+    #[serde(default)]
+    pub assessments: Vec<Finding>,
     pub status: FindingStatus,
     pub status_reason: Option<String>,
     pub occurrence_count: u64,
@@ -317,8 +669,25 @@ pub struct Finding {
     pub path: Option<String>,
     pub line: Option<u32>,
     pub provenance: String,
+    /// Reviewer IDs that independently reported this finding in the current review.
+    #[serde(default)]
+    pub reviewer_ids: Vec<String>,
     #[serde(default)]
     pub evidence_ids: Vec<String>,
+    /// Human-approved rule candidates explicitly attributed by a reviewer.
+    /// These links are claims from model output, constrained to approvals supplied to that run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rule_attributions: Vec<RuleAttribution>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuleAttribution {
+    /// Stable identity of the human-approved rule candidate.
+    pub rule_id: String,
+    /// Exact active approval version supplied to the reviewer.
+    pub approval_id: String,
+    /// Reviewer whose output reported this attribution; assigned by Vero.
+    pub reviewer_id: String,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -373,6 +742,17 @@ pub struct ProviderFinding {
     pub rationale: String,
     pub path: Option<String>,
     pub line: Option<u32>,
+    #[serde(default)]
+    pub rule_attributions: Vec<ProviderRuleAttribution>,
+}
+
+/// Untrusted provider claim; the application accepts it only if the exact pair
+/// was in the active, in-scope guidance supplied for this review.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderRuleAttribution {
+    pub rule_id: String,
+    pub approval_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -395,6 +775,21 @@ pub struct GateDecision {
     pub verification_run_ids: Vec<String>,
     pub evidence_digest: String,
     pub reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_inputs: Option<GateReplayInputs>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GateReplayInputs {
+    pub schema_version: u32,
+    pub policy: Policy,
+    pub reviewer_policies: std::collections::BTreeMap<String, ReviewerPolicy>,
+    pub complete: bool,
+    pub verification_runs: Vec<VerificationRun>,
+    pub waivers: Vec<Waiver>,
+    #[serde(default)]
+    pub evidence: Vec<Evidence>,
+    pub evaluation_time_unix: i64,
 }
 
 /// A waiver applies only to one finding fingerprint in one immutable snapshot and expires.
@@ -418,7 +813,7 @@ pub struct WaiverEvaluation<'a> {
     pub evaluation_time_unix: i64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Policy {
     pub block_severities: Vec<Severity>,
     pub minimum_confidence: u8,
@@ -426,10 +821,28 @@ pub struct Policy {
     pub required_verifications: Vec<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewerPolicy {
+    pub block_severities: Vec<Severity>,
+    pub minimum_confidence: u8,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct GateDigests<'a> {
     pub effective_config_digest: &'a str,
     pub policy_digest: &'a str,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GateEvidence<'a> {
+    pub verification_runs: &'a [VerificationRun],
+    pub source_evidence: &'a [Evidence],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GateEvaluationOptions<'a> {
+    pub waiver_evaluation: WaiverEvaluation<'a>,
+    pub reviewer_policies: &'a std::collections::BTreeMap<String, ReviewerPolicy>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -782,7 +1195,6 @@ where
 {
     use std::path::Component;
     let mut normalized = Vec::with_capacity(findings.len());
-    let mut seen = std::collections::BTreeSet::new();
     for mut finding in findings {
         if finding.category.trim().is_empty() || finding.rationale.trim().is_empty() {
             return Err("provider finding must include category and rationale".into());
@@ -827,9 +1239,7 @@ where
         finding.fingerprint = stable_fingerprint.clone();
         finding.id = format!("find_{}", &stable_fingerprint[7..19]);
         finding.provenance = "model_inference".into();
-        if seen.insert(finding.fingerprint.clone()) {
-            normalized.push(finding);
-        }
+        normalized.push(finding);
     }
     normalized.sort_by(|a, b| a.fingerprint.cmp(&b.fingerprint));
     Ok(normalized)
@@ -871,7 +1281,17 @@ where
             path: finding.path,
             line: finding.line,
             provenance: "model_inference".into(),
+            reviewer_ids: Vec::new(),
             evidence_ids: Vec::new(),
+            rule_attributions: finding
+                .rule_attributions
+                .into_iter()
+                .map(|attribution| RuleAttribution {
+                    rule_id: attribution.rule_id,
+                    approval_id: attribution.approval_id,
+                    reviewer_id: String::new(),
+                })
+                .collect(),
         })
         .collect();
     normalize_provider_findings_with_anchor(findings, repository_root, resolve_anchor)
@@ -884,7 +1304,7 @@ pub fn evaluate_gate(
     findings: &[Finding],
     policy: &Policy,
     complete: bool,
-    verification_runs: &[VerificationRun],
+    evidence: GateEvidence<'_>,
 ) -> GateDecision {
     evaluate_gate_with_waivers(
         snapshot_id,
@@ -895,7 +1315,7 @@ pub fn evaluate_gate(
         findings,
         policy,
         complete,
-        verification_runs,
+        evidence,
         WaiverEvaluation {
             records: &[],
             evaluation_time_unix: 0,
@@ -909,13 +1329,44 @@ pub fn evaluate_gate_with_waivers(
     findings: &[Finding],
     policy: &Policy,
     complete: bool,
-    verification_runs: &[VerificationRun],
+    evidence: GateEvidence<'_>,
     waiver_evaluation: WaiverEvaluation<'_>,
 ) -> GateDecision {
+    evaluate_gate_with_waivers_and_reviewer_policies(
+        snapshot_id,
+        digests,
+        findings,
+        policy,
+        complete,
+        evidence,
+        GateEvaluationOptions {
+            waiver_evaluation,
+            reviewer_policies: &std::collections::BTreeMap::new(),
+        },
+    )
+}
+
+pub fn evaluate_gate_with_waivers_and_reviewer_policies(
+    snapshot_id: &str,
+    digests: GateDigests<'_>,
+    findings: &[Finding],
+    policy: &Policy,
+    complete: bool,
+    gate_evidence: GateEvidence<'_>,
+    options: GateEvaluationOptions<'_>,
+) -> GateDecision {
+    let GateEvaluationOptions {
+        waiver_evaluation,
+        reviewer_policies,
+    } = options;
     let GateDigests {
         effective_config_digest,
         policy_digest,
     } = digests;
+    let GateEvidence {
+        verification_runs,
+        source_evidence: evidence,
+    } = gate_evidence;
     let mut applied_waivers: Vec<_> = waiver_evaluation
         .records
         .iter()
@@ -934,21 +1385,73 @@ pub fn evaluate_gate_with_waivers(
         .iter()
         .map(|waiver| waiver.finding_fingerprint.as_str())
         .collect();
-    let mut blocked: Vec<String> = findings
+    let meets_blocking_policy = |f: &Finding| {
+        policy.block_severities.contains(&f.severity)
+            && f.confidence.unwrap_or(0) >= policy.minimum_confidence
+            || f.reviewer_ids.iter().any(|reviewer_id| {
+                reviewer_policies
+                    .get(reviewer_id)
+                    .is_some_and(|reviewer_policy| {
+                        reviewer_policy.block_severities.contains(&f.severity)
+                            && f.confidence.unwrap_or(0) >= reviewer_policy.minimum_confidence
+                    })
+            })
+    };
+    let unlocated_blockers: Vec<String> = findings
+        .iter()
+        .filter(|finding| {
+            meets_blocking_policy(finding)
+                && (finding.path.is_none() || finding.line.is_none())
+                && !waived_fingerprints.contains(finding.fingerprint.as_str())
+        })
+        .map(|finding| finding.id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let unobserved_blockers: Vec<String> = findings
+        .iter()
+        .filter(|finding| {
+            meets_blocking_policy(finding)
+                && finding
+                    .path
+                    .as_ref()
+                    .zip(finding.line)
+                    .is_some_and(|(path, line)| {
+                        !finding.evidence_ids.iter().any(|evidence_id| {
+                            evidence.iter().any(|item| {
+                                item.id == *evidence_id
+                                    && item.kind == EvidenceKind::Source
+                                    && item.classification == EvidenceClassification::Observed
+                                    && item.source_path == *path
+                                    && item.start_line == Some(line)
+                            })
+                        })
+                    })
+                && !waived_fingerprints.contains(finding.fingerprint.as_str())
+        })
+        .map(|finding| finding.id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let blocked: Vec<String> = findings
         .iter()
         .filter(|f| {
-            policy.block_severities.contains(&f.severity)
-                && f.confidence.unwrap_or(0) >= policy.minimum_confidence
+            meets_blocking_policy(f)
+                && f.path.is_some()
+                && f.line.is_some()
+                && !unobserved_blockers.contains(&f.id)
                 && !waived_fingerprints.contains(f.fingerprint.as_str())
         })
         .map(|f| f.id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
         .collect();
-    blocked.sort();
     let mut verification_run_ids = Vec::new();
     let mut missing_verifications = Vec::new();
     for profile_id in &policy.required_verifications {
         match verification_runs.iter().find(|run| {
             run.finding_id.is_none()
+                && run.targets.is_empty()
                 && run.profile_id == *profile_id
                 && run.snapshot_id == snapshot_id
         }) {
@@ -964,7 +1467,7 @@ pub fn evaluate_gate_with_waivers(
     verification_run_ids.sort();
     missing_verifications.sort();
     let evidence_digest = digest(
-        &serde_json::to_vec(&(verification_run_ids.as_slice(), &applied_waivers))
+        &serde_json::to_vec(&(verification_run_ids.as_slice(), &applied_waivers, evidence))
             .expect("serializing gate evidence records"),
     );
     let verification_complete = missing_verifications.is_empty();
@@ -981,6 +1484,22 @@ pub fn evaluate_gate_with_waivers(
                 missing_verifications.join(", ")
             )],
         )
+    } else if !unlocated_blockers.is_empty() {
+        (
+            GateStatus::Incomplete,
+            vec![format!(
+                "blocking-policy findings lack a source path or line: {}",
+                unlocated_blockers.join(", ")
+            )],
+        )
+    } else if !unobserved_blockers.is_empty() {
+        (
+            GateStatus::Incomplete,
+            vec![format!(
+                "blocking-policy findings lack source evidence on a changed line: {}",
+                unobserved_blockers.join(", ")
+            )],
+        )
     } else if !blocked.is_empty() {
         (
             GateStatus::Block,
@@ -994,6 +1513,29 @@ pub fn evaluate_gate_with_waivers(
     } else {
         (GateStatus::Pass, Vec::new())
     };
+    if status == GateStatus::Block {
+        let mut reviewer_reasons = std::collections::BTreeSet::new();
+        for finding in findings
+            .iter()
+            .filter(|finding| blocked.contains(&finding.id))
+        {
+            for reviewer_id in &finding.reviewer_ids {
+                if reviewer_policies
+                    .get(reviewer_id)
+                    .is_some_and(|reviewer_policy| {
+                        reviewer_policy.block_severities.contains(&finding.severity)
+                            && finding.confidence.unwrap_or(0) >= reviewer_policy.minimum_confidence
+                    })
+                {
+                    reviewer_reasons.insert(format!(
+                        "reviewer {reviewer_id} policy blocked finding {}",
+                        finding.id
+                    ));
+                }
+            }
+        }
+        reasons.extend(reviewer_reasons);
+    }
     for waiver in applied_waivers {
         if let Some(finding) = findings
             .iter()
@@ -1034,6 +1576,16 @@ pub fn evaluate_gate_with_waivers(
         verification_run_ids,
         evidence_digest,
         reasons,
+        replay_inputs: Some(GateReplayInputs {
+            schema_version: 1,
+            policy: policy.clone(),
+            reviewer_policies: reviewer_policies.clone(),
+            complete,
+            verification_runs: verification_runs.to_vec(),
+            waivers: waiver_evaluation.records.to_vec(),
+            evidence: evidence.to_vec(),
+            evaluation_time_unix: waiver_evaluation.evaluation_time_unix,
+        }),
     }
 }
 
@@ -1069,6 +1621,7 @@ pub fn stale_gate_decision(
         verification_run_ids: Vec::new(),
         evidence_digest,
         reasons,
+        replay_inputs: None,
     }
 }
 
@@ -1079,6 +1632,298 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn verification_path_lookup_skips_non_executable_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let earlier = directory.path().join("earlier");
+        let later = directory.path().join("later");
+        std::fs::create_dir_all(&earlier).unwrap();
+        std::fs::create_dir_all(&later).unwrap();
+        let earlier_candidate = earlier.join("cargo");
+        let later_candidate = later.join("cargo");
+        std::fs::write(&earlier_candidate, "not executable").unwrap();
+        std::fs::set_permissions(&earlier_candidate, std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        std::fs::write(&later_candidate, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&later_candidate, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let resolved =
+            first_executable_candidate([earlier_candidate, later_candidate.clone()]).unwrap();
+        assert_eq!(resolved, Some(later_candidate));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verification_executable_uses_platform_default_when_path_is_unset() {
+        let directory = tempfile::tempdir().unwrap();
+        let resolved =
+            resolve_verification_executable_with_path("sh", directory.path(), None).unwrap();
+        assert!(resolved.ends_with("sh"), "resolved {resolved:?}");
+        assert!(resolved.is_absolute());
+    }
+
+    #[test]
+    fn webhook_delivery_claims_are_durable_leased_and_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("webhooks.sqlite");
+        let mut first = ReviewStore::open(&db).unwrap();
+        let body_digest = digest(b"verified webhook body");
+        let claim = first
+            .claim_webhook_delivery(
+                "github",
+                "delivery-1",
+                "pull_request",
+                1,
+                &body_digest,
+                100,
+                30,
+            )
+            .unwrap();
+        let WebhookClaim::Acquired { lease_token } = claim else {
+            panic!("first delivery should be claimed");
+        };
+        let mut second = ReviewStore::open(&db).unwrap();
+        assert_eq!(
+            second
+                .claim_webhook_delivery(
+                    "github",
+                    "delivery-1",
+                    "pull_request",
+                    2,
+                    &body_digest,
+                    101,
+                    30
+                )
+                .unwrap(),
+            WebhookClaim::InProgress
+        );
+        first
+            .renew_webhook_delivery("github", "delivery-1", &lease_token, 120, 30)
+            .unwrap();
+        assert_eq!(
+            second
+                .claim_webhook_delivery(
+                    "github",
+                    "delivery-1",
+                    "pull_request",
+                    2,
+                    &body_digest,
+                    131,
+                    30,
+                )
+                .unwrap(),
+            WebhookClaim::InProgress
+        );
+        assert!(second
+            .renew_webhook_delivery("github", "delivery-1", "stale-lease", 132, 30)
+            .is_err());
+        assert!(second
+            .complete_webhook_delivery("github", "delivery-1", "stale-lease", 102)
+            .is_err());
+        first
+            .release_webhook_delivery("github", "delivery-1", &lease_token)
+            .unwrap();
+        let WebhookClaim::Acquired { lease_token } = second
+            .claim_webhook_delivery(
+                "github",
+                "delivery-1",
+                "pull_request",
+                2,
+                &body_digest,
+                103,
+                30,
+            )
+            .unwrap()
+        else {
+            panic!("released delivery should be retriable");
+        };
+        second
+            .complete_webhook_delivery("github", "delivery-1", &lease_token, 104)
+            .unwrap();
+        drop(second);
+
+        let mut reopened = ReviewStore::open(&db).unwrap();
+        assert_eq!(
+            reopened
+                .claim_webhook_delivery(
+                    "github",
+                    "delivery-1",
+                    "pull_request",
+                    3,
+                    &body_digest,
+                    105,
+                    30
+                )
+                .unwrap(),
+            WebhookClaim::AlreadyProcessed
+        );
+        assert!(reopened
+            .claim_webhook_delivery(
+                "github",
+                "delivery-1",
+                "pull_request",
+                3,
+                &digest(b"different body"),
+                105,
+                30
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn hosted_finding_threads_are_isolated_by_pull_request_and_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("hosted-threads.sqlite");
+        let mut store = ReviewStore::open(&db).unwrap();
+        let first = std::collections::BTreeSet::from(["sha256:first".to_owned()]);
+        store
+            .replace_hosted_finding_threads("github:repo#1", &first)
+            .unwrap();
+        assert_eq!(
+            store.hosted_finding_threads("github:repo#1").unwrap(),
+            first
+        );
+        assert!(store
+            .hosted_finding_threads("github:repo#2")
+            .unwrap()
+            .is_empty());
+        drop(store);
+        let mut reopened = ReviewStore::open(&db).unwrap();
+        let next = std::collections::BTreeSet::from(["sha256:next".to_owned()]);
+        reopened
+            .replace_hosted_finding_threads("github:repo#1", &next)
+            .unwrap();
+        assert_eq!(
+            reopened.hosted_finding_threads("github:repo#1").unwrap(),
+            next
+        );
+    }
+
+    #[test]
+    fn expired_webhook_lease_can_be_reclaimed_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("webhook-expiry.sqlite");
+        let mut store = ReviewStore::open(&db).unwrap();
+        let payload_digest = digest(b"body");
+        let WebhookClaim::Acquired {
+            lease_token: old_token,
+        } = store
+            .claim_webhook_delivery(
+                "github",
+                "delivery-expired",
+                "push",
+                1,
+                &payload_digest,
+                10,
+                5,
+            )
+            .unwrap()
+        else {
+            panic!("expected claim");
+        };
+        assert!(store
+            .complete_webhook_delivery("github", "delivery-expired", &old_token, 15)
+            .is_err());
+        let WebhookClaim::Acquired {
+            lease_token: new_token,
+        } = store
+            .claim_webhook_delivery(
+                "github",
+                "delivery-expired",
+                "push",
+                2,
+                &payload_digest,
+                15,
+                5,
+            )
+            .unwrap()
+        else {
+            panic!("expired lease should be reclaimed");
+        };
+        assert_ne!(old_token, new_token);
+        assert!(store
+            .complete_webhook_delivery("github", "delivery-expired", &old_token, 16)
+            .is_err());
+        store
+            .complete_webhook_delivery("github", "delivery-expired", &new_token, 16)
+            .unwrap();
+    }
+
+    #[test]
+    fn webhook_retention_prunes_only_old_completed_receipts_and_supports_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ReviewStore::open(&dir.path().join("webhook-retention.sqlite")).unwrap();
+        let add_delivery = |store: &mut ReviewStore, event: &str, at: i64, complete: bool| {
+            let body_digest = digest(event.as_bytes());
+            let WebhookClaim::Acquired { lease_token } = store
+                .claim_webhook_delivery("github", event, "push", 1, &body_digest, at, 60)
+                .unwrap()
+            else {
+                panic!("new event should be claimed");
+            };
+            if complete {
+                store
+                    .complete_webhook_delivery("github", event, &lease_token, at + 1)
+                    .unwrap();
+            }
+        };
+        add_delivery(&mut store, "old-processed", 10, true);
+        add_delivery(&mut store, "recent-processed", 100, true);
+        add_delivery(&mut store, "old-in-flight", 5, false);
+
+        assert_eq!(
+            store
+                .prune_processed_webhook_deliveries_before(50, false)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM webhook_deliveries", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            store
+                .prune_processed_webhook_deliveries_before(50, true)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .prune_processed_webhook_deliveries_before(50, true)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM webhook_deliveries", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .claim_webhook_delivery(
+                    "github",
+                    "recent-processed",
+                    "push",
+                    2,
+                    &digest(b"recent-processed"),
+                    200,
+                    60,
+                )
+                .unwrap(),
+            WebhookClaim::AlreadyProcessed
+        );
+    }
 
     #[test]
     fn environment_allowlist_resolves_only_named_host_values() {
@@ -1105,11 +1950,36 @@ mod tests {
             severity,
             confidence,
             rationale: String::new(),
-            path: None,
-            line: None,
+            path: Some("src/lib.rs".into()),
+            line: Some(1),
             provenance: "model_inference".into(),
+            reviewer_ids: Vec::new(),
             evidence_ids: Vec::new(),
+            rule_attributions: Vec::new(),
         }
+    }
+
+    fn observed_test_evidence(findings: &mut [Finding]) -> Vec<Evidence> {
+        findings
+            .iter_mut()
+            .filter_map(|finding| {
+                let path = finding.path.clone()?;
+                let line = finding.line?;
+                let id = format!("evidence-{}", finding.id);
+                finding.evidence_ids = vec![id.clone()];
+                Some(Evidence {
+                    id,
+                    kind: EvidenceKind::Source,
+                    provenance: "source_snapshot_fixture".into(),
+                    source_path: path,
+                    start_line: Some(line),
+                    end_line: Some(line),
+                    content_digest: "sha256:fixture".into(),
+                    classification: EvidenceClassification::Observed,
+                    verification: EvidenceVerification::Unverified,
+                })
+            })
+            .collect()
     }
 
     #[test]
@@ -1120,11 +1990,12 @@ mod tests {
             required_review_complete: true,
             required_verifications: vec![],
         };
-        let findings = vec![
+        let mut findings = vec![
             finding("low-confidence", Severity::High, Some(79)),
             finding("high", Severity::High, Some(80)),
             finding("medium", Severity::Medium, Some(99)),
         ];
+        let evidence = observed_test_evidence(&mut findings);
         let decision = evaluate_gate(
             "snapshot",
             "config",
@@ -1132,10 +2003,177 @@ mod tests {
             &findings,
             &policy,
             true,
-            &[],
+            GateEvidence {
+                verification_runs: &[],
+                source_evidence: &evidence,
+            },
         );
         assert_eq!(decision.status, GateStatus::Block);
         assert_eq!(decision.blocking_findings, vec!["high"]);
+    }
+
+    #[test]
+    fn gate_marks_unlocated_blocking_finding_incomplete() {
+        let policy = Policy {
+            block_severities: vec![Severity::High],
+            minimum_confidence: 80,
+            required_review_complete: true,
+            required_verifications: vec![],
+        };
+        let mut unlocated = finding("unlocated", Severity::High, Some(95));
+        unlocated.path = None;
+        unlocated.line = None;
+        let decision = evaluate_gate(
+            "snapshot",
+            "config",
+            "policy",
+            &[unlocated],
+            &policy,
+            true,
+            GateEvidence {
+                verification_runs: &[],
+                source_evidence: &[],
+            },
+        );
+        assert_eq!(decision.status, GateStatus::Incomplete);
+        assert!(decision.blocking_findings.is_empty());
+        assert!(decision.reasons[0].contains("lack a source path or line"));
+    }
+
+    #[test]
+    fn evidence_bound_gate_requires_observed_source_on_the_finding_line() {
+        let policy = Policy {
+            block_severities: vec![Severity::High],
+            minimum_confidence: 80,
+            required_review_complete: true,
+            required_verifications: vec![],
+        };
+        let mut finding = finding("changed-line", Severity::High, Some(95));
+        finding.evidence_ids = vec!["source-evidence".into()];
+        let evidence = Evidence {
+            id: "source-evidence".into(),
+            kind: EvidenceKind::Source,
+            provenance: "source_snapshot".into(),
+            source_path: "src/lib.rs".into(),
+            start_line: Some(1),
+            end_line: Some(1),
+            content_digest: "sha256:file".into(),
+            classification: EvidenceClassification::Unknown,
+            verification: EvidenceVerification::Unverified,
+        };
+        let reviewer_policies = std::collections::BTreeMap::new();
+        let evaluate = |evidence: &[Evidence]| {
+            evaluate_gate_with_waivers_and_reviewer_policies(
+                "snapshot",
+                GateDigests {
+                    effective_config_digest: "config",
+                    policy_digest: "policy",
+                },
+                &[finding.clone()],
+                &policy,
+                true,
+                GateEvidence {
+                    verification_runs: &[],
+                    source_evidence: evidence,
+                },
+                GateEvaluationOptions {
+                    waiver_evaluation: WaiverEvaluation {
+                        records: &[],
+                        evaluation_time_unix: 0,
+                    },
+                    reviewer_policies: &reviewer_policies,
+                },
+            )
+        };
+        let unknown = evaluate(std::slice::from_ref(&evidence));
+        assert_eq!(unknown.status, GateStatus::Incomplete);
+        assert!(unknown.reasons[0].contains("changed line"));
+
+        let observed = Evidence {
+            classification: EvidenceClassification::Observed,
+            ..evidence
+        };
+        let blocked = evaluate(&[observed]);
+        assert_eq!(blocked.status, GateStatus::Block);
+        assert_eq!(blocked.blocking_findings, ["changed-line"]);
+        assert_eq!(blocked.replay_inputs.unwrap().evidence.len(), 1);
+    }
+
+    #[test]
+    fn reviewer_policy_blocks_findings_only_when_reported_by_that_reviewer() {
+        let mut security = finding("security-finding", Severity::Critical, Some(55));
+        security.reviewer_ids = vec!["security".into()];
+        let mut correctness = finding("correctness-finding", Severity::Critical, Some(55));
+        correctness.reviewer_ids = vec!["correctness".into()];
+        let policy = Policy {
+            block_severities: vec![],
+            minimum_confidence: 90,
+            required_review_complete: true,
+            required_verifications: vec![],
+        };
+        let reviewer_policies = std::collections::BTreeMap::from([(
+            "security".into(),
+            ReviewerPolicy {
+                block_severities: vec![Severity::Critical],
+                minimum_confidence: 50,
+            },
+        )]);
+        let mut findings = [security, correctness];
+        let evidence = observed_test_evidence(&mut findings);
+        let decision = evaluate_gate_with_waivers_and_reviewer_policies(
+            "snapshot",
+            GateDigests {
+                effective_config_digest: "config",
+                policy_digest: "policy",
+            },
+            &findings,
+            &policy,
+            true,
+            GateEvidence {
+                verification_runs: &[],
+                source_evidence: &evidence,
+            },
+            GateEvaluationOptions {
+                waiver_evaluation: WaiverEvaluation {
+                    records: &[],
+                    evaluation_time_unix: 0,
+                },
+                reviewer_policies: &reviewer_policies,
+            },
+        );
+        assert_eq!(decision.status, GateStatus::Block);
+        assert_eq!(decision.blocking_findings, ["security-finding"]);
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|reason| reason == "reviewer security policy blocked finding security-finding"));
+    }
+
+    #[test]
+    fn gate_deduplicates_repeated_reports_for_the_same_finding() {
+        let policy = Policy {
+            block_severities: vec![Severity::High],
+            minimum_confidence: 80,
+            required_review_complete: true,
+            required_verifications: vec![],
+        };
+        let duplicate = finding("same-finding", Severity::High, Some(99));
+        let mut findings = [duplicate.clone(), duplicate];
+        let evidence = observed_test_evidence(&mut findings);
+        let decision = evaluate_gate(
+            "snapshot",
+            "config",
+            "policy",
+            &findings,
+            &policy,
+            true,
+            GateEvidence {
+                verification_runs: &[],
+                source_evidence: &evidence,
+            },
+        );
+        assert_eq!(decision.status, GateStatus::Block);
+        assert_eq!(decision.blocking_findings, vec!["same-finding"]);
     }
 
     #[test]
@@ -1146,8 +2184,30 @@ mod tests {
             required_review_complete: true,
             required_verifications: vec![],
         };
-        let first = evaluate_gate("snapshot", "config-a", "policy", &[], &policy, true, &[]);
-        let second = evaluate_gate("snapshot", "config-b", "policy", &[], &policy, true, &[]);
+        let first = evaluate_gate(
+            "snapshot",
+            "config-a",
+            "policy",
+            &[],
+            &policy,
+            true,
+            GateEvidence {
+                verification_runs: &[],
+                source_evidence: &[],
+            },
+        );
+        let second = evaluate_gate(
+            "snapshot",
+            "config-b",
+            "policy",
+            &[],
+            &policy,
+            true,
+            GateEvidence {
+                verification_runs: &[],
+                source_evidence: &[],
+            },
+        );
         assert_eq!(first.effective_config_digest, "config-a");
         assert_ne!(first.decision_id, second.decision_id);
         let stale_first = stale_gate_decision("snapshot", "config-a", "policy");
@@ -1163,7 +2223,8 @@ mod tests {
             required_review_complete: true,
             required_verifications: vec![],
         };
-        let findings = [finding("finding-a", Severity::High, Some(90))];
+        let mut findings = [finding("finding-a", Severity::High, Some(90))];
+        let evidence = observed_test_evidence(&mut findings);
         let waiver = Waiver {
             schema_version: 1,
             id: "waiver-1".into(),
@@ -1184,7 +2245,10 @@ mod tests {
             &findings,
             &policy,
             true,
-            &[],
+            GateEvidence {
+                verification_runs: &[],
+                source_evidence: &evidence,
+            },
             WaiverEvaluation {
                 records: std::slice::from_ref(&waiver),
                 evaluation_time_unix: 15,
@@ -1205,7 +2269,10 @@ mod tests {
             &findings,
             &policy,
             true,
-            &[],
+            GateEvidence {
+                verification_runs: &[],
+                source_evidence: &evidence,
+            },
             WaiverEvaluation {
                 records: std::slice::from_ref(&amended_waiver),
                 evaluation_time_unix: 15,
@@ -1222,7 +2289,10 @@ mod tests {
             &findings,
             &policy,
             true,
-            &[],
+            GateEvidence {
+                verification_runs: &[],
+                source_evidence: &evidence,
+            },
             WaiverEvaluation {
                 records: std::slice::from_ref(&waiver),
                 evaluation_time_unix: 20,
@@ -1240,7 +2310,10 @@ mod tests {
             &findings,
             &policy,
             true,
-            &[],
+            GateEvidence {
+                verification_runs: &[],
+                source_evidence: &evidence,
+            },
             WaiverEvaluation {
                 records: std::slice::from_ref(&waiver),
                 evaluation_time_unix: 15,
@@ -1257,7 +2330,18 @@ mod tests {
             required_review_complete: true,
             required_verifications: vec![],
         };
-        let decision = evaluate_gate("snapshot", "config", "policy", &[], &policy, false, &[]);
+        let decision = evaluate_gate(
+            "snapshot",
+            "config",
+            "policy",
+            &[],
+            &policy,
+            false,
+            GateEvidence {
+                verification_runs: &[],
+                source_evidence: &[],
+            },
+        );
         assert_eq!(decision.status, GateStatus::Incomplete);
     }
 
@@ -1269,14 +2353,19 @@ mod tests {
             required_review_complete: false,
             required_verifications: vec![],
         };
+        let mut findings = [finding("high", Severity::High, Some(90))];
+        let evidence = observed_test_evidence(&mut findings);
         let decision = evaluate_gate(
             "snapshot",
             "config",
             "policy",
-            &[finding("high", Severity::High, Some(90))],
+            &findings,
             &policy,
             false,
-            &[],
+            GateEvidence {
+                verification_runs: &[],
+                source_evidence: &evidence,
+            },
         );
         assert_eq!(decision.status, GateStatus::Block);
         assert_eq!(decision.blocking_findings, vec!["high"]);
@@ -1296,6 +2385,7 @@ mod tests {
             snapshot_id: "snapshot-1".into(),
             profile_id: "unit".into(),
             finding_id: None,
+            targets: Vec::new(),
             command_digest: digest(b"unit-command"),
             status: VerificationStatus::Passed,
             exit_code: Some(0),
@@ -1314,13 +2404,27 @@ mod tests {
                 &[],
                 &policy,
                 true,
-                &[finding_specific],
+                GateEvidence {
+                    verification_runs: &[finding_specific],
+                    source_evidence: &[]
+                },
             )
             .status,
             GateStatus::Incomplete,
             "a finding-scoped check must not satisfy a snapshot-wide policy requirement"
         );
-        let missing = evaluate_gate("snapshot-1", "config", "policy", &[], &policy, true, &[]);
+        let missing = evaluate_gate(
+            "snapshot-1",
+            "config",
+            "policy",
+            &[],
+            &policy,
+            true,
+            GateEvidence {
+                verification_runs: &[],
+                source_evidence: &[],
+            },
+        );
         assert_eq!(missing.status, GateStatus::Incomplete);
         assert!(missing.reasons.iter().any(|reason| reason.contains("unit")));
 
@@ -1331,11 +2435,25 @@ mod tests {
             &[],
             &policy,
             true,
-            std::slice::from_ref(&run),
+            GateEvidence {
+                verification_runs: std::slice::from_ref(&run),
+                source_evidence: &[],
+            },
         );
         assert_eq!(passed.status, GateStatus::Pass);
         assert_eq!(passed.verification_run_ids, vec!["run-1"]);
-        let stale = evaluate_gate("snapshot-2", "config", "policy", &[], &policy, true, &[run]);
+        let stale = evaluate_gate(
+            "snapshot-2",
+            "config",
+            "policy",
+            &[],
+            &policy,
+            true,
+            GateEvidence {
+                verification_runs: &[run],
+                source_evidence: &[],
+            },
+        );
         assert_eq!(stale.status, GateStatus::Incomplete);
         assert_ne!(passed.evidence_digest, stale.evidence_digest);
 
@@ -1353,7 +2471,10 @@ mod tests {
             &[],
             &policy,
             true,
-            &[failed_latest, passed_run_for_test()],
+            GateEvidence {
+                verification_runs: &[failed_latest, passed_run_for_test()],
+                source_evidence: &[],
+            },
         );
         assert_eq!(regression.status, GateStatus::Incomplete);
         assert_eq!(regression.verification_run_ids, vec!["run-2"]);
@@ -1424,6 +2545,33 @@ mod tests {
     }
 
     #[test]
+    fn impact_targeted_verification_cannot_satisfy_snapshot_wide_gate_requirement() {
+        let policy = Policy {
+            block_severities: vec![],
+            minimum_confidence: 0,
+            required_review_complete: true,
+            required_verifications: vec!["unit".into()],
+        };
+        let mut targeted = passed_run_for_test();
+        targeted.targets = vec!["./pkg".into()];
+        let decision = evaluate_gate(
+            "snapshot-1",
+            "config",
+            "policy",
+            &[],
+            &policy,
+            true,
+            GateEvidence {
+                verification_runs: &[targeted],
+                source_evidence: &[],
+            },
+        );
+        assert_eq!(decision.status, GateStatus::Incomplete);
+        assert!(decision.verification_run_ids.is_empty());
+        assert!(decision.reasons[0].contains("unit"));
+    }
+
+    #[test]
     fn verification_store_migrates_legacy_table_and_persists_finding_scope() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legacy.sqlite");
@@ -1437,6 +2585,7 @@ mod tests {
             snapshot_id: "legacy-snapshot".into(),
             profile_id: "unit".into(),
             finding_id: None,
+            targets: Vec::new(),
             command_digest: digest(b"legacy-command"),
             status: VerificationStatus::Passed,
             exit_code: Some(0),
@@ -1473,6 +2622,7 @@ mod tests {
             snapshot_id: "snapshot".into(),
             profile_id: "unit".into(),
             finding_id: Some("find_123".into()),
+            targets: Vec::new(),
             command_digest: digest(b"command"),
             status: VerificationStatus::Passed,
             exit_code: Some(0),
@@ -1487,7 +2637,7 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, STORAGE_SCHEMA_VERSION);
     }
 
     #[test]
@@ -1499,6 +2649,28 @@ mod tests {
             digest: digest(b"wrong bytes"),
             path: ".vero/artifacts/sha256/0000000000000000000000000000000000000000000000000000000000000000".into(),
             size_bytes: 10,
+        });
+
+        assert!(store.save_verification_with_artifacts(&run).is_err());
+        assert_eq!(store.verification(&run.run_id).unwrap(), None);
+        assert_eq!(
+            store.verification_artifact(&run.run_id, "stdout").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn artifact_size_outside_sqlite_integer_range_rejects_verification_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ReviewStore::open(&dir.path().join("artifact-size.sqlite")).unwrap();
+        let mut run = passed_run_for_test();
+        run.stdout_artifact = Some(ArtifactReference {
+            digest: run.stdout_digest.clone(),
+            path: format!(
+                ".vero/artifacts/sha256/{}",
+                run.stdout_digest.strip_prefix("sha256:").unwrap()
+            ),
+            size_bytes: u64::MAX,
         });
 
         assert!(store.save_verification_with_artifacts(&run).is_err());
@@ -1542,7 +2714,7 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, STORAGE_SCHEMA_VERSION);
     }
 
     #[test]
@@ -1620,6 +2792,7 @@ mod tests {
             snapshot_id: "snapshot-1".into(),
             profile_id: "unit".into(),
             finding_id: None,
+            targets: Vec::new(),
             command_digest: digest(b"unit-command"),
             status: VerificationStatus::Passed,
             exit_code: Some(0),
@@ -1674,6 +2847,17 @@ mod tests {
         assert!(findings[0].id.starts_with("find_"));
         assert_ne!(findings[0].fingerprint, "");
         assert_eq!(findings[0].provenance, "model_inference");
+    }
+
+    #[test]
+    fn provider_normalization_preserves_same_fingerprint_reports_for_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("src.rs"), "fn f() { unsafe {} }\n").unwrap();
+        let bytes = br#"{"schema_version":1,"findings":[{"category":"correctness","severity":"critical","confidence":40,"rationale":"unsafe operation","path":"src.rs","line":1},{"category":"correctness","severity":"high","confidence":95,"rationale":"unsafe operation","path":"src.rs","line":1}]}"#;
+        let findings = parse_provider_findings(bytes, dir.path()).unwrap();
+        assert_eq!(findings.len(), 2);
+        assert_eq!(findings[0].fingerprint, findings[1].fingerprint);
+        assert_eq!(findings[0].id, findings[1].id);
     }
 
     #[test]
@@ -1759,6 +2943,7 @@ mod tests {
     #[test]
     fn snapshot_rejects_paths_outside_repository_root() {
         let dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
         let outside = tempfile::tempdir().unwrap();
         #[cfg(unix)]
         {
@@ -1786,6 +2971,14 @@ mod tests {
         assert!(RepositoryConfig::load(&file)
             .unwrap_err()
             .contains("max_concurrency must be in 1..=32"));
+        std::fs::write(
+            &file,
+            "version: 1\nreview:\n  max_context_file_bytes: 4194305\n",
+        )
+        .unwrap();
+        assert!(RepositoryConfig::load(&file)
+            .unwrap_err()
+            .contains("max_context_file_bytes must be in 1..=4194304"));
         std::fs::write(
             &file,
             "version: 1\npolicy:\n  required_verifications: [missing]\n",
@@ -1820,6 +3013,38 @@ mod tests {
         )
         .unwrap();
         assert!(RepositoryConfig::load(&file).unwrap_err().contains("api"));
+    }
+
+    #[test]
+    fn reviewer_specific_policy_is_validated_and_bound_to_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".vero.yaml");
+        std::fs::write(
+            &file,
+            "version: 1\nproviders:\n  p: { kind: cli, executable: provider }\nreviewers:\n  security:\n    provider: p\n    instructions_file: security.md\n    policy:\n      block_severities: [critical]\n      minimum_confidence: 35\n",
+        )
+        .unwrap();
+        let valid = RepositoryConfig::load(&file).unwrap();
+        assert_eq!(
+            valid.reviewers["security"].policy.minimum_confidence,
+            Some(35)
+        );
+        let valid_digest = digest(&serde_json::to_vec(&valid).unwrap());
+        std::fs::write(
+            &file,
+            "version: 1\nproviders:\n  p: { kind: cli, executable: provider }\nreviewers:\n  security:\n    provider: p\n    instructions_file: security.md\n    policy:\n      block_severities: [critical]\n      minimum_confidence: 36\n",
+        )
+        .unwrap();
+        let changed = RepositoryConfig::load(&file).unwrap();
+        assert_ne!(valid_digest, digest(&serde_json::to_vec(&changed).unwrap()));
+        std::fs::write(
+            &file,
+            "version: 1\nproviders:\n  p: { kind: cli, executable: provider }\nreviewers:\n  security:\n    provider: p\n    instructions_file: security.md\n    policy:\n      block_severities: [catastrophic]\n",
+        )
+        .unwrap();
+        assert!(RepositoryConfig::load(&file)
+            .unwrap_err()
+            .contains("unknown blocking severity"));
     }
 
     #[test]
@@ -1904,6 +3129,7 @@ policy_profiles:
             "version: 1\npolicy:\n  minumum_confidence: 80\n",
             "version: 1\nreviewers:\n  correctness:\n    provider: p\n    instructions_file: reviewer.md\n    incldue: [\"src/**\"]\nproviders:\n  p: { kind: cli, executable: codex }\n",
             "version: 1\nproviders:\n  p:\n    kind: cli\n    executable: codex\n    timeuot_seconds: 5\n",
+            "version: 1\nproviders:\n  p:\n    kind: cli\n    executable: codex\n    pricing:\n      model-a:\n        input_usd_per_million: -1\n        output_usd_per_million: 2\n",
             "version: 1\nproviders:\n  p:\n    kind: cli\n    executable: codex\n    env: { API_TOKEN: plaintext-secret }\n",
         ] {
             std::fs::write(&file, invalid).unwrap();
@@ -1911,6 +3137,30 @@ policy_profiles:
                 RepositoryConfig::load(&file).is_err(),
                 "accepted invalid config: {invalid}"
             );
+        }
+    }
+
+    #[test]
+    fn hosting_defaults_validate_provider_endpoints_and_environment_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".vero.yaml");
+        std::fs::write(
+            &file,
+            "version: 1\nhosting: { provider: gitlab, host: gitlab.example, api_base: https://gitlab.example/api/v4/, token_env: GITLAB_TOKEN, webhook_secret_env: VERO_WEBHOOK_SECRET, actor_login: vero-bot }\n",
+        )
+        .unwrap();
+        let config = RepositoryConfig::load(&file).unwrap();
+        assert_eq!(config.hosting.provider.as_deref(), Some("gitlab"));
+        assert_eq!(config.hosting.token_env.as_deref(), Some("GITLAB_TOKEN"));
+
+        for invalid in [
+            "version: 1\nhosting: { provider: bitbucket-cloud }\n",
+            "version: 1\nhosting: { token_env: 'TOKEN;echo bad' }\n",
+            "version: 1\nhosting: { api_base: http://example.com/api/ }\n",
+            "version: 1\nhosting: { api_base: https://user:secret@example.com/ }\n",
+        ] {
+            std::fs::write(&file, invalid).unwrap();
+            assert!(RepositoryConfig::load(&file).is_err(), "accepted {invalid}");
         }
     }
 
@@ -1936,12 +3186,123 @@ policy_profiles:
 
         std::fs::write(
             &file,
+            "version: 1\noffline: true\nverification:\n  unit: { executable: cargo, args: [test] }\n",
+        )
+        .unwrap();
+        assert!(RepositoryConfig::load(&file)
+            .unwrap_err()
+            .contains("offline mode rejects network verification profile unit"));
+
+        std::fs::write(
+            &file,
+            "version: 1\noffline: true\nverification:\n  unit: { executable: cargo, egress: local, args: [test, --offline] }\n",
+        )
+        .unwrap();
+        assert!(RepositoryConfig::load(&file).is_ok());
+
+        std::fs::write(
+            &file,
             "version: 1\nproviders:\n  hosted: { kind: codex_cli, egress: local, executable: codex }\n",
         )
         .unwrap();
         assert!(RepositoryConfig::load(&file)
             .unwrap_err()
             .contains("codex_cli cannot be declared local"));
+    }
+
+    #[test]
+    fn provider_input_token_budget_is_validated_and_defaults_to_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".vero.yaml");
+        std::fs::write(
+            &file,
+            "version: 1\nproviders:\n  local: { kind: openai_compatible, egress: local, endpoint: http://127.0.0.1:11434/v1/chat/completions, model: gemma3:12b, max_input_tokens: 12000 }\n",
+        )
+        .unwrap();
+        let config = RepositoryConfig::load(&file).unwrap();
+        assert_eq!(config.providers["local"].max_input_tokens, Some(12_000));
+
+        for tokens in ["0", "1023", "131073"] {
+            std::fs::write(
+                &file,
+                format!(
+                    "version: 1\nproviders:\n  local: {{ kind: cli, executable: reviewer, max_input_tokens: {tokens} }}\n"
+                ),
+            )
+            .unwrap();
+            assert!(
+                RepositoryConfig::load(&file)
+                    .unwrap_err()
+                    .contains("max_input_tokens must be in 1024..=131072"),
+                "accepted token budget {tokens}"
+            );
+        }
+
+        std::fs::write(
+            &file,
+            "version: 1\nproviders:\n  local: { kind: cli, executable: reviewer }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            RepositoryConfig::load(&file).unwrap().providers["local"].max_input_tokens,
+            None
+        );
+    }
+
+    #[test]
+    fn ollama_native_provider_requires_loopback_and_explicit_context_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".vero.yaml");
+        std::fs::write(
+            &file,
+            "version: 1\noffline: true\nproviders:\n  local:\n    kind: ollama_native\n    egress: local\n    endpoint: http://127.0.0.1:11434/api/chat\n    model: gemma3:12b\n    max_input_tokens: 28000\n    context_window_tokens: 32768\n    max_output_tokens: 4096\n",
+        )
+        .unwrap();
+        let config = RepositoryConfig::load(&file).unwrap();
+        assert_eq!(config.providers["local"].kind, ProviderKind::OllamaNative);
+        assert_eq!(config.providers["local"].max_output_tokens, Some(4096));
+        assert_eq!(
+            config.providers["local"].context_window_tokens,
+            Some(32_768)
+        );
+
+        std::fs::write(
+            &file,
+            "version: 1\noffline: true\nproviders:\n  local:\n    kind: ollama_native\n    egress: local\n    endpoint: http://127.0.0.1:11434/api/chat\n    model: gemma3:12b\n    max_input_tokens: 30000\n    context_window_tokens: 32768\n",
+        )
+        .unwrap();
+        let defaulted = RepositoryConfig::load(&file).unwrap();
+        assert_eq!(defaulted.providers["local"].max_output_tokens, None);
+
+        for invalid in [
+            "version: 1\nproviders:\n  local: { kind: ollama_native, endpoint: https://127.0.0.1:11434/api/chat, model: m, max_input_tokens: 30000, context_window_tokens: 32768 }\n",
+            "version: 1\nproviders:\n  local: { kind: ollama_native, egress: local, endpoint: http://example.com/api/chat, model: m, max_input_tokens: 30000, context_window_tokens: 32768 }\n",
+            "version: 1\nproviders:\n  local: { kind: ollama_native, egress: local, endpoint: http://127.0.0.1:11434/api/chat, model: m, max_input_tokens: 30000 }\n",
+            "version: 1\nproviders:\n  local: { kind: ollama_native, egress: local, endpoint: http://127.0.0.1:11434/api/chat, model: m, max_input_tokens: 32000, context_window_tokens: 32768 }\n",
+            "version: 1\nproviders:\n  local: { kind: ollama_native, egress: local, endpoint: http://127.0.0.1:11434/api/chat, model: m, max_input_tokens: 30000, context_window_tokens: 32768, max_output_tokens: 4096 }\n",
+            "version: 1\nproviders:\n  local: { kind: ollama_native, egress: local, endpoint: http://127.0.0.1:11434/api/chat, model: m, max_input_tokens: 30000, context_window_tokens: 32768, max_output_tokens: 0 }\n",
+            "version: 1\nproviders:\n  local: { kind: ollama_native, egress: local, endpoint: http://127.0.0.1:11434/api/chat, model: m, max_input_tokens: 30000, context_window_tokens: 32768, max_output_tokens: 131073 }\n",
+            "version: 1\nproviders:\n  local: { kind: cli, executable: reviewer, max_output_tokens: 4096 }\n",
+        ] {
+            std::fs::write(&file, invalid).unwrap();
+            assert!(RepositoryConfig::load(&file).is_err(), "accepted {invalid}");
+        }
+    }
+
+    #[test]
+    fn forced_offline_mode_cannot_be_weakened_by_repository_configuration() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join(".vero.yaml");
+        std::fs::write(
+            &config_path,
+            "version: 1\noffline: false\nproviders:\n  hosted: { kind: cli, executable: reviewer, egress: network }\n",
+        )
+        .unwrap();
+
+        let error =
+            RepositoryConfig::load_with_provider_defaults_and_offline(&config_path, None, true)
+                .unwrap_err();
+        assert!(error.contains("offline mode rejects network provider hosted"));
     }
 
     #[test]
@@ -2036,6 +3397,7 @@ policy_profiles:
             verification_run_ids: vec![],
             evidence_digest: "evidence".into(),
             reasons: vec![],
+            replay_inputs: None,
         };
         store
             .save_review_with_decision(ReviewWrite {
@@ -2091,6 +3453,7 @@ policy_profiles:
             verification_run_ids: vec![],
             evidence_digest: "evidence".into(),
             reasons: vec![],
+            replay_inputs: None,
         };
         for review_id in ["rev-1", "rev-2"] {
             store
@@ -2154,6 +3517,7 @@ policy_profiles:
             verification_run_ids: vec![],
             evidence_digest: "evidence".into(),
             reasons: vec![],
+            replay_inputs: None,
         };
         store
             .save_review_with_decision(ReviewWrite {
@@ -2209,6 +3573,42 @@ policy_profiles:
         store
             .save_review("rev-1", "snap-1", "cfg", "block", "{}", &[item.clone()])
             .unwrap();
+        let feedback = store
+            .add_finding_feedback(
+                "id-one",
+                "snap-1",
+                FindingFeedbackLabel::Confirmed,
+                "Reproduced the boundary defect",
+                "reviewer@example.invalid",
+            )
+            .unwrap();
+        assert_eq!(feedback.label, FindingFeedbackLabel::Confirmed);
+        assert_eq!(
+            store.list_finding_feedback().unwrap(),
+            vec![feedback.clone()]
+        );
+        assert_eq!(
+            store
+                .add_finding_feedback(
+                    "id-one",
+                    "snap-1",
+                    FindingFeedbackLabel::Confirmed,
+                    "Reproduced the boundary defect",
+                    "reviewer@example.invalid",
+                )
+                .unwrap(),
+            feedback,
+            "repeating the same label should be idempotent"
+        );
+        assert!(store
+            .add_finding_feedback(
+                "id-one",
+                "unrelated-snapshot",
+                FindingFeedbackLabel::FalsePositive,
+                "No issue",
+                "reviewer@example.invalid",
+            )
+            .is_err());
         let waiver = Waiver {
             schema_version: 1,
             id: "waiver-snap-1".into(),
@@ -2229,8 +3629,10 @@ policy_profiles:
                 "reviewed source evidence",
             )
             .unwrap();
+        let mut later_assessment = item.clone();
+        later_assessment.rationale = "updated after the earlier review".into();
         store
-            .save_review("rev-2", "snap-2", "cfg", "block", "{}", &[item.clone()])
+            .save_review("rev-2", "snap-2", "cfg", "block", "{}", &[later_assessment])
             .unwrap();
         let verified = store.finding("id-one").unwrap().unwrap();
         assert_eq!(verified.status, FindingStatus::Verified);
@@ -2238,6 +3640,16 @@ policy_profiles:
         assert_eq!(verified.occurrences.len(), 2);
         assert_eq!(verified.occurrences[1].review_id, "rev-2");
         assert_eq!(verified.occurrences[1].snapshot_id, "snap-2");
+        let first_review = store.list_findings(None, None, Some("rev-1")).unwrap();
+        assert_eq!(first_review.len(), 1);
+        assert_eq!(first_review[0].assessments.len(), 1);
+        assert_eq!(first_review[0].assessments[0].rationale, "unsafe operation");
+        let (first_page, first_total) = store
+            .list_findings_page(None, None, Some("rev-1"), 10, 0)
+            .unwrap();
+        assert_eq!(first_total, 1);
+        assert_eq!(first_page[0].assessments.len(), 1);
+        assert_eq!(first_page[0].assessments[0].rationale, "unsafe operation");
         store
             .set_finding_status("id-one", FindingStatus::Resolved, "fixed in change")
             .unwrap();
@@ -2261,7 +3673,306 @@ policy_profiles:
         assert!(store
             .set_finding_status("id-one", FindingStatus::Waived, "ignore")
             .unwrap_err()
-            .contains("waivers require scoped provenance and expiry"));
+            .contains("use the waiver workflow"));
+    }
+
+    #[test]
+    fn review_storage_consolidates_duplicate_fingerprint_occurrences() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ReviewStore::open(&dir.path().join("duplicate-findings.sqlite")).unwrap();
+        let mut first = finding("same-finding", Severity::Critical, Some(40));
+        first.fingerprint = "same-fingerprint".into();
+        first.rationale = "critical model rationale".into();
+        first.reviewer_ids = vec!["correctness".into()];
+        let mut second = finding("same-finding", Severity::High, Some(95));
+        second.fingerprint = "same-fingerprint".into();
+        second.rationale = "high model rationale".into();
+        second.reviewer_ids = vec!["security".into()];
+        store
+            .save_review(
+                "duplicate-review",
+                "duplicate-snapshot",
+                "config",
+                "block",
+                "{}",
+                &[first, second],
+            )
+            .unwrap();
+        let saved = store.finding("same-finding").unwrap().unwrap();
+        assert_eq!(saved.occurrences.len(), 1);
+        assert_eq!(saved.finding.severity, Severity::Critical);
+        assert_eq!(saved.finding.confidence, Some(40));
+        assert_eq!(saved.finding.rationale, "critical model rationale");
+        assert!(saved
+            .assessments
+            .iter()
+            .any(|entry| entry.severity == Severity::High
+                && entry.confidence == Some(95)
+                && entry.rationale == "high model rationale"));
+        assert!(saved
+            .assessments
+            .iter()
+            .any(|entry| entry.severity == Severity::Critical
+                && entry.confidence == Some(40)
+                && entry.rationale == "critical model rationale"));
+        assert_eq!(saved.finding.reviewer_ids, vec!["correctness", "security"]);
+        let high = store
+            .list_findings(Some(Severity::High), None, Some("duplicate-review"))
+            .unwrap();
+        assert_eq!(high.len(), 1);
+        assert!(high[0]
+            .assessments
+            .iter()
+            .any(|assessment| assessment.severity == Severity::High));
+        let (high_page, high_count) = store
+            .list_findings_page(Some(Severity::High), None, Some("duplicate-review"), 1, 0)
+            .unwrap();
+        assert_eq!(high_count, 1);
+        assert_eq!(high_page.len(), 1);
+        let mut later = finding("same-finding", Severity::Low, Some(70));
+        later.fingerprint = "same-fingerprint".into();
+        store
+            .save_review(
+                "later-review",
+                "later-snapshot",
+                "config",
+                "pass",
+                "{}",
+                &[later],
+            )
+            .unwrap();
+        assert!(store
+            .list_findings(Some(Severity::Low), None, Some("duplicate-review"))
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .list_findings_page(Some(Severity::Low), None, Some("duplicate-review"), 1, 0)
+            .unwrap()
+            .0
+            .is_empty());
+        assert_eq!(
+            store
+                .list_findings(Some(Severity::Low), None, Some("later-review"))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(store
+            .list_findings(Some(Severity::High), None, None)
+            .unwrap()
+            .is_empty());
+        let (old_high_page, old_high_count) = store
+            .list_findings_page(Some(Severity::High), None, None, 10, 0)
+            .unwrap();
+        assert!(old_high_page.is_empty());
+        assert_eq!(old_high_count, 0);
+        assert_eq!(
+            store
+                .list_findings(Some(Severity::Low), None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(store
+            .list_findings(Some(Severity::Critical), None, Some("later-review"))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn global_severity_filter_uses_insertion_order_when_review_ids_sort_backwards() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ReviewStore::open(&dir.path().join("occurrence-order.sqlite")).unwrap();
+        let mut old = finding("ordered-finding", Severity::High, Some(90));
+        old.fingerprint = "ordered-fingerprint".into();
+        store
+            .save_review("rev-z-old", "snapshot-old", "config", "block", "{}", &[old])
+            .unwrap();
+        let mut latest = finding("ordered-finding", Severity::Low, Some(70));
+        latest.fingerprint = "ordered-fingerprint".into();
+        store
+            .save_review(
+                "rev-a-new",
+                "snapshot-new",
+                "config",
+                "pass",
+                "{}",
+                &[latest],
+            )
+            .unwrap();
+
+        assert!(store
+            .list_findings(Some(Severity::High), None, None)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .list_findings(Some(Severity::Low), None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        let (high_page, high_count) = store
+            .list_findings_page(Some(Severity::High), None, None, 10, 0)
+            .unwrap();
+        assert!(high_page.is_empty());
+        assert_eq!(high_count, 0);
+    }
+
+    #[test]
+    fn review_storage_preserves_initial_assessment_when_later_severity_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ReviewStore::open(&dir.path().join("duplicate-order.sqlite")).unwrap();
+        let mut first = finding("order-finding", Severity::High, Some(95));
+        first.fingerprint = "order-fingerprint".into();
+        first.rationale = "high model rationale".into();
+        let mut second = finding("order-finding", Severity::Critical, Some(40));
+        second.fingerprint = "order-fingerprint".into();
+        second.rationale = "critical model rationale".into();
+        store
+            .save_review(
+                "order-review",
+                "order-snapshot",
+                "config",
+                "block",
+                "{}",
+                &[first, second],
+            )
+            .unwrap();
+        let saved = store.finding("order-finding").unwrap().unwrap();
+        assert_eq!(saved.finding.severity, Severity::Critical);
+        assert_eq!(saved.finding.confidence, Some(40));
+        assert_eq!(saved.finding.rationale, "critical model rationale");
+        assert!(saved
+            .assessments
+            .iter()
+            .any(|entry| entry.severity == Severity::High
+                && entry.confidence == Some(95)
+                && entry.rationale == "high model rationale"));
+        assert!(saved
+            .assessments
+            .iter()
+            .any(|entry| entry.severity == Severity::Critical
+                && entry.confidence == Some(40)
+                && entry.rationale == "critical model rationale"));
+    }
+
+    #[test]
+    fn rule_approval_is_persisted_and_revocation_is_append_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ReviewStore::open(&dir.path().join("rule-approvals.sqlite")).unwrap();
+        let approval = RuleApproval {
+            schema_version: 2,
+            approval_id: "approval-1".into(),
+            version: 1,
+            candidate_id: "candidate-1".into(),
+            evidence_digest: format!("sha256:{}", "a".repeat(64)),
+            source_feedback_ids: vec!["feedback-1".into()],
+            activated_at_unix: None,
+            category: "correctness".into(),
+            feedback_label: FindingFeedbackLabel::NotActionable,
+            scope: "src/parser.rs".into(),
+            instruction: "Require a reproducer for parser edge cases.".into(),
+            approver: "maintainer".into(),
+            approval_reason: "Repeated feedback supports this scoped guidance.".into(),
+            supersedes_approval_id: None,
+            expires_at_unix: None,
+            created_at: String::new(),
+            status: String::new(),
+            events: Vec::new(),
+        };
+        store.create_rule_approval(&approval).unwrap();
+        let saved = store.list_rule_approvals().unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].status, "active");
+        assert_eq!(saved[0].events.len(), 1);
+        assert_eq!(saved[0].version, 1);
+        let replacement = RuleApproval {
+            schema_version: 2,
+            approval_id: "approval-2".into(),
+            version: 1,
+            supersedes_approval_id: Some("approval-1".into()),
+            ..approval.clone()
+        };
+        store.create_rule_approval(&replacement).unwrap();
+        let versions = store.list_rule_approvals().unwrap();
+        assert_eq!(versions[0].status, "superseded");
+        assert_eq!(versions[1].version, 2);
+        store
+            .revoke_rule_approval("approval-2", "maintainer", "Guidance is obsolete")
+            .unwrap();
+        let revoked = store.list_rule_approvals().unwrap();
+        assert_eq!(revoked[1].status, "revoked");
+        assert_eq!(revoked[1].events.len(), 2);
+        assert_eq!(revoked[1].events[1].event, "revoked");
+        assert!(store
+            .revoke_rule_approval("approval-2", "maintainer", "duplicate")
+            .is_err());
+    }
+
+    #[test]
+    fn expired_rule_approval_is_inactive_and_version_numbers_continue() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("expired-rule-approval.sqlite");
+        let mut store = ReviewStore::open(&database).unwrap();
+        let approval = RuleApproval {
+            schema_version: 2,
+            approval_id: "approval-expiring".into(),
+            version: 1,
+            candidate_id: "candidate-expiring".into(),
+            evidence_digest: format!("sha256:{}", "c".repeat(64)),
+            source_feedback_ids: vec!["feedback-expiring".into()],
+            activated_at_unix: None,
+            category: "correctness".into(),
+            feedback_label: FindingFeedbackLabel::NotActionable,
+            scope: "src/parser.rs".into(),
+            instruction: "Keep this reviewer guidance temporary.".into(),
+            approver: "maintainer".into(),
+            approval_reason: "Temporary experiment.".into(),
+            supersedes_approval_id: None,
+            expires_at_unix: Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64
+                    + 3600,
+            ),
+            created_at: String::new(),
+            status: String::new(),
+            events: Vec::new(),
+        };
+        store.create_rule_approval(&approval).unwrap();
+        let connection = &store.connection;
+        let mut stored: RuleApproval = serde_json::from_str(
+            &connection
+                .query_row::<String, _, _>(
+                    "SELECT payload FROM rule_approvals WHERE approval_id='approval-expiring'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        stored.expires_at_unix = Some(0);
+        connection
+            .execute(
+                "UPDATE rule_approvals SET payload=?1 WHERE approval_id='approval-expiring'",
+                [serde_json::to_string(&stored).unwrap()],
+            )
+            .unwrap();
+        let expired = store.list_rule_approvals().unwrap();
+        assert_eq!(expired[0].status, "expired");
+        let mut replacement = approval;
+        replacement.approval_id = "approval-after-expiry".into();
+        replacement.expires_at_unix = None;
+        store.create_rule_approval(&replacement).unwrap();
+        let versions = store.list_rule_approvals().unwrap();
+        let replacement = versions
+            .iter()
+            .find(|item| item.approval_id == "approval-after-expiry")
+            .unwrap();
+        assert_eq!(replacement.version, 2);
+        assert_eq!(replacement.status, "active");
     }
 
     #[test]
@@ -2307,6 +4018,8 @@ policy_profiles:
             stdin: vec![],
             timeout_seconds: 2,
             output_limit_bytes: 4096,
+            context_window_tokens: None,
+            max_output_tokens: None,
             environment: vec![("VERO_TEST_ALLOWED".into(), "present".into())],
         };
         let _result = execute_provider(&ok).unwrap();
@@ -2319,6 +4032,8 @@ policy_profiles:
             working_directory: ".".into(),
             stdin: vec![],
             output_limit_bytes: 3,
+            context_window_tokens: None,
+            max_output_tokens: None,
             environment: vec![],
             timeout_seconds: 2,
         };
@@ -2349,11 +4064,49 @@ policy_profiles:
             stdin: vec![],
             timeout_seconds: 2,
             output_limit_bytes: 4096,
+            context_window_tokens: None,
+            max_output_tokens: None,
             environment: vec![],
         })
         .unwrap();
 
         assert_eq!(result.stdout, b"provider-ok");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_failure_reports_bounded_redacted_stderr() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("provider");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf 'Error: token=%s\\n' \"$API_TOKEN\" >&2\nexit 7\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let error = execute_provider(&ProviderRequest {
+            kind: ProviderKind::Cli,
+            executable: executable.to_string_lossy().into_owned(),
+            args: vec![],
+            model: None,
+            working_directory: directory.path().into(),
+            stdin: vec![],
+            timeout_seconds: 2,
+            output_limit_bytes: 4096,
+            context_window_tokens: None,
+            max_output_tokens: None,
+            environment: vec![("API_TOKEN".into(), "secret-value".into())],
+        })
+        .unwrap_err();
+
+        assert!(error.contains("provider exited with 7"));
+        assert!(error.contains("Error:token=[REDACTED]"));
+        assert!(!error.contains("secret-value"));
     }
 
     #[cfg(unix)]
@@ -2374,6 +4127,8 @@ policy_profiles:
             stdin: vec![],
             timeout_seconds: 20,
             output_limit_bytes: 128,
+            context_window_tokens: None,
+            max_output_tokens: None,
             environment: vec![],
         };
         let error = execute_provider_cancellable(&request, Some(&cancellation)).unwrap_err();
@@ -2401,6 +4156,8 @@ policy_profiles:
             stdin: vec![],
             timeout_seconds: 1,
             output_limit_bytes: 128,
+            context_window_tokens: None,
+            max_output_tokens: None,
             environment: vec![],
         };
         assert!(execute_provider(&request)
@@ -2416,8 +4173,12 @@ policy_profiles:
         let pid_file = dir.path().join("provider-cancelled-child.pid");
         let cancellation = tokio_util::sync::CancellationToken::new();
         let child_cancellation = cancellation.clone();
+        let child_pid_file = pid_file.clone();
         let cancel_thread = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !child_pid_file.exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
             child_cancellation.cancel();
         });
         let request = ProviderRequest {
@@ -2435,6 +4196,8 @@ policy_profiles:
             stdin: vec![],
             timeout_seconds: 10,
             output_limit_bytes: 128,
+            context_window_tokens: None,
+            max_output_tokens: None,
             environment: vec![],
         };
         assert!(execute_provider_cancellable(&request, Some(&cancellation))
@@ -2449,6 +4212,7 @@ policy_profiles:
     fn verification_runs_explicit_argv_and_records_deterministic_evidence() {
         let dir = tempfile::tempdir().unwrap();
         let profile = VerificationProfile {
+            egress: Default::default(),
             executable: "/bin/sh".into(),
             args: vec!["-c".into(), "printf ok; exit 7".into()],
             timeout_seconds: 2,
@@ -2470,10 +4234,51 @@ policy_profiles:
 
     #[cfg(unix)]
     #[test]
+    fn offline_dependency_resolution_failure_is_incomplete() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = VerificationProfile {
+            egress: Default::default(),
+            executable: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "printf 'module lookup disabled by GOPROXY\\n' >&2; exit 1".into(),
+            ],
+            timeout_seconds: 2,
+            output_limit_bytes: 256,
+            env_allowlist: vec![],
+        };
+        let run = execute_verification("snapshot-1", "tests", dir.path(), &profile).unwrap();
+        assert_eq!(run.status, VerificationStatus::Incomplete);
+        assert_eq!(run.exit_code, Some(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cargo_offline_dependency_download_failure_is_incomplete() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = VerificationProfile {
+            egress: Default::default(),
+            executable: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "printf 'attempting to make an HTTP request, but --offline was specified\\n' >&2; exit 101".into(),
+            ],
+            timeout_seconds: 2,
+            output_limit_bytes: 256,
+            env_allowlist: vec![],
+        };
+        let run = execute_verification("snapshot-1", "cargo-tests", dir.path(), &profile).unwrap();
+        assert_eq!(run.status, VerificationStatus::Incomplete);
+        assert_eq!(run.exit_code, Some(101));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn verification_uses_only_configured_environment() {
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("VERO_VERIFICATION_ALLOWED", "yes");
         let profile = VerificationProfile {
+            egress: Default::default(),
             executable: "/usr/bin/env".into(),
             args: vec![],
             env_allowlist: vec!["VERO_VERIFICATION_ALLOWED".into()],
@@ -2494,6 +4299,7 @@ policy_profiles:
     fn verification_rejects_output_over_limit() {
         let dir = tempfile::tempdir().unwrap();
         let profile = VerificationProfile {
+            egress: Default::default(),
             executable: "/bin/sh".into(),
             args: vec!["-c".into(), "printf 123456789".into()],
             timeout_seconds: 2,
@@ -2525,6 +4331,7 @@ policy_profiles:
     fn verification_times_out_and_binds_limits_into_command_digest() {
         let dir = tempfile::tempdir().unwrap();
         let profile = VerificationProfile {
+            egress: Default::default(),
             executable: "/bin/sleep".into(),
             args: vec!["2".into()],
             timeout_seconds: 1,
@@ -2534,11 +4341,64 @@ policy_profiles:
         let run = execute_verification("snapshot", "slow", dir.path(), &profile).unwrap();
         assert_eq!(run.status, VerificationStatus::TimedOut);
         let changed_limit = VerificationProfile {
+            egress: Default::default(),
             output_limit_bytes: 65,
             ..profile
         };
         let other = execute_verification("snapshot", "slow", dir.path(), &changed_limit).unwrap();
         assert_ne!(run.command_digest, other.command_digest);
+        let local_profile = VerificationProfile {
+            egress: ProviderEgress::Local,
+            ..changed_limit
+        };
+        let local = execute_verification("snapshot", "slow", dir.path(), &local_profile).unwrap();
+        assert_ne!(other.command_digest, local.command_digest);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verification_command_digest_tracks_executable_and_environment_without_exposing_values() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("verify.sh");
+        std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let profile = VerificationProfile {
+            egress: Default::default(),
+            executable: "./verify.sh".into(),
+            args: vec![],
+            timeout_seconds: 5,
+            output_limit_bytes: 64,
+            env_allowlist: vec!["VERO_TEST_SECRET".into()],
+        };
+        let name = "VERO_TEST_SECRET".to_string();
+        let executable_digest = digest_file(&executable).unwrap();
+        let executable_identity =
+            verification_executable_identity(&profile.executable, &executable);
+        let first_environment = vec![(&name, digest(b"secret-one"))];
+        let second_environment = vec![(&name, digest(b"secret-two"))];
+        let first_with_environment = verification_invocation_digest(
+            &profile,
+            &executable_identity,
+            &executable_digest,
+            &first_environment,
+        )
+        .unwrap();
+        let second_with_environment = verification_invocation_digest(
+            &profile,
+            &executable_identity,
+            &executable_digest,
+            &second_environment,
+        )
+        .unwrap();
+        assert_ne!(first_with_environment, second_with_environment);
+        assert!(!first_with_environment.contains("secret-one"));
+        let first = verification_command_digest(&profile, dir.path()).unwrap();
+        std::fs::write(&executable, "#!/bin/sh\nexit 1\n").unwrap();
+        let second = verification_command_digest(&profile, dir.path()).unwrap();
+        assert_ne!(first, second);
+        assert!(first.starts_with("sha256:"));
+        assert!(second.starts_with("sha256:"));
     }
 
     #[cfg(unix)]
@@ -2547,6 +4407,7 @@ policy_profiles:
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("verification-child.pid");
         let profile = VerificationProfile {
+            egress: Default::default(),
             executable: "/bin/sh".into(),
             args: vec![
                 "-c".into(),
@@ -2573,16 +4434,42 @@ policy_profiles:
             .unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
-            let running = unsafe { libc::kill(pid, 0) == 0 };
-            if !running || std::time::Instant::now() >= deadline {
-                if running {
+            if !process_is_running(pid) {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                if process_is_running(pid) {
                     unsafe { libc::kill(pid, libc::SIGKILL) };
                 }
-                assert!(!running, "descendant process {pid} survived timeout");
-                return;
+                assert!(
+                    !process_is_running(pid),
+                    "descendant process {pid} survived timeout"
+                );
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn process_is_running(pid: i32) -> bool {
+        // kill(pid, 0) also succeeds for zombies. Containers with a minimal
+        // PID 1 may leave killed grandchildren unreaped, even though they
+        // cannot execute or retain resources. Read the kernel state so the
+        // process-tree termination assertion checks execution, not reaping.
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            if let Some(state) = stat
+                .rsplit_once(") ")
+                .and_then(|(_, rest)| rest.chars().next())
+            {
+                return !matches!(state, 'Z' | 'X');
+            }
+        }
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    fn process_is_running(pid: i32) -> bool {
+        unsafe { libc::kill(pid, 0) == 0 }
     }
 }
 
@@ -2595,6 +4482,8 @@ pub struct RepositoryConfig {
     #[serde(default)]
     pub review: ReviewConfig,
     #[serde(default)]
+    pub test_generation: TestGenerationConfig,
+    #[serde(default)]
     pub providers: std::collections::BTreeMap<String, ProviderConfig>,
     #[serde(default)]
     pub reviewers: std::collections::BTreeMap<String, ReviewerConfig>,
@@ -2604,8 +4493,51 @@ pub struct RepositoryConfig {
     pub policy: PolicyConfig,
     #[serde(default)]
     pub policy_profiles: std::collections::BTreeMap<String, PolicyConfig>,
+    /// Non-secret defaults for optional Git hosting integrations. Tokens and
+    /// webhook secrets are always read from the named environment variables.
+    #[serde(default)]
+    pub hosting: HostingConfig,
     #[serde(skip)]
     pub active_policy_profile: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestGenerationConfig {
+    /// Estimated prompt token budget for snapshot-bound test proposals.
+    #[serde(default = "default_test_generation_tokens")]
+    pub max_context_tokens: usize,
+}
+
+impl Default for TestGenerationConfig {
+    fn default() -> Self {
+        Self {
+            max_context_tokens: default_test_generation_tokens(),
+        }
+    }
+}
+
+fn default_test_generation_tokens() -> usize {
+    20_000
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostingConfig {
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub api_base: Option<String>,
+    #[serde(default)]
+    pub token_env: Option<String>,
+    #[serde(default)]
+    pub webhook_secret_env: Option<String>,
+    #[serde(default)]
+    pub actor_login: Option<String>,
+    #[serde(default)]
+    pub username: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -2616,6 +4548,12 @@ pub struct ReviewConfig {
     pub exclude: Vec<String>,
     #[serde(default = "default_review_concurrency")]
     pub max_concurrency: usize,
+    #[serde(default = "default_context_files")]
+    pub max_context_files: usize,
+    #[serde(default = "default_context_file_bytes")]
+    pub max_context_file_bytes: usize,
+    #[serde(default = "default_context_bytes")]
+    pub max_context_bytes: usize,
 }
 
 impl Default for ReviewConfig {
@@ -2624,12 +4562,27 @@ impl Default for ReviewConfig {
             include: Vec::new(),
             exclude: Vec::new(),
             max_concurrency: default_review_concurrency(),
+            max_context_files: default_context_files(),
+            max_context_file_bytes: default_context_file_bytes(),
+            max_context_bytes: default_context_bytes(),
         }
     }
 }
 
 fn default_review_concurrency() -> usize {
     4
+}
+
+fn default_context_files() -> usize {
+    512
+}
+
+fn default_context_file_bytes() -> usize {
+    128 * 1024
+}
+
+fn default_context_bytes() -> usize {
+    512 * 1024
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -2647,10 +4600,32 @@ pub struct ProviderConfig {
     pub version_args: Vec<String>,
     #[serde(default)]
     pub model: Option<String>,
+    /// Approximate maximum input tokens for this provider. When set, review
+    /// context is trimmed deterministically before execution; changed source
+    /// is never silently dropped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<usize>,
+    /// Maximum generated tokens for local Ollama inference. Defaults to 2048.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<usize>,
+    /// Context window sent to local Ollama's native API. Ollama may otherwise
+    /// use a smaller server default than the model's advertised capacity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<usize>,
     #[serde(default)]
     pub env_allowlist: Vec<String>,
     #[serde(default = "default_timeout")]
     pub timeout_seconds: u64,
+    /// Optional user-maintained token prices. Estimates never affect review gates.
+    #[serde(default)]
+    pub pricing: std::collections::BTreeMap<String, ModelTokenPricing>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelTokenPricing {
+    pub input_usd_per_million: f64,
+    pub output_usd_per_million: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -2663,6 +4638,7 @@ pub enum ProviderKind {
     ClaudeCli,
     #[serde(rename = "openai_compatible")]
     OpenAiCompatible,
+    OllamaNative,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -2680,12 +4656,28 @@ fn default_timeout() -> u64 {
 pub struct ReviewerConfig {
     pub provider: String,
     pub instructions_file: String,
+    /// Trusted configuration paths whose current repository contents provide
+    /// supplemental, untrusted source context to this reviewer.
+    #[serde(default)]
+    pub context_files: Vec<String>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     #[serde(default)]
     pub include: Vec<String>,
     #[serde(default)]
     pub exclude: Vec<String>,
+    #[serde(default)]
+    pub policy: ReviewerPolicyConfig,
+}
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewerPolicyConfig {
+    /// Additional severities that this reviewer can independently block.
+    #[serde(default)]
+    pub block_severities: Vec<String>,
+    /// Reviewer-specific confidence threshold; defaults to the repository threshold.
+    #[serde(default)]
+    pub minimum_confidence: Option<u8>,
 }
 fn default_enabled() -> bool {
     true
@@ -2703,6 +4695,18 @@ pub struct PolicyConfig {
     pub minimum_confidence: u8,
     #[serde(default = "default_incomplete")]
     pub on_incomplete: String,
+    #[serde(default)]
+    pub acceptance: AcceptancePolicyConfig,
+}
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptancePolicyConfig {
+    /// Require at least one passing snapshot-bound verification per met criterion.
+    #[serde(default)]
+    pub require_passing_verification: bool,
+    /// Require each listed verification profile to pass for every met criterion.
+    #[serde(default)]
+    pub required_verification_profiles: Vec<String>,
 }
 impl Default for PolicyConfig {
     fn default() -> Self {
@@ -2712,6 +4716,7 @@ impl Default for PolicyConfig {
             block_severities: default_severities(),
             minimum_confidence: default_confidence(),
             on_incomplete: default_incomplete(),
+            acceptance: AcceptancePolicyConfig::default(),
         }
     }
 }
@@ -2755,6 +4760,16 @@ impl RepositoryConfig {
         path: &Path,
         user_config_path: Option<&Path>,
     ) -> Result<Self, String> {
+        Self::load_with_provider_defaults_and_offline(path, user_config_path, false)
+    }
+
+    /// Load repository and user provider configuration while allowing the caller
+    /// to force offline mode. The override only strengthens the repository setting.
+    pub fn load_with_provider_defaults_and_offline(
+        path: &Path,
+        user_config_path: Option<&Path>,
+        force_offline: bool,
+    ) -> Result<Self, String> {
         let raw = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut config: Self =
             serde_yaml::from_str(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -2777,8 +4792,122 @@ impl RepositoryConfig {
         if config.version != 1 {
             return Err(format!("unsupported config version {}", config.version));
         }
+        config.offline |= force_offline;
         if !(1..=32).contains(&config.review.max_concurrency) {
             return Err("review.max_concurrency must be in 1..=32".into());
+        }
+        if !(1..=2048).contains(&config.review.max_context_files) {
+            return Err("review.max_context_files must be in 1..=2048".into());
+        }
+        if !(1..=4 * 1024 * 1024).contains(&config.review.max_context_file_bytes) {
+            return Err("review.max_context_file_bytes must be in 1..=4194304".into());
+        }
+        if !(1..=16 * 1024 * 1024).contains(&config.review.max_context_bytes) {
+            return Err("review.max_context_bytes must be in 1..=16777216".into());
+        }
+        for (id, provider) in &config.providers {
+            if let Some(context_window) = provider.context_window_tokens {
+                if !(1024..=131_072).contains(&context_window) {
+                    return Err(format!(
+                        "provider {id} context_window_tokens must be in 1024..=131072"
+                    ));
+                }
+                if provider.kind != ProviderKind::OllamaNative {
+                    return Err(format!(
+                        "provider {id} context_window_tokens is only valid for ollama_native"
+                    ));
+                }
+            }
+            if provider
+                .max_input_tokens
+                .is_some_and(|tokens| !(1024..=131_072).contains(&tokens))
+            {
+                return Err(format!(
+                    "providers.{id}.max_input_tokens must be in 1024..=131072"
+                ));
+            }
+            if provider
+                .max_output_tokens
+                .is_some_and(|tokens| !(1..=131_072).contains(&tokens))
+            {
+                return Err(format!(
+                    "providers.{id}.max_output_tokens must be in 1..=131072"
+                ));
+            }
+            if provider.max_output_tokens.is_some() && provider.kind != ProviderKind::OllamaNative {
+                return Err(format!(
+                    "provider {id} max_output_tokens is only valid for ollama_native"
+                ));
+            }
+        }
+        if !(1024..=131_072).contains(&config.test_generation.max_context_tokens) {
+            return Err("test_generation.max_context_tokens must be in 1024..=131072".into());
+        }
+        if let Some(provider) = config.hosting.provider.as_deref() {
+            if !matches!(
+                provider,
+                "github" | "gitlab" | "bitbucket" | "azure-devops" | "gerrit"
+            ) {
+                return Err(format!("unsupported hosting provider {provider}"));
+            }
+        }
+        if let Some(host) = config.hosting.host.as_deref() {
+            if host.is_empty()
+                || !host.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b':' | b'[' | b']')
+                })
+            {
+                return Err("hosting.host must be a hostname or IP address".into());
+            }
+        }
+        for (field, value) in [
+            ("hosting.token_env", config.hosting.token_env.as_deref()),
+            (
+                "hosting.webhook_secret_env",
+                config.hosting.webhook_secret_env.as_deref(),
+            ),
+        ] {
+            if let Some(value) = value {
+                let mut bytes = value.bytes();
+                let valid_first = bytes
+                    .next()
+                    .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
+                if !valid_first || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
+                    return Err(format!("{field} must be an environment variable name"));
+                }
+            }
+        }
+        if let Some(api_base) = config.hosting.api_base.as_deref() {
+            let url = url::Url::parse(api_base)
+                .map_err(|_| "hosting.api_base must be an absolute HTTP(S) URL".to_string())?;
+            if !matches!(url.scheme(), "http" | "https")
+                || url.host().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+            {
+                return Err(
+                    "hosting.api_base must not contain credentials, a query, or a fragment".into(),
+                );
+            }
+            let loopback = match url.host() {
+                Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+                Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+                Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+                None => false,
+            };
+            if url.scheme() != "https" && !loopback {
+                return Err("hosting.api_base must use HTTPS except for loopback fixtures".into());
+            }
+        }
+        for (field, value) in [
+            ("hosting.actor_login", config.hosting.actor_login.as_deref()),
+            ("hosting.username", config.hosting.username.as_deref()),
+        ] {
+            if value.is_some_and(|value| value.len() > 256 || value.chars().any(char::is_control)) {
+                return Err(format!("{field} is invalid or too long"));
+            }
         }
         if config.policy.minimum_confidence > 100 {
             return Err("minimum_confidence must be 0..=100".into());
@@ -2795,9 +4924,28 @@ impl RepositoryConfig {
             }
         }
         for (id, provider) in &config.providers {
-            if provider.kind == ProviderKind::OpenAiCompatible {
+            for (model, pricing) in &provider.pricing {
+                if model.trim().is_empty()
+                    || !pricing.input_usd_per_million.is_finite()
+                    || !pricing.output_usd_per_million.is_finite()
+                    || pricing.input_usd_per_million < 0.0
+                    || pricing.output_usd_per_million < 0.0
+                {
+                    return Err(format!(
+                        "provider {id} pricing for model {model:?} must use a non-empty model name and finite non-negative USD per million token rates"
+                    ));
+                }
+            }
+            if provider.kind == ProviderKind::OpenAiCompatible
+                || provider.kind == ProviderKind::OllamaNative
+            {
+                let provider_label = if provider.kind == ProviderKind::OllamaNative {
+                    "ollama_native"
+                } else {
+                    "openai_compatible"
+                };
                 let endpoint = provider.endpoint.as_deref().ok_or_else(|| {
-                    format!("provider {id} openai_compatible requires an endpoint")
+                    format!("provider {id} {provider_label} requires an endpoint")
                 })?;
                 let url = url::Url::parse(endpoint)
                     .map_err(|_| format!("provider {id} endpoint must use http or https"))?;
@@ -2827,12 +4975,22 @@ impl RepositoryConfig {
                         ));
                     }
                 }
+                if provider.kind == ProviderKind::OllamaNative && url.scheme() != "http" {
+                    return Err(format!(
+                        "provider {id} ollama_native requires an http loopback endpoint"
+                    ));
+                }
+                if provider.kind == ProviderKind::OllamaNative
+                    && provider.egress != ProviderEgress::Local
+                {
+                    return Err(format!("provider {id} ollama_native requires local egress"));
+                }
                 if !provider.executable.is_empty()
                     || !provider.args.is_empty()
                     || !provider.version_args.is_empty()
                 {
                     return Err(format!(
-                        "provider {id} openai_compatible does not accept executable arguments"
+                        "provider {id} {provider_label} does not accept executable arguments"
                     ));
                 }
                 if provider
@@ -2842,7 +5000,33 @@ impl RepositoryConfig {
                     .trim()
                     .is_empty()
                 {
-                    return Err(format!("provider {id} openai_compatible requires a model"));
+                    return Err(format!("provider {id} {provider_label} requires a model"));
+                }
+                if provider.kind == ProviderKind::OllamaNative
+                    && provider.context_window_tokens.is_none()
+                {
+                    return Err(format!(
+                        "provider {id} ollama_native requires context_window_tokens"
+                    ));
+                }
+                if provider.kind == ProviderKind::OllamaNative {
+                    let context_window = provider.context_window_tokens.unwrap_or_default();
+                    let input_budget = provider.max_input_tokens.unwrap_or_default();
+                    let output_budget = provider.max_output_tokens.unwrap_or(2048);
+                    if input_budget < 1024
+                        || output_budget == 0
+                        || input_budget.saturating_add(output_budget) > context_window
+                    {
+                        return Err(format!(
+                            "provider {id} ollama_native requires max_input_tokens and max_output_tokens (default 2048) to fit within context_window_tokens"
+                        ));
+                    }
+                }
+                if provider.kind == ProviderKind::OllamaNative && !provider.env_allowlist.is_empty()
+                {
+                    return Err(format!(
+                        "provider {id} ollama_native does not accept environment variables"
+                    ));
                 }
                 if provider
                     .env_allowlist
@@ -2863,7 +5047,7 @@ impl RepositoryConfig {
             }
             if provider.endpoint.is_some() {
                 return Err(format!(
-                    "provider {id} endpoint is only valid for openai_compatible"
+                    "provider {id} endpoint is only valid for HTTP provider adapters"
                 ));
             }
             resolve_environment_allowlist(&provider.env_allowlist, |_| None)
@@ -2937,6 +5121,48 @@ impl RepositoryConfig {
             if reviewer.instructions_file.trim().is_empty() {
                 return Err(format!("reviewer {id} has an empty instructions_file"));
             }
+            if reviewer.context_files.len() > 128 {
+                return Err(format!("reviewer {id} has more than 128 context_files"));
+            }
+            let mut context_files = std::collections::BTreeSet::new();
+            for path in &reviewer.context_files {
+                let relative = std::path::Path::new(path);
+                if path.trim().is_empty()
+                    || relative.is_absolute()
+                    || relative.components().any(|component| {
+                        matches!(
+                            component,
+                            std::path::Component::ParentDir
+                                | std::path::Component::RootDir
+                                | std::path::Component::Prefix(_)
+                        )
+                    })
+                {
+                    return Err(format!(
+                        "reviewer {id} has unsafe context file path {path:?}"
+                    ));
+                }
+                if !context_files.insert(path) {
+                    return Err(format!("reviewer {id} has duplicate context file {path:?}"));
+                }
+            }
+            if reviewer
+                .policy
+                .minimum_confidence
+                .is_some_and(|value| value > 100)
+            {
+                return Err(format!("reviewer {id} minimum_confidence must be 0..=100"));
+            }
+            for severity in &reviewer.policy.block_severities {
+                if !matches!(
+                    severity.as_str(),
+                    "critical" | "high" | "medium" | "low" | "info"
+                ) {
+                    return Err(format!(
+                        "reviewer {id} has unknown blocking severity {severity}"
+                    ));
+                }
+            }
         }
         for reviewer_id in &config.policy.required_reviewers {
             if !config.reviewers.contains_key(reviewer_id) {
@@ -2944,6 +5170,11 @@ impl RepositoryConfig {
             }
         }
         for (id, profile) in &config.verification {
+            if config.offline && profile.egress != ProviderEgress::Local {
+                return Err(format!(
+                    "offline mode rejects network verification profile {id}; declare a trusted local profile explicitly"
+                ));
+            }
             resolve_environment_allowlist(&profile.env_allowlist, |_| None)
                 .map_err(|error| format!("verification profile {id}: {error}"))?;
             if profile.executable.trim().is_empty() {
@@ -2964,6 +5195,13 @@ impl RepositoryConfig {
             if !config.verification.contains_key(profile_id) {
                 return Err(format!(
                     "policy requires unknown verification profile {profile_id}"
+                ));
+            }
+        }
+        for profile_id in &config.policy.acceptance.required_verification_profiles {
+            if !config.verification.contains_key(profile_id) {
+                return Err(format!(
+                    "acceptance policy requires unknown verification profile {profile_id}"
                 ));
             }
         }
@@ -3002,6 +5240,13 @@ impl RepositoryConfig {
                     ));
                 }
             }
+            for verification in &profile.acceptance.required_verification_profiles {
+                if !config.verification.contains_key(verification) {
+                    return Err(format!(
+                        "policy profile {profile_id} acceptance policy requires unknown verification profile {verification}"
+                    ));
+                }
+            }
         }
         Ok(config)
     }
@@ -3037,7 +5282,7 @@ fn validate_snapshot_manifest(snapshot_id: &str, manifest_json: &str) -> Result<
     Ok(())
 }
 
-const STORAGE_SCHEMA_VERSION: u32 = 6;
+const STORAGE_SCHEMA_VERSION: u32 = 13;
 
 fn migrate_storage(connection: &mut rusqlite::Connection) -> Result<(), String> {
     use rusqlite::TransactionBehavior;
@@ -3061,7 +5306,7 @@ fn migrate_storage(connection: &mut rusqlite::Connection) -> Result<(), String> 
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS reviews (id TEXT PRIMARY KEY, snapshot_id TEXT NOT NULL, config_digest TEXT NOT NULL, status TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
             CREATE TABLE IF NOT EXISTS findings (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL UNIQUE, category TEXT NOT NULL, severity TEXT NOT NULL, confidence INTEGER, status TEXT NOT NULL CHECK(status IN ('open','verified','refuted','resolved','waived')), status_reason TEXT, finding_json TEXT NOT NULL, first_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-            CREATE TABLE IF NOT EXISTS finding_occurrences (review_id TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE, finding_id TEXT NOT NULL REFERENCES findings(id) ON DELETE CASCADE, snapshot_id TEXT NOT NULL, finding_json TEXT NOT NULL, observed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(review_id, finding_id));
+            CREATE TABLE IF NOT EXISTS finding_occurrences (review_id TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE, finding_id TEXT NOT NULL REFERENCES findings(id) ON DELETE CASCADE, snapshot_id TEXT NOT NULL, finding_json TEXT NOT NULL, observed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, occurrence_order INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(review_id, finding_id));
             CREATE TABLE IF NOT EXISTS evidence (review_id TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE, evidence_id TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(review_id,evidence_id));
             CREATE TABLE IF NOT EXISTS verification_runs (run_id TEXT PRIMARY KEY, snapshot_id TEXT NOT NULL, profile_id TEXT NOT NULL, command_digest TEXT NOT NULL, status TEXT NOT NULL, exit_code INTEGER, stdout_digest TEXT NOT NULL, stderr_digest TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
             CREATE TABLE IF NOT EXISTS gate_decisions (decision_id TEXT NOT NULL, review_id TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE, snapshot_id TEXT NOT NULL, policy_digest TEXT NOT NULL, evidence_digest TEXT NOT NULL, status TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(review_id,decision_id));
@@ -3282,6 +5527,190 @@ fn migrate_storage(connection: &mut rusqlite::Connection) -> Result<(), String> 
             .map_err(|error| error.to_string())?;
         tx.commit().map_err(|error| error.to_string())?;
     }
+    if version < 7 {
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS webhook_deliveries (
+                provider TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                delivery_attempt INTEGER NOT NULL CHECK(delivery_attempt > 0),
+                payload_digest TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('received','processing','processed')),
+                lease_token TEXT,
+                lease_expires_at_unix INTEGER NOT NULL DEFAULT 0,
+                received_at_unix INTEGER NOT NULL,
+                processed_at_unix INTEGER,
+                PRIMARY KEY(provider,event_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_state ON webhook_deliveries(state,lease_expires_at_unix);",
+        )
+        .map_err(|error| error.to_string())?;
+        tx.pragma_update(None, "user_version", 7u32)
+            .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+        version = 7;
+    }
+    if version < 8 {
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS finding_feedback (
+                feedback_id TEXT PRIMARY KEY,
+                finding_id TEXT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+                snapshot_id TEXT NOT NULL,
+                label TEXT NOT NULL CHECK(label IN ('confirmed','false_positive','actionable','not_actionable')),
+                reason TEXT NOT NULL,
+                reviewer TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_finding_feedback_finding ON finding_feedback(finding_id,created_at);
+            CREATE INDEX IF NOT EXISTS idx_finding_feedback_snapshot ON finding_feedback(snapshot_id);",
+        )
+        .map_err(|error| error.to_string())?;
+        tx.pragma_update(None, "user_version", 8u32)
+            .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+        version = 8;
+    }
+    if version < 9 {
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS rule_approvals (
+                approval_id TEXT PRIMARY KEY,
+                candidate_id TEXT NOT NULL,
+                evidence_digest TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS rule_approval_events (
+                event_id TEXT PRIMARY KEY,
+                approval_id TEXT NOT NULL REFERENCES rule_approvals(approval_id),
+                event TEXT NOT NULL CHECK(event IN ('activated','revoked')),
+                actor TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_rule_approval_events_approval ON rule_approval_events(approval_id,created_at,event_id);",
+        )
+        .map_err(|error| error.to_string())?;
+        tx.pragma_update(None, "user_version", 9u32)
+            .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+        version = 9;
+    }
+    if version < 10 {
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        tx.execute_batch(
+            "ALTER TABLE rule_approval_events RENAME TO rule_approval_events_v9;
+            CREATE TABLE rule_approval_events (
+                event_id TEXT PRIMARY KEY,
+                approval_id TEXT NOT NULL REFERENCES rule_approvals(approval_id),
+                event TEXT NOT NULL CHECK(event IN ('activated','revoked','superseded')),
+                actor TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO rule_approval_events(event_id,approval_id,event,actor,reason,created_at)
+                SELECT event_id,approval_id,event,actor,reason,created_at FROM rule_approval_events_v9;
+            DROP TABLE rule_approval_events_v9;
+            CREATE INDEX IF NOT EXISTS idx_rule_approval_events_approval ON rule_approval_events(approval_id,created_at,event_id);",
+        )
+        .map_err(|error| error.to_string())?;
+        tx.pragma_update(None, "user_version", 10u32)
+            .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+    }
+    if version < 11 {
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS finding_assessments (review_id TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE, finding_id TEXT NOT NULL REFERENCES findings(id) ON DELETE CASCADE, snapshot_id TEXT NOT NULL, assessment_digest TEXT NOT NULL, finding_json TEXT NOT NULL, PRIMARY KEY(review_id,finding_id,assessment_digest)); CREATE INDEX IF NOT EXISTS idx_assessments_finding ON finding_assessments(finding_id,review_id);").map_err(|error| error.to_string())?;
+        let has_occurrences: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='finding_occurrences')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let legacy_assessments = if has_occurrences {
+            let mut statement = tx
+                .prepare("SELECT review_id,finding_id,snapshot_id,finding_json FROM finding_occurrences ORDER BY review_id,finding_id")
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })
+                .map_err(|error| error.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?
+        } else {
+            Vec::new()
+        };
+        for (review_id, finding_id, snapshot_id, finding_json) in legacy_assessments {
+            let assessment_digest = digest(finding_json.as_bytes());
+            tx.execute(
+                "INSERT OR IGNORE INTO finding_assessments(review_id,finding_id,snapshot_id,assessment_digest,finding_json) VALUES (?1,?2,?3,?4,?5)",
+                rusqlite::params![review_id,finding_id,snapshot_id,assessment_digest,finding_json],
+            ).map_err(|error| error.to_string())?;
+        }
+        tx.pragma_update(None, "user_version", 11u32)
+            .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+    }
+    if version < 12 {
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS hosted_finding_threads (target_key TEXT NOT NULL, fingerprint TEXT NOT NULL, PRIMARY KEY(target_key,fingerprint));")
+            .map_err(|error| error.to_string())?;
+        tx.pragma_update(None, "user_version", 12u32)
+            .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+    }
+    if version < 13 {
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let has_occurrences: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='finding_occurrences')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if has_occurrences {
+            let has_order: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('finding_occurrences') WHERE name='occurrence_order')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if !has_order {
+                tx.execute_batch("ALTER TABLE finding_occurrences ADD COLUMN occurrence_order INTEGER NOT NULL DEFAULT 0;")
+                    .map_err(|error| error.to_string())?;
+                tx.execute_batch("UPDATE finding_occurrences SET occurrence_order=rowid;")
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        tx.pragma_update(None, "user_version", 13u32)
+            .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 
@@ -3309,11 +5738,252 @@ struct ReviewPersistence<'a> {
     decision: Option<&'a GateDecision>,
 }
 
+fn consolidated_findings(findings: &[Finding]) -> Vec<Finding> {
+    let mut unique = std::collections::BTreeMap::<String, Finding>::new();
+    for finding in findings {
+        unique
+            .entry(finding.fingerprint.clone())
+            .and_modify(|saved| {
+                let severity_rank = |severity| match severity {
+                    Severity::Critical => 5,
+                    Severity::High => 4,
+                    Severity::Medium => 3,
+                    Severity::Low => 2,
+                    Severity::Info => 1,
+                };
+                if (
+                    severity_rank(finding.severity),
+                    finding.confidence.unwrap_or(0),
+                ) > (severity_rank(saved.severity), saved.confidence.unwrap_or(0))
+                {
+                    saved.severity = finding.severity;
+                    saved.confidence = finding.confidence;
+                    saved.rationale = finding.rationale.clone();
+                }
+                saved
+                    .reviewer_ids
+                    .extend(finding.reviewer_ids.iter().cloned());
+                saved.reviewer_ids.sort();
+                saved.reviewer_ids.dedup();
+                saved
+                    .evidence_ids
+                    .extend(finding.evidence_ids.iter().cloned());
+                saved.evidence_ids.sort();
+                saved.evidence_ids.dedup();
+                saved
+                    .rule_attributions
+                    .extend(finding.rule_attributions.iter().cloned());
+                saved.rule_attributions.sort();
+                saved.rule_attributions.dedup();
+            })
+            .or_insert_with(|| finding.clone());
+    }
+    unique.into_values().collect()
+}
+
 impl ReviewStore {
     pub fn open(path: &Path) -> Result<Self, String> {
         let mut connection = rusqlite::Connection::open(path).map_err(|e| e.to_string())?;
         migrate_storage(&mut connection)?;
         Ok(Self { connection })
+    }
+
+    pub fn hosted_finding_threads(
+        &self,
+        target_key: &str,
+    ) -> Result<std::collections::BTreeSet<String>, String> {
+        if target_key.trim().is_empty() {
+            return Err("hosting target identity is required".into());
+        }
+        let mut statement = self.connection
+            .prepare("SELECT fingerprint FROM hosted_finding_threads WHERE target_key=?1 ORDER BY fingerprint")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([target_key], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<std::collections::BTreeSet<_>, _>>()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn replace_hosted_finding_threads(
+        &mut self,
+        target_key: &str,
+        fingerprints: &std::collections::BTreeSet<String>,
+    ) -> Result<(), String> {
+        if target_key.trim().is_empty() {
+            return Err("hosting target identity is required".into());
+        }
+        let tx = self
+            .connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        tx.execute(
+            "DELETE FROM hosted_finding_threads WHERE target_key=?1",
+            [target_key],
+        )
+        .map_err(|error| error.to_string())?;
+        for fingerprint in fingerprints {
+            tx.execute(
+                "INSERT INTO hosted_finding_threads(target_key,fingerprint) VALUES (?1,?2)",
+                rusqlite::params![target_key, fingerprint],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        tx.commit().map_err(|error| error.to_string())
+    }
+
+    /// Atomically claim a signature-verified webhook event. A repeated event ID
+    /// with different content is rejected. Expired leases can be reclaimed so
+    /// a crashed worker does not permanently lose the delivery.
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_webhook_delivery(
+        &mut self,
+        provider: &str,
+        event_id: &str,
+        event_type: &str,
+        delivery_attempt: u32,
+        payload_digest: &str,
+        now_unix: i64,
+        lease_seconds: i64,
+    ) -> Result<WebhookClaim, String> {
+        if provider.trim().is_empty()
+            || event_id.trim().is_empty()
+            || event_type.trim().is_empty()
+            || delivery_attempt == 0
+            || !is_sha256_digest(payload_digest)
+            || lease_seconds <= 0
+        {
+            return Err(
+                "webhook delivery identity, digest, and positive lease are required".into(),
+            );
+        }
+        use rusqlite::TransactionBehavior;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        tx.execute(
+            "INSERT OR IGNORE INTO webhook_deliveries(provider,event_id,event_type,delivery_attempt,payload_digest,state,received_at_unix) VALUES (?1,?2,?3,?4,?5,'received',?6)",
+            rusqlite::params![provider,event_id,event_type,delivery_attempt,payload_digest,now_unix],
+        ).map_err(|error| error.to_string())?;
+        let (stored_digest, state, lease_expiry): (String,String,i64) = tx.query_row(
+            "SELECT payload_digest,state,lease_expires_at_unix FROM webhook_deliveries WHERE provider=?1 AND event_id=?2",
+            rusqlite::params![provider,event_id],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).map_err(|error| error.to_string())?;
+        if stored_digest != payload_digest {
+            return Err("webhook event ID was reused with a different payload digest".into());
+        }
+        if state == "processed" {
+            tx.commit().map_err(|error| error.to_string())?;
+            return Ok(WebhookClaim::AlreadyProcessed);
+        }
+        if state == "processing" && lease_expiry > now_unix {
+            tx.commit().map_err(|error| error.to_string())?;
+            return Ok(WebhookClaim::InProgress);
+        }
+        static LEASE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = LEASE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let lease_token = format!("{}:{now_unix}:{sequence}", std::process::id());
+        tx.execute(
+            "UPDATE webhook_deliveries SET event_type=?1,delivery_attempt=MAX(delivery_attempt,?2),state='processing',lease_token=?3,lease_expires_at_unix=?4 WHERE provider=?5 AND event_id=?6",
+            rusqlite::params![event_type,delivery_attempt,lease_token,now_unix.saturating_add(lease_seconds),provider,event_id],
+        ).map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(WebhookClaim::Acquired { lease_token })
+    }
+
+    /// Extend the processing lease only when the caller still owns it.
+    pub fn renew_webhook_delivery(
+        &mut self,
+        provider: &str,
+        event_id: &str,
+        lease_token: &str,
+        now_unix: i64,
+        lease_seconds: i64,
+    ) -> Result<(), String> {
+        if provider.trim().is_empty()
+            || event_id.trim().is_empty()
+            || lease_token.trim().is_empty()
+            || lease_seconds <= 0
+        {
+            return Err("webhook lease identity and positive duration are required".into());
+        }
+        let changed = self.connection.execute(
+            "UPDATE webhook_deliveries SET lease_expires_at_unix=?1 WHERE provider=?2 AND event_id=?3 AND state='processing' AND lease_token=?4 AND lease_expires_at_unix>?5",
+            rusqlite::params![now_unix.saturating_add(lease_seconds), provider, event_id, lease_token, now_unix],
+        ).map_err(|error| error.to_string())?;
+        if changed != 1 {
+            return Err("webhook delivery lease is no longer owned by this worker".into());
+        }
+        Ok(())
+    }
+
+    /// Mark a delivery complete only for the worker that currently owns its lease.
+    pub fn complete_webhook_delivery(
+        &mut self,
+        provider: &str,
+        event_id: &str,
+        lease_token: &str,
+        now_unix: i64,
+    ) -> Result<(), String> {
+        let changed = self.connection.execute(
+            "UPDATE webhook_deliveries SET state='processed',processed_at_unix=?1,lease_token=NULL,lease_expires_at_unix=0 WHERE provider=?2 AND event_id=?3 AND state='processing' AND lease_token=?4 AND lease_expires_at_unix>?5",
+            rusqlite::params![now_unix,provider,event_id,lease_token,now_unix],
+        ).map_err(|error| error.to_string())?;
+        if changed != 1 {
+            return Err("webhook delivery lease is no longer owned by this worker".into());
+        }
+        Ok(())
+    }
+
+    /// Count or remove completed webhook receipts older than a caller-selected
+    /// cutoff. In-flight and retryable deliveries are never eligible.
+    pub fn prune_processed_webhook_deliveries_before(
+        &mut self,
+        cutoff_unix: i64,
+        apply: bool,
+    ) -> Result<u64, String> {
+        if cutoff_unix < 0 {
+            return Err("webhook retention cutoff must be a non-negative timestamp".into());
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let count: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM webhook_deliveries WHERE state='processed' AND processed_at_unix IS NOT NULL AND processed_at_unix<?1",
+                [cutoff_unix],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if apply {
+            tx.execute(
+                "DELETE FROM webhook_deliveries WHERE state='processed' AND processed_at_unix IS NOT NULL AND processed_at_unix<?1",
+                [cutoff_unix],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        tx.commit().map_err(|error| error.to_string())?;
+        u64::try_from(count).map_err(|error| error.to_string())
+    }
+
+    /// Release a failed delivery so the hosting provider can retry immediately.
+    pub fn release_webhook_delivery(
+        &mut self,
+        provider: &str,
+        event_id: &str,
+        lease_token: &str,
+    ) -> Result<(), String> {
+        let changed = self.connection.execute(
+            "UPDATE webhook_deliveries SET state='received',lease_token=NULL,lease_expires_at_unix=0 WHERE provider=?1 AND event_id=?2 AND state='processing' AND lease_token=?3",
+            rusqlite::params![provider,event_id,lease_token],
+        ).map_err(|error| error.to_string())?;
+        if changed != 1 {
+            return Err("webhook delivery lease is no longer owned by this worker".into());
+        }
+        Ok(())
     }
 
     /// Retrieve a successful provider response keyed by the complete request and tool identity.
@@ -3426,7 +6096,7 @@ impl ReviewStore {
             .map_err(|error| error.to_string())?;
         tx.execute(
             "INSERT OR IGNORE INTO verification_runs(run_id,snapshot_id,profile_id,finding_id,command_digest,status,exit_code,stdout_digest,stderr_digest,payload) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-            rusqlite::params![run.run_id, run.snapshot_id, run.profile_id, run.finding_id, run.command_digest, match run.status { VerificationStatus::Passed => "passed", VerificationStatus::Failed => "failed", VerificationStatus::TimedOut => "timed_out" }, run.exit_code, run.stdout_digest, run.stderr_digest, payload],
+            rusqlite::params![run.run_id, run.snapshot_id, run.profile_id, run.finding_id, run.command_digest, match run.status { VerificationStatus::Passed => "passed", VerificationStatus::Failed => "failed", VerificationStatus::TimedOut => "timed_out", VerificationStatus::Incomplete => "incomplete" }, run.exit_code, run.stdout_digest, run.stderr_digest, payload],
         ).map_err(|error| error.to_string())?;
         for (stream, reference) in [
             ("stdout", run.stdout_artifact.as_ref()),
@@ -3446,7 +6116,12 @@ impl ReviewStore {
                 }
                 tx.execute(
                     "INSERT OR IGNORE INTO artifacts(digest,path,size_bytes) VALUES (?1,?2,?3)",
-                    rusqlite::params![reference.digest, reference.path, reference.size_bytes],
+                    rusqlite::params![
+                        reference.digest,
+                        reference.path,
+                        i64::try_from(reference.size_bytes)
+                            .map_err(|error| format!("artifact size is too large: {error}"))?,
+                    ],
                 )
                 .map_err(|error| error.to_string())?;
                 tx.execute(
@@ -3474,10 +6149,17 @@ impl ReviewStore {
                 rusqlite::params![run_id, stream],
                 |row| {
                     let size_bytes: i64 = row.get(2)?;
+                    let size_bytes = u64::try_from(size_bytes).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Integer,
+                            Box::new(error),
+                        )
+                    })?;
                     Ok(ArtifactReference {
                         digest: row.get(0)?,
                         path: row.get(1)?,
-                        size_bytes: size_bytes.max(0) as u64,
+                        size_bytes,
                     })
                 },
             )
@@ -3529,6 +6211,68 @@ impl ReviewStore {
             .map_err(|error| error.to_string())?;
         rows.map(|row| row.map_err(|error| error.to_string()))
             .collect()
+    }
+
+    /// Returns local verification runs explicitly attached to a finding.
+    /// These runs are distinct from snapshot-wide checks used by gate policy.
+    pub fn verifications_for_finding(
+        &self,
+        finding_id: &str,
+    ) -> Result<Vec<VerificationRun>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT payload FROM verification_runs WHERE finding_id=?1 ORDER BY rowid DESC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([finding_id], |row| {
+                let payload: String = row.get(0)?;
+                serde_json::from_str(&payload).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.map(|row| row.map_err(|error| error.to_string()))
+            .collect()
+    }
+
+    /// Returns newest verification metadata first, plus the total row count.
+    /// This query deliberately avoids deserializing payloads or reading logs.
+    pub fn recent_verification_summaries(
+        &self,
+        limit: usize,
+    ) -> Result<(Vec<VerificationSummary>, usize), String> {
+        let total: i64 = self
+            .connection
+            .query_row("SELECT COUNT(*) FROM verification_runs", [], |row| {
+                row.get(0)
+            })
+            .map_err(|error| error.to_string())?;
+        let mut statement = self
+            .connection
+            .prepare("SELECT run_id,snapshot_id,profile_id,status,created_at FROM verification_runs ORDER BY rowid DESC LIMIT ?1")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([limit.min(i64::MAX as usize) as i64], |row| {
+                Ok(VerificationSummary {
+                    run_id: row.get(0)?,
+                    snapshot_id: row.get(1)?,
+                    profile_id: row.get(2)?,
+                    status: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        let mut summaries = Vec::new();
+        for row in rows {
+            summaries.push(row.map_err(|error| error.to_string())?);
+        }
+        Ok((summaries, total.max(0) as usize))
     }
 
     pub fn save_review(
@@ -3592,7 +6336,14 @@ impl ReviewStore {
             return Err("snapshot ID was previously stored with a different manifest".into());
         }
         tx.execute("INSERT INTO reviews(id,snapshot_id,config_digest,status,payload) VALUES (?1,?2,?3,?4,?5)", rusqlite::params![record.id,record.snapshot_id,record.config_digest,record.status,record.payload]).map_err(|e| e.to_string())?;
-        for finding in record.findings {
+        let occurrence_order: i64 = tx
+            .query_row(
+                "SELECT COALESCE(MAX(occurrence_order),0)+1 FROM finding_occurrences",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        for finding in consolidated_findings(record.findings).iter() {
             let severity = match finding.severity {
                 Severity::Critical => "critical",
                 Severity::High => "high",
@@ -3606,7 +6357,19 @@ impl ReviewStore {
                 status=CASE WHEN findings.status IN ('resolved','waived') THEN 'open' ELSE findings.status END,
                 status_reason=CASE WHEN findings.status IN ('resolved','waived') THEN 'reappeared in a later review' ELSE findings.status_reason END",
                 rusqlite::params![finding.id,finding.fingerprint,finding.category,severity,finding.confidence,finding_json]).map_err(|e| e.to_string())?;
-            tx.execute("INSERT INTO finding_occurrences(review_id,finding_id,snapshot_id,finding_json) VALUES (?1,?2,?3,?4)", rusqlite::params![record.id,finding.id,record.snapshot_id,finding_json]).map_err(|e| e.to_string())?;
+            tx.execute("INSERT INTO finding_occurrences(review_id,finding_id,snapshot_id,finding_json,occurrence_order) VALUES (?1,?2,?3,?4,?5)", rusqlite::params![record.id,finding.id,record.snapshot_id,finding_json,occurrence_order]).map_err(|e| e.to_string())?;
+        }
+        for assessment in record.findings {
+            let finding_id: String = tx
+                .query_row(
+                    "SELECT id FROM findings WHERE fingerprint=?1",
+                    [&assessment.fingerprint],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            let payload = serde_json::to_string(assessment).map_err(|error| error.to_string())?;
+            let assessment_digest = digest(payload.as_bytes());
+            tx.execute("INSERT OR IGNORE INTO finding_assessments(review_id,finding_id,snapshot_id,assessment_digest,finding_json) VALUES (?1,?2,?3,?4,?5)", rusqlite::params![record.id,finding_id,record.snapshot_id,assessment_digest,payload]).map_err(|error| error.to_string())?;
         }
         for evidence in record.evidence {
             let payload = serde_json::to_string(evidence).map_err(|error| error.to_string())?;
@@ -3706,7 +6469,7 @@ impl ReviewStore {
     ) -> Result<(), String> {
         if status == FindingStatus::Waived {
             return Err(
-                "waivers require scoped provenance and expiry; waiver records are not implemented"
+                "waivers require a scoped snapshot, provenance, author, and expiry; use the waiver workflow"
                     .into(),
             );
         }
@@ -3718,6 +6481,308 @@ impl ReviewStore {
             return Err(format!("finding {id} was not found"));
         }
         Ok(())
+    }
+
+    pub fn add_finding_feedback(
+        &mut self,
+        finding_id: &str,
+        snapshot_id: &str,
+        label: FindingFeedbackLabel,
+        reason: &str,
+        reviewer: &str,
+    ) -> Result<FindingFeedback, String> {
+        if reason.trim().is_empty() || reviewer.trim().is_empty() {
+            return Err("finding feedback requires a non-empty reason and reviewer".into());
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let occurrence_exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM finding_occurrences WHERE finding_id=?1 AND snapshot_id=?2)",
+            rusqlite::params![finding_id, snapshot_id],
+            |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        if !occurrence_exists {
+            return Err(
+                "finding feedback must reference a snapshot where the finding occurred".into(),
+            );
+        }
+        let feedback_id = digest(
+            format!(
+                "{finding_id}\0{snapshot_id}\0{}\0{}\0{}",
+                label.as_str(),
+                reviewer.trim(),
+                reason.trim()
+            )
+            .as_bytes(),
+        );
+        let created_at: String = tx
+            .query_row("SELECT CURRENT_TIMESTAMP", [], |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+        let feedback = FindingFeedback {
+            schema_version: 1,
+            feedback_id: feedback_id.clone(),
+            finding_id: finding_id.to_owned(),
+            snapshot_id: snapshot_id.to_owned(),
+            label,
+            reason: reason.trim().to_owned(),
+            reviewer: reviewer.trim().to_owned(),
+            created_at,
+        };
+        let payload = serde_json::to_string(&feedback).map_err(|error| error.to_string())?;
+        tx.execute(
+            "INSERT OR IGNORE INTO finding_feedback(feedback_id,finding_id,snapshot_id,label,reason,reviewer,payload,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            rusqlite::params![feedback.feedback_id, finding_id, snapshot_id, label.as_str(), feedback.reason, feedback.reviewer, payload, feedback.created_at],
+        ).map_err(|error| error.to_string())?;
+        let persisted = tx
+            .query_row(
+                "SELECT payload FROM finding_feedback WHERE feedback_id=?1",
+                [&feedback_id],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let persisted = serde_json::from_str(&persisted).map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(persisted)
+    }
+
+    pub fn list_finding_feedback(&self) -> Result<Vec<FindingFeedback>, String> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT payload FROM finding_feedback ORDER BY created_at,feedback_id")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                let payload: String = row.get(0)?;
+                serde_json::from_str(&payload).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.map(|row| row.map_err(|error| error.to_string()))
+            .collect()
+    }
+
+    pub fn create_rule_approval(&mut self, approval: &RuleApproval) -> Result<(), String> {
+        if approval.schema_version != 2 || approval.approval_id.trim().is_empty() {
+            return Err("rule approval requires schema version 2 and a non-empty ID".into());
+        }
+        if [
+            approval.candidate_id.as_str(),
+            approval.evidence_digest.as_str(),
+            approval.category.as_str(),
+            approval.scope.as_str(),
+            approval.instruction.as_str(),
+            approval.approver.as_str(),
+            approval.approval_reason.as_str(),
+        ]
+        .iter()
+        .any(|value| value.trim().is_empty())
+        {
+            return Err("rule approval fields must not be empty".into());
+        }
+        let scope_path = Path::new(approval.scope.trim());
+        if scope_path.is_absolute()
+            || approval
+                .scope
+                .trim()
+                .chars()
+                .any(|c| matches!(c, '*' | '?' | '[' | ']'))
+            || scope_path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return Err("rule approval scope must be a repository-relative file or directory path without glob or parent components".into());
+        }
+        if approval.instruction.len() > 20_000 || approval.scope.len() > 1_024 {
+            return Err("rule approval scope or instruction exceeds the storage limit".into());
+        }
+        if !is_sha256_digest(&approval.evidence_digest) {
+            return Err(
+                "rule approval evidence digest must use sha256:<64 hexadecimal characters>".into(),
+            );
+        }
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_secs() as i64;
+        if approval
+            .expires_at_unix
+            .is_some_and(|expiry| expiry <= now_unix)
+        {
+            return Err("rule approval expiry must be in the future".into());
+        }
+        let created_at: String = self
+            .connection
+            .query_row("SELECT CURRENT_TIMESTAMP", [], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let mut statement = tx
+            .prepare("SELECT approval_id,payload FROM rule_approvals WHERE candidate_id=?1")
+            .map_err(|e| e.to_string())?;
+        let existing = statement
+            .query_map([&approval.candidate_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        drop(statement);
+        let mut active_same_scope = Vec::new();
+        let mut latest_same_scope: Option<RuleApproval> = None;
+        for (id, payload) in existing {
+            let prior: RuleApproval = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
+            if prior.scope.trim() != approval.scope.trim() {
+                continue;
+            }
+            if latest_same_scope
+                .as_ref()
+                .is_none_or(|latest| prior.version > latest.version)
+            {
+                latest_same_scope = Some(prior.clone());
+            }
+            let terminal: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM rule_approval_events WHERE approval_id=?1 AND event IN ('revoked','superseded'))", [&id], |row| row.get(0)).map_err(|e| e.to_string())?;
+            if !terminal
+                && !prior
+                    .expires_at_unix
+                    .is_some_and(|expiry| expiry <= now_unix)
+            {
+                active_same_scope.push((id, prior));
+            }
+        }
+        let version = if let Some(supersedes_id) = approval.supersedes_approval_id.as_deref() {
+            let Some(_) = active_same_scope.iter().find(|(id, _)| id == supersedes_id) else {
+                return Err(
+                    "superseded approval must be active and have the same candidate and scope"
+                        .into(),
+                );
+            };
+            if active_same_scope.len() != 1 {
+                return Err("candidate and scope have ambiguous active approvals; revoke extras before superseding".into());
+            }
+            latest_same_scope
+                .as_ref()
+                .map_or(1, |latest| latest.version.saturating_add(1))
+        } else {
+            if !active_same_scope.is_empty() {
+                return Err(format!("active version {} already exists for this candidate and scope; specify --supersedes", active_same_scope[0].1.version));
+            }
+            latest_same_scope
+                .as_ref()
+                .map_or(1, |latest| latest.version.saturating_add(1))
+        };
+        let activation_event_id = digest(
+            format!(
+                "{}\0activated\0{}\0{}",
+                approval.approval_id, approval.approver, now_unix
+            )
+            .as_bytes(),
+        );
+        let mut stored = approval.clone();
+        stored.version = version;
+        stored.created_at = created_at.clone();
+        stored.activated_at_unix = Some(now_unix);
+        stored.status = "active".into();
+        stored.events = vec![RuleApprovalEvent {
+            event_id: activation_event_id.clone(),
+            event: "activated".into(),
+            actor: approval.approver.clone(),
+            reason: approval.approval_reason.clone(),
+            created_at: created_at.clone(),
+        }];
+        let payload = serde_json::to_string(&stored).map_err(|e| e.to_string())?;
+        if let Some((superseded_id, _)) = active_same_scope.first() {
+            let event_id = digest(
+                format!(
+                    "{superseded_id}\0superseded\0{}\0{}",
+                    approval.approval_id, now_unix
+                )
+                .as_bytes(),
+            );
+            tx.execute("INSERT INTO rule_approval_events(event_id,approval_id,event,actor,reason,created_at) VALUES (?1,?2,'superseded',?3,?4,?5)", rusqlite::params![event_id, superseded_id, approval.approver, format!("Superseded by approval {} version {version}", approval.approval_id), created_at]).map_err(|e| e.to_string())?;
+        }
+        tx.execute("INSERT INTO rule_approvals(approval_id,candidate_id,evidence_digest,payload,created_at) VALUES (?1,?2,?3,?4,?5)", rusqlite::params![stored.approval_id, stored.candidate_id, stored.evidence_digest, payload, created_at]).map_err(|e| e.to_string())?;
+        tx.execute("INSERT INTO rule_approval_events(event_id,approval_id,event,actor,reason,created_at) VALUES (?1,?2,'activated',?3,?4,?5)", rusqlite::params![activation_event_id, stored.approval_id, stored.approver, stored.approval_reason, created_at]).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    pub fn revoke_rule_approval(
+        &mut self,
+        approval_id: &str,
+        actor: &str,
+        reason: &str,
+    ) -> Result<(), String> {
+        if actor.trim().is_empty() || reason.trim().is_empty() {
+            return Err("revocation requires a non-empty actor and reason".into());
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM rule_approvals a WHERE a.approval_id=?1 AND NOT EXISTS(SELECT 1 FROM rule_approval_events e WHERE e.approval_id=a.approval_id AND e.event IN ('revoked','superseded')))", [approval_id], |row| row.get(0)).map_err(|e| e.to_string())?;
+        if !active {
+            return Err(format!("active rule approval {approval_id} was not found"));
+        }
+        let created_at: String = tx
+            .query_row("SELECT CURRENT_TIMESTAMP", [], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        let event_id = digest(
+            format!(
+                "{approval_id}\0revoked\0{}\0{}\0{}",
+                actor.trim(),
+                reason.trim(),
+                created_at
+            )
+            .as_bytes(),
+        );
+        tx.execute("INSERT INTO rule_approval_events(event_id,approval_id,event,actor,reason,created_at) VALUES (?1,?2,'revoked',?3,?4,?5)", rusqlite::params![event_id, approval_id, actor.trim(), reason.trim(), created_at]).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    pub fn list_rule_approvals(&self) -> Result<Vec<RuleApproval>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT approval_id,payload FROM rule_approvals ORDER BY created_at,approval_id",
+            )
+            .map_err(|e| e.to_string())?;
+        let approvals = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        approvals.into_iter().map(|(id,payload)| {
+            let mut approval: RuleApproval = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
+            let mut events_statement = self.connection.prepare("SELECT event_id,event,actor,reason,created_at FROM rule_approval_events WHERE approval_id=?1 ORDER BY rowid").map_err(|e| e.to_string())?;
+            approval.events = events_statement.query_map([&id], |row| Ok(RuleApprovalEvent { event_id: row.get(0)?, event: row.get(1)?, actor: row.get(2)?, reason: row.get(3)?, created_at: row.get(4)? })).map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?;
+            approval.schema_version = 2;
+            approval.version = approval.version.max(1);
+            approval.status = if approval.events.iter().any(|event| event.event == "revoked") {
+                "revoked".into()
+            } else if approval.events.iter().any(|event| event.event == "superseded") {
+                "superseded".into()
+            } else if approval.expires_at_unix.is_some_and(|expiry| expiry <= std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_secs() as i64).unwrap_or(i64::MAX)) {
+                "expired".into()
+            } else {
+                "active".into()
+            };
+            Ok(approval)
+        }).collect()
     }
 
     pub fn create_waiver(&mut self, waiver: &Waiver) -> Result<(), String> {
@@ -3784,6 +6849,7 @@ impl ReviewStore {
         let mut record = self.connection.query_row("SELECT f.finding_json,f.status,f.status_reason,(SELECT COUNT(*) FROM finding_occurrences o WHERE o.finding_id=f.id),f.first_seen,f.last_seen FROM findings f WHERE f.id=?1", [id], finding_record_from_row).optional().map_err(|e| e.to_string())?;
         if let Some(record) = &mut record {
             record.occurrences = self.load_occurrences(&record.finding.id)?;
+            record.assessments = self.load_assessments(&record.finding.id, None)?;
         }
         Ok(record)
     }
@@ -3796,7 +6862,7 @@ impl ReviewStore {
     ) -> Result<Vec<FindingRecord>, String> {
         let severity = severity.map(severity_name);
         let status = status.map(FindingStatus::as_str);
-        let mut statement = self.connection.prepare("SELECT f.finding_json,f.status,f.status_reason,(SELECT COUNT(*) FROM finding_occurrences o WHERE o.finding_id=f.id),f.first_seen,f.last_seen FROM findings f WHERE (?1 IS NULL OR f.severity=?1) AND (?2 IS NULL OR f.status=?2) AND (?3 IS NULL OR EXISTS(SELECT 1 FROM finding_occurrences x WHERE x.finding_id=f.id AND x.review_id=?3)) ORDER BY f.last_seen DESC,f.id").map_err(|e| e.to_string())?;
+        let mut statement = self.connection.prepare("SELECT f.finding_json,f.status,f.status_reason,(SELECT COUNT(*) FROM finding_occurrences o WHERE o.finding_id=f.id),f.first_seen,f.last_seen FROM findings f WHERE (?1 IS NULL OR ((?3 IS NULL AND f.severity=?1) OR EXISTS(SELECT 1 FROM finding_assessments a WHERE a.finding_id=f.id AND ((?3 IS NOT NULL AND a.review_id=?3) OR (?3 IS NULL AND a.review_id=(SELECT o.review_id FROM finding_occurrences o WHERE o.finding_id=f.id ORDER BY o.occurrence_order DESC,o.review_id DESC LIMIT 1))) AND json_extract(a.finding_json,'$.severity')=?1))) AND (?2 IS NULL OR f.status=?2) AND (?3 IS NULL OR EXISTS(SELECT 1 FROM finding_occurrences x WHERE x.finding_id=f.id AND x.review_id=?3)) ORDER BY f.last_seen DESC,f.id").map_err(|e| e.to_string())?;
         let records = statement
             .query_map(
                 rusqlite::params![severity, status, review_id],
@@ -3808,6 +6874,7 @@ impl ReviewStore {
             .collect::<Result<_, _>>()?;
         for record in &mut records {
             record.occurrences = self.load_occurrences(&record.finding.id)?;
+            record.assessments = self.load_assessments(&record.finding.id, review_id)?;
         }
         Ok(records)
     }
@@ -3830,7 +6897,7 @@ impl ReviewStore {
         let total: i64 = self
             .connection
             .query_row(
-                "SELECT COUNT(*) FROM findings f WHERE (?1 IS NULL OR f.severity=?1) AND (?2 IS NULL OR f.status=?2) AND (?3 IS NULL OR EXISTS(SELECT 1 FROM finding_occurrences x WHERE x.finding_id=f.id AND x.review_id=?3))",
+                "SELECT COUNT(*) FROM findings f WHERE (?1 IS NULL OR ((?3 IS NULL AND f.severity=?1) OR EXISTS(SELECT 1 FROM finding_assessments a WHERE a.finding_id=f.id AND ((?3 IS NOT NULL AND a.review_id=?3) OR (?3 IS NULL AND a.review_id=(SELECT o.review_id FROM finding_occurrences o WHERE o.finding_id=f.id ORDER BY o.occurrence_order DESC,o.review_id DESC LIMIT 1))) AND json_extract(a.finding_json,'$.severity')=?1))) AND (?2 IS NULL OR f.status=?2) AND (?3 IS NULL OR EXISTS(SELECT 1 FROM finding_occurrences x WHERE x.finding_id=f.id AND x.review_id=?3))",
                 rusqlite::params![severity, status, review_id],
                 |row| row.get(0),
             )
@@ -3838,7 +6905,7 @@ impl ReviewStore {
         let total = usize::try_from(total).map_err(|error| error.to_string())?;
         let mut statement = self
             .connection
-            .prepare("SELECT f.finding_json,f.status,f.status_reason,(SELECT COUNT(*) FROM finding_occurrences o WHERE o.finding_id=f.id),f.first_seen,f.last_seen FROM findings f WHERE (?1 IS NULL OR f.severity=?1) AND (?2 IS NULL OR f.status=?2) AND (?3 IS NULL OR EXISTS(SELECT 1 FROM finding_occurrences x WHERE x.finding_id=f.id AND x.review_id=?3)) ORDER BY f.last_seen DESC,f.id LIMIT ?4 OFFSET ?5")
+            .prepare("SELECT f.finding_json,f.status,f.status_reason,(SELECT COUNT(*) FROM finding_occurrences o WHERE o.finding_id=f.id),f.first_seen,f.last_seen FROM findings f WHERE (?1 IS NULL OR ((?3 IS NULL AND f.severity=?1) OR EXISTS(SELECT 1 FROM finding_assessments a WHERE a.finding_id=f.id AND ((?3 IS NOT NULL AND a.review_id=?3) OR (?3 IS NULL AND a.review_id=(SELECT o.review_id FROM finding_occurrences o WHERE o.finding_id=f.id ORDER BY o.occurrence_order DESC,o.review_id DESC LIMIT 1))) AND json_extract(a.finding_json,'$.severity')=?1))) AND (?2 IS NULL OR f.status=?2) AND (?3 IS NULL OR EXISTS(SELECT 1 FROM finding_occurrences x WHERE x.finding_id=f.id AND x.review_id=?3)) ORDER BY f.last_seen DESC,f.id LIMIT ?4 OFFSET ?5")
             .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map(
@@ -3851,8 +6918,27 @@ impl ReviewStore {
             .collect::<Result<_, _>>()?;
         for record in &mut records {
             record.occurrences = self.load_occurrences(&record.finding.id)?;
+            record.assessments = self.load_assessments(&record.finding.id, review_id)?;
         }
         Ok((records, total))
+    }
+
+    fn load_assessments(
+        &self,
+        finding_id: &str,
+        review_id: Option<&str>,
+    ) -> Result<Vec<Finding>, String> {
+        let mut statement = self.connection.prepare("SELECT finding_json FROM finding_assessments WHERE finding_id=?1 AND (?2 IS NULL OR review_id=?2) ORDER BY review_id,assessment_digest").map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(rusqlite::params![finding_id, review_id], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|error| error.to_string())?;
+        rows.map(|row| {
+            serde_json::from_str(&row.map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())
+        })
+        .collect()
     }
 
     fn load_occurrences(&self, finding_id: &str) -> Result<Vec<FindingOccurrence>, String> {
@@ -3934,6 +7020,7 @@ fn finding_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FindingR
     })?;
     Ok(FindingRecord {
         finding,
+        assessments: Vec::new(),
         status,
         status_reason,
         occurrence_count: occurrence_count.max(0) as u64,
@@ -3952,6 +7039,13 @@ pub struct ProviderResult {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub exit_code: Option<i32>,
+    pub usage: Option<ProviderUsage>,
+}
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ProviderUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
 }
 #[derive(Clone, Debug)]
 pub struct ProviderRequest {
@@ -3963,6 +7057,8 @@ pub struct ProviderRequest {
     pub stdin: Vec<u8>,
     pub timeout_seconds: u64,
     pub output_limit_bytes: usize,
+    pub context_window_tokens: Option<usize>,
+    pub max_output_tokens: Option<usize>,
     pub environment: Vec<(String, String)>,
 }
 pub fn execute_provider(request: &ProviderRequest) -> Result<ProviderResult, String> {
@@ -4045,18 +7141,43 @@ pub fn execute_provider_cancellable(
                 .join()
                 .map_err(|_| "provider stderr reader failed")?;
             if stdout.len() + stderr.len() > request.output_limit_bytes {
-                return Err("provider output exceeded configured limit".into());
+                return Err(format!(
+                    "provider output exceeded configured limit (stdout {} bytes, stderr {} bytes, limit {} bytes)",
+                    stdout.len(),
+                    stderr.len(),
+                    request.output_limit_bytes
+                ));
             }
             if !status.success() {
+                let mut stderr = stderr;
+                redact_output_values(&mut stderr, &request.environment);
+                let detail = String::from_utf8_lossy(&stderr);
+                let detail = detail
+                    .rsplit_once("Error:")
+                    .map(|(_, message)| format!("Error:{}", message.trim()))
+                    .unwrap_or_else(|| {
+                        if detail.trim().is_empty() {
+                            String::new()
+                        } else {
+                            format!("provider wrote {} bytes of stderr", stderr.len())
+                        }
+                    });
+                let detail: String = detail.chars().take(2048).collect();
+                let detail = if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!("; stderr: {detail}")
+                };
                 return Err(format!(
-                    "provider exited with {}",
-                    status.code().map_or("signal".into(), |c| c.to_string())
+                    "provider exited with {}{detail}",
+                    status.code().map_or("signal".into(), |c| c.to_string()),
                 ));
             }
             return Ok(ProviderResult {
                 stdout,
                 stderr,
                 exit_code: status.code(),
+                usage: None,
             });
         }
         if cancellation.is_some_and(|token| token.is_cancelled()) {

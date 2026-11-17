@@ -975,11 +975,12 @@ mod tests {
     #[test]
     fn worktree_scope_records_changed_submodule_commit_oid() {
         let repo = Repo::new();
-        let dependency = tempfile::tempdir().unwrap();
+        let checked_out_submodule = repo.path().join("modules/dep");
+        fs::create_dir_all(&checked_out_submodule).unwrap();
         assert!(Command::new("git")
             .arg("init")
             .arg("-q")
-            .arg(dependency.path())
+            .arg(&checked_out_submodule)
             .status()
             .unwrap()
             .success());
@@ -989,17 +990,17 @@ mod tests {
         ] {
             assert!(Command::new("git")
                 .arg("-C")
-                .arg(dependency.path())
+                .arg(&checked_out_submodule)
                 .args(["config", key, value])
                 .status()
                 .unwrap()
                 .success());
         }
-        fs::write(dependency.path().join("dep.rs"), "fn first() {}\n").unwrap();
+        fs::write(checked_out_submodule.join("dep.rs"), "fn first() {}\n").unwrap();
         let nested_git = |args: &[&str]| {
             assert!(Command::new("git")
                 .arg("-C")
-                .arg(dependency.path())
+                .arg(&checked_out_submodule)
                 .args(args)
                 .status()
                 .unwrap()
@@ -1007,17 +1008,28 @@ mod tests {
         };
         nested_git(&["add", "."]);
         nested_git(&["commit", "-qm", "first"]);
-        repo.git(&[
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            dependency.path().to_str().unwrap(),
-            "modules/dep",
-        ]);
+        let initial_oid = String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(&checked_out_submodule)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        fs::write(
+            repo.path().join(".gitmodules"),
+            "[submodule \"modules/dep\"]\n\tpath = modules/dep\n\turl = ../dep\n",
+        )
+        .unwrap();
+        repo.git(&["add", ".gitmodules"]);
+        let gitlink = format!("160000,{initial_oid},modules/dep");
+        repo.git(&["update-index", "--add", "--cacheinfo", &gitlink]);
         repo.git(&["commit", "-qam", "add submodule"]);
 
-        let checked_out_submodule = repo.path().join("modules/dep");
         fs::write(checked_out_submodule.join("dep.rs"), "fn second() {}\n").unwrap();
         let submodule_git = |args: &[&str]| {
             assert!(Command::new("git")
