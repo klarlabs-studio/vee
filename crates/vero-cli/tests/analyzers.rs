@@ -48,10 +48,11 @@ fn vero(root: &Path, args: &[&str]) -> (Option<i32>, Value) {
 }
 
 /// SARIF with an `error` on changed line 2, an `error` on untouched line 1, and a
-/// `warning` (from the rule default) on changed line 3.
+/// `warning` (from the rule default) on changed line 3, plus a suppressed `error`.
 const SARIF: &str = r#"{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"fakelint","semanticVersion":"1.2.3","rules":[{"id":"W1","defaultConfiguration":{"level":"warning"}}]}},"results":[
 {"ruleId":"E1","level":"error","message":{"text":"changed line defect"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"src/lib.rs"},"region":{"startLine":2}}}]},
 {"ruleId":"E1","level":"error","message":{"text":"pre-existing defect"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"src/lib.rs"},"region":{"startLine":1}}}]},
+{"ruleId":"E1","level":"error","message":{"text":"accepted by the team"},"suppressions":[{"kind":"external","status":"accepted"}],"locations":[{"physicalLocation":{"artifactLocation":{"uri":"src/lib.rs"},"region":{"startLine":2}}}]},
 {"ruleId":"W1","ruleIndex":0,"message":{"text":"style"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"src/lib.rs"},"region":{"startLine":3}}}]}
 ]}]}"#;
 
@@ -123,7 +124,11 @@ fn analyzer_results_on_changed_lines_block_and_can_be_waived() {
     assert_eq!(code, Some(0), "{report:#}");
     assert_eq!(report["parsed"], true);
     assert_eq!(report["tools"], serde_json::json!(["fakelint 1.2.3"]));
-    assert_eq!(report["results_total"], 3);
+    assert_eq!(report["results_total"], 4);
+    assert_eq!(
+        report["results_suppressed"], 1,
+        "accepted suppressions never block"
+    );
     assert_eq!(report["results_outside_changes"], 1, "line 1 is unchanged");
     let findings = report["findings"].as_array().unwrap();
     assert_eq!(findings.len(), 2);

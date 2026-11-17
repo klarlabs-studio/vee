@@ -194,6 +194,9 @@ pub struct AnalyzerReport {
     pub problem: Option<String>,
     pub findings: Vec<AnalyzerFinding>,
     pub results_total: usize,
+    /// Results the tool itself marked as suppressed (SARIF `suppressions` with an
+    /// accepted or unspecified status); they never block.
+    pub results_suppressed: usize,
     /// Results outside the snapshot's changed lines (pre-existing issues).
     pub results_outside_changes: usize,
     pub limitations: Vec<String>,
@@ -2163,6 +2166,7 @@ mod tests {
                 message: "defect".into(),
             }],
             results_total: 1,
+            results_suppressed: 0,
             results_outside_changes: 0,
             limitations: vec![],
         }

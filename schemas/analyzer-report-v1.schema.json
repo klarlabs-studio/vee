@@ -15,6 +15,7 @@
     "problem",
     "findings",
     "results_total",
+    "results_suppressed",
     "results_outside_changes",
     "limitations"
   ],
@@ -55,6 +56,11 @@
     "results_total": {
       "type": "integer",
       "minimum": 0
+    },
+    "results_suppressed": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Results the tool marked as suppressed (SARIF suppressions with an accepted or unspecified status); they never block."
     },
     "results_outside_changes": {
       "type": "integer",

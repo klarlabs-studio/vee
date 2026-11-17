@@ -2796,10 +2796,11 @@ fn print_analyzer_report(report: &vero_core::AnalyzerReport) {
         println!("Not evaluable: {problem}");
     }
     println!(
-        "Results: {} total, {} on changed lines, {} elsewhere (pre-existing, never blocking)",
+        "Results: {} total, {} on changed lines, {} elsewhere (pre-existing, never blocking), {} suppressed by the tool",
         report.results_total,
         report.findings.len(),
-        report.results_outside_changes
+        report.results_outside_changes,
+        report.results_suppressed
     );
     for finding in &report.findings {
         println!(

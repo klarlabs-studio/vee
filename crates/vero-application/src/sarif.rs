@@ -82,6 +82,7 @@ fn failed(run: &VerificationRun, problem: String) -> AnalyzerReport {
         problem: Some(problem),
         findings: Vec::new(),
         results_total: 0,
+        results_suppressed: 0,
         results_outside_changes: 0,
         limitations: Vec::new(),
     }
@@ -202,6 +203,7 @@ fn report_with_changes(
         problem: None,
         findings: Vec::new(),
         results_total: 0,
+        results_suppressed: 0,
         results_outside_changes: 0,
         limitations: changed.limitations.clone(),
     };
@@ -227,6 +229,10 @@ fn report_with_changes(
                 return report;
             }
             report.results_total += 1;
+            if is_suppressed(result) {
+                report.results_suppressed += 1;
+                continue;
+            }
             let Some((path, line)) = result_location(result, sarif_run, &canonical_root) else {
                 report.results_outside_changes += 1;
                 continue;
@@ -276,6 +282,18 @@ fn report_with_changes(
         .findings
         .sort_by(|a, b| (&a.path, a.line, &a.rule_id).cmp(&(&b.path, b.line, &b.rule_id)));
     report
+}
+
+/// A result the producing tool suppressed (for example an inline `nosemgrep` or a
+/// CodeQL dismissal). Suppressions under review or rejected do not count.
+fn is_suppressed(result: &serde_json::Value) -> bool {
+    result["suppressions"]
+        .as_array()
+        .is_some_and(|suppressions| {
+            suppressions.iter().any(|suppression| {
+                matches!(suppression["status"].as_str(), None | Some("accepted"))
+            })
+        })
 }
 
 /// SARIF level: the result's own level, else the rule's default, else `warning`.
@@ -403,6 +421,26 @@ mod tests {
         );
         assert_eq!(resolve_uri("../outside.rs", None, &root), None);
         assert_eq!(resolve_uri("file:///etc/passwd", None, &root), None);
+    }
+
+    #[test]
+    fn only_accepted_suppressions_suppress() {
+        let with =
+            |suppressions: serde_json::Value| serde_json::json!({ "suppressions": suppressions });
+        assert!(is_suppressed(&with(
+            serde_json::json!([{"kind": "inSource"}])
+        )));
+        assert!(is_suppressed(&with(
+            serde_json::json!([{"kind": "external", "status": "accepted"}])
+        )));
+        assert!(!is_suppressed(&with(
+            serde_json::json!([{"kind": "external", "status": "underReview"}])
+        )));
+        assert!(!is_suppressed(&with(
+            serde_json::json!([{"kind": "external", "status": "rejected"}])
+        )));
+        assert!(!is_suppressed(&with(serde_json::json!([]))));
+        assert!(!is_suppressed(&serde_json::json!({})));
     }
 
     #[test]
