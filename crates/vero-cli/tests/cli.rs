@@ -2939,6 +2939,7 @@ fn bitbucket_pull_request_context_is_available_through_the_cli() {
             "VERO_TEST_BB_TOKEN",
         ])
         .env("VERO_TEST_BB_TOKEN", "fixture-token")
+        .args(["--output", "json"])
         .current_dir(directory.path())
         .output()
         .unwrap();
@@ -3047,6 +3048,7 @@ fn finding_task_exports_bounded_snapshot_context_and_reports_staleness() {
         .unwrap();
     let task = Command::new(env!("CARGO_BIN_EXE_vero"))
         .args(["findings", "task", finding_id, "--context-lines", "1"])
+        .args(["--output", "json"])
         .current_dir(root)
         .output()
         .unwrap();
@@ -3135,7 +3137,7 @@ fn finding_task_exports_bounded_snapshot_context_and_reports_staleness() {
     )
     .unwrap();
     let stale = Command::new(env!("CARGO_BIN_EXE_vero"))
-        .args(["findings", "task", finding_id])
+        .args(["findings", "task", finding_id, "--output", "json"])
         .current_dir(root)
         .output()
         .unwrap();
@@ -4665,6 +4667,7 @@ fn gitlab_issue_context_is_available_through_the_cli() {
             "12",
         ])
         .env("VERO_TEST_GITLAB_TOKEN", "fixture-token")
+        .args(["--output", "json"])
         .current_dir(directory.path())
         .output()
         .unwrap();
@@ -4734,6 +4737,7 @@ fn azure_devops_work_item_context_is_available_through_the_cli() {
             "VERO_TEST_AZURE_TOKEN",
         ])
         .env("VERO_TEST_AZURE_TOKEN", "fixture-token")
+        .args(["--output", "json"])
         .current_dir(directory.path())
         .output()
         .unwrap();
@@ -7236,10 +7240,10 @@ fn mcp_stdio_exposes_findings_tool_over_the_pinned_protocol() {
             .await
             .unwrap();
         assert_eq!(historical["schema_version"], 3);
-        assert_eq!(historical["report"]["schema_version"], 3);
-        assert_eq!(historical["report"]["matches"], serde_json::json!([]));
-        assert_eq!(historical["report"]["trust"], "untrusted_external");
-        assert_eq!(historical["report"]["gate_eligible"], false);
+        assert_eq!(historical["query"], "correctness");
+        assert_eq!(historical["matches"], serde_json::json!([]));
+        assert_eq!(historical["trust"], "untrusted_external");
+        assert_eq!(historical["gate_eligible"], false);
         assert!(client
             .call::<_, serde_json::Value>(
                 "search_imported_review_history",
@@ -7337,9 +7341,9 @@ fn mcp_stdio_exposes_findings_tool_over_the_pinned_protocol() {
             .await
             .unwrap();
         assert_eq!(traceability["snapshot_id"], task_output["snapshot_id"]);
-        assert_eq!(traceability["report"]["impact_snapshot_id"], task_output["snapshot_id"]);
+        assert_eq!(traceability["impact_snapshot_id"], task_output["snapshot_id"]);
         assert_matches_schema(
-            &traceability["report"],
+            &traceability,
             include_str!("../../../schemas/acceptance-traceability-v1.schema.json"),
             "MCP acceptance traceability report",
         );
@@ -7363,10 +7367,13 @@ fn mcp_stdio_exposes_findings_tool_over_the_pinned_protocol() {
         assert_eq!(context["matching_lines"], serde_json::json!([1]));
         assert_eq!(context["classification"], "untrusted_repository_source");
         fs::write(root.join("tracked.rs"), "fn modified_after_review() {}\n").unwrap();
-        assert!(client.call::<_, serde_json::Value>(
+        // Traceability reads the saved snapshot through digest-verified snapshot reads,
+        // so later working-tree edits cannot change it; this matches `vero acceptance report`.
+        let after_edit: serde_json::Value = client.call(
             "acceptance_traceability",
             &serde_json::json!({"review_id":review_id}),
-        ).await.is_err());
+        ).await.unwrap();
+        assert_eq!(after_edit, traceability);
         let old_context: serde_json::Value = client.call(
             "get_repository_context",
             &serde_json::json!({"review_id":review_id,"path":"tracked.rs"}),
@@ -7411,7 +7418,7 @@ fn mcp_stdio_exposes_findings_tool_over_the_pinned_protocol() {
             .call("list_findings", &serde_json::json!({"limit": 5}))
             .await
             .unwrap();
-        assert_eq!(result["schema_version"], 1);
+        assert_eq!(result["schema_version"], 2);
         assert_eq!(result["findings"].as_array().unwrap().len(), 3);
         assert_eq!(result["total"], 3);
         assert!(result["findings"].as_array().unwrap().iter().any(|finding| {
@@ -7439,8 +7446,7 @@ fn mcp_stdio_exposes_findings_tool_over_the_pinned_protocol() {
             .await
             .unwrap();
         assert_eq!(impact["schema_version"], 3);
-        assert_eq!(impact["assessment"]["schema_version"], 3);
-        assert_eq!(impact["assessment"]["snapshot_id"], review["snapshot_id"]);
+        assert_eq!(impact["snapshot_id"], review["snapshot_id"]);
         let committed: serde_json::Value = client
             .call(
                 "review_changes",
@@ -7456,11 +7462,11 @@ fn mcp_stdio_exposes_findings_tool_over_the_pinned_protocol() {
             .await
             .unwrap();
         assert_eq!(
-            stored["review"]["change_set"]["scope"],
+            stored["change_set"]["scope"],
             format!(
                 "commit_range:{}..{}",
-                stored["review"]["change_set"]["base_oid"].as_str().unwrap(),
-                stored["review"]["change_set"]["head_oid"].as_str().unwrap()
+                stored["change_set"]["base_oid"].as_str().unwrap(),
+                stored["change_set"]["head_oid"].as_str().unwrap()
             )
         );
         fs::write(
@@ -8246,12 +8252,12 @@ esac
             vec![
                 "findings", "list", "--review", review_id, "--output", "json",
             ],
-            include_str!("../../../schemas/findings-list-v1.schema.json"),
+            include_str!("../../../schemas/findings-list-v2.schema.json"),
             "findings",
         ),
         (
             vec!["findings", "show", finding_id.as_str(), "--output", "json"],
-            include_str!("../../../schemas/finding-detail-v1.schema.json"),
+            include_str!("../../../schemas/finding-detail-v2.schema.json"),
             "finding",
         ),
         (
@@ -8268,7 +8274,11 @@ esac
         assert_eq!(result.status.code(), Some(0));
         let response: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
         assert_matches_schema(&response, schema_text, "CLI response");
-        assert_eq!(response["schema_version"], 1);
+        let schema: serde_json::Value = serde_json::from_str(schema_text).unwrap();
+        assert_eq!(
+            response["schema_version"],
+            schema["properties"]["schema_version"]["const"]
+        );
         assert!(!response[key].is_null());
     }
     let sarif = Command::new(env!("CARGO_BIN_EXE_vero"))
@@ -8383,9 +8393,9 @@ esac
             .await
             .unwrap();
         assert_eq!(verification["schema_version"], 1);
-        assert_eq!(verification["run"]["status"], "passed");
-        assert_eq!(verification["run"]["snapshot_id"], snapshot_id);
-        assert_eq!(verification["run"]["finding_id"], mcp_finding_id);
+        assert_eq!(verification["status"], "passed");
+        assert_eq!(verification["snapshot_id"], snapshot_id);
+        assert_eq!(verification["finding_id"], mcp_finding_id);
         let details: serde_json::Value = client
             .call(
                 "get_finding",
@@ -8398,7 +8408,7 @@ esac
         assert_eq!(details["verification_runs"].as_array().unwrap().len(), 1);
         assert_eq!(
             details["verification_runs"][0]["run_id"],
-            verification["run"]["run_id"]
+            verification["run_id"]
         );
         let page: serde_json::Value = client
             .call(
@@ -8431,10 +8441,10 @@ esac
     let listed: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
     assert_matches_schema(
         &listed,
-        include_str!("../../../schemas/findings-list-v1.schema.json"),
+        include_str!("../../../schemas/findings-list-v2.schema.json"),
         "findings list",
     );
-    assert_eq!(listed["schema_version"], 1);
+    assert_eq!(listed["schema_version"], 2);
     assert_eq!(listed["findings"].as_array().unwrap().len(), 1, "{listed}");
     let show = Command::new(env!("CARGO_BIN_EXE_vero"))
         .args(["findings", "show", finding_id.as_str(), "--output", "json"])
@@ -8445,10 +8455,10 @@ esac
     let shown: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
     assert_matches_schema(
         &shown,
-        include_str!("../../../schemas/finding-detail-v1.schema.json"),
+        include_str!("../../../schemas/finding-detail-v2.schema.json"),
         "finding detail",
     );
-    assert_eq!(shown["schema_version"], 1);
+    assert_eq!(shown["schema_version"], 2);
     assert_eq!(shown["finding"]["occurrence_count"], 1);
     let update = Command::new(env!("CARGO_BIN_EXE_vero"))
         .args([

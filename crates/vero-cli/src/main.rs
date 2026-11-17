@@ -12,10 +12,12 @@ use vero_core::{
 
 mod acceptance;
 mod analytics;
+mod contracts;
 mod coverage;
 mod finding_task;
 mod imported_history;
 mod mcp;
+mod operations;
 mod ownership;
 mod patch_sandbox;
 mod pr_description;
@@ -495,6 +497,9 @@ enum Command {
     },
     /// Analyze which files and tests a change is likely to affect.
     Impact {
+        /// Analyze a saved review's exact snapshot instead of capturing a scope; fails if the source changed.
+        #[arg(long, value_name = "REVIEW_ID", conflicts_with_all = ["base", "commit", "staged", "working_tree"])]
+        review: Option<String>,
         /// Use changes since the merge base with this Git ref.
         #[arg(long, conflicts_with_all = ["staged", "working_tree"])]
         base: Option<String>,
@@ -743,7 +748,7 @@ enum RulesCommand {
         #[arg(long)]
         approval_id: Option<String>,
         /// Output format.
-        #[arg(long, value_enum, default_value = "json")]
+        #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
 }
@@ -1038,7 +1043,7 @@ enum ReviewsCommand {
         #[arg(long)]
         public_key: Option<std::path::PathBuf>,
         /// Output format.
-        #[arg(long, value_enum, default_value = "json")]
+        #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Sign a bundle with an Ed25519 PKCS#8 private key.
@@ -1101,7 +1106,7 @@ enum HostingCommand {
         #[arg(long)]
         username: Option<String>,
         /// Output format.
-        #[arg(long, value_enum, default_value = "json")]
+        #[arg(long, value_enum, default_value = "text")]
         output: Output,
         /// Save the returned discussion as content-addressed, untrusted history.
         #[arg(long, default_value_t = false)]
@@ -1131,7 +1136,7 @@ enum HostingCommand {
         #[arg(long)]
         username: Option<String>,
         /// Output format.
-        #[arg(long, value_enum, default_value = "json")]
+        #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Retrieve issue/specification context with a content digest.
@@ -1155,7 +1160,7 @@ enum HostingCommand {
         #[arg(long, value_name = "ENV_VAR")]
         token_env: Option<String>,
         /// Output format.
-        #[arg(long, value_enum, default_value = "json")]
+        #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Publish a saved review's gate result and findings to a pull request.
@@ -2120,6 +2125,12 @@ enum FindingsCommand {
         /// Only findings from this review ID.
         #[arg(long)]
         review: Option<String>,
+        /// Page size, 1 to 100.
+        #[arg(long, default_value_t = operations::DEFAULT_PAGE_SIZE)]
+        limit: usize,
+        /// Number of matching findings to skip.
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
@@ -2140,7 +2151,7 @@ enum FindingsCommand {
         #[arg(long, default_value_t = 20)]
         context_lines: usize,
         /// Output format.
-        #[arg(long, value_enum, default_value = "json")]
+        #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Assemble same-review findings into one bounded agent work package.
@@ -2152,7 +2163,7 @@ enum FindingsCommand {
         #[arg(long, default_value_t = 20)]
         context_lines: usize,
         /// Output format.
-        #[arg(long, value_enum, default_value = "json")]
+        #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Validate and save an agent-proposed patch against an exact saved review.
@@ -2162,7 +2173,7 @@ enum FindingsCommand {
         /// Unified diff file proposed by the agent.
         patch: std::path::PathBuf,
         /// Output format.
-        #[arg(long, value_enum, default_value = "json")]
+        #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Apply a saved patch only when its exact digest is explicitly approved, then rerun review.
@@ -2173,7 +2184,7 @@ enum FindingsCommand {
         #[arg(long, value_name = "SHA256_DIGEST")]
         approve: String,
         /// Output format.
-        #[arg(long, value_enum, default_value = "json")]
+        #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Record an audited lifecycle status for a finding (not a waiver).
@@ -2186,6 +2197,9 @@ enum FindingsCommand {
         /// Why the status changed (kept in the audit log).
         #[arg(long)]
         reason: String,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
     },
     /// Record and inspect explicit review feedback labels.
     Feedback {
@@ -2613,6 +2627,15 @@ fn review_to_sarif(review: &vero_application::ReviewResult) -> Result<serde_json
     }))
 }
 
+/// Print one machine-readable document for `--output json`: compact JSON and a newline.
+/// The same document is returned by the matching MCP tool.
+fn emit_json(document: &impl serde::Serialize) -> Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    serde_json::to_writer(&mut stdout, document)?;
+    writeln!(stdout)?;
+    Ok(())
+}
+
 fn write_completions(shell: clap_complete::Shell, output: &mut dyn std::io::Write) {
     use clap::CommandFactory;
     let mut command = Cli::command();
@@ -2807,10 +2830,12 @@ fn run() -> Result<u8> {
                 }
             }
             }
-            let report =
-                standards::resolve(&root, path.as_deref()).map_err(configuration_failure)?;
+            let report = operations::applicable_standards(
+                &operations::Workspace::new(root.clone()),
+                path.as_deref(),
+            )?;
             match output {
-                Output::Json => println!("{}", serde_json::to_string(&report)?),
+                Output::Json => emit_json(&report)?,
                 Output::Text => {
                     println!(
                         "Applicable standards{}:",
@@ -2886,28 +2911,9 @@ fn run() -> Result<u8> {
         }
         Command::Rules { command } => match command {
             RulesCommand::Candidates { output } => {
-                let cwd = std::env::current_dir()?;
-                let root = vero_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-                let database = root.join(".vero/vero.sqlite");
-                let external_feedback =
-                    imported_history::list_feedback(&root, None).map_err(configuration_failure)?;
-                let report = if database.exists() {
-                    let store = ReviewStore::open(&database).map_err(anyhow::Error::msg)?;
-                    let (records, total) = store
-                        .list_findings_page(None, None, None, 10_000, 0)
-                        .map_err(anyhow::Error::msg)?;
-                    let feedback = store.list_finding_feedback().map_err(anyhow::Error::msg)?;
-                    rule_candidates::mine_with_external(
-                        &records,
-                        &feedback,
-                        &external_feedback,
-                        total > records.len(),
-                    )
-                } else {
-                    rule_candidates::mine_with_external(&[], &[], &external_feedback, false)
-                };
+                let report = operations::rule_candidates(&operations::Workspace::discover()?)?;
                 match output {
-                    Output::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+                    Output::Json => emit_json(&report)?,
                     Output::Text => {
                         if report.candidates.is_empty() {
                             println!("No repeated feedback patterns qualify as rule candidates.");
@@ -2939,104 +2945,27 @@ fn run() -> Result<u8> {
                 expires_in_days,
                 output,
             } => {
-                let cwd = std::env::current_dir()?;
-                let root = vero_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-                let database = root.join(".vero/vero.sqlite");
-                let mut store = ReviewStore::open(&database).map_err(anyhow::Error::msg)?;
-                let (records, total) = store
-                    .list_findings_page(None, None, None, 10_000, 0)
-                    .map_err(anyhow::Error::msg)?;
-                let feedback = store.list_finding_feedback().map_err(anyhow::Error::msg)?;
-                let external_feedback =
-                    imported_history::list_feedback(&root, None).map_err(configuration_failure)?;
-                let report = rule_candidates::mine_with_external(
-                    &records,
-                    &feedback,
-                    &external_feedback,
-                    total > records.len(),
-                );
-                let candidate = report.candidates.iter().find(|candidate| candidate.candidate_id == candidate_id).ok_or_else(|| usage_failure("candidate is missing, stale, disputed, or does not meet the evidence threshold"))?;
-                if candidate.evidence_digest != evidence_digest {
-                    return Err(usage_failure("candidate evidence changed; inspect the current report and approve its current evidence digest"));
-                }
-                if report.truncated {
-                    return Err(configuration_failure(
-                        "cannot approve candidates while feedback history is truncated",
-                    ));
-                }
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_nanos();
-                let approval_id = format!(
-                    "rule-approval:{}",
-                    vero_core::digest(
-                        format!(
-                            "{candidate_id}\0{}\0{}\0{now}",
-                            candidate.evidence_digest, approver
-                        )
-                        .as_bytes()
-                    )
-                );
-                let expires_at_unix = match expires_in_days {
-                    Some(days) if (1..=3650).contains(&days) => Some(
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)?
-                            .as_secs() as i64
-                            + i64::from(days) * 86_400,
-                    ),
-                    Some(_) => {
-                        return Err(usage_failure(
-                            "--expires-in-days must be between 1 and 3650",
-                        ))
-                    }
-                    None => None,
-                };
-                let approval = vero_core::RuleApproval {
-                    schema_version: 2,
-                    approval_id,
-                    version: 1,
-                    candidate_id,
-                    evidence_digest,
-                    source_feedback_ids: candidate.feedback_ids.clone(),
-                    activated_at_unix: None,
-                    category: candidate.category.clone(),
-                    feedback_label: candidate.feedback_label,
-                    scope,
-                    instruction,
-                    approver,
-                    approval_reason: reason,
-                    supersedes_approval_id: supersedes,
-                    expires_at_unix,
-                    created_at: String::new(),
-                    status: String::new(),
-                    events: Vec::new(),
-                };
-                store
-                    .create_rule_approval(&approval)
-                    .map_err(anyhow::Error::msg)?;
-                let result = store
-                    .list_rule_approvals()
-                    .map_err(anyhow::Error::msg)?
-                    .into_iter()
-                    .find(|item| item.approval_id == approval.approval_id)
-                    .unwrap();
-                match output { Output::Json => println!("{}", serde_json::to_string_pretty(&result)?), Output::Text => println!("Approved {} ({}) for scope {}. Guidance is recorded and does not alter gate policy.", result.approval_id, result.candidate_id, result.scope) }
+                let result = operations::approve_rule(
+                    &operations::Workspace::discover()?,
+                    operations::ApproveRuleRequest {
+                        candidate_id,
+                        evidence_digest,
+                        scope,
+                        instruction,
+                        approver,
+                        reason,
+                        supersedes_approval_id: supersedes,
+                        expires_in_days,
+                    },
+                )?;
+                match output { Output::Json => emit_json(&result)?, Output::Text => println!("Approved {} ({}) for scope {}. Guidance is recorded and does not alter gate policy.", result.approval_id, result.candidate_id, result.scope) }
                 Ok(0)
             }
             RulesCommand::List { output } => {
-                let cwd = std::env::current_dir()?;
-                let root = vero_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-                let database = root.join(".vero/vero.sqlite");
-                let approvals = if database.exists() {
-                    ReviewStore::open(&database)
-                        .map_err(anyhow::Error::msg)?
-                        .list_rule_approvals()
-                        .map_err(anyhow::Error::msg)?
-                } else {
-                    Vec::new()
-                };
+                let approvals =
+                    operations::list_rule_approvals(&operations::Workspace::discover()?)?;
                 match output {
-                    Output::Json => println!("{}", serde_json::to_string_pretty(&approvals)?),
+                    Output::Json => emit_json(&approvals)?,
                     Output::Text => {
                         if approvals.is_empty() {
                             println!("No rule guidance approvals.");
@@ -3060,21 +2989,14 @@ fn run() -> Result<u8> {
                 reason,
                 output,
             } => {
-                let cwd = std::env::current_dir()?;
-                let root = vero_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-                let database = root.join(".vero/vero.sqlite");
-                let mut store = ReviewStore::open(&database).map_err(anyhow::Error::msg)?;
-                store
-                    .revoke_rule_approval(&approval_id, &actor, &reason)
-                    .map_err(anyhow::Error::msg)?;
-                let result = store
-                    .list_rule_approvals()
-                    .map_err(anyhow::Error::msg)?
-                    .into_iter()
-                    .find(|item| item.approval_id == approval_id)
-                    .unwrap();
+                let result = operations::revoke_rule(
+                    &operations::Workspace::discover()?,
+                    &approval_id,
+                    &actor,
+                    &reason,
+                )?;
                 match output {
-                    Output::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+                    Output::Json => emit_json(&result)?,
                     Output::Text => {
                         println!("Revoked {}. Audit history retained.", result.approval_id)
                     }
@@ -3085,25 +3007,12 @@ fn run() -> Result<u8> {
                 approval_id,
                 output,
             } => {
-                let cwd = std::env::current_dir()?;
-                let root = vero_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-                let database = root.join(".vero/vero.sqlite");
-                if !database.exists() {
-                    return Err(configuration_failure(
-                        "no saved rule approvals or finding feedback are available",
-                    ));
-                }
-                let store = ReviewStore::open(&database).map_err(anyhow::Error::msg)?;
-                let external_feedback =
-                    imported_history::list_feedback(&root, None).map_err(configuration_failure)?;
-                let report = rule_candidates::effectiveness(
-                    &store,
+                let report = operations::rule_effectiveness(
+                    &operations::Workspace::discover()?,
                     approval_id.as_deref(),
-                    &external_feedback,
-                )
-                .map_err(anyhow::Error::msg)?;
+                )?;
                 match output {
-                    Output::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+                    Output::Json => emit_json(&report)?,
                     Output::Text => {
                         if report.approvals.is_empty() {
                             println!("No rule approvals to evaluate.");
@@ -3186,34 +3095,9 @@ fn run() -> Result<u8> {
             markdown,
             output,
         } => {
-            let root = std::env::current_dir()?;
-            let top = vero_git::repository_root(&root).map_err(anyhow::Error::msg)?;
-            if staged && working_tree {
-                return Err(usage_failure(
-                    "--staged and --working-tree are mutually exclusive",
-                ));
-            }
-            if staged && base.is_some() {
-                return Err(usage_failure("--base cannot be combined with --staged"));
-            }
-            let capture_scope = if let Some(oid) = commit {
-                vero_git::commit_scope(&oid).map_err(usage_failure)?
-            } else if staged {
-                vero_git::ChangeScope::Staged
-            } else if working_tree {
-                vero_git::ChangeScope::WorkingTree
-            } else {
-                vero_git::ChangeScope::BaseAndWorktree {
-                    base_oid: base
-                        .as_deref()
-                        .map(|base_ref| vero_git::merge_base(&top, base_ref))
-                        .transpose()
-                        .map_err(usage_failure)?,
-                }
-            };
-            let change_set = vero_application::capture_change_set(&top, capture_scope)
-                .map_err(anyhow::Error::msg)?;
-            let mut config = load_repository_config(std::path::Path::new(&top))?;
+            let workspace = operations::Workspace::discover()?;
+            let scope = operations::ScopeRequest::from_flags(base, commit, staged, working_tree)?;
+            let config = workspace.effective_config(policy_profile.as_deref())?;
             let hosting_provider = resolve_hosting_setting(
                 hosting_provider,
                 config.hosting.provider.clone(),
@@ -3228,19 +3112,11 @@ fn run() -> Result<u8> {
                 config.hosting.token_env.clone(),
                 "GH_TOKEN",
             );
-            config
-                .select_policy_profile(policy_profile.as_deref())
-                .map_err(configuration_failure)?;
-            apply_protected_policy(std::path::Path::new(&top), &mut config)?;
             if work_item.is_some() && config.offline {
                 return Err(configuration_failure(
                     "offline mode prevents fetching work item context",
                 ));
             }
-            let db_dir = std::path::Path::new(&top).join(".vero");
-            std::fs::create_dir_all(&db_dir)?;
-            let mut store =
-                ReviewStore::open(&db_dir.join("vero.sqlite")).map_err(anyhow::Error::msg)?;
             let work_item = work_item
                 .as_deref()
                 .map(|spec| {
@@ -3253,28 +3129,27 @@ fn run() -> Result<u8> {
                     )
                 })
                 .transpose()?;
-            let out =
-                vero_application::run_review_selecting_reviewers_with_work_item_and_token_env(
-                    &top,
-                    change_set,
-                    &config,
-                    &mut store,
-                    (!reviewer_ids.is_empty()).then_some(reviewer_ids.as_slice()),
+            let out = operations::review(
+                &workspace,
+                operations::ReviewRequest {
+                    scope,
+                    reviewer_ids: (!reviewer_ids.is_empty()).then_some(reviewer_ids.as_slice()),
+                    policy_profile: policy_profile.as_deref(),
                     work_item,
-                    Some(
+                    work_item_token_env: Some(
                         effective_work_item_token_env(&hosting_provider, &hosting_token_env)
                             .to_owned(),
                     ),
-                )
-                .map_err(anyhow::Error::msg)?;
+                },
+                None,
+            )?;
             if let Some(path) = markdown {
                 let report = vero_application::render_review_markdown(&out);
                 write_markdown_report(&path, report.as_bytes())?;
             }
             match output {
                 Output::Json => {
-                    serde_json::to_writer(std::io::stdout().lock(), &out)?;
-                    println!();
+                    emit_json(&out)?;
                     eprintln!("Review {}", out.review_id);
                     eprintln!("Status: {}", out.status);
                     eprintln!("Snapshot: {}", out.snapshot_id);
@@ -3299,38 +3174,26 @@ fn run() -> Result<u8> {
             })
         }
         Command::Impact {
+            review,
             base,
             commit,
             staged,
             working_tree,
             output,
         } => {
-            let cwd = std::env::current_dir()?;
-            let root = vero_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-            let scope = if let Some(oid) = commit {
-                vero_git::commit_scope(&oid).map_err(usage_failure)?
-            } else if staged {
-                vero_git::ChangeScope::Staged
-            } else if working_tree {
-                vero_git::ChangeScope::WorkingTree
-            } else {
-                vero_git::ChangeScope::BaseAndWorktree {
-                    base_oid: base
-                        .as_deref()
-                        .map(|base_ref| vero_git::merge_base(&root, base_ref))
-                        .transpose()
-                        .map_err(usage_failure)?,
-                }
+            let workspace = operations::Workspace::discover()?;
+            let target = match review {
+                Some(review_id) => operations::ImpactTarget::Review(review_id),
+                None => operations::ImpactTarget::Scope(operations::ScopeRequest::from_flags(
+                    base,
+                    commit,
+                    staged,
+                    working_tree,
+                )?),
             };
-            let change_set =
-                vero_application::capture_change_set(&root, scope).map_err(anyhow::Error::msg)?;
-            let impact =
-                vero_application::analyze_impact(&root, &change_set).map_err(anyhow::Error::msg)?;
+            let impact = operations::impact(&workspace, target)?;
             match output {
-                Output::Json => {
-                    serde_json::to_writer(std::io::stdout().lock(), &impact)?;
-                    println!();
-                }
+                Output::Json => emit_json(&impact)?,
                 Output::Text => {
                     println!("Impact for snapshot: {}", impact.snapshot_id);
                     println!("Changed paths: {}", impact.changed_paths.len());
@@ -4411,30 +4274,10 @@ fn run() -> Result<u8> {
         },
         Command::Acceptance { command } => match command {
             AcceptanceCommand::Report { review, output } => {
-                let cwd = std::env::current_dir()?;
-                let root = vero_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-                let store = ReviewStore::open(&root.join(".vero/vero.sqlite"))
-                    .map_err(anyhow::Error::msg)?;
-                let payload = store
-                    .get(&review)
-                    .map_err(anyhow::Error::msg)?
-                    .ok_or_else(|| anyhow::anyhow!("review {review} was not found"))?;
-                let review_result = vero_application::deserialize_review_result(&payload)
-                    .map_err(anyhow::Error::msg)?;
-                let (impact, impact_problem) = acceptance::matching_impact(
-                    &review_result.snapshot_id,
-                    vero_application::analyze_impact(&root, &review_result.change_set),
-                );
-                let report = acceptance::report_with_impact(
-                    &review_result,
-                    impact.as_ref(),
-                    impact_problem.as_deref(),
-                );
+                let workspace = operations::Workspace::discover()?;
+                let report = operations::acceptance_report(&workspace, &review)?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &report)?;
-                        println!();
-                    }
+                    Output::Json => emit_json(&report)?,
                     Output::Text => acceptance::render_text(&report),
                 }
                 Ok(0)
@@ -4505,94 +4348,10 @@ fn run() -> Result<u8> {
                 token_env,
                 output,
             } => {
-                let root = std::env::current_dir()?;
-                let top = vero_git::repository_root(&root)
-                    .map_err(anyhow::Error::msg)?
-                    .to_string_lossy()
-                    .to_string();
-                let db_path = std::path::Path::new(&top).join(".vero/vero.sqlite");
-                let store = ReviewStore::open(&db_path).map_err(anyhow::Error::msg)?;
-                let payload = store
-                    .get(&review)
-                    .map_err(anyhow::Error::msg)?
-                    .ok_or_else(|| usage_failure(format!("review ID {review} was not found")))?;
-                let stored = vero_application::deserialize_review_result(&payload)
-                    .map_err(anyhow::Error::msg)?;
-                let current = current_change_set(
-                    &top,
-                    stored.change_set.base_oid.as_deref(),
-                    &stored.change_set.scope,
-                )?;
-                let mut config = load_repository_config(std::path::Path::new(&top))?;
-                config
-                    .select_policy_profile(stored.policy_profile.as_deref())
-                    .map_err(configuration_failure)?;
-                apply_protected_policy(std::path::Path::new(&top), &mut config)?;
-                let current_work_item = if let Some(item) = stored.work_item.as_ref() {
-                    if config.offline {
-                        return Err(configuration_failure(
-                            "offline mode prevents revalidating the work item used by this review",
-                        ));
-                    }
-                    let configured_token_env = token_env
-                        .as_deref()
-                        .or(stored.work_item_token_env.as_deref())
-                        .or(config.hosting.token_env.as_deref())
-                        .unwrap_or("GH_TOKEN");
-                    let token_env =
-                        effective_work_item_token_env(&item.provider, configured_token_env);
-                    let token = std::env::var(token_env).with_context(|| {
-                        format!("{token_env} is required to revalidate the external work item used by this review")
-                    })?;
-                    Some(get_work_item(
-                        &item.provider,
-                        &item.api_base,
-                        token,
-                        &item.reference,
-                    )?)
-                } else {
-                    None
-                };
-                let config_digest =
-                    vero_application::effective_review_config_digest_with_work_item(
-                        &config,
-                        std::path::Path::new(&top),
-                        &stored.selected_reviewers,
-                        current_work_item.as_ref(),
-                    )
-                    .map_err(anyhow::Error::msg)?;
-                let verification_runs = store
-                    .verifications_for_snapshot(&current.digest)
-                    .map_err(anyhow::Error::msg)?;
-                let decision = vero_application::evaluate_and_persist_gate(
-                    &store,
-                    vero_application::GateEvaluation {
-                        review_id: &review,
-                        reviewed_snapshot_id: &stored.snapshot_id,
-                        current: &current,
-                        repository_root: std::path::Path::new(&top),
-                        reviewed_config_digest: &stored.effective_config_digest,
-                        effective_config_digest: &config_digest,
-                        config: &config,
-                        findings: &stored.findings,
-                        policy_findings: stored.policy_findings.as_deref(),
-                        reviewer_outcomes: &stored.reviewer_outcomes,
-                        analysis_complete: stored.analysis_complete,
-                        verification_runs: &verification_runs,
-                    },
-                )
-                .map_err(anyhow::Error::msg)?;
-                let response = vero_application::GateCheckResult::from_decision(
-                    review,
-                    stored.snapshot_id,
-                    current.digest,
-                    decision,
-                );
+                let workspace = operations::Workspace::discover()?;
+                let response = operations::gate_check(&workspace, &review, token_env.as_deref())?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &response)?;
-                        println!();
-                    }
+                    Output::Json => emit_json(&response)?,
                     Output::Text => {
                         println!("Gate status: {:?}", response.status);
                         for reason in &response.reasons {
@@ -4647,101 +4406,31 @@ fn run() -> Result<u8> {
             working_tree,
             output,
         } => {
-            let cwd = std::env::current_dir()?;
-            let top = vero_git::repository_root(&cwd)
-                .map_err(anyhow::Error::msg)?
-                .to_string_lossy()
-                .to_string();
-            let mut config = load_repository_config(std::path::Path::new(&top))?;
-            apply_protected_policy(std::path::Path::new(&top), &mut config)?;
-            let base_oid = base
-                .as_deref()
-                .map(|base_ref| vero_git::merge_base(std::path::Path::new(&top), base_ref))
-                .transpose()
-                .map_err(usage_failure)?;
-            if finding_id.is_some()
-                && (commit.is_some() || base.is_some() || staged || working_tree)
-            {
-                return Err(usage_failure("finding-scoped verification uses the finding's reviewed snapshot; scope flags cannot be combined"));
-            }
-            let scope = if let Some(commit) = commit.as_deref() {
-                format!("commit:{commit}")
-            } else if staged {
-                "staged".to_owned()
-            } else if working_tree {
-                "working_tree".to_owned()
-            } else {
-                "base_and_worktree".to_owned()
-            };
-            let snapshot = current_change_set(&top, base_oid.as_deref(), &scope)?;
-            let db_dir = std::path::Path::new(&top).join(".vero");
-            std::fs::create_dir_all(&db_dir)?;
-            let mut store =
-                ReviewStore::open(&db_dir.join("vero.sqlite")).map_err(anyhow::Error::msg)?;
-            let snapshot = if let Some(finding_id) = finding_id.as_deref() {
-                let finding = store
-                    .finding(finding_id)
-                    .map_err(anyhow::Error::msg)?
-                    .with_context(|| format!("finding {finding_id} was not found"))?;
-                let occurrence = finding
-                    .occurrences
-                    .last()
-                    .context("finding has no review occurrence")?;
-                let payload = store
-                    .get(&occurrence.review_id)
-                    .map_err(anyhow::Error::msg)?
-                    .context("finding review was not found")?;
-                let review: serde_json::Value = serde_json::from_str(&payload)?;
-                let change_set: vero_core::ChangeSet = serde_json::from_value(
-                    review
-                        .get("change_set")
-                        .cloned()
-                        .context("stored review has no change set")?,
-                )?;
-                let current = vero_application::capture_current_change_set(
-                    std::path::Path::new(&top),
-                    &change_set,
-                )
-                .map_err(anyhow::Error::msg)?;
-                if current.digest != occurrence.snapshot_id {
-                    anyhow::bail!("finding is stale because its source snapshot changed");
+            let workspace = operations::Workspace::discover()?;
+            let target = match finding_id {
+                Some(finding_id) => {
+                    if commit.is_some() || base.is_some() || staged || working_tree {
+                        return Err(usage_failure("finding-scoped verification uses the finding's reviewed snapshot; scope flags cannot be combined"));
+                    }
+                    operations::VerifyTarget::Finding(finding_id)
                 }
-                current
-            } else {
-                snapshot
+                None => operations::VerifyTarget::Scope(operations::ScopeRequest::from_flags(
+                    base,
+                    commit,
+                    staged,
+                    working_tree,
+                )?),
             };
-            let run = if impacted_tests {
-                vero_application::run_impacted_test_verification(
-                    std::path::Path::new(&top),
-                    &snapshot,
-                    &profile,
-                    &config,
-                    &mut store,
-                )
-            } else if let Some(finding_id) = finding_id.as_deref() {
-                vero_application::run_finding_verification(
-                    std::path::Path::new(&top),
-                    &snapshot,
-                    finding_id,
-                    &profile,
-                    &config,
-                    &mut store,
-                )
-            } else {
-                vero_application::run_verification(
-                    std::path::Path::new(&top),
-                    &snapshot,
-                    &profile,
-                    &config,
-                    &mut store,
-                )
-            }
-            .map_err(anyhow::Error::msg)?;
+            let run = operations::verify(
+                &workspace,
+                operations::VerifyRequest {
+                    target,
+                    profile_id: &profile,
+                    impacted_tests,
+                },
+            )?;
             match output {
-                Output::Json => {
-                    serde_json::to_writer(std::io::stdout().lock(), &run)?;
-                    println!();
-                }
+                Output::Json => emit_json(&run)?,
                 Output::Text => {
                     println!(
                         "Verification {}: {:?} ({})",
@@ -4825,25 +4514,10 @@ fn run() -> Result<u8> {
                 Ok(0)
             }
             VerificationCommand::Diagnose { run_id, output } => {
-                let cwd = std::env::current_dir()?;
-                let top = vero_git::repository_root(&cwd)
-                    .map_err(anyhow::Error::msg)?
-                    .to_string_lossy()
-                    .to_string();
-                let root = std::path::Path::new(&top);
-                let store = ReviewStore::open(&root.join(".vero/vero.sqlite"))
-                    .map_err(anyhow::Error::msg)?;
-                let run = store
-                    .verification(&run_id)
-                    .map_err(anyhow::Error::msg)?
-                    .with_context(|| format!("verification run {run_id} was not found"))?;
-                let diagnosis = verification_diagnosis::diagnose(root, &store, &run)
-                    .map_err(anyhow::Error::msg)?;
+                let workspace = operations::Workspace::discover()?;
+                let diagnosis = operations::diagnose_verification(&workspace, &run_id)?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &diagnosis)?;
-                        println!();
-                    }
+                    Output::Json => emit_json(&diagnosis)?,
                     Output::Text => {
                         println!(
                             "Verification diagnosis {}: {} ({})",
@@ -4979,21 +4653,11 @@ fn run() -> Result<u8> {
                     Ok(0)
                 }
                 ReviewsCommand::Show { id, output } => {
-                    let store =
-                        ReviewStore::open(&std::path::Path::new(&top).join(".vero/vero.sqlite"))
-                            .map_err(anyhow::Error::msg)?;
-                    let payload = store
-                        .get(&id)
-                        .map_err(anyhow::Error::msg)?
-                        .with_context(|| format!("review {id} was not found"))?;
-                    let review = vero_application::deserialize_review_result(&payload)
-                        .map_err(anyhow::Error::msg)?;
+                    let workspace = operations::Workspace::new(std::path::PathBuf::from(&top));
+                    let review = operations::get_review(&workspace, &id)?;
                     let review = serde_json::to_value(review)?;
                     match output {
-                        Output::Json => {
-                            serde_json::to_writer(std::io::stdout().lock(), &review)?;
-                            println!();
-                        }
+                        Output::Json => emit_json(&review)?,
                         Output::Text => {
                             println!("Review {}", review["review_id"].as_str().unwrap_or(&id));
                             println!("Snapshot: {}", review["snapshot_id"]);
@@ -5364,14 +5028,11 @@ fn run() -> Result<u8> {
                         limit,
                         output,
                     } => {
+                        let workspace = operations::Workspace::new(std::path::PathBuf::from(&top));
                         let report =
-                            imported_history::search(std::path::Path::new(&top), &query, limit)
-                                .map_err(configuration_failure)?;
+                            operations::search_imported_history(&workspace, &query, limit)?;
                         match output {
-                            Output::Json => {
-                                serde_json::to_writer(std::io::stdout().lock(), &report)?;
-                                println!();
-                            }
+                            Output::Json => emit_json(&report)?,
                             Output::Text => {
                                 for item in report["matches"].as_array().into_iter().flatten() {
                                     println!(
@@ -5401,29 +5062,22 @@ fn run() -> Result<u8> {
                             reviewer,
                             output,
                         } => {
-                            let feedback = imported_history::record_feedback(
-                                std::path::Path::new(&top),
-                                imported_history::FeedbackRecordInput {
+                            let workspace =
+                                operations::Workspace::new(std::path::PathBuf::from(&top));
+                            let recorded = operations::record_external_feedback(
+                                &workspace,
+                                operations::ExternalFeedbackRequest {
                                     archive_digest: &archive_digest,
                                     external_id: &external_id,
                                     category: &category,
                                     label: label.into(),
                                     reason: &reason,
                                     reviewer: &reviewer,
-                                    recorded_at_unix: current_unix_time()?,
                                 },
-                            )
-                            .map_err(configuration_failure)?;
+                            )?;
+                            let feedback = &recorded.feedback;
                             match output {
-                                Output::Json => {
-                                    serde_json::to_writer(std::io::stdout().lock(), &serde_json::json!({
-                                        "schema_version": 1,
-                                        "feedback": feedback,
-                                        "trust": "human_labeled_external_context",
-                                        "gate_eligible": false
-                                    }))?;
-                                    println!();
-                                }
+                                Output::Json => emit_json(&recorded)?,
                                 Output::Text => println!("Recorded {} feedback for external comment {} in {} (human label; never gate eligible).", feedback.label_text(), feedback.external_id, feedback.archive_digest),
                             }
                             Ok(0)
@@ -5432,23 +5086,15 @@ fn run() -> Result<u8> {
                             archive_digest,
                             output,
                         } => {
-                            let feedback = imported_history::list_feedback(
-                                std::path::Path::new(&top),
+                            let workspace =
+                                operations::Workspace::new(std::path::PathBuf::from(&top));
+                            let listed = operations::list_external_feedback(
+                                &workspace,
                                 archive_digest.as_deref(),
-                            )
-                            .map_err(configuration_failure)?;
+                            )?;
+                            let feedback = &listed.feedback;
                             match output {
-                                Output::Json => {
-                                    serde_json::to_writer(
-                                        std::io::stdout().lock(),
-                                        &serde_json::json!({
-                                            "schema_version": 1,
-                                            "feedback": feedback,
-                                            "gate_eligible": false
-                                        }),
-                                    )?;
-                                    println!();
-                                }
+                                Output::Json => emit_json(&listed)?,
                                 Output::Text => {
                                     for item in feedback {
                                         println!(
@@ -5469,20 +5115,10 @@ fn run() -> Result<u8> {
             }
         }
         Command::Analytics { output } => {
-            let cwd = std::env::current_dir()?;
-            let top = vero_git::repository_root(&cwd)
-                .map_err(anyhow::Error::msg)?
-                .to_string_lossy()
-                .to_string();
-            let store = ReviewStore::open(&std::path::Path::new(&top).join(".vero/vero.sqlite"))
-                .map_err(anyhow::Error::msg)?;
-            let analytics = analytics::summarize(std::path::Path::new(&top), &store)
-                .map_err(anyhow::Error::msg)?;
+            let workspace = operations::Workspace::discover()?;
+            let analytics = operations::quality_analytics(&workspace)?;
             match output {
-                Output::Json => {
-                    serde_json::to_writer(std::io::stdout().lock(), &analytics)?;
-                    println!();
-                }
+                Output::Json => emit_json(&analytics)?,
                 Output::Text => {
                     println!(
                         "Local quality analytics ({} reviews)",
@@ -7044,6 +6680,7 @@ fn run() -> Result<u8> {
             }
         }
         Command::Findings { command } => {
+            let workspace = operations::Workspace::discover()?;
             let cwd = std::env::current_dir()?;
             let top = vero_git::repository_root(&cwd)
                 .map_err(anyhow::Error::msg)?
@@ -7056,23 +6693,23 @@ fn run() -> Result<u8> {
                     severity,
                     status,
                     review,
+                    limit,
+                    offset,
                     output,
                 } => {
-                    let records = store
-                        .list_findings(
-                            severity.map(Into::into),
-                            status.map(Into::into),
-                            review.as_deref(),
-                        )
-                        .map_err(anyhow::Error::msg)?;
+                    let page = operations::list_findings(
+                        &workspace,
+                        operations::FindingQuery {
+                            review_id: review,
+                            severity: severity.map(Into::into),
+                            status: status.map(Into::into),
+                            limit: Some(limit),
+                            offset: Some(offset),
+                        },
+                    )?;
+                    let records = &page.findings;
                     match output {
-                        Output::Json => {
-                            serde_json::to_writer(
-                                std::io::stdout().lock(),
-                                &serde_json::json!({"schema_version": 1, "findings": records}),
-                            )?;
-                            println!();
-                        }
+                        Output::Json => emit_json(&page)?,
                         Output::Text => {
                             if records.is_empty() {
                                 println!("No findings");
@@ -7086,27 +6723,25 @@ fn run() -> Result<u8> {
                                     record.finding.path.as_deref().unwrap_or("<no path>")
                                 );
                             }
+                            if page.offset + records.len() < page.total {
+                                println!(
+                                    "Showing {}-{} of {}; use --offset {} for more",
+                                    page.offset + 1,
+                                    page.offset + records.len(),
+                                    page.total,
+                                    page.offset + records.len()
+                                );
+                            }
                         }
                     }
                     Ok(0)
                 }
                 FindingsCommand::Show { id, output } => {
-                    let record = store
-                        .finding(&id)
-                        .map_err(anyhow::Error::msg)?
-                        .with_context(|| format!("finding {id} was not found"))?;
-                    let verification_runs = store
-                        .verifications_for_finding(&id)
-                        .map_err(anyhow::Error::msg)?;
+                    let detail = operations::finding_detail(&workspace, &id)?;
+                    let record = &detail.finding;
+                    let verification_runs = &detail.verification_runs;
                     match output {
-                        Output::Json => {
-                            println!(
-                                "{}",
-                                serde_json::to_string_pretty(
-                                    &serde_json::json!({"schema_version": 1, "finding": record, "verification_runs": verification_runs})
-                                )?
-                            );
-                        }
+                        Output::Json => emit_json(&detail)?,
                         Output::Text => {
                             println!(
                                 "{} {:?} ({:?})",
@@ -7131,7 +6766,7 @@ fn run() -> Result<u8> {
                                 println!("Finding-specific verification: none recorded");
                             } else {
                                 println!("Finding-specific verification:");
-                                for run in &verification_runs {
+                                for run in verification_runs {
                                     println!(
                                         "  {}  {}  {}  snapshot {}",
                                         run.run_id,
@@ -7155,22 +6790,9 @@ fn run() -> Result<u8> {
                     context_lines,
                     output,
                 } => {
-                    let record = store
-                        .finding(&id)
-                        .map_err(anyhow::Error::msg)?
-                        .with_context(|| format!("finding {id} was not found"))?;
-                    let task = finding_task::build(
-                        std::path::Path::new(&top),
-                        &store,
-                        record,
-                        context_lines,
-                    )
-                    .map_err(anyhow::Error::msg)?;
+                    let task = operations::finding_task(&workspace, &id, context_lines)?;
                     match output {
-                        Output::Json => {
-                            serde_json::to_writer(std::io::stdout().lock(), &task)?;
-                            println!();
-                        }
+                        Output::Json => emit_json(&task)?,
                         Output::Text => {
                             println!("Task {}", task.task_id);
                             println!("Review: {}  Snapshot: {}", task.review_id, task.snapshot_id);
@@ -7202,18 +6824,10 @@ fn run() -> Result<u8> {
                     context_lines,
                     output,
                 } => {
-                    let package = finding_task::build_package(
-                        std::path::Path::new(&top),
-                        &store,
-                        &ids,
-                        context_lines,
-                    )
-                    .map_err(anyhow::Error::msg)?;
+                    let package =
+                        operations::finding_work_package(&workspace, &ids, context_lines)?;
                     match output {
-                        Output::Json => {
-                            serde_json::to_writer(std::io::stdout().lock(), &package)?;
-                            println!();
-                        }
+                        Output::Json => emit_json(&package)?,
                         Output::Text => {
                             println!("Work package {}", package.package_id);
                             println!(
@@ -7591,11 +7205,21 @@ fn run() -> Result<u8> {
                         }
                     })
                 }
-                FindingsCommand::SetStatus { id, status, reason } => {
-                    store
-                        .set_finding_status(&id, status.into(), &reason)
-                        .map_err(anyhow::Error::msg)?;
-                    println!("Updated finding {id}");
+                FindingsCommand::SetStatus {
+                    id,
+                    status,
+                    reason,
+                    output,
+                } => {
+                    let update =
+                        operations::set_finding_status(&workspace, &id, status.into(), &reason)?;
+                    match output {
+                        Output::Json => emit_json(&update)?,
+                        Output::Text => println!(
+                            "Updated finding {} to {:?}. {}",
+                            update.finding_id, update.status, update.note
+                        ),
+                    }
                     Ok(0)
                 }
                 FindingsCommand::Feedback { command } => match command {
@@ -7607,14 +7231,18 @@ fn run() -> Result<u8> {
                         reviewer,
                         output,
                     } => {
-                        let feedback = store
-                            .add_finding_feedback(&id, &snapshot, label.into(), &reason, &reviewer)
-                            .map_err(anyhow::Error::msg)?;
+                        let feedback = operations::record_finding_feedback(
+                            &workspace,
+                            operations::FeedbackRequest {
+                                finding_id: &id,
+                                snapshot_id: &snapshot,
+                                label: label.into(),
+                                reason: &reason,
+                                reviewer: &reviewer,
+                            },
+                        )?;
                         match output {
-                            Output::Json => {
-                                serde_json::to_writer(std::io::stdout().lock(), &feedback)?;
-                                println!();
-                            }
+                            Output::Json => emit_json(&feedback)?,
                             Output::Text => println!(
                                 "Recorded {} feedback for finding {} on snapshot {}",
                                 feedback_label_text(feedback.label),
@@ -7970,25 +7598,45 @@ mod tests {
         ])));
     }
 
+    fn output_defaults(command: &clap::Command, path: &str, found: &mut Vec<(String, String)>) {
+        for argument in command.get_arguments() {
+            if argument.get_id() == "output" {
+                let default = argument
+                    .get_default_values()
+                    .iter()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                found.push((path.to_owned(), default));
+            }
+        }
+        for subcommand in command.get_subcommands() {
+            output_defaults(
+                subcommand,
+                &format!("{path} {}", subcommand.get_name()),
+                found,
+            );
+        }
+    }
+
     #[test]
-    fn hosting_pr_context_defaults_to_json_and_explicit_text_is_respected() {
-        let parsed = Cli::try_parse_from([
-            "vero",
-            "hosting",
-            "pr-context",
-            "--repository",
-            "org/project/repo",
-            "--number",
-            "7",
-        ])
-        .unwrap();
-        let Command::Hosting {
-            command: HostingCommand::PrContext { output, .. },
-        } = parsed.command
-        else {
-            panic!("expected hosting pr-context");
-        };
-        assert!(matches!(output, Output::Json));
+    fn every_output_flag_defaults_to_human_readable_text() {
+        use clap::CommandFactory;
+        let mut found = Vec::new();
+        output_defaults(&Cli::command(), "vero", &mut found);
+        assert!(
+            found.len() > 40,
+            "expected many --output flags, found {}",
+            found.len()
+        );
+        let inconsistent: Vec<_> = found
+            .iter()
+            .filter(|(_, default)| default != "text")
+            .collect();
+        assert!(
+            inconsistent.is_empty(),
+            "--output must default to text everywhere; use --output json for machine output: {inconsistent:#?}"
+        );
         let parsed = Cli::try_parse_from([
             "vero",
             "hosting",
@@ -7998,7 +7646,7 @@ mod tests {
             "--number",
             "7",
             "--output",
-            "text",
+            "json",
         ])
         .unwrap();
         let Command::Hosting {
@@ -8007,7 +7655,7 @@ mod tests {
         else {
             panic!("expected hosting pr-context");
         };
-        assert!(matches!(output, Output::Text));
+        assert!(matches!(output, Output::Json));
     }
 
     #[test]
