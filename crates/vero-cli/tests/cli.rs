@@ -9919,6 +9919,145 @@ fn review_import_rejects_fifo_without_blocking() {
 
 #[cfg(unix)]
 #[test]
+fn mcp_tools_declare_titles_safety_annotations_and_documented_inputs() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let directory = tempfile::tempdir().unwrap();
+    init_git(directory.path());
+    fs::write(directory.path().join("tracked.txt"), "fixture\n").unwrap();
+    commit_all(directory.path(), "fixture");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vero"))
+        .args(["mcp", "serve", "--transport", "stdio"])
+        .current_dir(directory.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut exchange = |value: serde_json::Value| {
+        writeln!(input, "{}", serde_json::to_string(&value).unwrap()).unwrap();
+        input.flush().unwrap();
+        if value.get("id").is_none() {
+            return serde_json::Value::Null;
+        }
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        serde_json::from_str::<serde_json::Value>(&line).unwrap()
+    };
+    let initialized = exchange(serde_json::json!({
+        "jsonrpc":"2.0", "id":1, "method":"initialize",
+        "params":{"protocolVersion":"2025-06-18","capabilities":{},
+            "clientInfo":{"name":"vero-contract-test","version":"1"}}
+    }));
+    let instructions = initialized["result"]["instructions"].as_str().unwrap_or("");
+    assert!(
+        instructions.contains("evaluate_gate"),
+        "server should explain the review workflow to agents: {initialized}"
+    );
+    exchange(serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}));
+    let listed =
+        exchange(serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let tools = listed["result"]["tools"].as_array().unwrap();
+    let read_only: std::collections::BTreeSet<&str> = [
+        "list_findings",
+        "get_quality_analytics",
+        "get_finding",
+        "get_finding_task",
+        "get_finding_work_package",
+        "search_imported_review_history",
+        "list_external_review_feedback",
+        "list_rule_candidates",
+        "list_rule_approvals",
+        "rule_effectiveness",
+        "get_review",
+        "diagnose_verification",
+        "analyze_impact",
+        "analyze_cross_repository_impact",
+        "acceptance_traceability",
+        "get_repository_context",
+        "get_applicable_standards",
+    ]
+    .into_iter()
+    .collect();
+    let mut problems = Vec::new();
+    for tool in tools {
+        let name = tool["name"].as_str().unwrap();
+        if tool["title"].as_str().is_none_or(str::is_empty) {
+            problems.push(format!("{name}: missing title"));
+        }
+        let annotations = &tool["annotations"];
+        match annotations["readOnlyHint"].as_bool() {
+            None => problems.push(format!("{name}: missing readOnlyHint")),
+            Some(flag) if flag != read_only.contains(name) => {
+                problems.push(format!("{name}: readOnlyHint should be {}", !flag))
+            }
+            Some(false) if annotations["destructiveHint"].as_bool().is_none() => {
+                problems.push(format!("{name}: write tool missing destructiveHint"))
+            }
+            Some(_) => {}
+        }
+        if annotations["openWorldHint"].as_bool().is_none() {
+            problems.push(format!("{name}: missing openWorldHint"));
+        }
+        let properties = tool["inputSchema"]["properties"].as_object();
+        for (property, schema) in properties.into_iter().flatten() {
+            if schema["description"].as_str().is_none_or(str::is_empty) {
+                problems.push(format!("{name}.{property}: undocumented input"));
+            }
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "MCP tool contract gaps:\n{}",
+        problems.join("\n")
+    );
+
+    let enum_values = |tool: &str, property: &str| -> Vec<String> {
+        let tool = tools.iter().find(|item| item["name"] == tool).unwrap();
+        let schema = &tool["inputSchema"];
+        let property_schema = &schema["properties"][property];
+        let resolved = property_schema["$ref"]
+            .as_str()
+            .or_else(|| property_schema["anyOf"][0]["$ref"].as_str())
+            .and_then(|reference| reference.rsplit('/').next())
+            .map(|name| schema["$defs"][name].clone())
+            .unwrap_or_else(|| property_schema.clone());
+        resolved["enum"]
+            .as_array()
+            .map(|values| {
+                values
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        enum_values("review_changes", "scope"),
+        ["working_tree", "staged", "base", "commit"]
+    );
+    assert_eq!(
+        enum_values("list_findings", "severity"),
+        ["critical", "high", "medium", "low", "info"]
+    );
+    assert_eq!(
+        enum_values("record_finding_feedback", "label"),
+        [
+            "confirmed",
+            "false_positive",
+            "actionable",
+            "not_actionable"
+        ]
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn mcp_stdio_supports_legacy_initialize_and_read_only_tool_calls() {
     use std::io::{BufRead, BufReader, Write};
 
