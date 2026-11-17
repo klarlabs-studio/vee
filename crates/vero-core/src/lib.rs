@@ -3353,6 +3353,65 @@ policy_profiles:
     }
 
     #[test]
+    fn vendor_api_keys_are_accepted_only_for_their_vendor_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".vero.yaml");
+        let load = |env: &str, endpoint: &str| {
+            std::fs::write(
+                &file,
+                format!("version: 1\nproviders:\n  api:\n    kind: openai_compatible\n    egress: network\n    endpoint: {endpoint}\n    model: some-model\n    env_allowlist: [{env}]\n"),
+            )
+            .unwrap();
+            RepositoryConfig::load(&file)
+        };
+        for (env, endpoint) in [
+            (
+                "OPENAI_API_KEY",
+                "https://api.openai.com/v1/chat/completions",
+            ),
+            (
+                "OPENAI_API_KEY",
+                "https://llm.internal.example/v1/chat/completions",
+            ),
+            (
+                "ANTHROPIC_API_KEY",
+                "https://api.anthropic.com/v1/chat/completions",
+            ),
+            (
+                "GEMINI_API_KEY",
+                "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            ),
+        ] {
+            assert!(load(env, endpoint).is_ok(), "{env} -> {endpoint}");
+        }
+        for (env, endpoint, message) in [
+            (
+                "ANTHROPIC_API_KEY",
+                "https://attacker.example/v1/chat/completions",
+                "only to its vendor endpoint",
+            ),
+            (
+                "GEMINI_API_KEY",
+                "http://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+                "only to its vendor endpoint",
+            ),
+            (
+                "AWS_SECRET_ACCESS_KEY",
+                "https://api.openai.com/v1/chat/completions",
+                "accepts only",
+            ),
+            (
+                "OPENAI_API_KEY, ANTHROPIC_API_KEY",
+                "https://api.anthropic.com/v1/chat/completions",
+                "at most one API key",
+            ),
+        ] {
+            let error = load(env, endpoint).unwrap_err();
+            assert!(error.contains(message), "{env} -> {endpoint}: {error}");
+        }
+    }
+
+    #[test]
     fn review_store_persists_payload_and_staleness_is_exact() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = ReviewStore::open(&dir.path().join("reviews.sqlite")).unwrap();
@@ -4728,6 +4787,44 @@ pub struct UserProviderConfig {
     #[serde(default)]
     pub providers: std::collections::BTreeMap<String, ProviderConfig>,
 }
+/// API key environment variables an HTTP provider may forward, with the vendor
+/// host each key is bound to. `OPENAI_API_KEY` is also the conventional key for
+/// self-hosted OpenAI-compatible servers, so it is not host-bound.
+pub const PROVIDER_API_KEYS: &[(&str, Option<&str>)] = &[
+    ("OPENAI_API_KEY", None),
+    ("ANTHROPIC_API_KEY", Some("api.anthropic.com")),
+    ("GEMINI_API_KEY", Some("generativelanguage.googleapis.com")),
+];
+
+/// A repository configuration must not be able to route a vendor credential to an
+/// arbitrary endpoint, so vendor keys are accepted only for their vendor's HTTPS host.
+fn validate_api_key_binding(id: &str, names: &[String], endpoint: &url::Url) -> Result<(), String> {
+    if names.len() > 1 {
+        return Err(format!(
+            "provider {id} openai_compatible forwards at most one API key"
+        ));
+    }
+    let Some(name) = names.first() else {
+        return Ok(());
+    };
+    let Some((_, host)) = PROVIDER_API_KEYS.iter().find(|(key, _)| key == name) else {
+        let accepted: Vec<_> = PROVIDER_API_KEYS.iter().map(|(key, _)| *key).collect();
+        return Err(format!(
+            "provider {id} openai_compatible accepts only {} in env_allowlist",
+            accepted.join(", ")
+        ));
+    };
+    if let Some(host) = host {
+        let bound = endpoint.scheme() == "https" && endpoint.host_str() == Some(*host);
+        if !bound {
+            return Err(format!(
+                "provider {id}: {name} is forwarded only to its vendor endpoint https://{host}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn default_severities() -> Vec<String> {
     vec!["critical".into(), "high".into()]
 }
@@ -5028,13 +5125,7 @@ impl RepositoryConfig {
                         "provider {id} ollama_native does not accept environment variables"
                     ));
                 }
-                if provider
-                    .env_allowlist
-                    .iter()
-                    .any(|name| name != "OPENAI_API_KEY")
-                {
-                    return Err(format!("provider {id} openai_compatible only accepts OPENAI_API_KEY in env_allowlist"));
-                }
+                validate_api_key_binding(id, &provider.env_allowlist, &url)?;
                 if provider.timeout_seconds == 0 {
                     return Err(format!("provider {id} requires a positive timeout"));
                 }

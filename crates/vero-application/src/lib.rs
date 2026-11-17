@@ -77,7 +77,23 @@ pub fn load_repository_config(root: &Path) -> Result<RepositoryConfig, String> {
     )
 }
 
-fn user_config_path() -> Option<PathBuf> {
+/// Load repository configuration merged with an explicit user provider config
+/// (instead of the environment-selected one).
+pub fn load_repository_config_with_user_config(
+    root: &Path,
+    user_config: Option<&Path>,
+) -> Result<RepositoryConfig, String> {
+    RepositoryConfig::load_with_provider_defaults_and_offline(
+        &root.join(".vero.yaml"),
+        user_config.filter(|path| path.exists()),
+        offline_override_enabled()?,
+    )
+}
+
+/// Where the per-user provider configuration lives, whether or not it exists yet:
+/// `$VERO_CONFIG`, else `$XDG_CONFIG_HOME/vero/config.yaml` (`%APPDATA%` on Windows),
+/// else `~/.config/vero/config.yaml`.
+pub fn user_config_location() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("VERO_CONFIG") {
         return Some(PathBuf::from(path));
     }
@@ -88,7 +104,10 @@ fn user_config_path() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
     base.map(|path| path.join("vero").join("config.yaml"))
-        .filter(|path| path.exists())
+}
+
+fn user_config_path() -> Option<PathBuf> {
+    user_config_location().filter(|path| path.exists())
 }
 
 /// Validate a proposed repository YAML configuration with the same schema,
@@ -1067,7 +1086,11 @@ fn execute_openai_compatible(
     let token = request
         .environment
         .iter()
-        .find(|(name, _)| name == "OPENAI_API_KEY")
+        .find(|(name, _)| {
+            vero_core::PROVIDER_API_KEYS
+                .iter()
+                .any(|(key, _)| key == name)
+        })
         .map(|(_, value)| value.clone());
     let limit = request.output_limit_bytes;
     let timeout = Duration::from_secs(request.timeout_seconds.max(1));
@@ -1680,6 +1703,19 @@ fn parse_codex_jsonl_output(
         "Codex JSONL output did not include a completed assistant message".to_string()
     })?;
     Ok((message.into_bytes(), reported_usage.then_some(usage)))
+}
+
+/// Run a configured provider's bounded version probe, as reviews do before execution.
+/// Returns `None` for providers without a version probe (HTTP adapters, generic
+/// CLIs without `version_args`).
+pub fn provider_version(
+    provider: &vero_core::ProviderConfig,
+    root: &Path,
+) -> Result<Option<String>, String> {
+    let environment = vero_core::resolve_environment_allowlist(&provider.env_allowlist, |name| {
+        std::env::var(name).ok()
+    })?;
+    probe_provider_version(provider, root, &environment, None)
 }
 
 fn probe_provider_version(
