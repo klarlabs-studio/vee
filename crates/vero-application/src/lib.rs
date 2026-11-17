@@ -4918,14 +4918,28 @@ fn analyze_impact_with_typescript_server(
     let mut coverage_complete = true;
     let mut scanned_bytes = 0usize;
     let mut scan_limit_reached = false;
+    // Read in chunks through one `git cat-file --batch` per chunk; a chunk is
+    // small enough that stopping at a limit wastes little reading.
+    const READ_CHUNK: usize = 256;
+    let mut pending = std::collections::VecDeque::new();
     for (index, path) in candidates.iter().enumerate() {
         if index >= MAX_SOURCE_FILES {
             coverage_complete = false;
             scan_limit_reached = true;
             break;
         }
+        if pending.is_empty() {
+            let end = (index + READ_CHUNK).min(candidates.len()).min(MAX_SOURCE_FILES);
+            pending.extend(vero_git::read_snapshot_files(
+                root,
+                change_set,
+                &candidates[index..end],
+            )?);
+        }
         let relative = path.to_string_lossy().replace('\\', "/");
-        let bytes = vero_git::read_snapshot_file(root, change_set, path)?;
+        let bytes = pending
+            .pop_front()
+            .ok_or("batched snapshot read returned too few files")?;
         if let Some(bytes) = bytes {
             if bytes.len() <= MAX_FILE_BYTES
                 && scanned_bytes.saturating_add(bytes.len()) <= MAX_SOURCE_BYTES
@@ -5031,6 +5045,11 @@ fn analyze_impact_with_typescript_server(
     if let Some(module_path) = go_module_path.as_deref() {
         paths.extend(go_local_dependency_edges(module_path, &changed, &source));
     }
+    // Each Rust candidate is parsed once and queried for every changed file.
+    let mut rust_occurrences =
+        std::collections::HashMap::<&str, Option<Vec<(String, u32, bool)>>>::new();
+    // Comment- and string-stripped TypeScript, Python, and Java, computed once per file.
+    let mut stripped_code = std::collections::HashMap::<&str, String>::new();
     for changed_path in &changed {
         let local_symbols: Vec<_> = changed_symbols_by_path
             .get(changed_path)
@@ -5038,13 +5057,26 @@ fn analyze_impact_with_typescript_server(
             .unwrap_or_default()
             .into_iter()
             .collect();
+        let symbol_matcher = SymbolMatcher::new(&local_symbols);
         for (candidate_path, candidate_text) in &source {
             let same_file_rust = candidate_path == changed_path && candidate_path.ends_with(".rs");
             if !should_scan_impact_candidate(&changed, changed_path, candidate_path) {
                 continue;
             }
             if candidate_path.ends_with(".rs") {
-                match rust_references(candidate_text, &local_symbols) {
+                let occurrences = rust_occurrences
+                    .entry(candidate_path.as_str())
+                    .or_insert_with(|| rust_identifier_occurrences(candidate_text));
+                let wanted: std::collections::HashSet<&str> =
+                    local_symbols.iter().map(String::as_str).collect();
+                let references = occurrences.as_ref().map(|occurrences| {
+                    occurrences
+                        .iter()
+                        .filter(|(name, _, _)| wanted.contains(name.as_str()))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                });
+                match references {
                     Some(references) => {
                         for (symbol, line, in_test_context) in references {
                             if same_file_rust && !in_test_context {
@@ -5074,8 +5106,8 @@ fn analyze_impact_with_typescript_server(
                             continue;
                         }
                         for (line_index, line) in candidate_text.lines().enumerate() {
-                            for symbol in &local_symbols {
-                                if contains_identifier(line, symbol) {
+                            for symbol in symbol_matcher.matches(line) {
+                                {
                                     paths.push(ImpactEdge {
                                         source_path: changed_path.clone(),
                                         affected_path: candidate_path.clone(),
@@ -5099,9 +5131,13 @@ fn analyze_impact_with_typescript_server(
                 continue;
             }
             if is_typescript_path(candidate_path) {
-                let code = typescript_code_without_comments_and_strings(candidate_text);
+                let code = stripped_code
+                    .entry(candidate_path.as_str())
+                    .or_insert_with(|| {
+                        typescript_code_without_comments_and_strings(candidate_text)
+                    });
                 for (line_index, line) in code.lines().enumerate() {
-                    for symbol in &local_symbols {
+                    for symbol in symbol_matcher.matches(line) {
                         if typescript_analysis
                             .resolved_symbols
                             .contains(&(changed_path.clone(), symbol.clone()))
@@ -5111,7 +5147,7 @@ fn analyze_impact_with_typescript_server(
                             // edges for aliases and same-named unrelated symbols.
                             continue;
                         }
-                        if contains_identifier(line, symbol) {
+                        {
                             paths.push(ImpactEdge {
                                 source_path: changed_path.clone(),
                                 affected_path: candidate_path.clone(),
@@ -5136,10 +5172,12 @@ fn analyze_impact_with_typescript_server(
                 {
                     continue;
                 }
-                let code = python_code_without_comments_and_strings(candidate_text);
+                let code = stripped_code
+                    .entry(candidate_path.as_str())
+                    .or_insert_with(|| python_code_without_comments_and_strings(candidate_text));
                 for (line_index, line) in code.lines().enumerate() {
-                    for symbol in &local_symbols {
-                        if contains_identifier(line, symbol) {
+                    for symbol in symbol_matcher.matches(line) {
+                        {
                             paths.push(ImpactEdge {
                                 source_path: changed_path.clone(),
                                 affected_path: candidate_path.clone(),
@@ -5159,10 +5197,12 @@ fn analyze_impact_with_typescript_server(
                 continue;
             }
             if is_java_path(candidate_path) {
-                let code = java_code_without_comments_and_strings(candidate_text);
+                let code = stripped_code
+                    .entry(candidate_path.as_str())
+                    .or_insert_with(|| java_code_without_comments_and_strings(candidate_text));
                 for (line_index, line) in code.lines().enumerate() {
-                    for symbol in &local_symbols {
-                        if contains_identifier(line, symbol) {
+                    for symbol in symbol_matcher.matches(line) {
+                        {
                             paths.push(ImpactEdge {
                                 source_path: changed_path.clone(),
                                 affected_path: candidate_path.clone(),
@@ -5182,14 +5222,15 @@ fn analyze_impact_with_typescript_server(
                 continue;
             }
             for (line_index, line) in candidate_text.lines().enumerate() {
-                for symbol in &local_symbols {
+                let code_line = go_code_without_comments_and_strings(line);
+                for symbol in symbol_matcher.matches(&code_line) {
                     if go_analysis
                         .resolved_symbols
                         .contains(&(changed_path.clone(), symbol.clone()))
                     {
                         continue;
                     }
-                    if contains_identifier(&go_code_without_comments_and_strings(line), symbol) {
+                    {
                         paths.push(ImpactEdge {
                             source_path: changed_path.clone(),
                             affected_path: candidate_path.clone(),
@@ -6761,9 +6802,15 @@ fn rust_test_module_paths(
     output
 }
 
-fn rust_references(source: &str, symbols: &[String]) -> Option<Vec<(String, u32, bool)>> {
+/// Identifier occurrences in Rust paths, method calls, `use` trees, and macro
+/// tokens whose name satisfies `keep`, as sorted, deduplicated
+/// `(name, line, in_test_context)` triples. `None` when the file does not parse.
+fn rust_identifier_occurrences_matching(
+    source: &str,
+    keep: &dyn Fn(&str) -> bool,
+) -> Option<Vec<(String, u32, bool)>> {
     struct References<'a> {
-        symbols: &'a [String],
+        keep: &'a dyn Fn(&str) -> bool,
         found: Vec<(String, u32, bool)>,
         in_test_context: bool,
     }
@@ -6771,7 +6818,7 @@ fn rust_references(source: &str, symbols: &[String]) -> Option<Vec<(String, u32,
         fn record_path(&mut self, path: &syn::Path) {
             for segment in &path.segments {
                 let name = segment.ident.to_string();
-                if self.symbols.contains(&name) {
+                if (self.keep)(&name) {
                     self.found.push((
                         name,
                         segment.ident.span().start().line as u32,
@@ -6808,7 +6855,7 @@ fn rust_references(source: &str, symbols: &[String]) -> Option<Vec<(String, u32,
         }
         fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
             let name = node.method.to_string();
-            if self.symbols.contains(&name) {
+            if (self.keep)(&name) {
                 self.found.push((
                     name,
                     node.method.span().start().line as u32,
@@ -6838,7 +6885,7 @@ fn rust_references(source: &str, symbols: &[String]) -> Option<Vec<(String, u32,
             }
             collect(&node.tree, &mut names);
             for name in names {
-                if self.symbols.contains(&name) {
+                if (self.keep)(&name) {
                     self.found.push((
                         name,
                         node.tree.span().start().line as u32,
@@ -6851,7 +6898,7 @@ fn rust_references(source: &str, symbols: &[String]) -> Option<Vec<(String, u32,
             self.record_path(&node.path);
             fn visit_tokens(
                 tokens: proc_macro2::TokenStream,
-                symbols: &[String],
+                keep: &dyn Fn(&str) -> bool,
                 in_test_context: bool,
                 found: &mut Vec<(String, u32, bool)>,
             ) {
@@ -6859,7 +6906,7 @@ fn rust_references(source: &str, symbols: &[String]) -> Option<Vec<(String, u32,
                     match token {
                         proc_macro2::TokenTree::Ident(ident) => {
                             let name = ident.to_string();
-                            if symbols.contains(&name) {
+                            if keep(&name) {
                                 found.push((
                                     name,
                                     ident.span().start().line as u32,
@@ -6868,7 +6915,7 @@ fn rust_references(source: &str, symbols: &[String]) -> Option<Vec<(String, u32,
                             }
                         }
                         proc_macro2::TokenTree::Group(group) => {
-                            visit_tokens(group.stream(), symbols, in_test_context, found)
+                            visit_tokens(group.stream(), keep, in_test_context, found)
                         }
                         proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => {}
                     }
@@ -6876,7 +6923,7 @@ fn rust_references(source: &str, symbols: &[String]) -> Option<Vec<(String, u32,
             }
             visit_tokens(
                 node.tokens.clone(),
-                self.symbols,
+                self.keep,
                 self.in_test_context,
                 &mut self.found,
             );
@@ -6885,7 +6932,7 @@ fn rust_references(source: &str, symbols: &[String]) -> Option<Vec<(String, u32,
     }
     let file = syn::parse_file(source).ok()?;
     let mut visitor = References {
-        symbols,
+        keep,
         found: Vec::new(),
         in_test_context: false,
     };
@@ -6893,6 +6940,19 @@ fn rust_references(source: &str, symbols: &[String]) -> Option<Vec<(String, u32,
     visitor.found.sort();
     visitor.found.dedup();
     Some(visitor.found)
+}
+
+/// Every identifier occurrence in a Rust file (see
+/// [`rust_identifier_occurrences_matching`]); parse once, query many times.
+fn rust_identifier_occurrences(source: &str) -> Option<Vec<(String, u32, bool)>> {
+    rust_identifier_occurrences_matching(source, &|_| true)
+}
+
+#[cfg(test)]
+fn rust_references(source: &str, symbols: &[String]) -> Option<Vec<(String, u32, bool)>> {
+    rust_identifier_occurrences_matching(source, &|name| {
+        symbols.iter().any(|symbol| symbol == name)
+    })
 }
 
 fn has_test_attribute(attributes: &[syn::Attribute]) -> bool {
@@ -7624,6 +7684,64 @@ pub fn java_declared_symbols(source: &str) -> std::collections::BTreeSet<String>
         }
     }
     symbols
+}
+
+/// Finds which of a fixed list of symbols occur in a line as whole identifiers,
+/// equivalent to `contains_identifier(line, symbol)` for each symbol, but
+/// tokenizing the line once instead of searching it once per symbol.
+struct SymbolMatcher<'a> {
+    symbols: &'a [String],
+    /// Identifier-only symbols by name, with every position they appear at.
+    by_name: std::collections::HashMap<&'a str, Vec<usize>>,
+    /// Symbols containing non-identifier characters (for example `r#type`),
+    /// which still use substring matching.
+    other: Vec<usize>,
+}
+
+impl<'a> SymbolMatcher<'a> {
+    fn new(symbols: &'a [String]) -> Self {
+        let mut by_name = std::collections::HashMap::<&str, Vec<usize>>::new();
+        let mut other = Vec::new();
+        for (index, symbol) in symbols.iter().enumerate() {
+            if !symbol.is_empty() && symbol.chars().all(is_identifier_character) {
+                by_name.entry(symbol.as_str()).or_default().push(index);
+            } else {
+                other.push(index);
+            }
+        }
+        Self {
+            symbols,
+            by_name,
+            other,
+        }
+    }
+
+    /// Symbols occurring in `line`, in their original list order.
+    fn matches(&self, line: &str) -> Vec<&'a String> {
+        let mut indices: Vec<usize> = line
+            .split(|character: char| !is_identifier_character(character))
+            .filter(|token| !token.is_empty())
+            .filter_map(|token| self.by_name.get(token))
+            .flatten()
+            .copied()
+            .chain(
+                self.other
+                    .iter()
+                    .copied()
+                    .filter(|index| contains_identifier(line, &self.symbols[*index])),
+            )
+            .collect();
+        indices.sort_unstable();
+        indices.dedup();
+        indices
+            .into_iter()
+            .map(|index| &self.symbols[index])
+            .collect()
+    }
+}
+
+fn is_identifier_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
 }
 
 fn contains_identifier(line: &str, symbol: &str) -> bool {

@@ -227,6 +227,105 @@ pub fn read_snapshot_file(
     }
 }
 
+/// Read many snapshot files at once: changed paths exactly as
+/// [`read_snapshot_file`] does, and unchanged paths from the snapshot's head tree
+/// through a single `git cat-file --batch` process instead of one `git show` per
+/// path. Results are in input order.
+pub fn read_snapshot_files(
+    root: &Path,
+    change_set: &ChangeSet,
+    relatives: &[PathBuf],
+) -> Result<Vec<Option<Vec<u8>>>, String> {
+    let mut results: Vec<Option<Option<Vec<u8>>>> = vec![None; relatives.len()];
+    let mut batched = Vec::new();
+    for (index, relative) in relatives.iter().enumerate() {
+        validate_relative_path(relative)?;
+        let normalized = relative.to_string_lossy().replace('\\', "/");
+        let changed = change_set.files.iter().any(|file| file.path == normalized);
+        if changed || change_set.head_oid.is_none() || normalized.contains('\n') {
+            results[index] = Some(read_snapshot_file(root, change_set, relative)?);
+        } else {
+            batched.push((index, normalized));
+        }
+    }
+    if let (Some(head), false) = (change_set.head_oid.as_deref(), batched.is_empty()) {
+        let specs: Vec<String> = batched
+            .iter()
+            .map(|(_, path)| format!("{head}:{path}"))
+            .collect();
+        for ((index, _), bytes) in batched.iter().zip(cat_file_batch(root, &specs)?) {
+            results[*index] = Some(bytes);
+        }
+    }
+    Ok(results.into_iter().map(Option::unwrap_or_default).collect())
+}
+
+/// Resolve `specs` (`<treeish>:<path>`, no newlines) with one `git cat-file
+/// --batch`. Each result is the blob's bytes, or `None` when the object is
+/// missing or not a blob.
+fn cat_file_batch(root: &Path, specs: &[String]) -> Result<Vec<Option<Vec<u8>>>, String> {
+    use std::io::{BufRead, Read, Write};
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["cat-file", "--batch"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(git_spawn_error)?;
+    let mut stdin = child.stdin.take().ok_or("git cat-file stdin unavailable")?;
+    let input: Vec<u8> = specs
+        .iter()
+        .flat_map(|spec| spec.bytes().chain(std::iter::once(b'\n')))
+        .collect();
+    // Write from another thread so a large response cannot deadlock the pipes.
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let mut reader = std::io::BufReader::new(
+        child
+            .stdout
+            .take()
+            .ok_or("git cat-file stdout unavailable")?,
+    );
+    let mut results = Vec::with_capacity(specs.len());
+    let mut header = String::new();
+    for spec in specs {
+        header.clear();
+        if reader
+            .read_line(&mut header)
+            .map_err(|error| error.to_string())?
+            == 0
+        {
+            return Err(format!("git cat-file ended before answering {spec}"));
+        }
+        let fields: Vec<&str> = header.trim_end_matches('\n').split(' ').collect();
+        match fields.as_slice() {
+            [_, kind, size] => {
+                let size: usize = size
+                    .parse()
+                    .map_err(|_| format!("git cat-file returned an invalid size for {spec}"))?;
+                let mut bytes = vec![0; size + 1];
+                reader
+                    .read_exact(&mut bytes)
+                    .map_err(|error| error.to_string())?;
+                bytes.pop(); // trailing newline after the object
+                results.push((*kind == "blob").then_some(bytes));
+            }
+            // `<spec> missing` or `<spec> ambiguous`
+            _ => results.push(None),
+        }
+    }
+    writer
+        .join()
+        .map_err(|_| "git cat-file writer panicked".to_owned())?
+        .map_err(|error| error.to_string())?;
+    let status = child.wait().map_err(|error| error.to_string())?;
+    if !status.success() {
+        return Err(format!("git cat-file --batch failed: {status}"));
+    }
+    Ok(results)
+}
+
 /// Read the comparison-side bytes for a changed path from the snapshot's Git base.
 /// Working-tree and staged scopes use the captured HEAD; commit and range scopes use
 /// their recorded parent/from OID. Added paths have no baseline and return `None`.
@@ -772,6 +871,37 @@ fn git(path: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn batched_snapshot_reads_match_single_reads() {
+        let repo = Repo::new();
+        let root = repo.0.path();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/a.rs"), "fn a() {}\n").unwrap();
+        fs::write(root.join("src/b.rs"), vec![b'x'; 200_000]).unwrap();
+        fs::write(root.join("src/c.rs"), "fn c() {}\n").unwrap();
+        repo.git(&["add", "."]);
+        repo.git(&["commit", "-qm", "base"]);
+        fs::write(root.join("src/c.rs"), "fn c() { 1 }\n").unwrap();
+        let change_set = capture(root, ChangeScope::WorkingTree).unwrap();
+        let paths: Vec<PathBuf> = ["src/a.rs", "src/b.rs", "src/c.rs", "src/missing.rs", "src"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        let batched = read_snapshot_files(root, &change_set, &paths).unwrap();
+        for (path, batched) in paths.iter().zip(&batched) {
+            let single = read_snapshot_file(root, &change_set, path).unwrap();
+            if path == Path::new("src") {
+                // `git show` lists a tree; cat-file reports it is not a blob.
+                assert!(batched.is_none());
+                continue;
+            }
+            assert_eq!(batched, &single, "{}", path.display());
+        }
+        assert_eq!(batched[1].as_ref().unwrap().len(), 200_000);
+        assert_eq!(batched[2].as_deref(), Some(&b"fn c() { 1 }\n"[..]));
+        assert!(batched[3].is_none());
+    }
 
     #[test]
     fn revisions_that_git_would_parse_as_options_are_rejected() {
