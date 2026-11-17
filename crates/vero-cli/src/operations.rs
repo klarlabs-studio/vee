@@ -570,28 +570,36 @@ pub fn diagnose_verification(
 // ---------------------------------------------------------------------------
 // Impact, acceptance, standards, analytics
 
-pub enum ImpactTarget {
+/// The change an analysis runs on.
+pub enum ChangeTarget {
     /// The immutable snapshot of a saved review; fails if the source changed.
     Review(String),
+    /// A freshly captured change scope.
     Scope(ScopeRequest),
+}
+
+impl ChangeTarget {
+    fn change_set(self, workspace: &Workspace) -> Result<vero_core::ChangeSet> {
+        match self {
+            Self::Review(review_id) => {
+                let store = workspace.store()?;
+                let review = workspace.saved_review(&store, &review_id)?;
+                workspace.current_snapshot_of(&review)
+            }
+            Self::Scope(scope) => {
+                let scope = scope.resolve(workspace.root())?;
+                vero_application::capture_change_set(workspace.root(), scope)
+                    .map_err(anyhow::Error::msg)
+            }
+        }
+    }
 }
 
 pub fn impact(
     workspace: &Workspace,
-    target: ImpactTarget,
+    target: ChangeTarget,
 ) -> Result<vero_application::ImpactAssessment> {
-    let change_set = match target {
-        ImpactTarget::Review(review_id) => {
-            let store = workspace.store()?;
-            let review = workspace.saved_review(&store, &review_id)?;
-            workspace.current_snapshot_of(&review)?
-        }
-        ImpactTarget::Scope(scope) => {
-            let scope = scope.resolve(workspace.root())?;
-            vero_application::capture_change_set(workspace.root(), scope)
-                .map_err(anyhow::Error::msg)?
-        }
-    };
+    let change_set = target.change_set(workspace)?;
     vero_application::analyze_impact(workspace.root(), &change_set).map_err(anyhow::Error::msg)
 }
 
@@ -920,4 +928,252 @@ pub fn init(
         crate::setup::InitError::Usage(message) => usage_failure(message),
         crate::setup::InitError::Configuration(message) => configuration_failure(message),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Agent workflow: tests, PR drafts, ownership, waivers, gate history, patches
+
+/// Recommend missing tests for a change, optionally informed by LCOV coverage
+/// from a verification run on the same snapshot.
+pub fn recommend_tests(
+    workspace: &Workspace,
+    target: ChangeTarget,
+    coverage_run_id: Option<&str>,
+) -> Result<crate::test_recommendations::TestRecommendationReport> {
+    use crate::test_recommendations::{ExecutionCoverageFile, ExecutionCoverageSummary};
+    let change_set = target.change_set(workspace)?;
+    let impact = vero_application::analyze_impact(workspace.root(), &change_set)
+        .map_err(anyhow::Error::msg)?;
+    let coverage = match coverage_run_id {
+        None => None,
+        Some(run_id) => {
+            let store = workspace.store()?;
+            let run = store
+                .verification(run_id)
+                .map_err(anyhow::Error::msg)?
+                .ok_or_else(|| usage_failure(format!("verification run {run_id} was not found")))?;
+            if run.snapshot_id != change_set.digest {
+                return Err(usage_failure(
+                    "coverage verification run belongs to a different change snapshot",
+                ));
+            }
+            let report = crate::coverage::report(workspace.root(), &store, &run, "stdout")
+                .map_err(anyhow::Error::msg)?;
+            let files = report
+                .files
+                .into_iter()
+                .map(|file| {
+                    let signal = if file.executable_lines == 0 {
+                        "no_executable_lines"
+                    } else if file.covered_lines == 0 {
+                        "zero_covered_lines"
+                    } else if file.covered_lines == file.executable_lines {
+                        "all_reported_lines_covered"
+                    } else {
+                        "partial_file_coverage"
+                    };
+                    ExecutionCoverageFile {
+                        path: file.path,
+                        covered_lines: file.covered_lines,
+                        executable_lines: file.executable_lines,
+                        percent: file.percent,
+                        changed_line_count: file.changed_line_count,
+                        changed_executable_lines: file.changed_executable_lines,
+                        changed_covered_lines: file.changed_covered_lines,
+                        changed_percent: file.changed_percent,
+                        signal: signal.to_owned(),
+                    }
+                })
+                .collect();
+            Some(ExecutionCoverageSummary {
+                run_id: report.run_id,
+                profile_id: report.profile_id,
+                status: format!("{:?}", run.status).to_lowercase(),
+                files,
+                limitations: report.limitations,
+            })
+        }
+    };
+    Ok(crate::test_recommendations::recommend_with_coverage(
+        &impact, coverage,
+    ))
+}
+
+/// Draft a pull request title and body with a configured reviewer. The draft is
+/// digest-bound to the snapshot and never used by a gate.
+pub fn draft_pr_description(
+    workspace: &Workspace,
+    target: ChangeTarget,
+    reviewer_id: &str,
+) -> Result<vero_application::ProviderTaskResult> {
+    let change_set = target.change_set(workspace)?;
+    let config = workspace.effective_config(None)?;
+    let context = crate::pr_description::snapshot_context(
+        workspace.root(),
+        &change_set,
+        config.review.max_context_files,
+        config.review.max_context_file_bytes,
+        config.review.max_context_bytes,
+    )?;
+    vero_application::run_provider_task(
+        vero_application::ProviderTaskRequest {
+            root: workspace.root(),
+            snapshot_id: &change_set.digest,
+            config: &config,
+            reviewer_id,
+            task_instructions: crate::pr_description::INSTRUCTIONS,
+            context,
+            output_schema: crate::pr_description::output_schema(),
+        },
+        &vero_application::CliReviewProvider,
+    )
+    .map_err(anyhow::Error::msg)
+}
+
+pub fn owners(
+    workspace: &Workspace,
+    paths: &[PathBuf],
+) -> Result<crate::ownership::OwnershipReport> {
+    crate::ownership::analyze(workspace.root(), paths).map_err(usage_failure)
+}
+
+/// `gate-history-v1`
+#[derive(Debug, Serialize)]
+pub struct GateHistory {
+    pub schema_version: u32,
+    pub decisions: Vec<vero_core::GateDecision>,
+}
+
+pub fn gate_history(workspace: &Workspace, review_id: &str) -> Result<GateHistory> {
+    let store = workspace.store()?;
+    workspace.saved_review(&store, review_id)?;
+    let decisions = store
+        .gate_decisions_for_review(review_id)
+        .map_err(anyhow::Error::msg)?;
+    Ok(GateHistory {
+        schema_version: 1,
+        decisions,
+    })
+}
+
+/// `waivers-list-v1`
+#[derive(Debug, Serialize)]
+pub struct WaiverList {
+    pub schema_version: u32,
+    pub waivers: Vec<vero_core::Waiver>,
+}
+
+pub fn list_waivers(workspace: &Workspace, review_id: &str) -> Result<WaiverList> {
+    let store = workspace.store()?;
+    let review = workspace.saved_review(&store, review_id)?;
+    let waivers = store
+        .waivers_for_snapshot(&review.snapshot_id)
+        .map_err(anyhow::Error::msg)?;
+    Ok(WaiverList {
+        schema_version: 1,
+        waivers,
+    })
+}
+
+pub const MAX_PATCH_BYTES: usize = 2 * 1024 * 1024;
+const MAX_PROPOSAL_RECORD_BYTES: usize = 128 * 1024;
+
+/// Validate an agent-authored unified diff against a saved, still-current review,
+/// and save it as a digest-bound proposal (`patch-proposal-v1`). No repository file
+/// is changed; applying requires explicit human approval of the digest through
+/// `vero findings apply-patch`.
+pub fn propose_patch(
+    workspace: &Workspace,
+    review_id: &str,
+    patch: &[u8],
+) -> Result<serde_json::Value> {
+    use sha2::Digest as _;
+    use std::io::Write as _;
+    let root = workspace.root();
+    let store = workspace.store()?;
+    let saved = workspace.saved_review(&store, review_id)?;
+    if !matches!(
+        saved.change_set.scope.as_str(),
+        "staged" | "working_tree" | "base_and_worktree"
+    ) {
+        return Err(usage_failure(
+            "patch proposals require a mutable staged or working-tree review scope",
+        ));
+    }
+    let current = vero_application::capture_current_change_set(root, &saved.change_set)
+        .is_ok_and(|snapshot| snapshot.digest == saved.snapshot_id);
+    if !current {
+        return Err(usage_failure(
+            "saved review snapshot is stale; rerun review before proposing a patch",
+        ));
+    }
+    if patch.is_empty() || patch.len() > MAX_PATCH_BYTES {
+        return Err(usage_failure(format!(
+            "patch must contain 1 to {MAX_PATCH_BYTES} bytes"
+        )));
+    }
+    let text = std::str::from_utf8(patch)
+        .map_err(|_| usage_failure("patch must be a UTF-8 unified diff"))?;
+    if !(text.contains("diff --git ") || text.contains("--- ")) {
+        return Err(usage_failure("patch does not look like a unified diff"));
+    }
+    let mut check_command = std::process::Command::new("git");
+    check_command
+        .arg("-C")
+        .arg(root)
+        .args(["apply", "--check"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    if saved.change_set.scope == "staged" {
+        check_command.arg("--index");
+    }
+    let mut child = check_command
+        .spawn()
+        .context("could not start git apply --check")?;
+    child
+        .stdin
+        .take()
+        .context("could not open git apply input")?
+        .write_all(patch)?;
+    let check = child
+        .wait_with_output()
+        .context("could not run git apply --check")?;
+    if !check.status.success() {
+        return Err(usage_failure(format!(
+            "patch does not apply cleanly: {}",
+            String::from_utf8_lossy(&check.stderr).trim()
+        )));
+    }
+    let sandbox = crate::patch_sandbox::validate_bytes(root, patch).map_err(anyhow::Error::msg)?;
+    let input_digest =
+        crate::patch_sandbox::input_digest(&sandbox.input_files).map_err(anyhow::Error::msg)?;
+    let digest = format!("sha256:{:x}", sha2::Sha256::digest(patch));
+    let directory = crate::proposal_directory(root)?;
+    let saved_patch = directory.join(format!("{}.patch", &digest[7..]));
+    let record_path = directory.join(format!("{}.json", &digest[7..]));
+    let proposal = serde_json::json!({
+        "schema_version": 1,
+        "review_id": review_id,
+        "snapshot_id": saved.snapshot_id,
+        "effective_config_digest": saved.effective_config_digest,
+        "patch_digest": digest,
+        "patch_bytes": patch.len(),
+        "patch_inputs": sandbox.input_files,
+        "patch_input_digest": input_digest,
+        "patch_sandbox_result_digest": sandbox.result_digest,
+        "validated": true,
+        "application": "not_applied",
+        "approval_instruction": format!("Review the diff, then apply only with explicit approval of digest {digest}."),
+        "patch_path": saved_patch.to_string_lossy(),
+    });
+    let record = serde_json::to_vec_pretty(&proposal)?;
+    if record.len() > MAX_PROPOSAL_RECORD_BYTES {
+        return Err(usage_failure(
+            "patch proposal metadata exceeds the 128 KiB apply limit",
+        ));
+    }
+    crate::write_immutable_proposal_file(&saved_patch, patch)?;
+    crate::write_immutable_proposal_file(&record_path, &record)?;
+    Ok(proposal)
 }

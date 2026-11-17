@@ -304,6 +304,7 @@ def main() -> None:
                     str(executable),
                     "findings",
                     "propose-patch",
+                    "--review",
                     first_id,
                     str(patch_path),
                     "--output",

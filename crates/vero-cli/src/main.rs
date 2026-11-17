@@ -798,6 +798,9 @@ enum TestsCommand {
     },
     /// Recommend missing tests for the current change.
     Recommend {
+        /// Analyze a saved review's exact snapshot instead of capturing a scope; fails if the source changed.
+        #[arg(long, value_name = "REVIEW_ID", conflicts_with_all = ["base", "commit", "staged", "working_tree"])]
+        review: Option<String>,
         /// Use changes since the merge base with this Git ref.
         #[arg(long, conflicts_with_all = ["staged", "working_tree"])]
         base: Option<String>,
@@ -907,6 +910,9 @@ enum TestsCommand {
 enum PrCommand {
     /// Draft a pull request title and body with a configured reviewer.
     Draft {
+        /// Analyze a saved review's exact snapshot instead of capturing a scope; fails if the source changed.
+        #[arg(long, value_name = "REVIEW_ID", conflicts_with_all = ["base", "commit", "staged", "working_tree"])]
+        review: Option<String>,
         /// Use changes since the merge base with this Git ref.
         #[arg(long, conflicts_with_all = ["staged", "working_tree", "commit"])]
         base: Option<String>,
@@ -2203,6 +2209,7 @@ enum FindingsCommand {
     /// Validate and save an agent-proposed patch against an exact saved review.
     ProposePatch {
         /// Saved review ID the patch targets.
+        #[arg(long, value_name = "REVIEW_ID")]
         review: String,
         /// Unified diff file proposed by the agent.
         patch: std::path::PathBuf,
@@ -2757,6 +2764,25 @@ fn print_doctor_report(report: &setup::DoctorReport) {
     );
 }
 
+/// Resolve the CLI's `--review` / scope flags into the change an operation runs on.
+fn change_target(
+    review: Option<String>,
+    base: Option<String>,
+    commit: Option<String>,
+    staged: bool,
+    working_tree: bool,
+) -> Result<operations::ChangeTarget> {
+    Ok(match review {
+        Some(review_id) => operations::ChangeTarget::Review(review_id),
+        None => operations::ChangeTarget::Scope(operations::ScopeRequest::from_flags(
+            base,
+            commit,
+            staged,
+            working_tree,
+        )?),
+    })
+}
+
 /// Print one machine-readable document for `--output json`: compact JSON and a newline.
 /// The same document is returned by the matching MCP tool.
 fn emit_json(document: &impl serde::Serialize) -> Result<()> {
@@ -3045,9 +3071,7 @@ fn run() -> Result<u8> {
             Ok(0)
         }
         Command::Owners { paths, output } => {
-            let cwd = std::env::current_dir()?;
-            let root = vero_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-            let report = ownership::analyze(&root, &paths).map_err(anyhow::Error::msg)?;
+            let report = operations::owners(&operations::Workspace::discover()?, &paths)?;
             match output {
                 Output::Json => println!("{}", serde_json::to_string(&report)?),
                 Output::Text => {
@@ -3353,15 +3377,7 @@ fn run() -> Result<u8> {
             output,
         } => {
             let workspace = operations::Workspace::discover()?;
-            let target = match review {
-                Some(review_id) => operations::ImpactTarget::Review(review_id),
-                None => operations::ImpactTarget::Scope(operations::ScopeRequest::from_flags(
-                    base,
-                    commit,
-                    staged,
-                    working_tree,
-                )?),
-            };
+            let target = change_target(review, base, commit, staged, working_tree)?;
             let impact = operations::impact(&workspace, target)?;
             match output {
                 Output::Json => emit_json(&impact)?,
@@ -3448,6 +3464,7 @@ fn run() -> Result<u8> {
                 Ok(0)
             }
             TestsCommand::Recommend {
+                review,
                 base,
                 commit,
                 staged,
@@ -3455,77 +3472,12 @@ fn run() -> Result<u8> {
                 coverage_run,
                 output,
             } => {
-                let cwd = std::env::current_dir()?;
-                let root = vero_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-                let scope = if let Some(oid) = commit {
-                    vero_git::commit_scope(&oid).map_err(usage_failure)?
-                } else if staged {
-                    vero_git::ChangeScope::Staged
-                } else if working_tree {
-                    vero_git::ChangeScope::WorkingTree
-                } else {
-                    vero_git::ChangeScope::BaseAndWorktree {
-                        base_oid: base
-                            .as_deref()
-                            .map(|base_ref| vero_git::merge_base(&root, base_ref))
-                            .transpose()
-                            .map_err(usage_failure)?,
-                    }
-                };
-                let change_set = vero_application::capture_change_set(&root, scope)
-                    .map_err(anyhow::Error::msg)?;
-                let impact = vero_application::analyze_impact(&root, &change_set)
-                    .map_err(anyhow::Error::msg)?;
-                let coverage = if let Some(run_id) = coverage_run {
-                    let store = ReviewStore::open(&root.join(".vero/vero.sqlite"))
-                        .map_err(anyhow::Error::msg)?;
-                    let run = store
-                        .verification(&run_id)
-                        .map_err(anyhow::Error::msg)?
-                        .with_context(|| format!("verification run {run_id} was not found"))?;
-                    if run.snapshot_id != change_set.digest {
-                        return Err(usage_failure(
-                            "coverage verification run belongs to a different change snapshot",
-                        ));
-                    }
-                    let coverage_report = coverage::report(&root, &store, &run, "stdout")
-                        .map_err(anyhow::Error::msg)?;
-                    Some(test_recommendations::ExecutionCoverageSummary {
-                        run_id: coverage_report.run_id,
-                        profile_id: coverage_report.profile_id,
-                        status: format!("{:?}", run.status).to_lowercase(),
-                        files: coverage_report
-                            .files
-                            .into_iter()
-                            .map(|file| {
-                                let signal = if file.executable_lines == 0 {
-                                    "no_executable_lines".to_owned()
-                                } else if file.covered_lines == 0 {
-                                    "zero_covered_lines".to_owned()
-                                } else if file.covered_lines == file.executable_lines {
-                                    "all_reported_lines_covered".to_owned()
-                                } else {
-                                    "partial_file_coverage".to_owned()
-                                };
-                                test_recommendations::ExecutionCoverageFile {
-                                    path: file.path,
-                                    covered_lines: file.covered_lines,
-                                    executable_lines: file.executable_lines,
-                                    percent: file.percent,
-                                    changed_line_count: file.changed_line_count,
-                                    changed_executable_lines: file.changed_executable_lines,
-                                    changed_covered_lines: file.changed_covered_lines,
-                                    changed_percent: file.changed_percent,
-                                    signal,
-                                }
-                            })
-                            .collect(),
-                        limitations: coverage_report.limitations,
-                    })
-                } else {
-                    None
-                };
-                let report = test_recommendations::recommend_with_coverage(&impact, coverage);
+                let target = change_target(review, base, commit, staged, working_tree)?;
+                let report = operations::recommend_tests(
+                    &operations::Workspace::discover()?,
+                    target,
+                    coverage_run.as_deref(),
+                )?;
                 match output {
                     Output::Json => {
                         serde_json::to_writer(std::io::stdout().lock(), &report)?;
@@ -4374,6 +4326,7 @@ fn run() -> Result<u8> {
         },
         Command::Pr { command } => match command {
             PrCommand::Draft {
+                review,
                 base,
                 staged,
                 working_tree,
@@ -4381,47 +4334,12 @@ fn run() -> Result<u8> {
                 reviewer,
                 output,
             } => {
-                let cwd = std::env::current_dir()?;
-                let root = vero_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-                let scope = if let Some(oid) = commit {
-                    vero_git::commit_scope(&oid).map_err(usage_failure)?
-                } else if staged {
-                    vero_git::ChangeScope::Staged
-                } else if working_tree {
-                    vero_git::ChangeScope::WorkingTree
-                } else {
-                    vero_git::ChangeScope::BaseAndWorktree {
-                        base_oid: base
-                            .as_deref()
-                            .map(|base_ref| vero_git::merge_base(&root, base_ref))
-                            .transpose()
-                            .map_err(usage_failure)?,
-                    }
-                };
-                let change_set = vero_application::capture_change_set(&root, scope)
-                    .map_err(anyhow::Error::msg)?;
-                let mut config = load_repository_config(&root)?;
-                apply_protected_policy(&root, &mut config)?;
-                let context = pr_description::snapshot_context(
-                    &root,
-                    &change_set,
-                    config.review.max_context_files,
-                    config.review.max_context_file_bytes,
-                    config.review.max_context_bytes,
+                let target = change_target(review, base, commit, staged, working_tree)?;
+                let report = operations::draft_pr_description(
+                    &operations::Workspace::discover()?,
+                    target,
+                    &reviewer,
                 )?;
-                let report = vero_application::run_provider_task(
-                    vero_application::ProviderTaskRequest {
-                        root: &root,
-                        snapshot_id: &change_set.digest,
-                        config: &config,
-                        reviewer_id: &reviewer,
-                        task_instructions: pr_description::INSTRUCTIONS,
-                        context,
-                        output_schema: pr_description::output_schema(),
-                    },
-                    &vero_application::CliReviewProvider,
-                )
-                .map_err(anyhow::Error::msg)?;
                 match output {
                     Output::Json => {
                         serde_json::to_writer(std::io::stdout().lock(), &report)?;
@@ -4533,27 +4451,13 @@ fn run() -> Result<u8> {
                 Ok(response.exit_code())
             }
             GateCommand::History { review, output } => {
-                let cwd = std::env::current_dir()?;
-                let top = vero_git::repository_root(&cwd)
-                    .map_err(anyhow::Error::msg)?
-                    .to_string_lossy()
-                    .to_string();
-                let store =
-                    ReviewStore::open(&std::path::Path::new(&top).join(".vero/vero.sqlite"))
-                        .map_err(anyhow::Error::msg)?;
-                let decisions = store
-                    .gate_decisions_for_review(&review)
-                    .map_err(anyhow::Error::msg)?;
+                let history =
+                    operations::gate_history(&operations::Workspace::discover()?, &review)?;
+                let decisions = &history.decisions;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(
-                            std::io::stdout().lock(),
-                            &serde_json::json!({"schema_version": 1, "decisions": decisions}),
-                        )?;
-                        println!();
-                    }
+                    Output::Json => emit_json(&history)?,
                     Output::Text => {
-                        for decision in &decisions {
+                        for decision in decisions {
                             println!(
                                 "{} {:?} snapshot={} evidence={}",
                                 decision.decision_id,
@@ -6816,23 +6720,13 @@ fn run() -> Result<u8> {
                     Ok(0)
                 }
                 WaiversCommand::List { review, output } => {
-                    let payload = store
-                        .get(&review)
-                        .map_err(anyhow::Error::msg)?
-                        .with_context(|| format!("review {review} was not found"))?;
-                    let reviewed = vero_application::deserialize_review_result(&payload)
-                        .map_err(anyhow::Error::msg)?;
-                    let waivers = store
-                        .waivers_for_snapshot(&reviewed.snapshot_id)
-                        .map_err(anyhow::Error::msg)?;
+                    let listed = operations::list_waivers(
+                        &operations::Workspace::new(top.clone()),
+                        &review,
+                    )?;
+                    let waivers = &listed.waivers;
                     match output {
-                        Output::Json => {
-                            serde_json::to_writer(
-                                std::io::stdout().lock(),
-                                &serde_json::json!({"schema_version": 1, "waivers": waivers}),
-                            )?;
-                            println!();
-                        }
+                        Output::Json => emit_json(&listed)?,
                         Output::Text => {
                             for waiver in waivers {
                                 println!(
@@ -7025,88 +6919,12 @@ fn run() -> Result<u8> {
                     patch,
                     output,
                 } => {
-                    let payload = store
-                        .get(&review)
-                        .map_err(anyhow::Error::msg)?
-                        .with_context(|| format!("review {review} was not found"))?;
-                    let saved: vero_application::ReviewResult =
-                        vero_application::deserialize_review_result(&payload)
-                            .map_err(anyhow::Error::msg)?;
-                    anyhow::ensure!(
-                        matches!(
-                            saved.change_set.scope.as_str(),
-                            "staged" | "working_tree" | "base_and_worktree"
-                        ),
-                        "patch proposals require a mutable staged or working-tree review scope"
-                    );
-                    let current = vero_application::capture_current_change_set(
-                        std::path::Path::new(&top),
-                        &saved.change_set,
-                    )
-                    .map(|snapshot| snapshot.digest == saved.snapshot_id)
-                    .unwrap_or(false);
-                    anyhow::ensure!(
-                        current,
-                        "saved review snapshot is stale; rerun review before proposing a patch"
-                    );
-                    let bytes = read_proposal_file(&patch, 2 * 1024 * 1024).context(
-                        "patch must be a regular, non-symlink file no larger than 2 MiB",
-                    )?;
-                    anyhow::ensure!(!bytes.is_empty(), "patch is empty");
-                    let text =
-                        std::str::from_utf8(&bytes).context("patch must be UTF-8 unified diff")?;
-                    anyhow::ensure!(
-                        text.contains("diff --git ") || text.contains("--- "),
-                        "patch does not look like a unified diff"
-                    );
-                    let mut check_command = std::process::Command::new("git");
-                    check_command
-                        .arg("-C")
-                        .arg(&top)
-                        .args(["apply", "--check"])
-                        .stdin(std::process::Stdio::piped());
-                    if saved.change_set.scope == "staged" {
-                        check_command.arg("--index");
-                    }
-                    let mut child = check_command
-                        .spawn()
-                        .context("could not start git apply --check")?;
-                    child
-                        .stdin
-                        .take()
-                        .context("could not open git apply input")?
-                        .write_all(&bytes)?;
-                    let check = child
-                        .wait_with_output()
-                        .context("could not run git apply --check")?;
-                    anyhow::ensure!(
-                        check.status.success(),
-                        "patch does not apply cleanly: {}",
-                        String::from_utf8_lossy(&check.stderr).trim()
-                    );
-                    let sandbox_result =
-                        patch_sandbox::validate_bytes(std::path::Path::new(&top), &bytes)
-                            .map_err(anyhow::Error::msg)?;
-                    let patch_input_digest =
-                        patch_sandbox::input_digest(&sandbox_result.input_files)
-                            .map_err(anyhow::Error::msg)?;
-                    let mut hasher = Sha256::new();
-                    hasher.update(&bytes);
-                    let digest = format!("sha256:{:x}", hasher.finalize());
-                    let proposal = serde_json::json!({"schema_version":1,"review_id":review,"snapshot_id":saved.snapshot_id,"effective_config_digest":saved.effective_config_digest,"patch_digest":digest,"patch_bytes":bytes.len(),"patch_inputs":sandbox_result.input_files,"patch_input_digest":patch_input_digest,"patch_sandbox_result_digest":sandbox_result.result_digest,"validated":true,"application":"not_applied","approval_instruction":format!("Review the diff, then apply only with explicit approval of digest {digest}.")});
-                    let proposal_dir = proposal_directory(std::path::Path::new(&top))?;
-                    let proposal_path = proposal_dir.join(format!("{}.json", &digest[7..]));
-                    let saved_patch_path = proposal_dir.join(format!("{}.patch", &digest[7..]));
-                    write_immutable_proposal_file(&saved_patch_path, &bytes)?;
-                    let mut proposal = proposal;
-                    proposal["patch_path"] =
-                        serde_json::Value::String(saved_patch_path.to_string_lossy().into_owned());
-                    let proposal_bytes = serde_json::to_vec_pretty(&proposal)?;
-                    anyhow::ensure!(
-                        proposal_bytes.len() <= 128 * 1024,
-                        "patch proposal metadata exceeds the 128 KiB apply limit"
-                    );
-                    write_immutable_proposal_file(&proposal_path, &proposal_bytes)?;
+                    let bytes = read_proposal_file(&patch, operations::MAX_PATCH_BYTES as u64)
+                        .context(
+                            "patch must be a regular, non-symlink file no larger than 2 MiB",
+                        )?;
+                    let proposal = operations::propose_patch(&workspace, &review, &bytes)?;
+                    let digest = proposal["patch_digest"].as_str().unwrap_or_default();
                     match output {
                         Output::Json => {
                             serde_json::to_writer(std::io::stdout().lock(), &proposal)?;
@@ -7116,10 +6934,13 @@ fn run() -> Result<u8> {
                             println!("Patch validated: {digest}");
                             println!(
                                 "Review: {}  Snapshot: {}",
-                                saved.review_id, saved.snapshot_id
+                                proposal["review_id"].as_str().unwrap_or_default(),
+                                proposal["snapshot_id"].as_str().unwrap_or_default()
                             );
-                            println!("Saved patch: {}", saved_patch_path.display());
-                            println!("Proposal record: {}", proposal_path.display());
+                            println!(
+                                "Saved patch: {}",
+                                proposal["patch_path"].as_str().unwrap_or_default()
+                            );
                             println!("No repository files were changed.");
                         }
                     }

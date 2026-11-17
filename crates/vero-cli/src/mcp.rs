@@ -351,6 +351,41 @@ struct StartReviewInput {
     policy_profile: Option<String>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ProposePatchInput {
+    /// Saved review ID whose current snapshot the patch targets (working-tree, staged, or base scope).
+    review_id: String,
+    /// Unified diff (as produced by `git diff`), at most 2 MiB.
+    patch: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RecommendTestsInput {
+    /// Saved review ID whose snapshot is analyzed; fails if the source changed.
+    review_id: String,
+    /// Verification run on the same snapshot whose LCOV coverage informs the recommendations.
+    coverage_run_id: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DraftPullRequestInput {
+    /// Saved review ID whose snapshot is described; fails if the source changed.
+    review_id: String,
+    /// Configured reviewer whose provider drafts the text (default `correctness`).
+    reviewer_id: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct OwnersInput {
+    /// Repository-relative paths to resolve CODEOWNERS for (1 to 200).
+    #[schemars(length(min = 1, max = 200))]
+    paths: Vec<String>,
+}
+
 /// MCP-only: bounded source read from a review snapshot (the CLI has no equivalent).
 #[derive(Serialize, JsonSchema)]
 struct RepositoryContextOutput {
@@ -692,7 +727,7 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
     operation_tool!(server, workspace, "analyze_impact", "Analyze impact", read_only_tool(),
         Some("impact-assessment-v3"),
         "Analyze files and tests likely affected by a saved review's snapshot, with evidence paths and uncertainty. Same document as `vero impact --review <id> --output json`.",
-        |ws, input: ReviewInput| operations::impact(&ws, operations::ImpactTarget::Review(input.review_id)));
+        |ws, input: ReviewInput| operations::impact(&ws, operations::ChangeTarget::Review(input.review_id)));
 
     let state = workspace.clone();
     server
@@ -796,6 +831,48 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         Some("doctor-report-v1"),
         "Report whether this repository's reviewers can run on this machine, which AI backends (local models, agent CLIs, API keys) are available, and what to do next. Same document as `vero doctor --output json`.",
         |ws, _input: EmptyInput| operations::doctor(&ws));
+
+    operation_tool!(server, workspace, "propose_patch", "Propose patch", write_tool(false, false, false),
+        Some("patch-proposal-v1"),
+        "Validate an agent-authored unified diff against a saved, still-current review and save it as a digest-bound proposal. No repository file changes; a human applies it with `vero findings apply-patch <digest> --approve <digest>`. Same document as `vero findings propose-patch --output json`.",
+        |ws, input: ProposePatchInput| operations::propose_patch(&ws, &input.review_id, input.patch.as_bytes()));
+
+    operation_tool!(server, workspace, "recommend_tests", "Recommend tests", read_only_tool(),
+        Some("test-recommendations-v1"),
+        "Recommend missing tests for a saved review's changes from impact analysis, optionally using LCOV coverage from a verification run on the same snapshot. Same document as `vero tests recommend --review <id> --output json`.",
+        |ws, input: RecommendTestsInput| operations::recommend_tests(
+            &ws,
+            operations::ChangeTarget::Review(input.review_id),
+            input.coverage_run_id.as_deref(),
+        ));
+
+    operation_tool!(server, workspace, "draft_pr_description", "Draft PR description",
+        mcp_rs::model::ToolAnnotations::new().read_only(true).open_world(true),
+        Some("pr-description-v1"),
+        "Draft a pull request title and body for a saved review's changes with a configured reviewer. The draft is digest-bound, local, and never used by a gate. Same document as `vero pr draft --review <id> --output json`.",
+        |ws, input: DraftPullRequestInput| operations::draft_pr_description(
+            &ws,
+            operations::ChangeTarget::Review(input.review_id),
+            input.reviewer_id.as_deref().unwrap_or("correctness"),
+        ));
+
+    operation_tool!(server, workspace, "resolve_owners", "Resolve owners", read_only_tool(),
+        Some("ownership-report-v1"),
+        "Resolve advisory CODEOWNERS owners for repository paths, with the matching rule and file digest. Same document as `vero owners --output json`.",
+        |ws, input: OwnersInput| operations::owners(
+            &ws,
+            &input.paths.iter().map(PathBuf::from).collect::<Vec<_>>(),
+        ));
+
+    operation_tool!(server, workspace, "list_waivers", "List waivers", read_only_tool(),
+        Some("waivers-list-v1"),
+        "List waivers recorded for a saved review's exact snapshot. Same document as `vero waivers list --output json`.",
+        |ws, input: ReviewInput| operations::list_waivers(&ws, &input.review_id));
+
+    operation_tool!(server, workspace, "get_gate_history", "Get gate history", read_only_tool(),
+        Some("gate-history-v1"),
+        "List persisted gate decisions for a saved review. Same document as `vero gate history --output json`.",
+        |ws, input: ReviewInput| operations::gate_history(&ws, &input.review_id));
 
     Ok(server)
 }

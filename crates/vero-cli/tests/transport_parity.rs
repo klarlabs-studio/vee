@@ -69,7 +69,14 @@ fn seeded_repository() -> tempfile::TempDir {
     let provider = root.join("fake-provider");
     fs::write(
         &provider,
-        "#!/bin/sh\ncat >/dev/null\nprintf '%s' '{\"schema_version\":1,\"findings\":[{\"category\":\"correctness\",\"severity\":\"medium\",\"confidence\":95,\"rationale\":\"potential defect\",\"path\":\"tracked.rs\",\"line\":1}]}'\n",
+        concat!(
+            "#!/bin/sh\ninput=$(cat)\n",
+            // PR-description tasks ask for an object with a `body`; reviews ask for findings.
+            "case \"$input\" in\n",
+            "  *'\"body\"'*) printf '%s' '{\"title\":\"Mark main unsafe\",\"body\":\"## Summary\\nAdds an unsafe block to main.\"}' ;;\n",
+            "  *) printf '%s' '{\"schema_version\":1,\"findings\":[{\"category\":\"correctness\",\"severity\":\"medium\",\"confidence\":95,\"rationale\":\"potential defect\",\"path\":\"tracked.rs\",\"line\":1}]}' ;;\n",
+            "esac\n"
+        ),
     )
     .unwrap();
     fs::set_permissions(&provider, fs::Permissions::from_mode(0o755)).unwrap();
@@ -104,8 +111,9 @@ fn cli_json(root: &Path, args: &[&str]) -> Value {
         .unwrap();
     assert!(
         matches!(output.status.code(), Some(0..=2)),
-        "vero {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        "vero {args:?} failed: {}{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
     );
     serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
         panic!(
@@ -293,6 +301,67 @@ fn cli_and_mcp_return_identical_documents_for_shared_operations() {
     assert_matches_published_schema(&via_mcp, "verification-run-v1");
     assert_eq!(cli["snapshot_id"], via_mcp["snapshot_id"]);
     assert_eq!(cli["finding_id"], via_mcp["finding_id"]);
+
+    let cli = cli_json(root, &["tests", "recommend", "--review", &review_id]);
+    let via_mcp = mcp.call("recommend_tests", json!({"review_id": review_id}));
+    assert_same(&cli, &via_mcp, "recommend tests", "test-recommendations-v1");
+
+    let cli = cli_json(root, &["owners", "--path", "tracked.rs"]);
+    let via_mcp = mcp.call("resolve_owners", json!({"paths": ["tracked.rs"]}));
+    assert_same(&cli, &via_mcp, "owners", "ownership-report-v1");
+
+    let cli = cli_json(root, &["waivers", "list", "--review", &review_id]);
+    let via_mcp = mcp.call("list_waivers", json!({"review_id": review_id}));
+    assert_same(&cli, &via_mcp, "waivers", "waivers-list-v1");
+
+    let cli = cli_json(root, &["gate", "history", "--review", &review_id]);
+    let via_mcp = mcp.call("get_gate_history", json!({"review_id": review_id}));
+    assert_same(&cli, &via_mcp, "gate history", "gate-history-v1");
+    // Both gate checks evaluated identical inputs, so they share one decision identity.
+    assert_eq!(cli["decisions"].as_array().unwrap().len(), 1);
+
+    let cli = cli_json(root, &["pr", "draft", "--review", &review_id]);
+    let via_mcp = mcp.call("draft_pr_description", json!({"review_id": review_id}));
+    assert_matches_published_schema(&cli, "pr-description-v1");
+    assert_eq!(cli["output"], via_mcp["output"]);
+    assert_eq!(cli["snapshot_id"], via_mcp["snapshot_id"]);
+    assert_matches_published_schema(&via_mcp, "pr-description-v1");
+
+    // Two different patches, so each transport saves its own immutable proposal.
+    let patch = |replacement: &str| {
+        format!(
+            "diff --git a/tracked.rs b/tracked.rs\n--- a/tracked.rs\n+++ b/tracked.rs\n@@ -1 +1 @@\n-fn main() {{ unsafe {{}} }}\n+{replacement}\n"
+        )
+    };
+    // Outside the repository: an untracked file would change the reviewed snapshot.
+    let patch_directory = tempfile::tempdir().unwrap();
+    let patch_file = patch_directory.path().join("cli.patch");
+    fs::write(&patch_file, patch("fn main() {}")).unwrap();
+    let cli = cli_json(
+        root,
+        &[
+            "findings",
+            "propose-patch",
+            "--review",
+            &review_id,
+            patch_file.to_str().unwrap(),
+        ],
+    );
+    let via_mcp = mcp.call(
+        "propose_patch",
+        json!({"review_id": review_id, "patch": patch("fn main() { let _ = 1; }")}),
+    );
+    for proposal in [&cli, &via_mcp] {
+        assert_matches_published_schema(proposal, "patch-proposal-v1");
+        assert_eq!(proposal["application"], "not_applied");
+        assert_eq!(proposal["review_id"], review_id.as_str());
+    }
+    assert_ne!(cli["patch_digest"], via_mcp["patch_digest"]);
+    assert_eq!(
+        fs::read_to_string(root.join("tracked.rs")).unwrap(),
+        "fn main() { unsafe {} }\n",
+        "proposing must not change repository files"
+    );
 
     let cli = cli_json(root, &["doctor"]);
     let via_mcp = mcp.call("check_setup", json!({}));

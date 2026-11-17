@@ -17,6 +17,8 @@ For an issue raised in a live GitHub PR, GitLab MR, Bitbucket PR, Azure DevOps P
 4. Rerun `vero review --base <base> --gate` (or the original explicit scope) after edits. Confirm the new snapshot ID and gate status.
 5. Report findings fixed, still open, refuted, or inconclusive with evidence. If a finding cannot be safely fixed, leave it open or use an authorized waiver with reason and expiry; never claim it is resolved without re-review.
 
+When you cannot edit files directly, or the user wants to approve changes first, propose the fix instead: write a unified diff and submit it with MCP `propose_patch` (or `vero findings propose-patch --review <review-id> <file>`). Vero validates it against the still-current review snapshot and saves it under a digest without changing any file. Show the user the digest; only a human applies it with `vero findings apply-patch <digest> --approve <digest>`, which reruns the review. Use MCP `recommend_tests` to find changed code lacking tests and `resolve_owners` to see who owns the affected paths.
+
 When using MCP, record a human disposition with `set_finding_status` only after investigation. The reason is required audit context. A lifecycle disposition does not suppress a gate finding; use the separate scoped waiver workflow for an authorized exception.
 
 Do not edit Vero's database or artifacts to alter findings or gate decisions.

@@ -8612,7 +8612,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
     let patch = root.join("agent.patch");
     fs::write(&patch, "diff --git a/src.rs b/src.rs\n--- a/src.rs\n+++ b/src.rs\n@@ -1 +1 @@\n-pub fn value() -> i32 { 1 }\n+pub fn value() -> i32 { 2 }\n").unwrap();
     let proposed = Command::new(env!("CARGO_BIN_EXE_vero"))
-        .args(["findings", "propose-patch", review_id])
+        .args(["findings", "propose-patch", "--review", review_id])
         .arg("../agent.patch")
         .args(["--output", "json"])
         .current_dir(root.join("tools"))
@@ -8656,6 +8656,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
         .args([
             "findings",
             "propose-patch",
+            "--review",
             second_review["review_id"].as_str().unwrap(),
         ])
         .arg("../agent.patch")
@@ -10022,6 +10023,11 @@ fn mcp_tools_declare_titles_safety_annotations_and_documented_inputs() {
         "get_repository_context",
         "get_applicable_standards",
         "check_setup",
+        "recommend_tests",
+        "draft_pr_description",
+        "resolve_owners",
+        "list_waivers",
+        "get_gate_history",
     ]
     .into_iter()
     .collect();
