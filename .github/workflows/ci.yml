@@ -12,6 +12,52 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  dependency-audit:
+    name: Rust dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.23.0 --locked
+      - name: Audit locked dependencies
+        run: cargo audit
+
+  web:
+    name: Web assets and browser workflows (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
+      - name: Rebuild bundled UI assets
+        working-directory: web
+        run: npm run build
+      - name: Check generated assets are current
+        run: git diff --exit-code -- web/dist
+      - name: Install Playwright browser
+        working-directory: web
+        if: runner.os == 'Linux'
+        run: npx playwright install --with-deps chromium
+      - name: Install Playwright browser (macOS and Windows)
+        working-directory: web
+        if: runner.os != 'Linux'
+        run: npx playwright install chromium
+      - name: Run browser workflows
+        working-directory: web
+        run: npm run test:e2e
+
   rust:
     name: Rust (${{ matrix.os }})
     strategy:
@@ -21,17 +67,73 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Install Python for mutation-effectiveness fixtures
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Java for mutation-effectiveness fixtures
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install Go for mutation-effectiveness fixtures
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+      - name: Install gopls for Go impact acceptance
+        shell: bash
+        env:
+          GOBIN: ${{ runner.temp }}/vero-tools
+        run: |
+          mkdir -p "$GOBIN"
+          go install golang.org/x/tools/gopls@v0.18.1
+          echo "$GOBIN" >> "$GITHUB_PATH"
+          export PATH="$GOBIN:$PATH"
+          gopls version
+      - name: Install Node.js for mutation-effectiveness fixtures
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Ruby for mutation-effectiveness fixtures
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+      - name: Install TypeScript language service for impact acceptance
+        shell: bash
+        run: |
+          npm install --global typescript@6.0.3
+          echo "VERO_TSSERVER=$(npm root --global)/typescript/lib/tsserver.js" >> "$GITHUB_ENV"
+          test -f "$(npm root --global)/typescript/lib/tsserver.js"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Install rust-analyzer for Rust impact acceptance
+        run: rustup component add rust-analyzer
       - uses: Swatinem/rust-cache@v2
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run workspace tests
-        run: cargo test --workspace --locked
+        # The language-service acceptance tests start bounded compiler servers
+        # (gopls, rust-analyzer, and tsserver). Running tests concurrently can
+        # starve those servers on smaller hosted runners and make semantic
+        # impact results time out nondeterministically.
+        run: cargo test --workspace --locked -- --test-threads=1
+      - name: Verify cross-repository Go impact with gopls
+        run: cargo test -p vero cross_impact_resolves_go_consumer_references_to_local_producer_with_gopls --locked
+      - name: Verify cross-repository Rust impact with rust-analyzer
+        run: cargo test -p vero cross_impact_resolves_rust_consumer_references_with_rust_analyzer --locked
+      - name: Verify project-aware TypeScript impact
+        run: cargo test -p vero-application typescript_project_references_resolve_aliases_without_same_name_false_edges --locked
       - name: Install CLI from workspace
         run: cargo install --path crates/vero-cli --locked --force
       - name: Check installed CLI
         run: vero --version
+      - name: Exercise installed CLI with local-only review
+        run: python scripts/acceptance/installed_cli_smoke.py vero
+      - name: Compare saved local-review reports
+        run: python scripts/acceptance/compare_historical_reviews.py
+      - name: Run local historical-review acceptance
+        if: runner.os != 'Windows'
+        run: python scripts/acceptance/historical_review_benchmark.py vero
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
