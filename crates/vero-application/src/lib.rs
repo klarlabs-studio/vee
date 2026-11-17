@@ -71,8 +71,9 @@ pub fn load_repository_config(root: &Path) -> Result<RepositoryConfig, String> {
     let repository_config = root.join(".vero.yaml");
     let user_config = user_config_path();
     let force_offline = offline_override_enabled()?;
-    RepositoryConfig::load_with_provider_defaults_and_offline(
+    RepositoryConfig::load_for_repository(
         &repository_config,
+        root,
         user_config.as_deref(),
         force_offline,
     )
@@ -84,8 +85,9 @@ pub fn load_repository_config_with_user_config(
     root: &Path,
     user_config: Option<&Path>,
 ) -> Result<RepositoryConfig, String> {
-    RepositoryConfig::load_with_provider_defaults_and_offline(
+    RepositoryConfig::load_for_repository(
         &root.join(".vero.yaml"),
+        root,
         user_config.filter(|path| path.exists()),
         offline_override_enabled()?,
     )
@@ -126,8 +128,9 @@ pub fn validate_repository_config_yaml(
         .write_all(yaml.as_bytes())
         .map_err(|error| error.to_string())?;
     let force_offline = offline_override_enabled()?;
-    let mut config = RepositoryConfig::load_with_provider_defaults_and_offline(
+    let mut config = RepositoryConfig::load_for_repository(
         temporary.path(),
+        root,
         user_config_path().as_deref(),
         force_offline,
     )?;
@@ -1970,7 +1973,8 @@ pub fn run_review_with_provider_and_selection_context(
         .filter_map(|id| config.reviewers.get(id).map(|reviewer| (id, reviewer)))
         .collect();
     let mut complete = !enabled_reviewers.is_empty() && required_reviewers_available;
-    let applicable_rule_guidance = applicable_rule_guidance(root, &change_set.files)?;
+    let applicable_rule_guidance =
+        applicable_rule_guidance(root, &config.pack_rules, &change_set.files)?;
     // Impact is computed from the immutable snapshot and is used only to select
     // bounded source context. Its inferred edges are explicitly labeled below.
     let impact_context = analyze_impact(root, &change_set);
@@ -8090,11 +8094,23 @@ fn active_rule_approvals(root: &Path) -> Result<Vec<vero_core::RuleApproval>, St
         .collect())
 }
 
+/// Active local approvals plus rules from pinned packs; a local approval wins
+/// when both carry the same approval ID.
 fn applicable_rule_guidance(
     root: &Path,
+    pack_rules: &[vero_core::RuleApproval],
     files: &[vero_core::SnapshotFile],
 ) -> Result<Vec<vero_core::RuleApproval>, String> {
-    let mut matches = active_rule_approvals(root)?
+    let mut active = active_rule_approvals(root)?;
+    for rule in pack_rules {
+        if !active
+            .iter()
+            .any(|approval| approval.approval_id == rule.approval_id)
+        {
+            active.push(rule.clone());
+        }
+    }
+    let mut matches = active
         .into_iter()
         .filter(|approval| {
             let scope = approval.scope.trim().trim_end_matches('/');
@@ -8297,7 +8313,8 @@ fn resolve_reviewer_selection(
     Ok(selected)
 }
 
-fn read_repository_file(root: &Path, relative: &Path) -> Result<Vec<u8>, String> {
+/// Read a bounded regular file confined to the repository root.
+pub fn read_repository_file(root: &Path, relative: &Path) -> Result<Vec<u8>, String> {
     if relative.is_absolute()
         || relative.components().any(|component| {
             matches!(
@@ -11777,7 +11794,7 @@ printf '%s\n' '{{"type":"item.completed","item":{{"type":"agent_message","text":
             content_digest: "digest".into(),
             status: "modified".into(),
         }];
-        let guidance = applicable_rule_guidance(root, &files).unwrap();
+        let guidance = applicable_rule_guidance(root, &[], &files).unwrap();
         assert_eq!(guidance.len(), 1);
         assert_eq!(guidance[0].approval_id, "approval-scoped");
         let after_approval = effective_config_digest(&config, root).unwrap();
@@ -11786,13 +11803,15 @@ printf '%s\n' '{{"type":"item.completed","item":{{"type":"agent_message","text":
             path: "src/api.rs".into(),
             ..files[0].clone()
         }];
-        assert!(applicable_rule_guidance(root, &unrelated)
+        assert!(applicable_rule_guidance(root, &[], &unrelated)
             .unwrap()
             .is_empty());
         store
             .revoke_rule_approval("approval-scoped", "maintainer", "Replaced")
             .unwrap();
-        assert!(applicable_rule_guidance(root, &files).unwrap().is_empty());
+        assert!(applicable_rule_guidance(root, &[], &files)
+            .unwrap()
+            .is_empty());
         assert_ne!(
             after_approval,
             effective_config_digest(&config, root).unwrap()

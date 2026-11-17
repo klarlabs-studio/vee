@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/policy-pack-v1.schema.json",
+  "title": "Vero policy pack manifest v1",
+  "description": "pack.yaml at the root of a policy pack directory. Reviewer files are relative to the pack directory. Repositories pin a pack by content digest under `packs` in .vero.yaml.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "name",
+    "version"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "description": {
+      "type": "string"
+    },
+    "policy": {
+      "$ref": "repository-config-v1.schema.json#/$defs/policy"
+    },
+    "policy_profiles": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "repository-config-v1.schema.json#/$defs/policy"
+      }
+    },
+    "reviewers": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/reviewer"
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "repository-config-v1.schema.json#/$defs/verification"
+      }
+    },
+    "rules": {
+      "type": "array",
+      "items": {
+        "$ref": "rule-approvals-v2.schema.json#/$defs/approval"
+      }
+    }
+  },
+  "$defs": {
+    "reviewer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "instructions_file"
+      ],
+      "properties": {
+        "instructions_file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "context_files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "include": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "policy": {
+          "$ref": "repository-config-v1.schema.json#/$defs/reviewer_policy"
+        }
+      }
+    }
+  }
+}

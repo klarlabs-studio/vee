@@ -93,6 +93,32 @@
       "additionalProperties": {
         "$ref": "#/$defs/policy"
       }
+    },
+    "packs": {
+      "type": "array",
+      "description": "Digest-pinned policy packs merged into this configuration; see policy-pack-v1.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "digest"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "provider": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
     }
   },
   "$defs": {

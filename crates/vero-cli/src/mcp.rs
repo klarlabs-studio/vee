@@ -886,6 +886,11 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         "Results of a trusted SARIF analyzer verification run located on changed lines of its snapshot, exactly as the gate evaluates them. Results elsewhere are pre-existing and never block. Same document as `vero verification findings <run-id> --output json`.",
         |ws, input: VerificationRunInput| operations::analyzer_findings(&ws, &input.run_id));
 
+    operation_tool!(server, workspace, "list_packs", "List policy packs", read_only_tool(),
+        Some("packs-list-v1"),
+        "List the policy packs pinned in .vero.yaml and whether each still matches its pinned digest. A changed or invalid pack makes configuration loading fail until a human re-pins it. Same document as `vero packs list --output json`.",
+        |ws, _input: EmptyInput| crate::packs::list(&ws));
+
     Ok(server)
 }
 

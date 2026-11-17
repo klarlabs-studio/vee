@@ -19,6 +19,7 @@ mod imported_history;
 mod mcp;
 mod operations;
 mod ownership;
+mod packs;
 mod patch_sandbox;
 mod pr_description;
 mod repository_map;
@@ -424,6 +425,11 @@ enum Command {
     Providers {
         #[command(subcommand)]
         command: ProvidersCommand,
+    },
+    /// Share policy across repositories as digest-pinned policy packs.
+    Packs {
+        #[command(subcommand)]
+        command: PacksCommand,
     },
     /// Print a shell completion script to stdout (for example: `vero completions zsh > ~/.zfunc/_vero`).
     Completions {
@@ -2153,6 +2159,64 @@ enum ProvidersCommand {
 }
 
 #[derive(Subcommand)]
+enum PacksCommand {
+    /// Export this repository's reviewers, policy, policy profiles, and approved rules as a pack directory.
+    Export {
+        /// Directory to create (must not exist or be empty).
+        directory: std::path::PathBuf,
+        /// Pack name: lowercase letters, digits, '.', '_', or '-'.
+        #[arg(long)]
+        name: String,
+        /// Pack version label, for example 1.2.0.
+        #[arg(long)]
+        version: String,
+        /// One-line description.
+        #[arg(long)]
+        description: Option<String>,
+        /// Reviewer to include; repeat for several. Defaults to all reviewers.
+        #[arg(long = "reviewer", value_name = "REVIEWER_ID")]
+        reviewers: Vec<String>,
+        /// Verification profile to include; repeat for several. Commands are repository-specific, so none are exported by default.
+        #[arg(long = "verification", value_name = "PROFILE_ID")]
+        verification: Vec<String>,
+        /// Leave the repository policy out of the pack.
+        #[arg(long)]
+        no_policy: bool,
+        /// Leave approved rules out of the pack.
+        #[arg(long)]
+        no_rules: bool,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
+    /// Install a pack into .vero/packs/<name>/ and pin its digest in .vero.yaml.
+    Add {
+        /// Pack directory containing pack.yaml.
+        directory: std::path::PathBuf,
+        /// Provider that runs the pack's reviewers (default: `default`, configured by `vero init`).
+        #[arg(long)]
+        provider: Option<String>,
+        /// Upgrade an installed pack whose content differs.
+        #[arg(long)]
+        replace: bool,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
+    /// List pinned packs and whether their content still matches the pin.
+    List {
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
+    /// Print the content digest of a pack directory.
+    Digest {
+        /// Pack directory containing pack.yaml.
+        directory: std::path::PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 enum FindingsCommand {
     /// List findings with optional filters.
     List {
@@ -2813,6 +2877,132 @@ fn print_analyzer_report(report: &vero_core::AnalyzerReport) {
     }
 }
 
+fn run_packs(command: PacksCommand) -> Result<u8> {
+    match command {
+        PacksCommand::Export {
+            directory,
+            name,
+            version,
+            description,
+            reviewers,
+            verification,
+            no_policy,
+            no_rules,
+            output,
+        } => {
+            let summary = packs::export(
+                &operations::Workspace::discover()?,
+                packs::ExportRequest {
+                    destination: &directory,
+                    name: &name,
+                    version: &version,
+                    description: description.as_deref(),
+                    reviewers: &reviewers,
+                    verification: &verification,
+                    include_policy: !no_policy,
+                    include_rules: !no_rules,
+                },
+            )?;
+            match output {
+                Output::Json => emit_json(&summary)?,
+                Output::Text => print_pack_summary("Exported", &summary),
+            }
+            Ok(0)
+        }
+        PacksCommand::Add {
+            directory,
+            provider,
+            replace,
+            output,
+        } => {
+            let summary = packs::add(
+                &operations::Workspace::discover()?,
+                &directory,
+                provider.as_deref(),
+                replace,
+            )?;
+            match output {
+                Output::Json => emit_json(&summary)?,
+                Output::Text => print_pack_summary("Pinned", &summary),
+            }
+            Ok(0)
+        }
+        PacksCommand::List { output } => {
+            let list = packs::list(&operations::Workspace::discover()?)?;
+            match output {
+                Output::Json => emit_json(&list)?,
+                Output::Text => {
+                    if list.packs.is_empty() {
+                        println!("No packs are pinned in .vero.yaml.");
+                    }
+                    for pack in &list.packs {
+                        println!(
+                            "{} {}  {}  [{}]  provider: {}",
+                            pack.name.as_deref().unwrap_or("?"),
+                            pack.version.as_deref().unwrap_or("?"),
+                            pack.path,
+                            pack.status,
+                            pack.provider
+                        );
+                        if let Some(problem) = &pack.problem {
+                            println!("  {problem}");
+                        }
+                    }
+                }
+            }
+            Ok(if list.packs.iter().all(|pack| pack.status == "ok") {
+                0
+            } else {
+                2
+            })
+        }
+        PacksCommand::Digest { directory } => {
+            println!(
+                "{}",
+                vero_core::packs::pack_digest(&directory).map_err(usage_failure)?
+            );
+            Ok(0)
+        }
+    }
+}
+
+fn print_pack_summary(action: &str, summary: &packs::PackSummary) {
+    println!(
+        "{action} pack {} {} at {}",
+        summary.name, summary.version, summary.path
+    );
+    println!("Digest: {}", summary.digest);
+    println!(
+        "Reviewers: {}",
+        if summary.reviewers.is_empty() {
+            "none".into()
+        } else {
+            summary.reviewers.join(", ")
+        }
+    );
+    if !summary.verification_profiles.is_empty() {
+        println!(
+            "Verification profiles: {}",
+            summary.verification_profiles.join(", ")
+        );
+    }
+    if !summary.policy_profiles.is_empty() {
+        println!("Policy profiles: {}", summary.policy_profiles.join(", "));
+    }
+    println!(
+        "Policy: {}  Approved rules: {}",
+        if summary.includes_policy {
+            "included"
+        } else {
+            "not included"
+        },
+        summary.rules
+    );
+    for warning in &summary.warnings {
+        println!("Warning: {warning}");
+    }
+}
+
 /// Resolve the CLI's `--review` / scope flags into the change an operation runs on.
 fn change_target(
     review: Option<String>,
@@ -3000,6 +3190,7 @@ fn run() -> Result<u8> {
             }
             Ok(0)
         }
+        Command::Packs { command } => run_packs(command),
         Command::Completions { shell } => {
             let mut script = Vec::new();
             write_completions(shell, &mut script);

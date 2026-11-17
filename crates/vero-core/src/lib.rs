@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+pub mod packs;
+pub use packs::{PackReference, PolicyPack};
+
 pub const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -4874,6 +4877,12 @@ pub struct RepositoryConfig {
     pub hosting: HostingConfig,
     #[serde(skip)]
     pub active_policy_profile: Option<String>,
+    /// Digest-pinned policy packs merged into this configuration at load time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packs: Vec<PackReference>,
+    /// Approved rules contributed by packs; their pins are covered by `packs`.
+    #[serde(skip)]
+    pub pack_rules: Vec<RuleApproval>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -5183,6 +5192,22 @@ impl RepositoryConfig {
         user_config_path: Option<&Path>,
         force_offline: bool,
     ) -> Result<Self, String> {
+        let root = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        Self::load_for_repository(path, root, user_config_path, force_offline)
+    }
+
+    /// Load `path` as the configuration of the repository at `root`; pinned
+    /// packs resolve against `root`, which matters when validating a candidate
+    /// configuration written to a temporary file.
+    pub fn load_for_repository(
+        path: &Path,
+        root: &Path,
+        user_config_path: Option<&Path>,
+        force_offline: bool,
+    ) -> Result<Self, String> {
         let raw = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut config: Self =
             serde_yaml::from_str(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -5205,6 +5230,7 @@ impl RepositoryConfig {
         if config.version != 1 {
             return Err(format!("unsupported config version {}", config.version));
         }
+        packs::apply_packs(&mut config, root)?;
         config.offline |= force_offline;
         if !(1..=32).contains(&config.review.max_concurrency) {
             return Err("review.max_concurrency must be in 1..=32".into());

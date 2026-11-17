@@ -10053,6 +10053,7 @@ fn mcp_tools_declare_titles_safety_annotations_and_documented_inputs() {
         "list_waivers",
         "get_gate_history",
         "get_analyzer_findings",
+        "list_packs",
     ]
     .into_iter()
     .collect();
