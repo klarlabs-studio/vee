@@ -1191,6 +1191,7 @@ mod tests {
                 ],
                 timeout_seconds: 60,
                 output_limit_bytes: 65_536,
+                sarif: None,
             },
         );
         assert_eq!(rust.corpus_id, "rust-v1");
@@ -1218,6 +1219,7 @@ mod tests {
                 env_allowlist: vec!["PATH".into(), "PYTHONPATH".into()],
                 timeout_seconds: 30,
                 output_limit_bytes: 65_536,
+                sarif: None,
             },
         );
         assert_eq!(python.corpus_id, "python-v1");
@@ -1234,6 +1236,7 @@ mod tests {
                 env_allowlist: vec!["PATH".into(), "JAVA_HOME".into()],
                 timeout_seconds: 30,
                 output_limit_bytes: 65_536,
+                sarif: None,
             },
         );
         assert_eq!(java.corpus_id, "java-v1");
@@ -1266,6 +1269,7 @@ mod tests {
                     env_allowlist: vec!["PATH".into(), "HOME".into(), "GOMODCACHE".into()],
                     timeout_seconds: 60,
                     output_limit_bytes: 65_536,
+                    sarif: None,
                 },
             );
             assert_eq!(go.corpus_id, "go-v1");
@@ -1296,6 +1300,7 @@ mod tests {
                     env_allowlist: vec!["PATH".into(), "HOME".into()],
                     timeout_seconds: 30,
                     output_limit_bytes: 65_536,
+                    sarif: None,
                 },
             );
             assert_eq!(node.corpus_id, "node-v1");
@@ -1323,6 +1328,7 @@ mod tests {
                     env_allowlist: vec!["PATH".into(), "HOME".into()],
                     timeout_seconds: 30,
                     output_limit_bytes: 65_536,
+                    sarif: None,
                 },
                 Some(("true", "false")),
             );
@@ -1354,6 +1360,7 @@ mod tests {
                     env_allowlist: vec!["PATH".into(), "GEM_PATH".into(), "GEM_HOME".into()],
                     timeout_seconds: 30,
                     output_limit_bytes: 65_536,
+                    sarif: None,
                 },
             );
             assert_eq!(ruby.corpus_id, "ruby-v1");
@@ -1394,6 +1401,7 @@ mod tests {
                 ],
                 timeout_seconds: 60,
                 output_limit_bytes: 65_536,
+                sarif: None,
             },
             Some(("status < 600", "status <= 600")),
         );
@@ -1447,6 +1455,7 @@ mod tests {
                 ],
                 timeout_seconds: 60,
                 output_limit_bytes: 65_536,
+                sarif: None,
             },
             Some(("segment == \"..\"", "segment == \"...\"")),
         );
@@ -1546,6 +1555,7 @@ mod tests {
             env_allowlist: vec!["PATH".into()],
             timeout_seconds: 5,
             output_limit_bytes: 65_536,
+            sarif: None,
         };
         let report = assess_corpus(
             &root,
@@ -1598,6 +1608,7 @@ mod tests {
             env_allowlist: vec!["PATH".into()],
             timeout_seconds: 5,
             output_limit_bytes: 65_536,
+            sarif: None,
         };
         let inconclusive = assess_corpus(
             &root,
@@ -1645,6 +1656,7 @@ mod tests {
             env_allowlist: vec![],
             timeout_seconds: 1,
             output_limit_bytes: 1024,
+            sarif: None,
         };
         let error = assess_corpus(
             workspace.path(),

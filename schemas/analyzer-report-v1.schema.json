@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/analyzer-report-v1.schema.json",
+  "title": "Vero analyzer report v1",
+  "description": "Results of a trusted SARIF analyzer run, restricted to changed lines of the verified snapshot. Returned by `vero verification findings --output json` and the MCP `get_analyzer_findings` tool, and recorded in gate replay inputs.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "profile_id",
+    "snapshot_id",
+    "tools",
+    "parsed",
+    "problem",
+    "findings",
+    "results_total",
+    "results_outside_changes",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "profile_id": {
+      "type": "string"
+    },
+    "snapshot_id": {
+      "type": "string"
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "parsed": {
+      "type": "boolean"
+    },
+    "problem": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    },
+    "results_total": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "results_outside_changes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "fingerprint",
+        "rule_id",
+        "level",
+        "path",
+        "line",
+        "message"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^analyzer:"
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "rule_id": {
+          "type": "string"
+        },
+        "level": {
+          "enum": [
+            "error",
+            "warning",
+            "note",
+            "none"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

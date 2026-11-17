@@ -386,6 +386,13 @@ struct OwnersInput {
     paths: Vec<String>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct VerificationRunInput {
+    /// Verification run ID of a profile configured as a SARIF analyzer.
+    run_id: String,
+}
+
 /// MCP-only: bounded source read from a review snapshot (the CLI has no equivalent).
 #[derive(Serialize, JsonSchema)]
 struct RepositoryContextOutput {
@@ -873,6 +880,11 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         Some("gate-history-v1"),
         "List persisted gate decisions for a saved review. Same document as `vero gate history --output json`.",
         |ws, input: ReviewInput| operations::gate_history(&ws, &input.review_id));
+
+    operation_tool!(server, workspace, "get_analyzer_findings", "Get analyzer findings", read_only_tool(),
+        Some("analyzer-report-v1"),
+        "Results of a trusted SARIF analyzer verification run located on changed lines of its snapshot, exactly as the gate evaluates them. Results elsewhere are pre-existing and never block. Same document as `vero verification findings <run-id> --output json`.",
+        |ws, input: VerificationRunInput| operations::analyzer_findings(&ws, &input.run_id));
 
     Ok(server)
 }

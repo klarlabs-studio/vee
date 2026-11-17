@@ -12,6 +12,7 @@ Use Vero as an independent reviewer after implementation and before declaring th
 2. Preserve stdout JSON as machine-readable output when using `--output json`; diagnostics belong on stderr.
 3. Interpret exit codes: 0 passed, 1 blocked, 2 incomplete or execution failure, 3 invalid invocation/configuration. Incomplete is never a pass.
 4. Inspect findings and evidence with `vero findings list --review <id>` (paged; follow `--offset` while `total` exceeds the page) and `vero findings show <id>`; check reviewer outcomes and snapshot identity.
-5. If files or effective policy change after a pass, rerun the review. Do not reuse a prior gate decision for a modified snapshot.
+5. A blocking ID starting with `analyzer:` comes from a trusted static analyzer, not a model: inspect it with `vero verification findings <run-id>` (MCP: `get_analyzer_findings`) and fix it like a failing check. Rerun the analyzer (`vero verify --profile <profile>` on the same scope) before re-reviewing.
+6. If files or effective policy change after a pass, rerun the review. Do not reuse a prior gate decision for a modified snapshot.
 
 Do not ask Vero or another model to self-approve. The gate is determined by stored evidence and policy, not reviewer prose.

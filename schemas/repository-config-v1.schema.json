@@ -4,123 +4,427 @@
   "title": "Vero repository configuration",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version"],
+  "required": [
+    "version"
+  ],
   "properties": {
-    "version": { "const": 1 },
-    "offline": { "type": "boolean" },
+    "version": {
+      "const": 1
+    },
+    "offline": {
+      "type": "boolean"
+    },
     "review": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "include": { "type": "array", "items": { "type": "string" } },
-        "exclude": { "type": "array", "items": { "type": "string" } },
-        "max_concurrency": { "type": "integer", "minimum": 1, "maximum": 32 },
-        "max_context_files": { "type": "integer", "minimum": 1, "maximum": 2048 },
-        "max_context_file_bytes": { "type": "integer", "minimum": 1, "maximum": 4194304 },
-        "max_context_bytes": { "type": "integer", "minimum": 1, "maximum": 16777216 }
+        "include": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "max_concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "max_context_files": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2048
+        },
+        "max_context_file_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4194304
+        },
+        "max_context_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        }
       }
     },
     "test_generation": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "max_context_tokens": { "type": "integer", "minimum": 1024, "maximum": 131072, "default": 20000 }
+        "max_context_tokens": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 131072,
+          "default": 20000
+        }
       }
     },
-    "providers": { "type": "object", "additionalProperties": { "$ref": "#/$defs/provider" } },
-    "reviewers": { "type": "object", "additionalProperties": { "$ref": "#/$defs/reviewer" } },
-    "verification": { "type": "object", "additionalProperties": { "$ref": "#/$defs/verification" } },
-    "hosting": { "$ref": "#/$defs/hosting" },
-    "policy": { "$ref": "#/$defs/policy" },
-    "policy_profiles": { "type": "object", "additionalProperties": { "$ref": "#/$defs/policy" } }
+    "providers": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/provider"
+      }
+    },
+    "reviewers": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/reviewer"
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/verification"
+      }
+    },
+    "hosting": {
+      "$ref": "#/$defs/hosting"
+    },
+    "policy": {
+      "$ref": "#/$defs/policy"
+    },
+    "policy_profiles": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/policy"
+      }
+    }
   },
   "$defs": {
     "provider": {
-      "type": "object", "additionalProperties": false,
-      "required": ["kind"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
       "properties": {
-        "kind": { "enum": ["cli", "codex_cli", "gemini_cli", "claude_cli", "openai_compatible", "ollama_native"] },
-        "egress": { "enum": ["local", "network"] },
-        "executable": { "type": "string", "minLength": 1 },
-        "endpoint": { "type": "string", "format": "uri", "minLength": 1 },
-        "args": { "type": "array", "items": { "type": "string" } },
-        "version_args": { "type": "array", "items": { "type": "string" } },
-        "model": { "type": ["string", "null"] },
-        "max_input_tokens": { "type": "integer", "minimum": 1024, "maximum": 131072, "description": "Approximate provider input token budget; impact context is reduced before execution while changed source is preserved." },
-        "max_output_tokens": { "type": "integer", "minimum": 1, "maximum": 131072, "description": "ollama_native only; maximum generated tokens, default 2048. The input and output budgets must fit in context_window_tokens." },
-        "context_window_tokens": { "type": "integer", "minimum": 1024, "maximum": 131072, "description": "Required for ollama_native; sent as Ollama's native options.num_ctx." },
-        "env_allowlist": { "type": "array", "items": { "type": "string" } },
-        "timeout_seconds": { "type": "integer", "minimum": 1 },
+        "kind": {
+          "enum": [
+            "cli",
+            "codex_cli",
+            "gemini_cli",
+            "claude_cli",
+            "openai_compatible",
+            "ollama_native"
+          ]
+        },
+        "egress": {
+          "enum": [
+            "local",
+            "network"
+          ]
+        },
+        "executable": {
+          "type": "string",
+          "minLength": 1
+        },
+        "endpoint": {
+          "type": "string",
+          "format": "uri",
+          "minLength": 1
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "version_args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_input_tokens": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 131072,
+          "description": "Approximate provider input token budget; impact context is reduced before execution while changed source is preserved."
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131072,
+          "description": "ollama_native only; maximum generated tokens, default 2048. The input and output budgets must fit in context_window_tokens."
+        },
+        "context_window_tokens": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 131072,
+          "description": "Required for ollama_native; sent as Ollama's native options.num_ctx."
+        },
+        "env_allowlist": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
         "pricing": {
           "type": "object",
           "description": "Optional user-maintained model token prices used for informational cost estimates only.",
           "additionalProperties": {
-            "type": "object", "additionalProperties": false,
-            "required": ["input_usd_per_million", "output_usd_per_million"],
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "input_usd_per_million",
+              "output_usd_per_million"
+            ],
             "properties": {
-              "input_usd_per_million": { "type": "number", "minimum": 0 },
-              "output_usd_per_million": { "type": "number", "minimum": 0 }
+              "input_usd_per_million": {
+                "type": "number",
+                "minimum": 0
+              },
+              "output_usd_per_million": {
+                "type": "number",
+                "minimum": 0
+              }
             }
           }
         }
       }
     },
     "reviewer": {
-      "type": "object", "additionalProperties": false,
-      "required": ["provider", "instructions_file"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "instructions_file"
+      ],
       "properties": {
-        "provider": { "type": "string" }, "instructions_file": { "type": "string" },
-        "context_files": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
-        "enabled": { "type": "boolean" },
-        "include": { "type": "array", "items": { "type": "string" } },
-        "exclude": { "type": "array", "items": { "type": "string" } },
-        "policy": { "$ref": "#/$defs/reviewer_policy" }
+        "provider": {
+          "type": "string"
+        },
+        "instructions_file": {
+          "type": "string"
+        },
+        "context_files": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "include": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "policy": {
+          "$ref": "#/$defs/reviewer_policy"
+        }
       }
     },
     "reviewer_policy": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "block_severities": { "type": "array", "uniqueItems": true, "items": { "enum": ["critical", "high", "medium", "low", "info"] } },
-        "minimum_confidence": { "type": "integer", "minimum": 0, "maximum": 100 }
+        "block_severities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low",
+              "info"
+            ]
+          }
+        },
+        "minimum_confidence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
       }
     },
     "verification": {
-      "type": "object", "additionalProperties": false, "required": ["executable"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "executable"
+      ],
       "properties": {
-        "executable": { "type": "string", "minLength": 1 },
-        "egress": { "enum": ["local", "network"], "default": "network", "description": "Declared check network behavior; local is an operator assertion, not OS-level network isolation." },
-        "args": { "type": "array", "items": { "type": "string" } },
-        "timeout_seconds": { "type": "integer", "minimum": 1 },
-        "output_limit_bytes": { "type": "integer", "minimum": 1 },
-        "env_allowlist": { "type": "array", "items": { "type": "string" } }
+        "executable": {
+          "type": "string",
+          "minLength": 1
+        },
+        "egress": {
+          "enum": [
+            "local",
+            "network"
+          ],
+          "default": "network",
+          "description": "Declared check network behavior; local is an operator assertion, not OS-level network isolation."
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "output_limit_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "env_allowlist": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "sarif": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Treat this profile as a trusted static analyzer whose stdout is SARIF 2.1.0.",
+          "properties": {
+            "block_levels": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "error",
+                  "warning",
+                  "note",
+                  "none"
+                ]
+              },
+              "uniqueItems": true,
+              "description": "SARIF levels that block the gate when reported on a changed line; empty means advisory."
+            }
+          }
+        }
       }
     },
     "hosting": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "provider": { "enum": ["github", "gitlab", "bitbucket", "azure-devops", "gerrit"] },
-        "host": { "type": "string", "minLength": 1 },
-        "api_base": { "type": "string", "format": "uri", "minLength": 1 },
-        "token_env": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
-        "webhook_secret_env": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
-        "actor_login": { "type": "string", "maxLength": 256 },
-        "username": { "type": "string", "maxLength": 256 }
+        "provider": {
+          "enum": [
+            "github",
+            "gitlab",
+            "bitbucket",
+            "azure-devops",
+            "gerrit"
+          ]
+        },
+        "host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "api_base": {
+          "type": "string",
+          "format": "uri",
+          "minLength": 1
+        },
+        "token_env": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+        },
+        "webhook_secret_env": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+        },
+        "actor_login": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "username": {
+          "type": "string",
+          "maxLength": 256
+        }
       }
     },
     "policy": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "required_reviewers": { "type": "array", "items": { "type": "string" } },
-        "required_verifications": { "type": "array", "items": { "type": "string" } },
-        "block_severities": { "type": "array", "items": { "enum": ["critical", "high", "medium", "low", "info"] } },
-        "minimum_confidence": { "type": "integer", "minimum": 0, "maximum": 100 },
-        "on_incomplete": { "enum": ["block", "allow"] },
-        "acceptance": { "$ref": "#/$defs/acceptance_policy" }
+        "required_reviewers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "required_verifications": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "block_severities": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low",
+              "info"
+            ]
+          }
+        },
+        "minimum_confidence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "on_incomplete": {
+          "enum": [
+            "block",
+            "allow"
+          ]
+        },
+        "acceptance": {
+          "$ref": "#/$defs/acceptance_policy"
+        }
       }
     },
     "acceptance_policy": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "require_passing_verification": { "type": "boolean" },
-        "required_verification_profiles": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+        "require_passing_verification": {
+          "type": "boolean"
+        },
+        "required_verification_profiles": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
       }
     }
   }

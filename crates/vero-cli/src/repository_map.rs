@@ -583,6 +583,7 @@ fn current_gate_validity(
         vero_core::GateEvidence {
             verification_runs: &current_verification_runs,
             source_evidence: &replay_inputs.evidence,
+            analyzer_reports: &replay_inputs.analyzer_reports,
         },
         vero_core::GateEvaluationOptions {
             waiver_evaluation: vero_core::WaiverEvaluation {
@@ -592,20 +593,11 @@ fn current_gate_validity(
             reviewer_policies: &replay_inputs.reviewer_policies,
         },
     );
-    let visible_ids = saved
-        .findings
-        .iter()
-        .map(|finding| (finding.fingerprint.as_str(), finding.id.as_str()))
-        .collect::<std::collections::HashMap<_, _>>();
-    replayed.blocking_findings = replayed
-        .blocking_findings
-        .iter()
-        .filter_map(|id| findings.iter().find(|finding| finding.id == *id))
-        .filter_map(|finding| visible_ids.get(finding.fingerprint.as_str()))
-        .map(|id| (*id).to_owned())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    replayed.blocking_findings = vero_application::visible_blocking_findings(
+        &replayed.blocking_findings,
+        findings,
+        &saved.findings,
+    );
     if replayed.verification_run_ids != saved.gate.verification_run_ids
         || replayed.evidence_digest != saved.gate.evidence_digest
     {

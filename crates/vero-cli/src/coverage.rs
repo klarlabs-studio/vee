@@ -263,7 +263,7 @@ fn parse_lcov(text: &str, root: &Path) -> Result<BTreeMap<String, BTreeMap<u64, 
     Ok(records)
 }
 
-fn parse_manifest(manifest: &str, expected: &str) -> Result<ChangeSet, String> {
+pub(crate) fn parse_manifest(manifest: &str, expected: &str) -> Result<ChangeSet, String> {
     let (version, base, head, scope, files): (
         u32,
         Option<String>,

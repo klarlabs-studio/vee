@@ -1027,6 +1027,14 @@ enum VerificationCommand {
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
+    /// Show a SARIF analyzer run's results on changed lines, as the gate evaluates them.
+    Findings {
+        /// Verification run ID of a profile configured with `sarif`.
+        run_id: String,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
 }
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum CoverageStream {
@@ -1585,6 +1593,7 @@ fn replay_gate(review_value: &serde_json::Value) -> serde_json::Value {
         vero_core::GateEvidence {
             verification_runs: &inputs.verification_runs,
             source_evidence: &inputs.evidence,
+            analyzer_reports: &inputs.analyzer_reports,
         },
         vero_core::GateEvaluationOptions {
             waiver_evaluation: vero_core::WaiverEvaluation {
@@ -1594,20 +1603,11 @@ fn replay_gate(review_value: &serde_json::Value) -> serde_json::Value {
             reviewer_policies: &inputs.reviewer_policies,
         },
     );
-    let visible_ids = review
-        .findings
-        .iter()
-        .map(|finding| (finding.fingerprint.as_str(), finding.id.as_str()))
-        .collect::<std::collections::HashMap<_, _>>();
-    replayed.blocking_findings = replayed
-        .blocking_findings
-        .iter()
-        .filter_map(|id| findings.iter().find(|finding| finding.id == *id))
-        .filter_map(|finding| visible_ids.get(finding.fingerprint.as_str()))
-        .map(|id| (*id).to_owned())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    replayed.blocking_findings = vero_application::visible_blocking_findings(
+        &replayed.blocking_findings,
+        findings,
+        &review.findings,
+    );
     let matches = replayed == review.gate;
     serde_json::json!({"status":"replayed","matches":matches,"message":if matches {"deterministic gate replay matches the stored decision"} else {"replayed gate decision differs from the stored decision"},"replayed_decision":replayed})
 }
@@ -2762,6 +2762,54 @@ fn print_doctor_report(report: &setup::DoctorReport) {
             "Not ready."
         }
     );
+}
+
+/// Fingerprint of an analyzer finding recorded in one of the review's gate
+/// decisions (at review time or a later `gate check`) on the review's snapshot.
+fn analyzer_finding_fingerprint(
+    store: &ReviewStore,
+    review: &vero_application::ReviewResult,
+    finding_id: &str,
+) -> Result<Option<String>> {
+    let decisions = store
+        .gate_decisions_for_review(&review.review_id)
+        .map_err(anyhow::Error::msg)?;
+    Ok(std::iter::once(&review.gate)
+        .chain(decisions.iter())
+        .filter(|decision| decision.snapshot_id == review.snapshot_id)
+        .filter_map(|decision| decision.replay_inputs.as_ref())
+        .flat_map(|inputs| &inputs.analyzer_reports)
+        .flat_map(|report| &report.findings)
+        .find(|finding| finding.id == finding_id)
+        .map(|finding| finding.fingerprint.clone()))
+}
+
+fn print_analyzer_report(report: &vero_core::AnalyzerReport) {
+    println!(
+        "Analyzer run {} ({})  Snapshot: {}",
+        report.run_id, report.profile_id, report.snapshot_id
+    );
+    if !report.tools.is_empty() {
+        println!("Tools: {}", report.tools.join(", "));
+    }
+    if let Some(problem) = &report.problem {
+        println!("Not evaluable: {problem}");
+    }
+    println!(
+        "Results: {} total, {} on changed lines, {} elsewhere (pre-existing, never blocking)",
+        report.results_total,
+        report.findings.len(),
+        report.results_outside_changes
+    );
+    for finding in &report.findings {
+        println!(
+            "  {} [{:?}] {}:{} {}: {}",
+            finding.id, finding.level, finding.path, finding.line, finding.rule_id, finding.message
+        );
+    }
+    for limitation in &report.limitations {
+        println!("Limitation: {limitation}");
+    }
 }
 
 /// Resolve the CLI's `--review` / scope flags into the change an operation runs on.
@@ -4623,6 +4671,15 @@ fn run() -> Result<u8> {
                     }
                 }
                 Ok(0)
+            }
+            VerificationCommand::Findings { run_id, output } => {
+                let report =
+                    operations::analyzer_findings(&operations::Workspace::discover()?, &run_id)?;
+                match output {
+                    Output::Json => emit_json(&report)?,
+                    Output::Text => print_analyzer_report(&report),
+                }
+                Ok(if report.parsed { 0 } else { 2 })
             }
             VerificationCommand::Coverage {
                 run_id,
@@ -6669,13 +6726,17 @@ fn run() -> Result<u8> {
                         .with_context(|| format!("review {review} was not found"))?;
                     let reviewed = vero_application::deserialize_review_result(&payload)
                         .map_err(anyhow::Error::msg)?;
-                    let finding = reviewed
+                    let fingerprint = match reviewed
                         .findings
                         .iter()
                         .find(|finding| finding.id == finding_id)
-                        .with_context(|| {
-                            format!("finding {finding_id} was not observed in review {review}")
-                        })?;
+                    {
+                        Some(finding) => finding.fingerprint.clone(),
+                        None => analyzer_finding_fingerprint(&store, &reviewed, &finding_id)?
+                            .with_context(|| {
+                                format!("finding {finding_id} was not observed in review {review}")
+                            })?,
+                    };
                     if reason.trim().is_empty() || author.trim().is_empty() {
                         anyhow::bail!("--reason and --author must not be empty");
                     }
@@ -6683,7 +6744,6 @@ fn run() -> Result<u8> {
                     let expires_at_unix = created_at_unix
                         .checked_add(i64::from(expires_in_days) * 86_400)
                         .context("waiver expiry exceeds supported timestamp")?;
-                    let fingerprint = finding.fingerprint.clone();
                     let id = format!(
                         "waiver_{}",
                         &vero_core::digest(&serde_json::to_vec(&(

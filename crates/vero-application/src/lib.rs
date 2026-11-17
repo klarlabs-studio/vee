@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+pub mod sarif;
 use std::path::{Path, PathBuf};
 use syn::spanned::Spanned;
 use vero_core::{
@@ -1952,6 +1953,7 @@ pub fn run_review_with_provider_and_selection_context(
         minimum_confidence: config.policy.minimum_confidence,
         required_review_complete: config.policy.on_incomplete == "block",
         required_verifications: config.policy.required_verifications.clone(),
+        analyzer_block_levels: sarif::analyzer_block_levels(config),
     };
     let required_reviewers_available = config.policy.required_reviewers.iter().all(|required| {
         selected_reviewers
@@ -2732,6 +2734,8 @@ pub fn run_review_with_provider_and_selection_context(
         gate_eligible_verification_runs(root, &snapshot, config, &verification_runs);
     let waivers = store.waivers_for_snapshot(&snapshot)?;
     let waiver_evaluation_time_unix = current_unix_time()?;
+    let analyzer_reports =
+        sarif::analyzer_reports(root, &change_set, config, &gate_verification_runs);
     let decision = vero_core::evaluate_gate_with_waivers_and_reviewer_policies(
         &snapshot,
         vero_core::GateDigests {
@@ -2744,6 +2748,7 @@ pub fn run_review_with_provider_and_selection_context(
         vero_core::GateEvidence {
             verification_runs: &gate_verification_runs,
             source_evidence: &evidence,
+            analyzer_reports: &analyzer_reports,
         },
         vero_core::GateEvaluationOptions {
             waiver_evaluation: vero_core::WaiverEvaluation {
@@ -2753,20 +2758,9 @@ pub fn run_review_with_provider_and_selection_context(
             reviewer_policies: &reviewer_policies,
         },
     );
-    let visible_ids_by_fingerprint = findings
-        .iter()
-        .map(|finding| (finding.fingerprint.as_str(), finding.id.as_str()))
-        .collect::<std::collections::HashMap<_, _>>();
     let mut decision = decision;
-    decision.blocking_findings = decision
-        .blocking_findings
-        .iter()
-        .filter_map(|id| policy_findings.iter().find(|finding| finding.id == *id))
-        .filter_map(|finding| visible_ids_by_fingerprint.get(finding.fingerprint.as_str()))
-        .map(|id| (*id).to_string())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    decision.blocking_findings =
+        visible_blocking_findings(&decision.blocking_findings, &policy_findings, &findings);
     let reviewer_arbitration = build_reviewer_arbitration(
         &policy_findings,
         &findings,
@@ -2807,14 +2801,7 @@ pub fn run_review_with_provider_and_selection_context(
         work_item_token_env,
     };
     let payload = serde_json::to_string(&result).map_err(|error| error.to_string())?;
-    let snapshot_manifest = serde_json::to_string(&(
-        result.change_set.schema_version,
-        result.change_set.base_oid.as_deref(),
-        result.change_set.head_oid.as_deref(),
-        result.change_set.scope.as_str(),
-        &result.change_set.files,
-    ))
-    .map_err(|error| error.to_string())?;
+    let snapshot_manifest = snapshot_manifest_json(&result.change_set)?;
     store.save_review_with_decision(ReviewWrite {
         id: &review_id,
         snapshot_id: &snapshot,
@@ -3447,6 +3434,18 @@ fn severity_rank(severity: vero_core::Severity) -> u8 {
     }
 }
 
+/// The persisted manifest form of a change snapshot.
+pub fn snapshot_manifest_json(change_set: &ChangeSet) -> Result<String, String> {
+    serde_json::to_string(&(
+        change_set.schema_version,
+        change_set.base_oid.as_deref(),
+        change_set.head_oid.as_deref(),
+        change_set.scope.as_str(),
+        &change_set.files,
+    ))
+    .map_err(|error| error.to_string())
+}
+
 pub fn run_verification(
     root: &Path,
     snapshot: &ChangeSet,
@@ -3455,6 +3454,7 @@ pub fn run_verification(
     store: &mut ReviewStore,
 ) -> Result<VerificationRun, String> {
     ensure_snapshot_current(root, snapshot, "before verification")?;
+    store.record_snapshot_manifest(&snapshot.digest, &snapshot_manifest_json(snapshot)?)?;
     let profile = config
         .verification
         .get(profile_id)
@@ -3693,6 +3693,7 @@ pub fn run_impacted_test_verification(
     store: &mut ReviewStore,
 ) -> Result<VerificationRun, String> {
     ensure_snapshot_current(root, snapshot, "before impact-targeted verification")?;
+    store.record_snapshot_manifest(&snapshot.digest, &snapshot_manifest_json(snapshot)?)?;
     let profile = config
         .verification
         .get(profile_id)
@@ -7788,6 +7789,34 @@ pub struct GateEvaluation<'a> {
 /// executable, arguments, time limits, output limits, or allowed environment
 /// have changed. The command digest also includes executable bytes and digests
 /// of present allowlisted environment values.
+/// Map a gate decision's blocking IDs to the IDs users see. Reviewer findings are
+/// deduplicated after policy evaluation, so policy-level IDs map to the visible
+/// finding with the same fingerprint; analyzer finding IDs are already visible.
+pub fn visible_blocking_findings(
+    blocking: &[String],
+    policy_findings: &[vero_core::Finding],
+    visible_findings: &[vero_core::Finding],
+) -> Vec<String> {
+    let visible: std::collections::HashMap<_, _> = visible_findings
+        .iter()
+        .map(|finding| (finding.fingerprint.as_str(), finding.id.as_str()))
+        .collect();
+    blocking
+        .iter()
+        .filter_map(|id| {
+            if id.starts_with("analyzer:") {
+                return Some(id.clone());
+            }
+            let finding = policy_findings.iter().find(|finding| finding.id == *id)?;
+            visible
+                .get(finding.fingerprint.as_str())
+                .map(|id| (*id).to_owned())
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn gate_eligible_verification_runs(
     repository_root: &Path,
     snapshot_id: &str,
@@ -7900,6 +7929,7 @@ pub fn evaluate_and_persist_gate(
             required_review_complete: config.policy.on_incomplete == "block"
                 || !required_reviewers_complete,
             required_verifications: config.policy.required_verifications.clone(),
+            analyzer_block_levels: sarif::analyzer_block_levels(config),
         };
         let gate_verification_runs = gate_eligible_verification_runs(
             repository_root,
@@ -7907,6 +7937,8 @@ pub fn evaluate_and_persist_gate(
             config,
             verification_runs,
         );
+        let analyzer_reports =
+            sarif::analyzer_reports(repository_root, current, config, &gate_verification_runs);
         vero_core::evaluate_gate_with_waivers_and_reviewer_policies(
             &current.digest,
             vero_core::GateDigests {
@@ -7919,6 +7951,7 @@ pub fn evaluate_and_persist_gate(
             vero_core::GateEvidence {
                 verification_runs: &gate_verification_runs,
                 source_evidence: &gate_evidence,
+                analyzer_reports: &analyzer_reports,
             },
             vero_core::GateEvaluationOptions {
                 waiver_evaluation: vero_core::WaiverEvaluation {
@@ -7951,19 +7984,8 @@ pub fn evaluate_and_persist_gate(
         stale
     };
     if let Some(policy_findings) = policy_findings {
-        let visible_ids = findings
-            .iter()
-            .map(|finding| (finding.fingerprint.as_str(), finding.id.as_str()))
-            .collect::<std::collections::HashMap<_, _>>();
-        decision.blocking_findings = decision
-            .blocking_findings
-            .iter()
-            .filter_map(|id| policy_findings.iter().find(|finding| finding.id == *id))
-            .filter_map(|finding| visible_ids.get(finding.fingerprint.as_str()))
-            .map(|id| (*id).to_owned())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
+        decision.blocking_findings =
+            visible_blocking_findings(&decision.blocking_findings, policy_findings, findings);
     }
     store.save_gate_decision(review_id, &decision)?;
     Ok(decision)
@@ -8518,6 +8540,7 @@ mod tests {
             minimum_confidence: 0,
             required_review_complete: true,
             required_verifications: vec![],
+            analyzer_block_levels: Default::default(),
         };
         let gate = vero_core::evaluate_gate(
             "snapshot",
@@ -8529,6 +8552,7 @@ mod tests {
             vero_core::GateEvidence {
                 verification_runs: &[],
                 source_evidence: &[],
+                analyzer_reports: &[],
             },
         );
         let mut review = ReviewResult {
@@ -8840,6 +8864,7 @@ mod tests {
             minimum_confidence: 80,
             required_review_complete: true,
             required_verifications: vec![],
+            analyzer_block_levels: Default::default(),
         };
         let decision = vero_core::evaluate_gate(
             "snapshot",
@@ -8851,6 +8876,7 @@ mod tests {
             vero_core::GateEvidence {
                 verification_runs: &[],
                 source_evidence: &evidence,
+                analyzer_reports: &[],
             },
         );
         assert_eq!(decision.status, vero_core::GateStatus::Incomplete);
@@ -9155,6 +9181,7 @@ mod tests {
             minimum_confidence: 80,
             required_review_complete: true,
             required_verifications: vec![],
+            analyzer_block_levels: Default::default(),
         };
         let finding = vero_core::Finding {
             id: "legacy-blocker".into(),
@@ -9191,6 +9218,7 @@ mod tests {
             vero_core::GateEvidence {
                 verification_runs: &[],
                 source_evidence: std::slice::from_ref(&evidence),
+                analyzer_reports: &[],
             },
         );
         let review = ReviewResult {
@@ -9234,6 +9262,7 @@ mod tests {
             vero_core::GateEvidence {
                 verification_runs: &[],
                 source_evidence: &stored.evidence,
+                analyzer_reports: &[],
             },
         );
         assert_eq!(reevaluated.status, GateStatus::Block);

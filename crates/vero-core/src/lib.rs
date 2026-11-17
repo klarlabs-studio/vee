@@ -139,6 +139,64 @@ pub struct VerificationProfile {
     pub timeout_seconds: u64,
     #[serde(default = "default_verification_output_limit")]
     pub output_limit_bytes: usize,
+    /// Treat this profile as a trusted static analyzer whose stdout is SARIF 2.1.0.
+    /// Results on changed lines whose level is listed in `block_levels` block the gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sarif: Option<SarifAnalyzerConfig>,
+}
+
+/// Gate policy for a SARIF-producing verification profile.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SarifAnalyzerConfig {
+    /// SARIF result levels that block the gate when reported on a changed line.
+    /// An empty list makes the analyzer advisory.
+    #[serde(default)]
+    pub block_levels: Vec<SarifLevel>,
+}
+
+/// SARIF 2.1.0 result level.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SarifLevel {
+    Error,
+    Warning,
+    Note,
+    None,
+}
+
+/// One analyzer result located on a changed line of the verified snapshot.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnalyzerFinding {
+    /// `analyzer:<profile>:<fingerprint prefix>`; appears in gate `blocking_findings`.
+    pub id: String,
+    /// Digest of profile, rule, path, and the trimmed source line; stable across line shifts.
+    pub fingerprint: String,
+    pub rule_id: String,
+    pub level: SarifLevel,
+    pub path: String,
+    pub line: u64,
+    pub message: String,
+}
+
+/// Results of one SARIF analyzer run, restricted to the run's snapshot changes.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnalyzerReport {
+    pub schema_version: u32,
+    pub run_id: String,
+    pub profile_id: String,
+    pub snapshot_id: String,
+    /// Tool names and versions from the SARIF `driver` objects.
+    pub tools: Vec<String>,
+    /// False when the run produced no valid SARIF; the gate then treats the
+    /// analyzer as incomplete.
+    pub parsed: bool,
+    pub problem: Option<String>,
+    pub findings: Vec<AnalyzerFinding>,
+    pub results_total: usize,
+    /// Results outside the snapshot's changed lines (pre-existing issues).
+    pub results_outside_changes: usize,
+    pub limitations: Vec<String>,
 }
 
 /// Resolve configured environment variable names from the invoking process.
@@ -789,6 +847,8 @@ pub struct GateReplayInputs {
     pub waivers: Vec<Waiver>,
     #[serde(default)]
     pub evidence: Vec<Evidence>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub analyzer_reports: Vec<AnalyzerReport>,
     pub evaluation_time_unix: i64,
 }
 
@@ -819,6 +879,10 @@ pub struct Policy {
     pub minimum_confidence: u8,
     pub required_review_complete: bool,
     pub required_verifications: Vec<String>,
+    /// Required verification profiles that are SARIF analyzers, with the result
+    /// levels that block. Omitted when empty so earlier decisions replay unchanged.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub analyzer_block_levels: std::collections::BTreeMap<String, Vec<SarifLevel>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -837,6 +901,8 @@ pub struct GateDigests<'a> {
 pub struct GateEvidence<'a> {
     pub verification_runs: &'a [VerificationRun],
     pub source_evidence: &'a [Evidence],
+    /// Reports derived from SARIF analyzer runs on this snapshot.
+    pub analyzer_reports: &'a [AnalyzerReport],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1366,7 +1432,21 @@ pub fn evaluate_gate_with_waivers_and_reviewer_policies(
     let GateEvidence {
         verification_runs,
         source_evidence: evidence,
+        analyzer_reports,
     } = gate_evidence;
+    // Only reports for runs of required analyzer profiles on this snapshot count.
+    let analyzer_reports: Vec<&AnalyzerReport> = analyzer_reports
+        .iter()
+        .filter(|report| {
+            report.snapshot_id == snapshot_id
+                && policy
+                    .analyzer_block_levels
+                    .contains_key(&report.profile_id)
+                && verification_runs
+                    .iter()
+                    .any(|run| run.run_id == report.run_id && run.profile_id == report.profile_id)
+        })
+        .collect();
     let mut applied_waivers: Vec<_> = waiver_evaluation
         .records
         .iter()
@@ -1375,9 +1455,15 @@ pub fn evaluate_gate_with_waivers_and_reviewer_policies(
                 && waiver.snapshot_id == snapshot_id
                 && waiver.created_at_unix <= waiver_evaluation.evaluation_time_unix
                 && waiver.expires_at_unix > waiver_evaluation.evaluation_time_unix
-                && findings
+                && (findings
                     .iter()
                     .any(|finding| finding.fingerprint == waiver.finding_fingerprint)
+                    || analyzer_reports.iter().any(|report| {
+                        report
+                            .findings
+                            .iter()
+                            .any(|finding| finding.fingerprint == waiver.finding_fingerprint)
+                    }))
         })
         .collect();
     applied_waivers.sort_by(|a, b| a.id.cmp(&b.id));
@@ -1457,7 +1543,19 @@ pub fn evaluate_gate_with_waivers_and_reviewer_policies(
         }) {
             Some(run) => {
                 verification_run_ids.push(run.run_id.clone());
-                if run.status != VerificationStatus::Passed {
+                let complete = if policy.analyzer_block_levels.contains_key(profile_id) {
+                    // Analyzers commonly exit non-zero when they report results; the
+                    // run is complete when it finished and produced valid SARIF.
+                    matches!(
+                        run.status,
+                        VerificationStatus::Passed | VerificationStatus::Failed
+                    ) && analyzer_reports
+                        .iter()
+                        .any(|report| report.run_id == run.run_id && report.parsed)
+                } else {
+                    run.status == VerificationStatus::Passed
+                };
+                if !complete {
                     missing_verifications.push(profile_id.clone());
                 }
             }
@@ -1466,10 +1564,39 @@ pub fn evaluate_gate_with_waivers_and_reviewer_policies(
     }
     verification_run_ids.sort();
     missing_verifications.sort();
-    let evidence_digest = digest(
-        &serde_json::to_vec(&(verification_run_ids.as_slice(), &applied_waivers, evidence))
+    let analyzer_blocked: Vec<String> = analyzer_reports
+        .iter()
+        .filter(|report| verification_run_ids.contains(&report.run_id))
+        .flat_map(|report| {
+            let levels = &policy.analyzer_block_levels[&report.profile_id];
+            report
+                .findings
+                .iter()
+                .filter(move |finding| levels.contains(&finding.level))
+        })
+        .filter(|finding| !waived_fingerprints.contains(finding.fingerprint.as_str()))
+        .map(|finding| finding.id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    // Analyzer reports join the evidence digest only when present, so decisions
+    // without analyzers keep their earlier identities.
+    let evidence_digest = if analyzer_reports.is_empty() {
+        digest(
+            &serde_json::to_vec(&(verification_run_ids.as_slice(), &applied_waivers, evidence))
+                .expect("serializing gate evidence records"),
+        )
+    } else {
+        digest(
+            &serde_json::to_vec(&(
+                verification_run_ids.as_slice(),
+                &applied_waivers,
+                evidence,
+                &analyzer_reports,
+            ))
             .expect("serializing gate evidence records"),
-    );
+        )
+    };
     let verification_complete = missing_verifications.is_empty();
     let (status, mut reasons) = if !complete && policy.required_review_complete {
         (
@@ -1500,11 +1627,18 @@ pub fn evaluate_gate_with_waivers_and_reviewer_policies(
                 unobserved_blockers.join(", ")
             )],
         )
-    } else if !blocked.is_empty() {
-        (
-            GateStatus::Block,
-            vec!["unwaived findings meet blocking policy".to_string()],
-        )
+    } else if !blocked.is_empty() || !analyzer_blocked.is_empty() {
+        let mut reasons = Vec::new();
+        if !blocked.is_empty() {
+            reasons.push("unwaived findings meet blocking policy".to_string());
+        }
+        if !analyzer_blocked.is_empty() {
+            reasons.push(format!(
+                "trusted analyzers reported blocking results on changed lines: {}",
+                analyzer_blocked.join(", ")
+            ));
+        }
+        (GateStatus::Block, reasons)
     } else if !complete {
         (
             GateStatus::Incomplete,
@@ -1537,13 +1671,21 @@ pub fn evaluate_gate_with_waivers_and_reviewer_policies(
         reasons.extend(reviewer_reasons);
     }
     for waiver in applied_waivers {
-        if let Some(finding) = findings
+        let finding_id = findings
             .iter()
             .find(|finding| finding.fingerprint == waiver.finding_fingerprint)
-        {
+            .map(|finding| finding.id.as_str())
+            .or_else(|| {
+                analyzer_reports
+                    .iter()
+                    .flat_map(|report| &report.findings)
+                    .find(|finding| finding.fingerprint == waiver.finding_fingerprint)
+                    .map(|finding| finding.id.as_str())
+            });
+        if let Some(finding_id) = finding_id {
             reasons.push(format!(
                 "waiver {} applied to finding {} until {}",
-                waiver.id, finding.id, waiver.expires_at_unix
+                waiver.id, finding_id, waiver.expires_at_unix
             ));
         }
     }
@@ -1552,6 +1694,7 @@ pub fn evaluate_gate_with_waivers_and_reviewer_policies(
         GateStatus::Block => "block",
         GateStatus::Incomplete => "incomplete",
     };
+    let blocked: Vec<String> = blocked.into_iter().chain(analyzer_blocked).collect();
     let decision_id = digest(
         &serde_json::to_vec(&(
             snapshot_id,
@@ -1584,6 +1727,7 @@ pub fn evaluate_gate_with_waivers_and_reviewer_policies(
             verification_runs: verification_runs.to_vec(),
             waivers: waiver_evaluation.records.to_vec(),
             evidence: evidence.to_vec(),
+            analyzer_reports: analyzer_reports.into_iter().cloned().collect(),
             evaluation_time_unix: waiver_evaluation.evaluation_time_unix,
         }),
     }
@@ -1982,6 +2126,136 @@ mod tests {
             .collect()
     }
 
+    fn analyzer_run(run_id: &str, profile_id: &str, snapshot_id: &str) -> VerificationRun {
+        VerificationRun {
+            schema_version: 1,
+            run_id: run_id.into(),
+            snapshot_id: snapshot_id.into(),
+            profile_id: profile_id.into(),
+            finding_id: None,
+            targets: vec![],
+            command_digest: "sha256:command".into(),
+            status: VerificationStatus::Failed,
+            exit_code: Some(1),
+            stdout_digest: "sha256:out".into(),
+            stderr_digest: "sha256:err".into(),
+            stdout_artifact: None,
+            stderr_artifact: None,
+        }
+    }
+
+    fn analyzer_report(run: &VerificationRun, level: SarifLevel) -> AnalyzerReport {
+        AnalyzerReport {
+            schema_version: 1,
+            run_id: run.run_id.clone(),
+            profile_id: run.profile_id.clone(),
+            snapshot_id: run.snapshot_id.clone(),
+            tools: vec!["lint 1".into()],
+            parsed: true,
+            problem: None,
+            findings: vec![AnalyzerFinding {
+                id: format!("analyzer:{}:000000000000", run.profile_id),
+                fingerprint: format!("sha256:{}", run.profile_id),
+                rule_id: "R1".into(),
+                level,
+                path: "src/lib.rs".into(),
+                line: 2,
+                message: "defect".into(),
+            }],
+            results_total: 1,
+            results_outside_changes: 0,
+            limitations: vec![],
+        }
+    }
+
+    #[test]
+    fn analyzer_results_block_only_for_required_profiles_on_the_gated_snapshot() {
+        let policy = Policy {
+            block_severities: vec![],
+            minimum_confidence: 0,
+            required_review_complete: true,
+            required_verifications: vec!["lint".into()],
+            analyzer_block_levels: [("lint".to_owned(), vec![SarifLevel::Error])].into(),
+        };
+        let gate = |runs: &[VerificationRun], reports: &[AnalyzerReport]| {
+            evaluate_gate(
+                "snapshot",
+                "config",
+                "policy",
+                &[],
+                &policy,
+                true,
+                GateEvidence {
+                    verification_runs: runs,
+                    source_evidence: &[],
+                    analyzer_reports: reports,
+                },
+            )
+        };
+        let lint = analyzer_run("run-lint", "lint", "snapshot");
+        let blocked = gate(
+            std::slice::from_ref(&lint),
+            &[analyzer_report(&lint, SarifLevel::Error)],
+        );
+        assert_eq!(blocked.status, GateStatus::Block);
+        assert_eq!(
+            blocked.blocking_findings,
+            vec!["analyzer:lint:000000000000"]
+        );
+
+        // A non-blocking level passes; the analyzer still counts as complete.
+        let advisory = gate(
+            std::slice::from_ref(&lint),
+            &[analyzer_report(&lint, SarifLevel::Warning)],
+        );
+        assert_eq!(advisory.status, GateStatus::Pass);
+
+        // Reports for other profiles or other snapshots are not trusted evidence.
+        let other = analyzer_run("run-other", "other", "snapshot");
+        let stale = analyzer_run("run-lint", "lint", "older-snapshot");
+        let ignored = gate(
+            std::slice::from_ref(&lint),
+            &[
+                AnalyzerReport {
+                    findings: vec![],
+                    ..analyzer_report(&lint, SarifLevel::Error)
+                },
+                analyzer_report(&other, SarifLevel::Error),
+                analyzer_report(&stale, SarifLevel::Error),
+            ],
+        );
+        assert_eq!(ignored.status, GateStatus::Pass);
+
+        // Without a parsed report the required analyzer is incomplete, not passing.
+        let missing = gate(std::slice::from_ref(&lint), &[]);
+        assert_eq!(missing.status, GateStatus::Incomplete);
+        let unparsed = gate(
+            std::slice::from_ref(&lint),
+            &[AnalyzerReport {
+                parsed: false,
+                ..analyzer_report(&lint, SarifLevel::Error)
+            }],
+        );
+        assert_eq!(unparsed.status, GateStatus::Incomplete);
+
+        // The decision replays from its recorded inputs alone.
+        let inputs = blocked.replay_inputs.clone().unwrap();
+        let replayed = evaluate_gate(
+            "snapshot",
+            "config",
+            "policy",
+            &[],
+            &inputs.policy,
+            inputs.complete,
+            GateEvidence {
+                verification_runs: &inputs.verification_runs,
+                source_evidence: &inputs.evidence,
+                analyzer_reports: &inputs.analyzer_reports,
+            },
+        );
+        assert_eq!(replayed.decision_id, blocked.decision_id);
+    }
+
     #[test]
     fn gate_blocks_only_configured_severity_at_confidence_threshold() {
         let policy = Policy {
@@ -1989,6 +2263,7 @@ mod tests {
             minimum_confidence: 80,
             required_review_complete: true,
             required_verifications: vec![],
+            analyzer_block_levels: Default::default(),
         };
         let mut findings = vec![
             finding("low-confidence", Severity::High, Some(79)),
@@ -2006,6 +2281,7 @@ mod tests {
             GateEvidence {
                 verification_runs: &[],
                 source_evidence: &evidence,
+                analyzer_reports: &[],
             },
         );
         assert_eq!(decision.status, GateStatus::Block);
@@ -2019,6 +2295,7 @@ mod tests {
             minimum_confidence: 80,
             required_review_complete: true,
             required_verifications: vec![],
+            analyzer_block_levels: Default::default(),
         };
         let mut unlocated = finding("unlocated", Severity::High, Some(95));
         unlocated.path = None;
@@ -2033,6 +2310,7 @@ mod tests {
             GateEvidence {
                 verification_runs: &[],
                 source_evidence: &[],
+                analyzer_reports: &[],
             },
         );
         assert_eq!(decision.status, GateStatus::Incomplete);
@@ -2047,6 +2325,7 @@ mod tests {
             minimum_confidence: 80,
             required_review_complete: true,
             required_verifications: vec![],
+            analyzer_block_levels: Default::default(),
         };
         let mut finding = finding("changed-line", Severity::High, Some(95));
         finding.evidence_ids = vec!["source-evidence".into()];
@@ -2075,6 +2354,7 @@ mod tests {
                 GateEvidence {
                     verification_runs: &[],
                     source_evidence: evidence,
+                    analyzer_reports: &[],
                 },
                 GateEvaluationOptions {
                     waiver_evaluation: WaiverEvaluation {
@@ -2110,6 +2390,7 @@ mod tests {
             minimum_confidence: 90,
             required_review_complete: true,
             required_verifications: vec![],
+            analyzer_block_levels: Default::default(),
         };
         let reviewer_policies = std::collections::BTreeMap::from([(
             "security".into(),
@@ -2132,6 +2413,7 @@ mod tests {
             GateEvidence {
                 verification_runs: &[],
                 source_evidence: &evidence,
+                analyzer_reports: &[],
             },
             GateEvaluationOptions {
                 waiver_evaluation: WaiverEvaluation {
@@ -2156,6 +2438,7 @@ mod tests {
             minimum_confidence: 80,
             required_review_complete: true,
             required_verifications: vec![],
+            analyzer_block_levels: Default::default(),
         };
         let duplicate = finding("same-finding", Severity::High, Some(99));
         let mut findings = [duplicate.clone(), duplicate];
@@ -2170,6 +2453,7 @@ mod tests {
             GateEvidence {
                 verification_runs: &[],
                 source_evidence: &evidence,
+                analyzer_reports: &[],
             },
         );
         assert_eq!(decision.status, GateStatus::Block);
@@ -2183,6 +2467,7 @@ mod tests {
             minimum_confidence: 0,
             required_review_complete: true,
             required_verifications: vec![],
+            analyzer_block_levels: Default::default(),
         };
         let first = evaluate_gate(
             "snapshot",
@@ -2194,6 +2479,7 @@ mod tests {
             GateEvidence {
                 verification_runs: &[],
                 source_evidence: &[],
+                analyzer_reports: &[],
             },
         );
         let second = evaluate_gate(
@@ -2206,6 +2492,7 @@ mod tests {
             GateEvidence {
                 verification_runs: &[],
                 source_evidence: &[],
+                analyzer_reports: &[],
             },
         );
         assert_eq!(first.effective_config_digest, "config-a");
@@ -2222,6 +2509,7 @@ mod tests {
             minimum_confidence: 0,
             required_review_complete: true,
             required_verifications: vec![],
+            analyzer_block_levels: Default::default(),
         };
         let mut findings = [finding("finding-a", Severity::High, Some(90))];
         let evidence = observed_test_evidence(&mut findings);
@@ -2248,6 +2536,7 @@ mod tests {
             GateEvidence {
                 verification_runs: &[],
                 source_evidence: &evidence,
+                analyzer_reports: &[],
             },
             WaiverEvaluation {
                 records: std::slice::from_ref(&waiver),
@@ -2272,6 +2561,7 @@ mod tests {
             GateEvidence {
                 verification_runs: &[],
                 source_evidence: &evidence,
+                analyzer_reports: &[],
             },
             WaiverEvaluation {
                 records: std::slice::from_ref(&amended_waiver),
@@ -2292,6 +2582,7 @@ mod tests {
             GateEvidence {
                 verification_runs: &[],
                 source_evidence: &evidence,
+                analyzer_reports: &[],
             },
             WaiverEvaluation {
                 records: std::slice::from_ref(&waiver),
@@ -2313,6 +2604,7 @@ mod tests {
             GateEvidence {
                 verification_runs: &[],
                 source_evidence: &evidence,
+                analyzer_reports: &[],
             },
             WaiverEvaluation {
                 records: std::slice::from_ref(&waiver),
@@ -2329,6 +2621,7 @@ mod tests {
             minimum_confidence: 0,
             required_review_complete: true,
             required_verifications: vec![],
+            analyzer_block_levels: Default::default(),
         };
         let decision = evaluate_gate(
             "snapshot",
@@ -2340,6 +2633,7 @@ mod tests {
             GateEvidence {
                 verification_runs: &[],
                 source_evidence: &[],
+                analyzer_reports: &[],
             },
         );
         assert_eq!(decision.status, GateStatus::Incomplete);
@@ -2352,6 +2646,7 @@ mod tests {
             minimum_confidence: 0,
             required_review_complete: false,
             required_verifications: vec![],
+            analyzer_block_levels: Default::default(),
         };
         let mut findings = [finding("high", Severity::High, Some(90))];
         let evidence = observed_test_evidence(&mut findings);
@@ -2365,6 +2660,7 @@ mod tests {
             GateEvidence {
                 verification_runs: &[],
                 source_evidence: &evidence,
+                analyzer_reports: &[],
             },
         );
         assert_eq!(decision.status, GateStatus::Block);
@@ -2378,6 +2674,7 @@ mod tests {
             minimum_confidence: 0,
             required_review_complete: true,
             required_verifications: vec!["unit".into()],
+            analyzer_block_levels: Default::default(),
         };
         let run = VerificationRun {
             schema_version: 1,
@@ -2406,7 +2703,8 @@ mod tests {
                 true,
                 GateEvidence {
                     verification_runs: &[finding_specific],
-                    source_evidence: &[]
+                    source_evidence: &[],
+                    analyzer_reports: &[],
                 },
             )
             .status,
@@ -2423,6 +2721,7 @@ mod tests {
             GateEvidence {
                 verification_runs: &[],
                 source_evidence: &[],
+                analyzer_reports: &[],
             },
         );
         assert_eq!(missing.status, GateStatus::Incomplete);
@@ -2438,6 +2737,7 @@ mod tests {
             GateEvidence {
                 verification_runs: std::slice::from_ref(&run),
                 source_evidence: &[],
+                analyzer_reports: &[],
             },
         );
         assert_eq!(passed.status, GateStatus::Pass);
@@ -2452,6 +2752,7 @@ mod tests {
             GateEvidence {
                 verification_runs: &[run],
                 source_evidence: &[],
+                analyzer_reports: &[],
             },
         );
         assert_eq!(stale.status, GateStatus::Incomplete);
@@ -2474,6 +2775,7 @@ mod tests {
             GateEvidence {
                 verification_runs: &[failed_latest, passed_run_for_test()],
                 source_evidence: &[],
+                analyzer_reports: &[],
             },
         );
         assert_eq!(regression.status, GateStatus::Incomplete);
@@ -2551,6 +2853,7 @@ mod tests {
             minimum_confidence: 0,
             required_review_complete: true,
             required_verifications: vec!["unit".into()],
+            analyzer_block_levels: Default::default(),
         };
         let mut targeted = passed_run_for_test();
         targeted.targets = vec!["./pkg".into()];
@@ -2564,6 +2867,7 @@ mod tests {
             GateEvidence {
                 verification_runs: &[targeted],
                 source_evidence: &[],
+                analyzer_reports: &[],
             },
         );
         assert_eq!(decision.status, GateStatus::Incomplete);
@@ -4277,6 +4581,7 @@ policy_profiles:
             timeout_seconds: 2,
             output_limit_bytes: 64,
             env_allowlist: vec![],
+            sarif: None,
         };
         let first = execute_verification("snapshot-1", "tests", dir.path(), &profile).unwrap();
         let second = execute_verification("snapshot-1", "tests", dir.path(), &profile).unwrap();
@@ -4305,6 +4610,7 @@ policy_profiles:
             timeout_seconds: 2,
             output_limit_bytes: 256,
             env_allowlist: vec![],
+            sarif: None,
         };
         let run = execute_verification("snapshot-1", "tests", dir.path(), &profile).unwrap();
         assert_eq!(run.status, VerificationStatus::Incomplete);
@@ -4325,6 +4631,7 @@ policy_profiles:
             timeout_seconds: 2,
             output_limit_bytes: 256,
             env_allowlist: vec![],
+            sarif: None,
         };
         let run = execute_verification("snapshot-1", "cargo-tests", dir.path(), &profile).unwrap();
         assert_eq!(run.status, VerificationStatus::Incomplete);
@@ -4343,6 +4650,7 @@ policy_profiles:
             env_allowlist: vec!["VERO_VERIFICATION_ALLOWED".into()],
             timeout_seconds: 2,
             output_limit_bytes: 1024,
+            sarif: None,
         };
         let run = execute_verification("snapshot", "env", dir.path(), &profile).unwrap();
         std::env::remove_var("VERO_VERIFICATION_ALLOWED");
@@ -4364,6 +4672,7 @@ policy_profiles:
             timeout_seconds: 2,
             output_limit_bytes: 4,
             env_allowlist: vec![],
+            sarif: None,
         };
         assert!(
             execute_verification("snap", "bounded", dir.path(), &profile)
@@ -4396,6 +4705,7 @@ policy_profiles:
             timeout_seconds: 1,
             output_limit_bytes: 64,
             env_allowlist: vec![],
+            sarif: None,
         };
         let run = execute_verification("snapshot", "slow", dir.path(), &profile).unwrap();
         assert_eq!(run.status, VerificationStatus::TimedOut);
@@ -4429,6 +4739,7 @@ policy_profiles:
             timeout_seconds: 5,
             output_limit_bytes: 64,
             env_allowlist: vec!["VERO_TEST_SECRET".into()],
+            sarif: None,
         };
         let name = "VERO_TEST_SECRET".to_string();
         let executable_digest = digest_file(&executable).unwrap();
@@ -4478,6 +4789,7 @@ policy_profiles:
             timeout_seconds: 1,
             output_limit_bytes: 128,
             env_allowlist: vec![],
+            sarif: None,
         };
         let run = execute_verification("snapshot", "descendant", dir.path(), &profile).unwrap();
         assert_eq!(run.status, VerificationStatus::TimedOut);
@@ -6140,6 +6452,30 @@ impl ReviewStore {
             })
             .optional()
             .map_err(|e| e.to_string())
+    }
+
+    /// Record the manifest of a snapshot that a verification ran on, so reports
+    /// can reconstruct its changes without a review. Existing manifests are kept.
+    pub fn record_snapshot_manifest(
+        &mut self,
+        snapshot_id: &str,
+        manifest_json: &str,
+    ) -> Result<(), String> {
+        validate_snapshot_manifest(snapshot_id, manifest_json)?;
+        self.connection
+            .execute(
+                "INSERT OR IGNORE INTO snapshots(snapshot_id,manifest_json) VALUES (?1,?2)",
+                rusqlite::params![snapshot_id, manifest_json],
+            )
+            .map_err(|error| error.to_string())?;
+        // Legacy rows hold an empty placeholder; replace it with the real manifest.
+        self.connection
+            .execute(
+                "UPDATE snapshots SET manifest_json=?2 WHERE snapshot_id=?1 AND manifest_json='{}'",
+                rusqlite::params![snapshot_id, manifest_json],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     pub fn snapshot_manifest(&self, snapshot_id: &str) -> Result<Option<String>, String> {

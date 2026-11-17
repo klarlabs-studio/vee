@@ -5099,6 +5099,14 @@ fn assert_matches_schema(value: &serde_json::Value, schema_json: &str, contract:
         .unwrap_or_else(|error| panic!("{contract} schema is invalid: {error}"));
     let registry = jsonschema::Registry::new()
         .add(
+            "https://vero.dev/schemas/analyzer-report-v1.schema.json",
+            serde_json::from_str::<serde_json::Value>(include_str!(
+                "../../../schemas/analyzer-report-v1.schema.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap()
+        .add(
             "https://vero.dev/schemas/verification-run-v1.schema.json",
             serde_json::from_str::<serde_json::Value>(include_str!(
                 "../../../schemas/verification-run-v1.schema.json"
@@ -6510,6 +6518,14 @@ fn gated_review_with_no_reviewer_is_incomplete_and_persisted() {
     ))
     .unwrap();
     let registry = jsonschema::Registry::new()
+        .add(
+            "https://vero.dev/schemas/analyzer-report-v1.schema.json",
+            serde_json::from_str::<serde_json::Value>(include_str!(
+                "../../../schemas/analyzer-report-v1.schema.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap()
         .add(
             "https://vero.dev/schemas/work-item-v1.schema.json",
             serde_json::from_str::<serde_json::Value>(include_str!(
@@ -9162,6 +9178,14 @@ fn snapshot_waiver_is_auditable_expires_and_only_applies_to_its_review() {
         serde_json::from_str(include_str!("../../../schemas/waivers-list-v1.schema.json")).unwrap();
     let registry = jsonschema::Registry::new()
         .add(
+            "https://vero.dev/schemas/analyzer-report-v1.schema.json",
+            serde_json::from_str::<serde_json::Value>(include_str!(
+                "../../../schemas/analyzer-report-v1.schema.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap()
+        .add(
             "https://vero.dev/schemas/waiver-v1.schema.json",
             waiver_schema,
         )
@@ -10028,6 +10052,7 @@ fn mcp_tools_declare_titles_safety_annotations_and_documented_inputs() {
         "resolve_owners",
         "list_waivers",
         "get_gate_history",
+        "get_analyzer_findings",
     ]
     .into_iter()
     .collect();

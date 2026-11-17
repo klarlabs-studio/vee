@@ -1177,3 +1177,38 @@ pub fn propose_patch(
     crate::write_immutable_proposal_file(&record_path, &record)?;
     Ok(proposal)
 }
+
+// ---------------------------------------------------------------------------
+// Trusted analyzers (SARIF)
+
+/// Results of a SARIF analyzer verification run on changed lines of its snapshot
+/// (`analyzer-report-v1`), exactly as the gate evaluates them.
+pub fn analyzer_findings(workspace: &Workspace, run_id: &str) -> Result<vero_core::AnalyzerReport> {
+    let store = workspace.store()?;
+    let run = store
+        .verification(run_id)
+        .map_err(anyhow::Error::msg)?
+        .ok_or_else(|| usage_failure(format!("verification run {run_id} was not found")))?;
+    let config = workspace.effective_config(None)?;
+    let is_analyzer = config
+        .verification
+        .get(&run.profile_id)
+        .is_some_and(|profile| profile.sarif.is_some());
+    if !is_analyzer {
+        return Err(usage_failure(format!(
+            "verification profile {} is not configured as a SARIF analyzer",
+            run.profile_id
+        )));
+    }
+    let manifest = store
+        .snapshot_manifest(&run.snapshot_id)
+        .map_err(anyhow::Error::msg)?
+        .ok_or_else(|| anyhow::anyhow!("snapshot manifest for run {run_id} is missing"))?;
+    let change_set =
+        crate::coverage::parse_manifest(&manifest, &run.snapshot_id).map_err(anyhow::Error::msg)?;
+    Ok(vero_application::sarif::analyze_run(
+        workspace.root(),
+        &change_set,
+        &run,
+    ))
+}
