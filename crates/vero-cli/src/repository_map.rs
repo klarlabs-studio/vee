@@ -5130,6 +5130,15 @@ fn resolve_rust_consumer_references(
                 continue;
             }
         };
+        let total_deadline = started + std::time::Duration::from_secs(45);
+        if let Err(error) = session.wait_until_quiescent(total_deadline) {
+            complete = false;
+            limitations.push(format!(
+                "rust-analyzer stopped while indexing {} ({error}); syntax matches retained.",
+                root.display()
+            ));
+            continue;
+        }
         for index in indices {
             if index >= checked {
                 complete = false;
@@ -5246,6 +5255,13 @@ struct RustAnalyzerSession {
     receiver: std::sync::mpsc::Receiver<Result<serde_json::Value, String>>,
     next_id: u64,
     opened: std::collections::BTreeSet<PathBuf>,
+    /// Set once rust-analyzer reports `experimental/serverStatus` with
+    /// `quiescent: true`: the workspace is loaded and indexed, so definition
+    /// requests answer from a complete index.
+    quiescent: bool,
+    /// Whether the server has sent any `experimental/serverStatus`; servers that
+    /// never do are not waited on.
+    status_seen: bool,
 }
 
 impl RustAnalyzerSession {
@@ -5346,6 +5362,8 @@ impl RustAnalyzerSession {
             receiver,
             next_id: 1,
             opened: std::collections::BTreeSet::new(),
+            quiescent: false,
+            status_seen: false,
         };
         let root_uri = reqwest::Url::from_directory_path(root)
             .map_err(|_| "could not encode consumer root as a file URI".to_owned())?;
@@ -5361,7 +5379,8 @@ impl RustAnalyzerSession {
                 "capabilities": {
                     "general": {"positionEncodings": ["utf-16"]},
                     "workspace": {"configuration": true, "workspaceFolders": true},
-                    "textDocument": {"definition": {"dynamicRegistration": false, "linkSupport": true}}
+                    "textDocument": {"definition": {"dynamicRegistration": false, "linkSupport": true}},
+                    "experimental": {"serverStatusNotification": true}
                 },
                 "initializationOptions": {
                     "cargo": {"buildScripts": {"enable": false}, "extraArgs": ["--offline"]},
@@ -5470,6 +5489,74 @@ impl RustAnalyzerSession {
             .map_err(|error| error.to_string())
     }
 
+    /// Answer a request the server sent to the client (for example
+    /// `workspace/configuration`). Returns whether `message` was such a request.
+    fn answer_server_request(&mut self, message: &serde_json::Value) -> Result<bool, String> {
+        if message.get("method").is_none() || message.get("id").is_none() {
+            return Ok(false);
+        }
+        let id = message
+            .get("id")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let result = if message.get("method").and_then(serde_json::Value::as_str)
+            == Some("workspace/configuration")
+        {
+            serde_json::Value::Array(
+                message
+                    .pointer("/params/items")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|items| vec![serde_json::Value::Null; items.len()])
+                    .unwrap_or_default(),
+            )
+        } else {
+            serde_json::Value::Null
+        };
+        self.send(&serde_json::json!({"jsonrpc":"2.0", "id":id, "result":result}))?;
+        Ok(true)
+    }
+
+    fn observe_status(&mut self, message: &serde_json::Value) {
+        if message.get("method").and_then(serde_json::Value::as_str)
+            == Some("experimental/serverStatus")
+        {
+            self.status_seen = true;
+            if message.pointer("/params/quiescent") == Some(&serde_json::Value::Bool(true)) {
+                self.quiescent = true;
+            }
+        }
+    }
+
+    /// Wait until rust-analyzer has loaded and indexed the workspace, or until
+    /// `deadline`. A cold start (sysroot loading and indexing) can take longer
+    /// than one definition request's budget; waiting here keeps that time out of
+    /// the per-request cap. Returns whether the server became quiescent.
+    fn wait_until_quiescent(&mut self, deadline: std::time::Instant) -> Result<bool, String> {
+        // rust-analyzer announces its status right after `initialized`; a server
+        // that has said nothing within the grace period does not report status.
+        let status_grace = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !self.quiescent {
+            let deadline = if self.status_seen {
+                deadline
+            } else {
+                deadline.min(status_grace)
+            };
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(false);
+            }
+            let message = match self.receiver.recv_timeout(remaining) {
+                Ok(message) => message?,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok(false),
+                Err(error) => return Err(error.to_string()),
+            };
+            if !self.answer_server_request(&message)? {
+                self.observe_status(&message);
+            }
+        }
+        Ok(true)
+    }
+
     fn response(
         &mut self,
         request_id: u64,
@@ -5484,26 +5571,10 @@ impl RustAnalyzerSession {
                 .receiver
                 .recv_timeout(remaining)
                 .map_err(|error| error.to_string())??;
-            if message.get("method").is_some() && message.get("id").is_some() {
-                let id = message
-                    .get("id")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                let method = message.get("method").and_then(serde_json::Value::as_str);
-                let result = if method == Some("workspace/configuration") {
-                    serde_json::Value::Array(
-                        message
-                            .pointer("/params/items")
-                            .and_then(serde_json::Value::as_array)
-                            .map(|items| vec![serde_json::Value::Null; items.len()])
-                            .unwrap_or_default(),
-                    )
-                } else {
-                    serde_json::Value::Null
-                };
-                self.send(&serde_json::json!({"jsonrpc":"2.0", "id":id, "result":result}))?;
+            if self.answer_server_request(&message)? {
                 continue;
             }
+            self.observe_status(&message);
             if message.get("id").and_then(serde_json::Value::as_u64) != Some(request_id) {
                 continue;
             }
