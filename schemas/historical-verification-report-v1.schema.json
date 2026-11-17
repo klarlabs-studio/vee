@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/historical-verification-report-v1.schema.json",
+  "title": "Vero historical verification benchmark report v1",
+  "type": "object",
+  "required": ["schema_version", "benchmark", "corpus_id", "manifest_digest", "benchmark_config_digest", "vero_version", "verifier_digest", "case_count", "completed_cases", "incomplete_cases", "cases", "report_path", "limitations"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "benchmark": {"const": "historical_verification"},
+    "corpus_id": {"type": "string", "minLength": 1},
+    "manifest_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "benchmark_config_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "vero_version": {"type": "string"},
+    "verifier_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "case_count": {"type": "integer", "minimum": 0},
+    "completed_cases": {"type": "integer", "minimum": 0},
+    "incomplete_cases": {"type": "integer", "minimum": 0},
+    "cases": {"type": "array", "items": {"type": "object", "required": ["case_id", "repository", "buggy_commit", "state"], "properties": {"case_id": {"type": "string"}, "repository": {"type": "string"}, "buggy_commit": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"}, "fix_commit": {"type": ["string", "null"], "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"}, "state": {"enum": ["complete", "incomplete"]}, "buggy_runs": {"type": "array"}, "fix_runs": {"type": "array"}, "comparisons": {"type": "array"}, "error": {"type": "string"}}, "additionalProperties": true}},
+    "report_path": {"type": "string"},
+    "limitations": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}

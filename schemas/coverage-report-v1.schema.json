@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/coverage-report-v1.schema.json",
+  "title": "Vero Coverage Report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "snapshot_id", "profile_id", "stream", "measured_scope", "files", "limitations"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "run_id": { "type": "string", "minLength": 1 },
+    "snapshot_id": { "type": "string", "minLength": 1 },
+    "profile_id": { "type": "string", "minLength": 1 },
+    "stream": { "enum": ["stdout", "stderr"] },
+    "measured_scope": { "const": "file_and_changed_executable_lines" },
+    "files": { "type": "array", "items": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "covered_lines", "executable_lines", "percent", "changed_line_count", "changed_executable_lines", "changed_covered_lines", "changed_percent"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "covered_lines": { "type": "integer", "minimum": 0 },
+        "executable_lines": { "type": "integer", "minimum": 0 },
+        "percent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+        "changed_line_count": { "type": ["integer", "null"], "minimum": 0 },
+        "changed_executable_lines": { "type": ["integer", "null"], "minimum": 0 },
+        "changed_covered_lines": { "type": ["integer", "null"], "minimum": 0 },
+        "changed_percent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 }
+      }
+    } },
+    "limitations": { "type": "array", "items": { "type": "string" } }
+  }
+}

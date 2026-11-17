@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/test-effectiveness-v1.schema.json",
+  "title": "Vero seeded mutant effectiveness assessment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "proposal_id", "snapshot_id", "profile_id", "baseline_verification_run_id", "mutant_patch_digest", "mutant_snapshot_id",
+    "mutant_paths", "baseline_status", "mutated_status", "outcome", "mutant_failure_signal", "baseline_stdout_digest",
+    "baseline_stderr_digest", "mutated_stdout_digest", "mutated_stderr_digest", "limitations"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "proposal_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "snapshot_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "profile_id": { "type": "string", "minLength": 1 },
+    "baseline_verification_run_id": { "type": "string", "minLength": 1 },
+    "mutant_patch_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "mutant_snapshot_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "mutant_paths": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "baseline_status": { "enum": ["passed", "failed", "timed_out"] },
+    "mutated_status": { "enum": ["passed", "failed", "timed_out", "not_run"] },
+    "outcome": { "enum": ["killed", "survived", "inconclusive"] },
+    "mutant_failure_signal": { "type": ["string", "null"] },
+    "baseline_stdout_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "baseline_stderr_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "mutated_stdout_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$|^$" },
+    "mutated_stderr_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$|^$" },
+    "limitations": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+  }
+}

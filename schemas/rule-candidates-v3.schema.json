@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/rule-candidates-v3.schema.json",
+  "title": "Vero Review Rule Candidates v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "candidates", "disputed_findings_excluded", "disputed_external_comments_excluded", "feedback_without_saved_finding", "truncated", "limitations"],
+  "properties": {
+    "schema_version": { "const": 3 },
+    "disputed_findings_excluded": { "type": "integer", "minimum": 0 },
+    "disputed_external_comments_excluded": { "type": "integer", "minimum": 0 },
+    "feedback_without_saved_finding": { "type": "integer", "minimum": 0 },
+    "truncated": { "type": "boolean" },
+    "limitations": { "type": "array", "items": { "type": "string" } },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["candidate_id", "source_kind", "category", "feedback_label", "feedback_count", "feedback_event_count", "evidence_digest", "suggestion", "feedback", "approval_status"],
+        "properties": {
+          "candidate_id": { "type": "string", "pattern": "^rule-candidate:[0-9a-f]{32}$" },
+          "source_kind": { "enum": ["finding_feedback", "provider_discussions"] },
+          "category": { "type": "string", "minLength": 1 },
+          "feedback_label": { "enum": ["confirmed", "false_positive", "actionable", "not_actionable"] },
+          "feedback_count": { "type": "integer", "minimum": 3 },
+          "feedback_event_count": { "type": "integer", "minimum": 3 },
+          "evidence_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+          "suggestion": { "type": "string" },
+          "approval_status": { "const": "requires_human_review" },
+          "feedback": {
+            "type": "array",
+            "maxItems": 5,
+            "items": {
+              "type": "object",
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "required": ["source_kind", "finding_id", "snapshot_id", "reviewer", "reason"],
+                  "properties": {
+                    "source_kind": { "const": "finding_feedback" },
+                    "finding_id": { "type": "string" },
+                    "snapshot_id": { "type": "string" },
+                    "reviewer": { "type": "string" },
+                    "reason": { "type": "string", "maxLength": 501 }
+                  },
+                  "not": { "anyOf": [{"required":["external_comment_id"]},{"required":["archive_digest"]},{"required":["provider"]},{"required":["pull_request"]}] }
+                },
+                {
+                  "additionalProperties": false,
+                  "required": ["source_kind", "external_comment_id", "archive_digest", "provider", "pull_request", "snapshot_id", "reviewer", "reason"],
+                  "properties": {
+                    "source_kind": { "const": "provider_comment_feedback" },
+                    "external_comment_id": { "type": "string" },
+                    "archive_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+                    "provider": { "type": "string" },
+                    "pull_request": { "type": "object" },
+                    "snapshot_id": { "type": "string" },
+                    "reviewer": { "type": "string" },
+                    "reason": { "type": "string", "maxLength": 501 }
+                  },
+                  "not": { "required": ["finding_id"] }
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/test-proposal-application-v1.schema.json",
+  "title": "Vero test proposal application result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "proposal_id", "application", "snapshot_id", "concurrent_mutation_detected"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "proposal_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "application": { "const": "applied" },
+    "snapshot_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "concurrent_mutation_detected": { "type": "boolean" }
+  }
+}

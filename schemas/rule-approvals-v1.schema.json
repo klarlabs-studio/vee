@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/rule-approvals-v1.schema.json",
+  "title": "Vero rule guidance approvals v1",
+  "oneOf": [
+    { "$ref": "#/$defs/approval" },
+    { "type": "array", "items": { "$ref": "#/$defs/approval" } }
+  ],
+  "$defs": {
+    "approval": {
+      "type": "object",
+      "required": ["schema_version", "approval_id", "candidate_id", "evidence_digest", "category", "feedback_label", "scope", "instruction", "approver", "approval_reason", "created_at", "status", "events"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "approval_id": { "type": "string", "minLength": 1 },
+        "candidate_id": { "type": "string", "minLength": 1 },
+        "evidence_digest": { "type": "string", "pattern": "^sha256:[a-fA-F0-9]{64}$" },
+        "category": { "type": "string", "minLength": 1 },
+        "feedback_label": { "enum": ["confirmed", "false_positive", "actionable", "not_actionable"] },
+        "scope": { "type": "string", "minLength": 1 },
+        "instruction": { "type": "string", "minLength": 1 },
+        "approver": { "type": "string", "minLength": 1 },
+        "approval_reason": { "type": "string", "minLength": 1 },
+        "created_at": { "type": "string" },
+        "status": { "enum": ["active", "revoked"] },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["event_id", "event", "actor", "reason", "created_at"],
+            "properties": {
+              "event_id": { "type": "string" },
+              "event": { "enum": ["activated", "revoked"] },
+              "actor": { "type": "string" },
+              "reason": { "type": "string" },
+              "created_at": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

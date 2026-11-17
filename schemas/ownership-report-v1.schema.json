@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/ownership-report-v1.schema.json",
+  "title": "Vero advisory ownership report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "advisory_only", "repository_root", "codeowners_path", "codeowners_digest", "coverage_complete", "results", "limitations", "digest"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "advisory_only": { "const": true },
+    "repository_root": { "type": "string", "minLength": 1 },
+    "codeowners_path": { "type": ["string", "null"] },
+    "codeowners_digest": { "type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$" },
+    "coverage_complete": { "type": "boolean" },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "status", "owners", "matching_rule_line", "matching_pattern"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "status": { "enum": ["owned", "unowned", "no_codeowners"] },
+          "owners": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "matching_rule_line": { "type": ["integer", "null"], "minimum": 1 },
+          "matching_pattern": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "limitations": { "type": "array", "items": { "type": "string" } },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  }
+}

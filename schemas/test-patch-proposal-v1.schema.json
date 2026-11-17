@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/test-patch-proposal-v1.schema.json",
+  "title": "Vero generated test patch proposal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "snapshot_id", "reviewer_id", "provider_id", "provider_kind",
+    "model", "provider_output_digest", "patch_digest", "patch_path",
+    "validated_in_isolated_sandbox", "sandbox_input_digest", "sandbox_result_digest",
+    "application", "tests_executed", "approval_instruction"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "snapshot_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "reviewer_id": { "type": "string", "minLength": 1 },
+    "provider_id": { "type": "string", "minLength": 1 },
+    "provider_kind": { "enum": ["cli", "codex_cli", "gemini_cli", "claude_cli", "openai_compatible"] },
+    "model": { "type": ["string", "null"] },
+    "provider_output_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "patch_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "patch_path": { "type": "string", "minLength": 1 },
+    "validated_in_isolated_sandbox": { "const": true },
+    "sandbox_input_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "sandbox_result_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "application": { "const": "not_applied" },
+    "tests_executed": { "const": false },
+    "approval_instruction": { "type": "string", "minLength": 1 }
+  }
+}

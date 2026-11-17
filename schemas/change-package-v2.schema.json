@@ -1,0 +1,482 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/change-package-v2.schema.json",
+  "title": "Vero local change package v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "package_id",
+    "dependency_map_digest",
+    "readiness",
+    "priority_order",
+    "repositories",
+    "dependency_edges",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "package_id": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "dependency_map_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "readiness": {
+      "enum": [
+        "ready",
+        "blocked",
+        "incomplete"
+      ]
+    },
+    "priority_order": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "remote_state_refreshed": {
+      "type": "boolean"
+    },
+    "pull_request_lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "linked_count",
+        "refreshed_count",
+        "open_count",
+        "closed_count",
+        "merged_count",
+        "local_head_mismatch_count"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "no_linked_pull_requests",
+            "unrefreshed",
+            "partially_refreshed",
+            "mixed",
+            "local_head_mismatch",
+            "all_open",
+            "all_closed",
+            "all_merged"
+          ]
+        },
+        "linked_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "refreshed_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "open_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "closed_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "merged_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "local_head_mismatch_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "repositories": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "repository_id",
+          "pull_requests",
+          "root",
+          "head_oid",
+          "base_oid",
+          "branch",
+          "snapshot_id",
+          "review_id",
+          "saved_gate_status",
+          "gate_validity",
+          "downstream_repository_count",
+          "priority_factors",
+          "gate_decision_id",
+          "effective_config_digest",
+          "policy_digest",
+          "changed_files",
+          "source_digest",
+          "has_changes"
+        ],
+        "properties": {
+          "repository_id": {
+            "type": "string"
+          },
+          "pull_requests": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "repository",
+                "number"
+              ],
+              "properties": {
+                "repository": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "host",
+                    "full_name"
+                  ],
+                  "properties": {
+                    "host": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "full_name": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                },
+                "number": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "discovered_pull_requests": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/pull_request_ref"
+            }
+          },
+          "remote_pull_requests": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "pull_request",
+                "provider",
+                "state",
+                "base_oid",
+                "head_oid",
+                "revision",
+                "local_head_matches"
+              ],
+              "properties": {
+                "pull_request": {
+                  "$ref": "#/$defs/pull_request_ref"
+                },
+                "provider": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "state": {
+                  "enum": [
+                    "open",
+                    "closed",
+                    "merged"
+                  ]
+                },
+                "base_oid": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "head_oid": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "revision": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "local_head_matches": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "root": {
+            "type": "string"
+          },
+          "head_oid": {
+            "type": "string"
+          },
+          "base_oid": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "snapshot_id": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "review_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "saved_gate_status": {
+            "enum": [
+              "pass",
+              "block",
+              "incomplete",
+              "not_gated",
+              "not_reviewed"
+            ]
+          },
+          "gate_validity": {
+            "enum": [
+              "current",
+              "stale_snapshot",
+              "stale_configuration",
+              "stale_verification",
+              "external_context_unverified",
+              "replay_mismatch",
+              "replay_unavailable",
+              "not_available"
+            ]
+          },
+          "downstream_repository_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "priority_factors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "gate_decision_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effective_config_digest": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "policy_digest": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "changed_files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "path",
+                "mode",
+                "content_digest",
+                "status"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "content_digest": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "source_digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "has_changes": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "dependency_edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "from",
+          "to",
+          "package",
+          "declared_alias",
+          "kind",
+          "declared_requirement",
+          "declared_path",
+          "match_basis",
+          "evidence_path",
+          "evidence_digest",
+          "constraint_source_path",
+          "constraint_source_digest",
+          "version_compatibility"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "minLength": 1
+          },
+          "to": {
+            "type": "string",
+            "minLength": 1
+          },
+          "package": {
+            "type": "string",
+            "minLength": 1
+          },
+          "declared_alias": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "minLength": 1
+          },
+          "declared_requirement": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "declared_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "match_basis": {
+            "enum": [
+              "resolved_path",
+              "package_name",
+              "npm_alias"
+            ]
+          },
+          "evidence_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "constraint_source_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "constraint_source_digest": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "version_compatibility": {
+            "enum": [
+              "satisfied",
+              "mismatch",
+              "unknown",
+              "invalid_requirement",
+              "invalid_package_version",
+              "not_specified",
+              "not_evaluated"
+            ]
+          }
+        }
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "pull_request_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "number"
+      ],
+      "properties": {
+        "repository": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "host",
+            "full_name"
+          ],
+          "properties": {
+            "host": {
+              "type": "string",
+              "minLength": 1
+            },
+            "full_name": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

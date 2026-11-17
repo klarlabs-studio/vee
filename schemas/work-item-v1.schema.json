@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/work-item-v1.schema.json",
+  "title": "Vero work item context v1",
+  "type": "object",
+  "required": ["schema_version", "reference", "provider", "api_base", "title", "url", "state", "updated_at", "labels", "content_digest"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "reference": {
+      "type": "object",
+      "required": ["repository", "number"],
+      "properties": {
+        "repository": {
+          "type": "object",
+          "required": ["host", "full_name"],
+          "properties": {
+            "host": {"type": "string", "minLength": 1},
+            "full_name": {"type": "string", "minLength": 3}
+          },
+          "additionalProperties": false
+        },
+        "number": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "provider": {"type": "string", "minLength": 1},
+    "api_base": {"type": "string", "format": "uri"},
+    "title": {"type": "string", "minLength": 1},
+    "body": {"type": ["string", "null"]},
+    "acceptance_criteria": {"type": ["string", "null"], "maxLength": 131072},
+    "url": {"type": "string", "format": "uri"},
+    "state": {"type": "string", "minLength": 1},
+    "updated_at": {"type": "string", "minLength": 1},
+    "labels": {"type": "array", "items": {"type": "string"}, "maxItems": 100},
+    "content_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  },
+  "additionalProperties": false
+}

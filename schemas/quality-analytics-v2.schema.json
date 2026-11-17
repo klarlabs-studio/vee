@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/quality-analytics-v2.schema.json",
+  "title": "Vero Local Quality Analytics v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "review_count",
+    "latest_gate_decisions",
+    "reviews_without_gate_decision",
+    "findings_by_status",
+    "findings_by_severity",
+    "verification_runs_by_profile"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "review_count": { "type": "integer", "minimum": 0 },
+    "latest_gate_decisions": { "$ref": "#/$defs/counts" },
+    "reviews_without_gate_decision": { "type": "integer", "minimum": 0 },
+    "findings_by_status": { "$ref": "#/$defs/counts" },
+    "findings_by_severity": { "$ref": "#/$defs/counts" },
+    "verification_runs_by_profile": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/verificationOutcomes" }
+    }
+  },
+  "$defs": {
+    "counts": {
+      "type": "object",
+      "additionalProperties": { "type": "integer", "minimum": 0 }
+    },
+    "verificationOutcomes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "failed", "timed_out"],
+      "properties": {
+        "passed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "timed_out": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

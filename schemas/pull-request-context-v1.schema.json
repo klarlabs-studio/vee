@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/pull-request-context-v1.schema.json",
+  "title": "Vero pull request context v1",
+  "type": "object",
+  "required": ["schema_version", "provider", "snapshot", "changed_files", "limitations"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "provider": {"const": "azure-devops"},
+    "snapshot": {
+      "type": "object",
+      "required": ["pull_request", "base_oid", "head_oid", "title", "state", "revision"],
+      "properties": {
+        "pull_request": {
+          "type": "object",
+          "required": ["repository", "number"],
+          "properties": {
+            "repository": {
+              "type": "object",
+              "required": ["host", "full_name"],
+              "properties": {
+                "host": {"type": "string", "minLength": 1},
+                "full_name": {"type": "string", "minLength": 5}
+              },
+              "additionalProperties": false
+            },
+            "number": {"type": "integer", "minimum": 1}
+          },
+          "additionalProperties": false
+        },
+        "base_oid": {"type": "string", "pattern": "^[a-fA-F0-9]{40}([a-fA-F0-9]{24})?$"},
+        "head_oid": {"type": "string", "pattern": "^[a-fA-F0-9]{40}([a-fA-F0-9]{24})?$"},
+        "title": {"type": "string", "minLength": 1},
+        "body": {"type": ["string", "null"]},
+        "state": {"enum": ["open", "closed", "merged"]},
+        "revision": {"type": "string", "minLength": 81}
+      },
+      "additionalProperties": false
+    },
+    "changed_files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "change", "patch", "additions", "deletions"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "change": {"enum": ["added", "modified", "deleted", "renamed", "copied"]},
+          "previous_path": {"type": ["string", "null"]},
+          "patch": {"type": ["string", "null"]},
+          "additions": {"type": "integer", "minimum": 0},
+          "deletions": {"type": "integer", "minimum": 0}
+        },
+        "additionalProperties": false
+      }
+    },
+    "limitations": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}

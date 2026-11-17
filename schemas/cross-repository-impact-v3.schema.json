@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/cross-repository-impact-v3.schema.json",
+  "title": "Vero cross-repository symbol, API contract, and compatibility impact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "producer_snapshot_id", "changed_symbols", "api_contract_changes", "api_contract_compatibility", "dependency_paths", "references", "coverage_complete", "limitations", "digest"],
+  "properties": {
+    "schema_version": { "const": 3 },
+    "producer_snapshot_id": { "type": "string", "minLength": 1 },
+    "changed_symbols": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "api_contract_changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["producer_path", "producer_digest", "method", "route", "operation_id"],
+        "properties": {
+          "producer_path": { "type": "string", "minLength": 1 },
+          "producer_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "method": { "enum": ["GET", "PUT", "POST", "DELETE", "OPTIONS", "HEAD", "PATCH", "TRACE"] },
+          "route": { "type": "string", "minLength": 1 },
+          "operation_id": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "api_contract_compatibility": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["producer_path", "issue", "method", "route", "previous_operation_id", "current_operation_id"],
+        "properties": {
+          "producer_path": { "type": "string", "minLength": 1 },
+          "issue": { "enum": ["operation_removed", "operation_id_removed", "operation_id_changed"] },
+          "method": { "enum": ["GET", "PUT", "POST", "DELETE", "OPTIONS", "HEAD", "PATCH", "TRACE"] },
+          "route": { "type": "string", "minLength": 1 },
+          "previous_operation_id": { "type": ["string", "null"] },
+          "current_operation_id": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "dependency_paths": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["producer_package", "consumer_package", "packages", "manifest_digests"],
+        "properties": {
+          "producer_package": { "type": "string", "minLength": 1 },
+          "consumer_package": { "type": "string", "minLength": 1 },
+          "packages": { "type": "array", "minItems": 2, "items": { "type": "string", "minLength": 1 } },
+          "manifest_digests": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" } }
+        }
+      }
+    },
+    "references": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["consumer_repository", "path", "line", "symbol", "certainty", "match_context", "source_digest", "consumer_package_id", "dependency_status", "dependency_paths"],
+        "properties": {
+          "consumer_repository": { "type": "string", "minLength": 1 },
+          "path": { "type": "string", "minLength": 1 },
+          "line": { "type": "integer", "minimum": 1 },
+          "symbol": { "type": "string", "minLength": 1 },
+          "certainty": { "enum": ["inferred_syntax", "heuristic_lexical", "semantic_resolved"] },
+          "match_context": { "enum": ["function_call", "method_call", "call", "qualified_reference", "identifier_reference"] },
+          "source_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "consumer_package_id": { "type": ["string", "null"] },
+          "dependency_status": { "enum": ["declared_downstream", "no_declared_path", "package_unresolved"] },
+          "dependency_paths": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["producer_package", "consumer_package", "packages", "manifest_digests"],
+              "properties": {
+                "producer_package": { "type": "string", "minLength": 1 },
+                "consumer_package": { "type": "string", "minLength": 1 },
+                "packages": { "type": "array", "minItems": 2, "items": { "type": "string", "minLength": 1 } },
+                "manifest_digests": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" } }
+              }
+            }
+          }
+        }
+      }
+    },
+    "coverage_complete": { "type": "boolean" },
+    "limitations": { "type": "array", "items": { "type": "string" } },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  }
+}

@@ -52,9 +52,51 @@
             "items": {
               "type": "string"
             }
+          },
+          "reviewer_ids": {
+            "type": "array",
+            "description": "Configured reviewers that independently reported this finding.",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "rule_attributions": {
+            "type": "array",
+            "description": "Reviewer-reported links to active, in-scope human-approved rules supplied for this review; not proof of causation.",
+            "items": {
+              "type": "object",
+              "required": [
+                "rule_id",
+                "approval_id",
+                "reviewer_id"
+              ],
+              "properties": {
+                "rule_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "approval_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "reviewer_id": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "additionalProperties": false
+            }
           }
         },
         "additionalProperties": true
+      }
+    },
+    "policy_findings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/properties/findings/items"
       }
     },
     "verification_runs": {
@@ -83,16 +125,128 @@
             "type": "string"
           },
           "provider_kind": {
-            "enum": ["cli", "codex_cli", "gemini_cli", "claude_cli", "openai_compatible"]
+            "enum": [
+              "cli",
+              "codex_cli",
+              "gemini_cli",
+              "claude_cli",
+              "openai_compatible",
+              "ollama_native"
+            ]
           },
           "model": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "provider_version": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "status": {
             "type": "string"
+          },
+          "duration_ms": {
+            "type": ["integer", "null"],
+            "minimum": 0,
+            "description": "Measured wall-clock provider adapter time; null when cached or not invoked."
+          },
+          "usage": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "properties": {
+              "input_tokens": { "type": ["integer", "null"], "minimum": 0 },
+              "output_tokens": { "type": ["integer", "null"], "minimum": 0 },
+              "total_tokens": { "type": ["integer", "null"], "minimum": 0 }
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "reviewer_arbitration": {
+      "type": "array",
+      "description": "Evidence-preserving comparison of findings independently reported by multiple reviewers.",
+      "items": {
+        "type": "object",
+        "required": [
+          "finding_id",
+          "fingerprint",
+          "reports",
+          "severity_disagreement",
+          "confidence_disagreement",
+          "rationale_disagreement",
+          "applicable_policy_rules",
+          "gate_blocking"
+        ],
+        "properties": {
+          "finding_id": {
+            "type": "string"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "reports": {
+            "type": "array",
+            "minItems": 2,
+            "items": {
+              "type": "object",
+              "required": [
+                "reviewer_id",
+                "severity",
+                "confidence",
+                "rationale"
+              ],
+              "properties": {
+                "reviewer_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "severity": {
+                  "enum": [
+                    "critical",
+                    "high",
+                    "medium",
+                    "low",
+                    "info"
+                  ]
+                },
+                "confidence": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "rationale": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "severity_disagreement": {
+            "type": "boolean"
+          },
+          "confidence_disagreement": {
+            "type": "boolean"
+          },
+          "rationale_disagreement": {
+            "type": "boolean"
+          },
+          "applicable_policy_rules": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string"
+            }
+          },
+          "gate_blocking": {
+            "type": "boolean"
           }
         },
         "additionalProperties": false
@@ -173,7 +327,9 @@
         },
         "warnings": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false
@@ -190,7 +346,51 @@
       },
       "uniqueItems": true
     },
+    "reviewer_context": {
+      "type": "array",
+      "description": "Local, snapshot-bound manifest of changed-file and optional impact context supplied or omitted for each reviewer. Impact coverage is reported separately from changed-source completeness. Digests identify context artifacts without including source text.",
+      "items": {
+        "type": "object",
+        "required": ["reviewer_id", "files"],
+        "properties": {
+          "reviewer_id": { "type": "string", "minLength": 1 },
+          "impact_context_status": { "enum": ["complete", "partial", "unavailable", "stale"] },
+          "impact_context_complete": { "type": "boolean" },
+          "omitted_impact_context_count": { "type": "integer", "minimum": 0 },
+          "max_input_tokens": { "type": "integer", "minimum": 1024, "maximum": 131072 },
+          "estimated_input_tokens": { "type": "integer", "minimum": 0 },
+          "input_budget_satisfied": { "type": "boolean" },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["path", "role", "status"],
+              "properties": {
+                "path": { "type": "string", "minLength": 1 },
+                "role": { "type": "string", "minLength": 1 },
+                "status": {
+                  "enum": ["full_source", "bounded_diff", "metadata_only", "excluded_by_review_filter", "excluded_by_reviewer_filter", "omitted_by_context_limit"]
+                },
+                "reason": { "type": "string" },
+                "artifact_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
     "policy_profile": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "work_item": {
+      "$ref": "work-item-v1.schema.json"
+    },
+    "work_item_token_env": {
       "type": ["string", "null"]
     },
     "evidence": {

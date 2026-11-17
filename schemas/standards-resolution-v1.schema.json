@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/standards-resolution-v1.schema.json",
+  "title": "Vero standards resolution v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "target_path", "sources", "potential_conflicts", "limitations"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "target_path": { "type": ["string", "null"] },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "kind", "precedence", "scope", "content_digest", "integrity", "content", "truncated"],
+        "properties": {
+          "path": { "type": "string" },
+          "kind": { "type": "string", "enum": ["agent_instructions", "protected_policy", "reviewer_instructions", "editor_rule", "remote_standard"] },
+          "precedence": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "scope": { "type": "string" },
+          "content_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+          "integrity": { "type": "string", "enum": ["local-content-hash", "sha256-pinned", "post-fetch-hash-only"] },
+          "content": { "type": "string" },
+          "truncated": { "type": "boolean" }
+        }
+      }
+    },
+    "potential_conflicts": { "type": "array", "items": { "type": "string" } },
+    "limitations": { "type": "array", "items": { "type": "string" } }
+  }
+}

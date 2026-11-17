@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/webhook-retention-v1.schema.json",
+  "title": "Vero webhook retention result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "retention_days",
+    "eligible_receipts",
+    "deleted_receipts",
+    "dry_run"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "retention_days": { "type": "integer", "minimum": 1, "maximum": 36500 },
+    "eligible_receipts": { "type": "integer", "minimum": 0 },
+    "deleted_receipts": { "type": "integer", "minimum": 0 },
+    "dry_run": { "type": "boolean" }
+  }
+}

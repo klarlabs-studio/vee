@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/finding-task-v1.schema.json",
+  "title": "Vero finding task v1",
+  "type": "object",
+  "required": ["schema_version", "task_id", "review_id", "snapshot_id", "snapshot_current", "finding", "source_context", "context_note", "instructions"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "task_id": {"type": "string", "minLength": 1},
+    "review_id": {"type": "string", "minLength": 1},
+    "snapshot_id": {"type": "string", "minLength": 1},
+    "snapshot_current": {"type": "boolean"},
+    "finding": {"type": "object"},
+    "source_context": {
+      "anyOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["path", "start_line", "end_line", "content", "classification"],
+          "properties": {
+            "path": {"type": "string", "minLength": 1},
+            "start_line": {"type": "integer", "minimum": 1},
+            "end_line": {"type": "integer", "minimum": 1},
+            "content": {"type": "string", "maxLength": 32768},
+            "classification": {"const": "untrusted_repository_source"}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "context_note": {"type": ["string", "null"]},
+    "instructions": {"type": "string", "minLength": 1}
+  },
+  "additionalProperties": false
+}

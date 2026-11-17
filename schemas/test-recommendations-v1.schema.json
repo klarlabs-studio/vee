@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/test-recommendations-v1.schema.json",
+  "title": "Vero Test Recommendations v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "snapshot_id", "coverage_complete", "recommendations", "limitations"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "snapshot_id": { "type": "string", "minLength": 1 },
+    "coverage_complete": { "type": "boolean" },
+    "execution_coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "profile_id", "status", "files", "limitations"],
+      "properties": {
+        "run_id": { "type": "string", "minLength": 1 },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["passed", "failed", "timedout"] },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "covered_lines", "executable_lines", "percent", "changed_line_count", "changed_executable_lines", "changed_covered_lines", "changed_percent", "signal"],
+            "properties": {
+              "path": { "type": "string", "minLength": 1 },
+              "covered_lines": { "type": "integer", "minimum": 0 },
+              "executable_lines": { "type": "integer", "minimum": 0 },
+              "percent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+              "changed_line_count": { "type": ["integer", "null"], "minimum": 0 },
+              "changed_executable_lines": { "type": ["integer", "null"], "minimum": 0 },
+              "changed_covered_lines": { "type": ["integer", "null"], "minimum": 0 },
+              "changed_percent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+              "signal": { "enum": ["no_executable_lines", "zero_covered_lines", "all_reported_lines_covered", "partial_file_coverage"] }
+            }
+          }
+        },
+        "limitations": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "recommendations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["changed_path", "rationale", "action"],
+        "properties": {
+          "changed_path": { "type": "string", "minLength": 1 },
+          "rationale": { "type": "string", "minLength": 1 },
+          "action": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "limitations": { "type": "array", "items": { "type": "string" } }
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/historical-review-labels-v1.schema.json",
+  "title": "Vero historical review labels v1",
+  "type": "object",
+  "required": ["schema_version", "labels"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "labels": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "required": ["id", "path", "start_line", "end_line", "category", "rationale"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$" },
+          "path": { "type": "string", "minLength": 1 },
+          "start_line": { "type": "integer", "minimum": 1 },
+          "end_line": { "type": "integer", "minimum": 1 },
+          "category": { "type": "string", "minLength": 1 },
+          "rationale": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

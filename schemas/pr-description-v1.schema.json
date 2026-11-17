@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/pr-description-v1.schema.json",
+  "title": "Vero pull request description draft",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "snapshot_id",
+    "reviewer_id",
+    "provider_id",
+    "provider_kind",
+    "model",
+    "output_digest",
+    "output"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "snapshot_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "reviewer_id": { "type": "string", "minLength": 1 },
+    "provider_id": { "type": "string", "minLength": 1 },
+    "provider_kind": {
+      "enum": ["cli", "codex_cli", "gemini_cli", "claude_cli", "openai_compatible"]
+    },
+    "model": { "type": ["string", "null"] },
+    "output_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "body"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "body": { "type": "string", "minLength": 1, "maxLength": 12000 }
+      }
+    }
+  }
+}

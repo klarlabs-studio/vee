@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/rule-candidates-v2.schema.json",
+  "title": "Vero Review Rule Candidates v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "candidates", "disputed_findings_excluded", "feedback_without_saved_finding", "truncated", "limitations"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "disputed_findings_excluded": { "type": "integer", "minimum": 0 },
+    "feedback_without_saved_finding": { "type": "integer", "minimum": 0 },
+    "truncated": { "type": "boolean" },
+    "limitations": { "type": "array", "items": { "type": "string" } },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["candidate_id", "category", "feedback_label", "feedback_count", "feedback_event_count", "evidence_digest", "suggestion", "feedback", "approval_status"],
+        "properties": {
+          "candidate_id": { "type": "string", "pattern": "^rule-candidate:[0-9a-f]{32}$" },
+          "category": { "type": "string", "minLength": 1 },
+          "feedback_label": { "enum": ["confirmed", "false_positive", "actionable", "not_actionable"] },
+          "feedback_count": { "type": "integer", "minimum": 3 },
+          "feedback_event_count": { "type": "integer", "minimum": 3 },
+          "evidence_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+          "suggestion": { "type": "string" },
+          "approval_status": { "const": "requires_human_review" },
+          "feedback": {
+            "type": "array",
+            "maxItems": 5,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["finding_id", "snapshot_id", "reviewer", "reason"],
+              "properties": {
+                "finding_id": { "type": "string" },
+                "snapshot_id": { "type": "string" },
+                "reviewer": { "type": "string" },
+                "reason": { "type": "string", "maxLength": 501 }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

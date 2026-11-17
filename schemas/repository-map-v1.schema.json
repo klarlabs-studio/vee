@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/repository-map-v1.schema.json",
+  "title": "Vero local repository dependency map",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "repositories", "dependencies", "limitations", "digest"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "repositories": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "root", "ecosystem", "manifest", "manifest_digest"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "root": { "type": "string", "minLength": 1 },
+          "ecosystem": { "enum": ["cargo", "npm", "go"] },
+          "manifest": { "enum": ["Cargo.toml", "package.json", "go.mod"] },
+          "manifest_digest": { "$ref": "#/$defs/digest" }
+        }
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["from", "to", "package", "kind", "declared_requirement", "declared_path", "match_basis", "evidence_path", "evidence_digest", "constraint_source_path", "constraint_source_digest"],
+        "properties": {
+          "from": { "type": "string", "minLength": 1 },
+          "to": { "type": "string", "minLength": 1 },
+          "package": { "type": "string", "minLength": 1 },
+          "kind": { "type": "string", "minLength": 1 },
+          "declared_requirement": { "type": ["string", "null"] },
+          "declared_path": { "type": ["string", "null"] },
+          "match_basis": { "enum": ["resolved_path", "package_name"] },
+          "evidence_path": { "type": "string", "minLength": 1 },
+          "evidence_digest": { "$ref": "#/$defs/digest" },
+          "constraint_source_path": { "type": ["string", "null"] },
+          "constraint_source_digest": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] }
+        }
+      }
+    },
+    "limitations": { "type": "array", "items": { "type": "string" } },
+    "digest": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  }
+}
