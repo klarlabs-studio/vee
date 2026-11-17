@@ -5162,6 +5162,7 @@ fn assert_matches_schema(value: &serde_json::Value, schema_json: &str, contract:
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn repository_config_schema_accepts_initialized_and_configured_examples() {
     let schema: serde_json::Value = serde_json::from_str(include_str!(
@@ -5170,12 +5171,35 @@ fn repository_config_schema_accepts_initialized_and_configured_examples() {
     .unwrap();
     let validator = jsonschema::validator_for(&schema).unwrap();
     let directory = tempfile::tempdir().unwrap();
+    init_git(directory.path());
+    // An isolated machine whose only AI backend is a fake Codex CLI.
+    let machine = tempfile::tempdir().unwrap();
+    let bin = machine.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let codex = bin.join("codex");
+    fs::write(&codex, "#!/bin/sh\necho 'codex-cli 9.9.9'\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&codex, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|directory| directory.join("git"))
+        .find(|candidate| candidate.is_file())
+        .unwrap();
+    std::os::unix::fs::symlink(git, bin.join("git")).unwrap();
     let init = Command::new(env!("CARGO_BIN_EXE_vero"))
         .current_dir(directory.path())
         .arg("init")
+        .env("PATH", &bin)
+        .env("VERO_CONFIG", machine.path().join("config.yaml"))
+        .env("OLLAMA_HOST", "127.0.0.1:9")
         .output()
         .unwrap();
-    assert!(init.status.success());
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
     let initialized_yaml = fs::read_to_string(directory.path().join(".vero.yaml")).unwrap();
     let initialized = serde_yaml::from_str::<serde_json::Value>(&initialized_yaml).unwrap();
     let configured = serde_yaml::from_str::<serde_json::Value>(
@@ -5193,7 +5217,13 @@ fn repository_config_schema_accepts_initialized_and_configured_examples() {
     let api_yaml = serde_yaml::to_string(&api_config).unwrap();
     fs::write(directory.path().join("api.yaml"), api_yaml).unwrap();
     assert!(vero_core::RepositoryConfig::load(&directory.path().join("api.yaml")).is_ok());
-    assert!(vero_core::RepositoryConfig::load(&directory.path().join(".vero.yaml")).is_ok());
+    // The initialized repository config references this machine's `default` provider.
+    vero_core::RepositoryConfig::load_with_provider_defaults_and_offline(
+        &directory.path().join(".vero.yaml"),
+        Some(&machine.path().join("config.yaml")),
+        false,
+    )
+    .unwrap();
     let parsed = serde_yaml::from_str::<vero_core::RepositoryConfig>(
         &serde_yaml::to_string(&configured).unwrap(),
     );
@@ -9991,6 +10021,7 @@ fn mcp_tools_declare_titles_safety_annotations_and_documented_inputs() {
         "acceptance_traceability",
         "get_repository_context",
         "get_applicable_standards",
+        "check_setup",
     ]
     .into_iter()
     .collect();

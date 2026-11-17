@@ -874,3 +874,50 @@ pub fn rule_effectiveness(
     crate::rule_candidates::effectiveness(&store, approval_id, &external_feedback)
         .map_err(anyhow::Error::msg)
 }
+
+// ---------------------------------------------------------------------------
+// Setup: provider detection, init, doctor
+
+fn user_config_location() -> Result<PathBuf> {
+    vero_application::user_config_location().ok_or_else(|| {
+        configuration_failure("cannot determine the user config location; set VERO_CONFIG")
+    })
+}
+
+/// AI backends available on this machine, in preference order.
+pub fn detect_providers() -> crate::setup::DetectionReport {
+    crate::setup::detect(&crate::setup::LocalSystem)
+}
+
+/// Whether the repository's configured reviewers can run on this machine.
+pub fn doctor(workspace: &Workspace) -> Result<crate::setup::DoctorReport> {
+    let user_config = user_config_location().ok();
+    Ok(crate::setup::doctor(
+        &crate::setup::LocalSystem,
+        workspace.root(),
+        user_config.as_deref(),
+    ))
+}
+
+/// Create a reviewer setup from the detected backends, or configure this machine
+/// for a repository that already has one.
+pub fn init(
+    workspace: &Workspace,
+    candidate_id: Option<&str>,
+    model: Option<&str>,
+) -> Result<crate::setup::InitReport> {
+    let user_config = user_config_location()?;
+    crate::setup::init(
+        &crate::setup::LocalSystem,
+        workspace.root(),
+        &user_config,
+        crate::setup::InitRequest {
+            candidate_id,
+            model,
+        },
+    )
+    .map_err(|error| match error {
+        crate::setup::InitError::Usage(message) => usage_failure(message),
+        crate::setup::InitError::Configuration(message) => configuration_failure(message),
+    })
+}

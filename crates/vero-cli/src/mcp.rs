@@ -250,7 +250,7 @@ struct ApproveRuleCandidateInput {
     candidate_id: String,
     /// Evidence digest reported with the candidate; approval fails if the evidence changed.
     evidence_digest: String,
-    /// Repository path glob the guidance applies to.
+    /// Repository-relative file or directory the guidance applies to (no globs or `..`).
     scope: String,
     /// Reviewer guidance text to activate (up to 20000 bytes).
     instruction: String,
@@ -791,6 +791,11 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         Some("rule-effectiveness-v1"),
         "Compare explicit category-matched feedback before and after approval activation; observational only. Same document as `vero rules effectiveness --output json`.",
         |ws, input: RuleEffectivenessInput| operations::rule_effectiveness(&ws, input.approval_id.as_deref()));
+
+    operation_tool!(server, workspace, "check_setup", "Check setup", read_only_tool(),
+        Some("doctor-report-v1"),
+        "Report whether this repository's reviewers can run on this machine, which AI backends (local models, agent CLIs, API keys) are available, and what to do next. Same document as `vero doctor --output json`.",
+        |ws, _input: EmptyInput| operations::doctor(&ws));
 
     Ok(server)
 }

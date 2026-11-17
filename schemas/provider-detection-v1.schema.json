@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/provider-detection-v1.schema.json",
+  "title": "Vero provider detection v1",
+  "description": "AI backends available on this machine in preference order: local model, agent CLIs, API keys. Returned by `vero providers detect --output json` and embedded in doctor and init reports.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidates",
+    "recommended"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/candidate"
+      }
+    },
+    "recommended": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "First available candidate that needs no further input."
+    }
+  },
+  "$defs": {
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_id",
+        "family",
+        "kind",
+        "egress",
+        "available",
+        "detail",
+        "models",
+        "requires_model",
+        "reason"
+      ],
+      "properties": {
+        "candidate_id": {
+          "enum": [
+            "ollama",
+            "codex",
+            "gemini",
+            "claude",
+            "openai-api",
+            "anthropic-api",
+            "gemini-api"
+          ]
+        },
+        "family": {
+          "enum": [
+            "local_model",
+            "agent_cli",
+            "api_key"
+          ]
+        },
+        "kind": {
+          "enum": [
+            "ollama_native",
+            "codex_cli",
+            "gemini_cli",
+            "claude_cli",
+            "openai_compatible"
+          ]
+        },
+        "egress": {
+          "enum": [
+            "local",
+            "network"
+          ]
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "requires_model": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

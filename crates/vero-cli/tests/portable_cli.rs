@@ -4,41 +4,130 @@ fn vero() -> Command {
     Command::new(env!("CARGO_BIN_EXE_vero"))
 }
 
-#[test]
-fn init_creates_a_loadable_repository_config_and_refuses_to_overwrite_it() {
-    let directory = tempfile::tempdir().unwrap();
+/// A machine whose only AI backend is a fake Codex CLI: an isolated user config,
+/// a PATH containing just that CLI, and an Ollama port nothing listens on.
+#[cfg(unix)]
+struct FakeMachine {
+    _home: tempfile::TempDir,
+    bin: std::path::PathBuf,
+    user_config: std::path::PathBuf,
+}
 
-    let initialized = vero()
-        .arg("init")
-        .current_dir(directory.path())
-        .output()
-        .unwrap();
+#[cfg(unix)]
+impl FakeMachine {
+    fn with_codex() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let codex = bin.join("codex");
+        fs::write(&codex, "#!/bin/sh\necho 'codex-cli 9.9.9'\n").unwrap();
+        fs::set_permissions(&codex, fs::Permissions::from_mode(0o755)).unwrap();
+        let git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|directory| directory.join("git"))
+            .find(|candidate| candidate.is_file())
+            .expect("git is required for Vero");
+        std::os::unix::fs::symlink(git, bin.join("git")).unwrap();
+        let user_config = home.path().join("vero/config.yaml");
+        Self {
+            _home: home,
+            bin,
+            user_config,
+        }
+    }
+
+    fn repository(&self) -> tempfile::TempDir {
+        let repository = tempfile::tempdir().unwrap();
+        let status = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repository.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        repository
+    }
+
+    fn vero(&self, root: &std::path::Path, args: &[&str]) -> std::process::Output {
+        vero()
+            .args(args)
+            .current_dir(root)
+            .env("PATH", &self.bin)
+            .env("VERO_CONFIG", &self.user_config)
+            .env("OLLAMA_HOST", "127.0.0.1:9")
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("ANTHROPIC_API_KEY")
+            .env_remove("GEMINI_API_KEY")
+            .output()
+            .unwrap()
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn init_configures_detected_backend_and_doctor_reports_ready() {
+    let machine = FakeMachine::with_codex();
+    let repository = machine.repository();
+    let root = repository.path();
+
+    let detected = machine.vero(root, &["providers", "detect", "--output", "json"]);
+    assert!(
+        detected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&detected.stderr)
+    );
+    let detected: serde_json::Value = serde_json::from_slice(&detected.stdout).unwrap();
+    assert_eq!(detected["recommended"], "codex");
+    assert_eq!(detected["candidates"][0]["candidate_id"], "ollama");
+    assert_eq!(detected["candidates"][0]["available"], false);
+
+    let initialized = machine.vero(root, &["init", "--output", "json"]);
     assert!(
         initialized.status.success(),
         "init failed: {}",
         String::from_utf8_lossy(&initialized.stderr)
     );
-    assert_eq!(
-        String::from_utf8_lossy(&initialized.stdout).trim(),
-        "Created .vero.yaml"
-    );
+    let report: serde_json::Value = serde_json::from_slice(&initialized.stdout).unwrap();
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["candidate_id"], "codex");
+    assert_eq!(report["provider_status"], "written");
+    assert_eq!(report["repository_config_status"], "written");
+    assert!(root.join(".vero.yaml").is_file());
+    assert!(root.join(".vero/reviewers/correctness.md").is_file());
+    assert!(fs::read_to_string(&machine.user_config)
+        .unwrap()
+        .contains("codex_cli"));
 
-    let config_path = directory.path().join(".vero.yaml");
-    assert!(config_path.is_file());
-    let config = vero_application::load_repository_config(directory.path()).unwrap();
-    assert_eq!(config.version, 1);
-    assert!(config.reviewers.is_empty());
-    assert!(config.policy.block_severities.contains(&"high".to_owned()));
+    let doctor = machine.vero(root, &["doctor", "--output", "json"]);
+    let diagnosis: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    assert_eq!(doctor.status.code(), Some(0), "{diagnosis:#}");
+    assert_eq!(diagnosis["ready"], true);
+    assert_eq!(diagnosis["reviewers"][0]["reviewer_id"], "correctness");
+    assert_eq!(diagnosis["reviewers"][0]["kind"], "codex_cli");
+    assert_eq!(diagnosis["reviewers"][0]["detail"], "codex-cli 9.9.9");
 
-    let original = fs::read(&config_path).unwrap();
-    let repeated = vero()
-        .arg("init")
-        .current_dir(directory.path())
-        .output()
-        .unwrap();
+    let original = fs::read(root.join(".vero.yaml")).unwrap();
+    let repeated = machine.vero(root, &["init"]);
     assert_eq!(repeated.status.code(), Some(3));
-    assert!(String::from_utf8_lossy(&repeated.stderr).contains("already exists"));
-    assert_eq!(fs::read(config_path).unwrap(), original);
+    assert!(String::from_utf8_lossy(&repeated.stderr).contains("already set up"));
+    assert_eq!(fs::read(root.join(".vero.yaml")).unwrap(), original);
+}
+
+#[cfg(unix)]
+#[test]
+fn init_without_any_backend_explains_options_and_writes_nothing() {
+    let machine = FakeMachine::with_codex();
+    fs::remove_file(machine.bin.join("codex")).unwrap();
+    let repository = machine.repository();
+    let output = machine.vero(repository.path(), &["init"]);
+    assert_eq!(output.status.code(), Some(3));
+    let message = String::from_utf8_lossy(&output.stderr);
+    assert!(message.contains("no AI backend found"), "{message}");
+    assert!(!repository.path().join(".vero.yaml").exists());
+    assert!(!machine.user_config.exists());
+
+    let doctor = machine.vero(repository.path(), &["doctor"]);
+    assert_eq!(doctor.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&doctor.stdout).contains("Run `vero init`"));
 }
 
 #[test]

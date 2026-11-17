@@ -23,6 +23,7 @@ mod patch_sandbox;
 mod pr_description;
 mod repository_map;
 mod rule_candidates;
+mod setup;
 mod standards;
 mod test_effectiveness;
 mod test_generation;
@@ -399,8 +400,31 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
-    /// Create a starter .vero.yaml in the current directory.
-    Init,
+    /// Set up Vero: create .vero.yaml and reviewer instructions, and configure this
+    /// machine's AI provider from the backends detected (local model first). In a
+    /// repository that already has .vero.yaml, configures only this machine.
+    Init {
+        /// Backend to use instead of the recommended one (see `vero providers detect`).
+        #[arg(long, value_name = "CANDIDATE")]
+        provider: Option<String>,
+        /// Model for the chosen backend; required for API keys, optional for Ollama.
+        #[arg(long)]
+        model: Option<String>,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
+    /// Check whether this repository's reviewers can run on this machine (exit 0 when ready, 2 when not).
+    Doctor {
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
+    /// Discover the AI backends available on this machine.
+    Providers {
+        #[command(subcommand)]
+        command: ProvidersCommand,
+    },
     /// Print a shell completion script to stdout (for example: `vero completions zsh > ~/.zfunc/_vero`).
     Completions {
         /// Shell to generate completions for.
@@ -700,7 +724,7 @@ enum RulesCommand {
         /// Evidence digest reported for the candidate; approval fails if evidence changed.
         #[arg(long)]
         evidence_digest: String,
-        /// Repository path glob the approved guidance applies to.
+        /// Repository-relative file or directory the approved guidance applies to (no globs or `..`).
         #[arg(long)]
         scope: String,
         /// Reviewer guidance text to activate.
@@ -2113,6 +2137,16 @@ enum GateCommand {
     },
 }
 #[derive(Subcommand)]
+enum ProvidersCommand {
+    /// List local models, agent CLIs, and API keys Vero can use, in preference order.
+    Detect {
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
+}
+
+#[derive(Subcommand)]
 enum FindingsCommand {
     /// List findings with optional filters.
     List {
@@ -2627,6 +2661,102 @@ fn review_to_sarif(review: &vero_application::ReviewResult) -> Result<serde_json
     }))
 }
 
+fn print_detection(report: &setup::DetectionReport) {
+    println!("AI backends on this machine (preference order):");
+    for candidate in &report.candidates {
+        let marker = if report.recommended == Some(candidate.candidate_id) {
+            "*"
+        } else if candidate.available {
+            "+"
+        } else {
+            "-"
+        };
+        let state = if candidate.available {
+            let mut detail = candidate.detail.clone().unwrap_or_default();
+            if !candidate.models.is_empty() {
+                detail = format!("{detail}; models: {}", candidate.models.join(", "));
+            }
+            if candidate.requires_model {
+                detail = format!("{detail}; needs --model");
+            }
+            detail
+        } else {
+            candidate.reason.clone().unwrap_or_default()
+        };
+        println!(
+            "{marker} {:<14} {:<18} {:<8} {state}",
+            candidate.candidate_id, candidate.kind, candidate.egress
+        );
+    }
+    match report.recommended {
+        Some(recommended) => {
+            println!("Recommended: {recommended} (* recommended, + available, - unavailable)")
+        }
+        None => {
+            println!("No backend can be configured automatically (+ available, - unavailable).")
+        }
+    }
+}
+
+fn print_doctor_report(report: &setup::DoctorReport) {
+    println!(
+        "Repository config: {} ({})",
+        report.repository_config,
+        if report.config_valid {
+            "valid"
+        } else {
+            "invalid"
+        }
+    );
+    if let Some(error) = &report.config_error {
+        println!("  {error}");
+    }
+    match &report.user_config {
+        Some(path) => println!(
+            "User config: {path}{}",
+            if report.user_config_exists {
+                ""
+            } else {
+                " (not created yet)"
+            }
+        ),
+        None => println!("User config: location unknown (set VERO_CONFIG)"),
+    }
+    if report.offline {
+        println!("Offline mode: on (network providers are rejected)");
+    }
+    for check in &report.reviewers {
+        let status = if check.usable { "ok" } else { "FAIL" };
+        let role = if check.required {
+            "required"
+        } else {
+            "optional"
+        };
+        println!(
+            "[{status}] reviewer {} ({role}) -> provider {} [{}, {} egress]",
+            check.reviewer_id, check.provider_id, check.kind, check.egress
+        );
+        if let Some(detail) = &check.detail {
+            println!("       {detail}");
+        }
+        if let Some(problem) = &check.problem {
+            println!("       {problem}");
+        }
+    }
+    print_detection(&report.detection);
+    for step in &report.next_steps {
+        println!("Next: {step}");
+    }
+    println!(
+        "{}",
+        if report.ready {
+            "Ready to review."
+        } else {
+            "Not ready."
+        }
+    );
+}
+
 /// Print one machine-readable document for `--output json`: compact JSON and a newline.
 /// The same document is returned by the matching MCP tool.
 fn emit_json(document: &impl serde::Serialize) -> Result<()> {
@@ -2745,13 +2875,54 @@ fn run() -> Result<u8> {
         Err(error) => return Err(anyhow::Error::new(error)),
     };
     match cli.command {
-        Command::Init => {
-            let path = std::path::Path::new(".vero.yaml");
-            if path.exists() {
-                return Err(configuration_failure(".vero.yaml already exists"));
+        Command::Init {
+            provider,
+            model,
+            output,
+        } => {
+            let workspace = operations::Workspace::discover()?;
+            let report = operations::init(&workspace, provider.as_deref(), model.as_deref())?;
+            match output {
+                Output::Json => emit_json(&report)?,
+                Output::Text => {
+                    if report.repository_config_status == "written" {
+                        println!("Created {}", report.repository_config);
+                    }
+                    if report.reviewer_instructions_created {
+                        println!("Created {}", report.reviewer_instructions);
+                    }
+                    match (report.provider_status, report.candidate_id) {
+                        ("written", Some(candidate)) => println!(
+                            "Configured provider `{}` ({candidate}, {} egress) in {}",
+                            report.provider_id, report.egress, report.user_config
+                        ),
+                        _ => println!(
+                            "Using existing provider `{}` from {}",
+                            report.provider_id, report.user_config
+                        ),
+                    }
+                    println!("Next: run `vero doctor`, then `vero review`.");
+                }
             }
-            std::fs::write(path, "version: 1\nreview:\n  include: [\"**/*.rs\", \"**/*.go\"]\n  exclude: [\"**/generated/**\"]\nproviders: {}\nreviewers: {}\nverification: {}\nhosting: {}\npolicy:\n  required_reviewers: []\n  required_verifications: []\n  block_severities: [critical, high]\n  minimum_confidence: 80\n  on_incomplete: block\n")?;
-            println!("Created .vero.yaml");
+            Ok(0)
+        }
+        Command::Doctor { output } => {
+            let workspace = operations::Workspace::discover()?;
+            let report = operations::doctor(&workspace)?;
+            match output {
+                Output::Json => emit_json(&report)?,
+                Output::Text => print_doctor_report(&report),
+            }
+            Ok(if report.ready { 0 } else { 2 })
+        }
+        Command::Providers {
+            command: ProvidersCommand::Detect { output },
+        } => {
+            let report = operations::detect_providers();
+            match output {
+                Output::Json => emit_json(&report)?,
+                Output::Text => print_detection(&report),
+            }
             Ok(0)
         }
         Command::Completions { shell } => {

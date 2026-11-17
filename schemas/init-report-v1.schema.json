@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/init-report-v1.schema.json",
+  "title": "Vero init report v1",
+  "description": "Files written by `vero init --output json`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "repository_config",
+    "repository_config_status",
+    "reviewer_instructions",
+    "reviewer_instructions_created",
+    "user_config",
+    "provider_status",
+    "provider_id",
+    "candidate_id",
+    "egress",
+    "detection"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "repository_config": {
+      "type": "string"
+    },
+    "repository_config_status": {
+      "enum": [
+        "written",
+        "existing"
+      ]
+    },
+    "reviewer_instructions": {
+      "type": "string"
+    },
+    "reviewer_instructions_created": {
+      "type": "boolean"
+    },
+    "user_config": {
+      "type": "string"
+    },
+    "provider_status": {
+      "enum": [
+        "written",
+        "existing"
+      ]
+    },
+    "provider_id": {
+      "type": "string"
+    },
+    "candidate_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "egress": {
+      "enum": [
+        "local",
+        "network"
+      ]
+    },
+    "detection": {
+      "$ref": "provider-detection-v1.schema.json"
+    }
+  }
+}

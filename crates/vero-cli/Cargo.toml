@@ -35,6 +35,7 @@ base64.workspace = true
 tempfile.workspace = true
 globset.workspace = true
 semver.workspace = true
+url.workspace = true
 clap_complete.workspace = true
 
 [dev-dependencies]

@@ -294,6 +294,11 @@ fn cli_and_mcp_return_identical_documents_for_shared_operations() {
     assert_eq!(cli["snapshot_id"], via_mcp["snapshot_id"]);
     assert_eq!(cli["finding_id"], via_mcp["finding_id"]);
 
+    let cli = cli_json(root, &["doctor"]);
+    let via_mcp = mcp.call("check_setup", json!({}));
+    assert_same(&cli, &via_mcp, "doctor", "doctor-report-v1");
+    assert_eq!(cli["ready"], true, "{cli:#}");
+
     let cli = cli_json(root, &["analytics"]);
     let via_mcp = mcp.call("get_quality_analytics", json!({}));
     assert_same(&cli, &via_mcp, "analytics", "quality-analytics-v9");

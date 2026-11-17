@@ -108,7 +108,7 @@ def mcp_review(executable: str, root: Path, review_id: str) -> dict[str, object]
         payload = json.loads(text)
         if payload.get("review_id") != review_id:
             raise RuntimeError(f"MCP returned a different review: {payload}")
-        if payload.get("review", {}).get("gate", {}).get("status") != "pass":
+        if payload.get("gate", {}).get("status") != "pass":
             raise RuntimeError(f"MCP did not retrieve the CLI's passing review: {payload}")
         return payload
     finally:
@@ -140,9 +140,11 @@ def main() -> int:
         run(["git", "commit", "-qm", "initial"], root)
         source.write_text("fn main() { let changed = true; }\n", encoding="utf-8")
 
-        initialized = run([executable, "init"], root)
-        if ".vero.yaml" not in initialized.stdout or not (root / ".vero.yaml").is_file():
-            raise RuntimeError("vero init did not create the repository-local config")
+        # Without .vero.yaml the setup is not ready, and doctor says how to fix it.
+        unready = run([executable, "doctor", "--output", "json"], root, expected=2)
+        diagnosis = json.loads(unready.stdout)
+        if diagnosis["ready"] or not any("vero init" in step for step in diagnosis["next_steps"]):
+            raise RuntimeError(f"doctor did not guide setup: {diagnosis}")
 
         (root / "reviewer.md").write_text("Return no findings.\n", encoding="utf-8")
         provider = root / "local_reviewer.py"
@@ -170,6 +172,10 @@ def main() -> int:
             encoding="utf-8",
         )
 
+        ready = json.loads(run([executable, "doctor", "--output", "json"], root).stdout)
+        if not ready["ready"] or not ready["reviewers"][0]["usable"]:
+            raise RuntimeError(f"doctor did not accept the local provider: {ready}")
+
         review_result = run(
             [executable, "review", "--working-tree", "--gate", "--output", "json"], root
         )
@@ -192,7 +198,7 @@ def main() -> int:
             raise RuntimeError(f"modified source reused a passing gate: {decision}")
 
     print(
-        "installed local workflow passed: init, offline local review, CLI gate pass, "
+        "installed local workflow passed: doctor, offline local review, CLI gate pass, "
         "MCP retrieved the same review, stale snapshot rejected"
     )
     return 0
