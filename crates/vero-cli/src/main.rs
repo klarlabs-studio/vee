@@ -397,7 +397,14 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Create a starter .vero.yaml in the current directory.
     Init,
+    /// Print a shell completion script to stdout (for example: `vero completions zsh > ~/.zfunc/_vero`).
+    Completions {
+        /// Shell to generate completions for.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
     /// List or install bundled agent workflow skills.
     Skills {
         #[command(subcommand)]
@@ -405,13 +412,16 @@ enum Command {
     },
     /// Resolve repository guidance that applies to a target path.
     Standards {
+        /// Repository-relative path whose applicable standards should be resolved.
         #[arg(long, value_name = "PATH")]
         path: Option<std::path::PathBuf>,
         /// Explicitly fetch one HTTPS standards document into the local cache.
         #[arg(long, value_name = "HTTPS_URL")]
         sync_url: Option<String>,
+        /// Identifier for the remote standards source being synced or removed.
         #[arg(long, value_name = "ID")]
         source_id: Option<String>,
+        /// Repository path glob the remote standards source applies to.
         #[arg(long, value_name = "SCOPE")]
         source_scope: Option<String>,
         /// Optional expected digest in sha256:<hex> form.
@@ -420,13 +430,16 @@ enum Command {
         /// Remove a previously synced source and its cached content.
         #[arg(long, value_name = "ID")]
         remove_source: Option<String>,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Resolve advisory CODEOWNERS for repository paths.
     Owners {
+        /// Repository-relative path to resolve owners for (repeatable).
         #[arg(long = "path", required = true, value_name = "PATH")]
         paths: Vec<std::path::PathBuf>,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
@@ -435,46 +448,66 @@ enum Command {
         #[command(subcommand)]
         command: RulesCommand,
     },
+    /// Review a change scope with the configured reviewers and save the result.
     Review {
+        /// Use changes since the merge base with this Git ref.
         #[arg(long)]
         base: Option<String>,
+        /// Use the changes introduced by this commit.
         #[arg(long, conflicts_with_all = ["base", "staged", "working_tree"])]
         commit: Option<String>,
+        /// Use only staged changes.
         #[arg(long)]
         staged: bool,
+        /// Use staged and unstaged working-tree changes.
         #[arg(long)]
         working_tree: bool,
+        /// Evaluate the deterministic gate after the review and exit 1 on block, 2 on incomplete.
         #[arg(long)]
         gate: bool,
+        /// Named policy profile from .vero.yaml to apply.
         #[arg(long, value_name = "NAME")]
         policy_profile: Option<String>,
+        /// Run only these configured reviewer IDs (repeatable).
         #[arg(long = "reviewer")]
         reviewer_ids: Vec<String>,
         /// Attach hosting issue context as untrusted, digest-bound reviewer input (OWNER/REPO#NUMBER).
         #[arg(long, value_name = "OWNER/REPO#NUMBER")]
         work_item: Option<String>,
+        /// Git hosting provider for --work-item context.
         #[arg(long, value_parser = ["github", "gitlab", "azure-devops"])]
         hosting_provider: Option<String>,
+        /// Hosting server host name for --work-item (self-hosted instances).
         #[arg(long)]
         hosting_host: Option<String>,
+        /// Hosting API base URL for --work-item (defaults per provider).
         #[arg(long, value_name = "URL")]
         hosting_api_base: Option<String>,
+        /// Environment variable holding the hosting token for --work-item.
         #[arg(long, value_name = "ENV_VAR")]
         hosting_token_env: Option<String>,
+        /// Also write a Markdown report to this path.
         #[arg(long, value_name = "PATH")]
         markdown: Option<std::path::PathBuf>,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
+    /// Analyze which files and tests a change is likely to affect.
     Impact {
+        /// Use changes since the merge base with this Git ref.
         #[arg(long, conflicts_with_all = ["staged", "working_tree"])]
         base: Option<String>,
+        /// Use the changes introduced by this commit.
         #[arg(long, conflicts_with_all = ["base", "staged", "working_tree"])]
         commit: Option<String>,
+        /// Use only staged changes.
         #[arg(long, conflicts_with = "working_tree")]
         staged: bool,
+        /// Use staged and unstaged working-tree changes.
         #[arg(long)]
         working_tree: bool,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
@@ -493,46 +526,60 @@ enum Command {
         #[command(subcommand)]
         command: AcceptanceCommand,
     },
+    /// Evaluate or inspect deterministic gate decisions for saved reviews.
     Gate {
         #[command(subcommand)]
         command: GateCommand,
     },
+    /// Inspect, resolve, and give feedback on review findings.
     Findings {
         #[command(subcommand)]
         command: FindingsCommand,
     },
+    /// Create or list snapshot-scoped finding waivers.
     Waivers {
         #[command(subcommand)]
         command: WaiversCommand,
     },
+    /// Run a trusted verification profile against the current snapshot.
     Verify {
+        /// Finding to verify; omit to verify the current snapshot as a whole.
         finding_id: Option<String>,
+        /// Verification profile ID from .vero.yaml.
         #[arg(long)]
         profile: String,
         /// Expand `{impacted_test_packages}` (Go) or `{impacted_rust_test_filters}` (Rust) in profile argv.
         #[arg(long, conflicts_with = "finding_id")]
         impacted_tests: bool,
+        /// Use the changes introduced by this commit.
         #[arg(long, conflicts_with_all = ["base", "staged", "working_tree"])]
         commit: Option<String>,
+        /// Use changes since the merge base with this Git ref.
         #[arg(long, conflicts_with_all = ["staged", "working_tree"])]
         base: Option<String>,
+        /// Use only staged changes.
         #[arg(long, conflicts_with = "working_tree")]
         staged: bool,
+        /// Use staged and unstaged working-tree changes.
         #[arg(long)]
         working_tree: bool,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
+    /// Inspect saved verification runs and their diagnostics.
     Verification {
         #[command(subcommand)]
         command: VerificationCommand,
     },
+    /// List, export, bundle, sign, and import saved reviews.
     Reviews {
         #[command(subcommand)]
         command: ReviewsCommand,
     },
     /// Summarize local review, gate, and finding lifecycle outcomes.
     Analytics {
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
@@ -546,13 +593,17 @@ enum Command {
         #[command(subcommand)]
         command: HostingCommand,
     },
+    /// Run Vero as a Model Context Protocol server for coding agents.
     Mcp {
         #[command(subcommand)]
         command: McpCommand,
     },
+    /// Serve the local web dashboard on a loopback address.
     Ui {
+        /// Hosting server host name (for self-hosted instances).
         #[arg(long, default_value = "127.0.0.1")]
         host: std::net::IpAddr,
+        /// Loopback port to listen on.
         #[arg(long, default_value_t = 7878)]
         port: u16,
         /// Reserved; direct network access requires native TLS support.
@@ -562,14 +613,18 @@ enum Command {
 }
 #[derive(Subcommand)]
 enum McpCommand {
+    /// Serve MCP tools over stdio for the current repository.
     Serve {
+        /// MCP transport (stdio is the only supported transport).
         #[arg(long, default_value = "stdio", value_parser = ["stdio"])]
         transport: String,
     },
 }
 #[derive(Subcommand)]
 enum SkillsCommand {
+    /// List the bundled agent skills.
     List,
+    /// Install the bundled agent skills into this repository.
     Install {
         /// Replace existing Vero skill files.
         #[arg(long)]
@@ -580,13 +635,16 @@ enum SkillsCommand {
 enum ReposCommand {
     /// Build a deterministic local manifest dependency map.
     Map {
+        /// Local repository checkouts to include.
         #[arg(required = true, value_name = "REPOSITORY_PATH")]
         repositories: Vec<std::path::PathBuf>,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Capture a digest-bound working-tree change package across related checkouts.
     Package {
+        /// Local repository checkouts to include in the change package.
         #[arg(required = true, value_name = "REPOSITORY_PATH")]
         repositories: Vec<std::path::PathBuf>,
         /// Bind a selected local repository to a provider PR: REPO_ID=HOST/OWNER/REPO#NUMBER.
@@ -602,38 +660,51 @@ enum ReposCommand {
         /// Resolve this ref to a merge-base independently in every checkout.
         #[arg(long)]
         base: Option<String>,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Find potential Rust symbol references in selected consumer checkouts.
     Impact {
+        /// Repository whose changes are the source of impact.
         #[arg(value_name = "PRODUCER_REPOSITORY")]
         producer: std::path::PathBuf,
+        /// Local consumer repository checkouts to analyze.
         #[arg(required = true, value_name = "CONSUMER_REPOSITORY")]
         consumers: Vec<std::path::PathBuf>,
+        /// Use changes since the merge base with this Git ref.
         #[arg(long, required = true, value_name = "GIT_REF")]
         base: String,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
 }
 #[derive(Subcommand)]
 enum RulesCommand {
+    /// List rule candidates mined from repeated human feedback.
     Candidates {
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Approve explicitly written reviewer guidance for a current candidate.
     Approve {
+        /// Candidate ID from `vero rules candidates`.
         candidate_id: String,
+        /// Evidence digest reported for the candidate; approval fails if evidence changed.
         #[arg(long)]
         evidence_digest: String,
+        /// Repository path glob the approved guidance applies to.
         #[arg(long)]
         scope: String,
+        /// Reviewer guidance text to activate.
         #[arg(long)]
         instruction: String,
+        /// Name of the person approving the guidance.
         #[arg(long)]
         approver: String,
+        /// Why the guidance is being approved.
         #[arg(long)]
         reason: String,
         /// Replace this prior approval with a new immutable version.
@@ -642,28 +713,36 @@ enum RulesCommand {
         /// Expire the approval after this many days (1 to 3650).
         #[arg(long)]
         expires_in_days: Option<u32>,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// List guidance approvals and their audit events.
     List {
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Revoke an approval without deleting its audit history.
     Revoke {
+        /// Approval ID to revoke.
         approval_id: String,
+        /// Name of the person revoking the approval.
         #[arg(long)]
         actor: String,
+        /// Why the approval is being revoked.
         #[arg(long)]
         reason: String,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Report later human feedback for occurrences in an approved rule category.
     Effectiveness {
+        /// Limit the report to one approval ID.
         #[arg(long)]
         approval_id: Option<String>,
+        /// Output format.
         #[arg(long, value_enum, default_value = "json")]
         output: Output,
     },
@@ -672,108 +751,149 @@ enum RulesCommand {
 enum TestsCommand {
     /// Show impact-selected trusted test commands without executing them.
     Plan {
+        /// Use changes since the merge base with this Git ref.
         #[arg(long, conflicts_with_all = ["staged", "working_tree"])]
         base: Option<String>,
+        /// Use only staged changes.
         #[arg(long, conflicts_with = "working_tree")]
         staged: bool,
+        /// Use staged and unstaged working-tree changes.
         #[arg(long)]
         working_tree: bool,
+        /// Verification profile whose test selection is planned.
         #[arg(long, required = true)]
         profile: String,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
+    /// Recommend missing tests for the current change.
     Recommend {
+        /// Use changes since the merge base with this Git ref.
         #[arg(long, conflicts_with_all = ["staged", "working_tree"])]
         base: Option<String>,
+        /// Use the changes introduced by this commit.
         #[arg(long, conflicts_with_all = ["base", "staged", "working_tree"])]
         commit: Option<String>,
+        /// Use only staged changes.
         #[arg(long, conflicts_with = "working_tree")]
         staged: bool,
+        /// Use staged and unstaged working-tree changes.
         #[arg(long)]
         working_tree: bool,
         /// Include a persisted LCOV verification run for this exact change snapshot.
         #[arg(long)]
         coverage_run: Option<String>,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Generate a snapshot-bound test patch proposal; never applies or runs it.
     Generate {
+        /// Use changes since the merge base with this Git ref.
         #[arg(long, conflicts_with_all = ["staged", "working_tree", "commit"])]
         base: Option<String>,
+        /// Use only staged changes.
         #[arg(long, conflicts_with_all = ["base", "working_tree", "commit"])]
         staged: bool,
+        /// Use staged and unstaged working-tree changes.
         #[arg(long, conflicts_with_all = ["base", "staged", "commit"])]
         working_tree: bool,
+        /// Use the changes introduced by this commit.
         #[arg(long, conflicts_with_all = ["base", "staged", "working_tree"])]
         commit: Option<String>,
+        /// Configured reviewer that drafts the test patch.
         #[arg(long, default_value = "correctness")]
         reviewer: String,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Create a new test-only proposal from a failed run linked to an applied proposal.
     Refine {
+        /// Applied test proposal to refine.
         proposal_id: String,
+        /// Failed verification run ID that guides the refinement.
         #[arg(long, required = true)]
         run: String,
+        /// Configured reviewer that drafts the refined test patch.
         #[arg(long, default_value = "correctness")]
         reviewer: String,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Measure whether the selected trusted profile kills a supplied source mutant.
     Effectiveness {
+        /// Applied test proposal to assess.
         proposal_id: String,
+        /// Trusted verification profile used to run the tests.
         #[arg(long, required = true)]
         profile: String,
+        /// Unified diff that introduces the mutant.
         #[arg(long = "mutant-patch", required = true)]
         mutant_patch: std::path::PathBuf,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Measure generated-test effectiveness across a digest-pinned mutant corpus.
     EffectivenessCorpus {
+        /// Applied test proposal to assess.
         proposal_id: String,
+        /// Trusted verification profile used to run the tests.
         #[arg(long, required = true)]
         profile: String,
+        /// Digest-pinned mutant corpus manifest (JSON).
         #[arg(long = "manifest", required = true)]
         manifest: std::path::PathBuf,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Apply a previously generated test patch after exact-digest approval.
     Apply {
+        /// Test proposal ID to apply.
         proposal_id: String,
+        /// Exact proposal digest, confirming you reviewed this patch.
         #[arg(long, required = true)]
         approve: String,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Run a trusted verification profile against an applied generated-test proposal.
     Run {
+        /// Applied test proposal whose tests should run.
         proposal_id: String,
+        /// Trusted verification profile used to run the tests.
         #[arg(long, required = true)]
         profile: String,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
 }
 #[derive(Subcommand)]
 enum PrCommand {
+    /// Draft a pull request title and body with a configured reviewer.
     Draft {
+        /// Use changes since the merge base with this Git ref.
         #[arg(long, conflicts_with_all = ["staged", "working_tree", "commit"])]
         base: Option<String>,
+        /// Use only staged changes.
         #[arg(long, conflicts_with_all = ["base", "working_tree", "commit"])]
         staged: bool,
+        /// Use staged and unstaged working-tree changes.
         #[arg(long, conflicts_with_all = ["base", "staged", "commit"])]
         working_tree: bool,
+        /// Use the changes introduced by this commit.
         #[arg(long, conflicts_with_all = ["base", "staged", "working_tree"])]
         commit: Option<String>,
         /// Configured reviewer whose provider and instruction file draft the artifact.
         #[arg(long, default_value = "correctness")]
         reviewer: String,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
@@ -782,21 +902,26 @@ enum PrCommand {
 enum AcceptanceCommand {
     /// Report candidate changed files and snapshot-bound verification for criteria.
     Report {
+        /// Saved review ID.
         #[arg(long, value_name = "REVIEW_ID")]
         review: String,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Validate a human traceability mapping against a saved review and snapshot.
     Validate {
+        /// Saved review ID.
         #[arg(long, value_name = "REVIEW_ID")]
         review: String,
+        /// Path to the acceptance mapping file (JSON or YAML).
         #[arg(long, value_name = "PATH")]
         mapping: std::path::PathBuf,
         /// Enforce the attestation result: 0 met, 1 not met, 2 incomplete.
         /// This evaluates human traceability attestations, not behavioral proof.
         #[arg(long)]
         gate: bool,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
@@ -833,27 +958,37 @@ static SKILL_TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 enum VerificationCommand {
     /// List verification runs for an exact immutable snapshot.
     List {
+        /// Snapshot ID whose verification runs should be listed.
         #[arg(long, required = true)]
         snapshot: String,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
+    /// Show a verification run with its captured output references.
     Show {
+        /// Verification run ID.
         run_id: String,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Parse a saved verification run into bounded, snapshot-linked diagnostics.
     Diagnose {
+        /// Verification run ID.
         run_id: String,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Summarize snapshot-bound LCOV data for changed files.
     Coverage {
+        /// Verification run ID.
         run_id: String,
+        /// Which captured stream contains the LCOV data.
         #[arg(long, value_enum, default_value = "stdout")]
         stream: CoverageStream,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
@@ -865,22 +1000,31 @@ enum CoverageStream {
 }
 #[derive(Subcommand)]
 enum ReviewsCommand {
+    /// List saved reviews.
     List {
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
+    /// Show a saved review.
     Show {
+        /// Saved review ID.
         id: String,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
+    /// Export a saved review as SARIF or Vero JSON.
     Export {
+        /// Saved review ID.
         id: String,
+        /// Export format.
         #[arg(long, value_enum, default_value = "sarif")]
         format: ReportFormat,
     },
     /// Export a self-contained, digest-verified gate evidence bundle.
     Bundle {
+        /// Saved review ID.
         id: String,
         /// Export a particular persisted gate decision; defaults to the latest decision.
         #[arg(long)]
@@ -888,31 +1032,40 @@ enum ReviewsCommand {
     },
     /// Verify the integrity and internal bindings of an exported evidence bundle.
     VerifyBundle {
+        /// Path to the evidence bundle.
         path: std::path::PathBuf,
         /// Ed25519 public key in raw 32-byte form; required to verify signed bundles.
         #[arg(long)]
         public_key: Option<std::path::PathBuf>,
+        /// Output format.
         #[arg(long, value_enum, default_value = "json")]
         output: Output,
     },
     /// Sign a bundle with an Ed25519 PKCS#8 private key.
     SignBundle {
+        /// Path to the evidence bundle.
         path: std::path::PathBuf,
+        /// Ed25519 PKCS#8 private key file.
         #[arg(long)]
         private_key: std::path::PathBuf,
+        /// Key identifier recorded with the signature.
         #[arg(long)]
         key_id: String,
     },
     /// Generate a local Ed25519 key pair for bundle signing.
     Keygen {
+        /// Where to write the PKCS#8 private key.
         #[arg(long)]
         private_key: std::path::PathBuf,
+        /// Where to write the public key.
         #[arg(long)]
         public_key: std::path::PathBuf,
     },
     /// Import a portable review as untrusted external history. It is never used by gate evaluation.
     Import {
+        /// Path to the portable review file to import.
         path: std::path::PathBuf,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
@@ -926,14 +1079,19 @@ enum ReviewsCommand {
 enum HostingCommand {
     /// Retrieve live PR review comments as untrusted remediation context.
     PrIssues {
+        /// Repository identifier on the hosting provider.
         #[arg(long, value_name = "OWNER/REPO")]
         repository: String,
+        /// Pull or merge request number.
         #[arg(long)]
         number: u64,
+        /// Git hosting provider (defaults to .vero.yaml).
         #[arg(long, value_parser = ["github", "gitlab", "bitbucket", "azure-devops", "gerrit"])]
         provider: Option<String>,
+        /// Hosting server host name (for self-hosted instances).
         #[arg(long)]
         host: Option<String>,
+        /// Hosting API base URL (defaults per provider).
         #[arg(long, value_name = "URL")]
         api_base: Option<String>,
         /// Credential variable (default: GH_TOKEN; can be set in .vero.yaml).
@@ -942,6 +1100,7 @@ enum HostingCommand {
         /// Gerrit HTTP username for Basic authentication; omit for bearer token auth.
         #[arg(long)]
         username: Option<String>,
+        /// Output format.
         #[arg(long, value_enum, default_value = "json")]
         output: Output,
         /// Save the returned discussion as content-addressed, untrusted history.
@@ -950,14 +1109,19 @@ enum HostingCommand {
     },
     /// Retrieve Azure DevOps pull request metadata and changed-file context.
     PrContext {
+        /// Repository identifier on the hosting provider.
         #[arg(long, value_name = "ORGANIZATION/PROJECT/REPOSITORY")]
         repository: String,
+        /// Pull or merge request number.
         #[arg(long)]
         number: u64,
+        /// Git hosting provider (defaults to .vero.yaml).
         #[arg(long, value_parser = ["github", "gitlab", "bitbucket", "azure-devops", "gerrit"])]
         provider: Option<String>,
+        /// Hosting server host name (for self-hosted instances).
         #[arg(long)]
         host: Option<String>,
+        /// Hosting API base URL (defaults per provider).
         #[arg(long, value_name = "URL")]
         api_base: Option<String>,
         /// Credential variable (default: AZURE_DEVOPS_EXT_PAT; can be set in .vero.yaml).
@@ -966,38 +1130,52 @@ enum HostingCommand {
         /// Gerrit HTTP username for Basic authentication; omit for bearer token auth.
         #[arg(long)]
         username: Option<String>,
+        /// Output format.
         #[arg(long, value_enum, default_value = "json")]
         output: Output,
     },
     /// Retrieve issue/specification context with a content digest.
     IssueContext {
+        /// Repository identifier on the hosting provider.
         #[arg(long, value_name = "OWNER/REPO")]
         repository: String,
+        /// Issue or work-item number.
         #[arg(long)]
         number: u64,
+        /// Git hosting provider (defaults to .vero.yaml).
         #[arg(long, value_parser = ["github", "gitlab", "azure-devops"])]
         provider: Option<String>,
+        /// Hosting server host name (for self-hosted instances).
         #[arg(long)]
         host: Option<String>,
+        /// Hosting API base URL (defaults per provider).
         #[arg(long, value_name = "URL")]
         api_base: Option<String>,
         /// Credential variable (defaults by provider; can be set in .vero.yaml).
         #[arg(long, value_name = "ENV_VAR")]
         token_env: Option<String>,
+        /// Output format.
         #[arg(long, value_enum, default_value = "json")]
         output: Output,
     },
+    /// Publish a saved review's gate result and findings to a pull request.
     Publish {
+        /// Saved review ID to publish.
         #[arg(long, value_name = "REVIEW_ID")]
         review: String,
+        /// Repository identifier on the hosting provider.
         #[arg(long, value_name = "OWNER/REPO")]
         repository: String,
+        /// Pull or merge request number.
         #[arg(long)]
         number: u64,
+        /// Git hosting provider (defaults to .vero.yaml).
         #[arg(long, value_parser = ["github", "gitlab", "bitbucket", "azure-devops", "gerrit"])]
         provider: Option<String>,
+        /// Hosting server host name (for self-hosted instances).
         #[arg(long)]
         host: Option<String>,
+        /// Hosting API base URL (defaults per provider).
         #[arg(long, value_name = "URL")]
         api_base: Option<String>,
         /// Credential variable (defaults by provider; can be set in .vero.yaml).
@@ -1006,25 +1184,34 @@ enum HostingCommand {
         /// Gerrit HTTP username for Basic authentication; omit for bearer token auth.
         #[arg(long)]
         username: Option<String>,
+        /// Environment variable holding the webhook secret.
         #[arg(long, value_name = "ENV_VAR")]
         webhook_secret_env: Option<String>,
+        /// Hosting account that owns Vero's published threads.
         #[arg(long, value_name = "LOGIN")]
         actor_login: Option<String>,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Listen for authenticated pull request events from supported Git hosts.
     WebhookServe {
+        /// Local repository checkout that webhook reviews run in.
         #[arg(long, value_name = "PATH")]
         repository: String,
+        /// Git hosting provider (defaults to .vero.yaml).
         #[arg(long, value_parser = ["github", "gitlab", "bitbucket", "azure-devops", "gerrit"])]
         provider: Option<String>,
+        /// Hosting server host name (for self-hosted instances).
         #[arg(long)]
         host: Option<String>,
+        /// Address to bind the webhook listener to.
         #[arg(long, default_value = "127.0.0.1")]
         bind: std::net::IpAddr,
+        /// Port for the webhook listener.
         #[arg(long, default_value_t = 8787)]
         port: u16,
+        /// Hosting API base URL (defaults per provider).
         #[arg(long, value_name = "URL")]
         api_base: Option<String>,
         /// Credential variable (defaults by provider; can be set in .vero.yaml).
@@ -1033,8 +1220,10 @@ enum HostingCommand {
         /// Gerrit HTTP username for Basic authentication; omit for bearer token auth.
         #[arg(long)]
         username: Option<String>,
+        /// Environment variable holding the webhook secret.
         #[arg(long, value_name = "ENV_VAR")]
         webhook_secret_env: Option<String>,
+        /// Hosting account that owns Vero's published threads.
         #[arg(long, value_name = "LOGIN")]
         actor_login: Option<String>,
         /// Reserved; non-loopback binding requires native TLS support.
@@ -1049,24 +1238,32 @@ enum HostingCommand {
         /// Apply deletion. Without this flag, only report the number of eligible receipts.
         #[arg(long, default_value_t = false)]
         apply: bool,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
 }
 #[derive(Subcommand)]
 enum ImportedCommand {
+    /// List imported review archives.
     List {
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
+    /// Show one imported review archive.
     Show {
+        /// Content digest of the imported archive.
         digest: String,
     },
     /// Search imported review findings as untrusted, non-gating history.
     Search {
+        /// Search text.
         query: String,
+        /// Maximum number of results.
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
@@ -1080,24 +1277,32 @@ enum ImportedCommand {
 enum ImportedFeedbackCommand {
     /// Label one provider comment after human review.
     Set {
+        /// Content digest of the imported archive.
         archive_digest: String,
+        /// Provider comment ID within the archive.
         external_id: String,
         /// Human-assigned normalized defect category used only for candidate grouping.
         #[arg(long)]
         category: String,
+        /// Feedback label.
         #[arg(long, value_enum)]
         label: FeedbackLabelArg,
+        /// Why this label applies.
         #[arg(long)]
         reason: String,
+        /// Name of the person labeling the comment.
         #[arg(long)]
         reviewer: String,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// List labels attached to archived provider comments.
     List {
+        /// Limit to one imported archive.
         #[arg(long)]
         archive_digest: Option<String>,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
@@ -1880,74 +2085,105 @@ fn imported_reviews_dir(root: &std::path::Path, create: bool) -> Result<std::pat
 }
 #[derive(Subcommand)]
 enum GateCommand {
+    /// Re-evaluate the gate for a saved review against the current source.
     Check {
+        /// Saved review ID.
         #[arg(long)]
         review: String,
+        /// Environment variable holding the token used to revalidate the review's work item.
         #[arg(long, value_name = "ENV_VAR")]
         token_env: Option<String>,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
+    /// List persisted gate decisions for a saved review.
     History {
+        /// Saved review ID.
         #[arg(long)]
         review: String,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
 }
 #[derive(Subcommand)]
 enum FindingsCommand {
+    /// List findings with optional filters.
     List {
+        /// Only findings with this severity.
         #[arg(long, value_enum)]
         severity: Option<SeverityArg>,
+        /// Only findings with this lifecycle status.
         #[arg(long, value_enum)]
         status: Option<StatusArg>,
+        /// Only findings from this review ID.
         #[arg(long)]
         review: Option<String>,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
+    /// Show a finding with its occurrences, evidence, and verification runs.
     Show {
+        /// Finding ID.
         id: String,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// Build a bounded, snapshot-bound task bundle for an agent or reviewer.
     Task {
+        /// Finding ID.
         id: String,
+        /// Source lines of context around the finding.
         #[arg(long, default_value_t = 20)]
         context_lines: usize,
+        /// Output format.
         #[arg(long, value_enum, default_value = "json")]
         output: Output,
     },
     /// Assemble same-review findings into one bounded agent work package.
     Package {
+        /// Finding IDs from one review (1 to 20).
         #[arg(required = true, num_args = 1..=20)]
         ids: Vec<String>,
+        /// Source lines of context around each finding.
         #[arg(long, default_value_t = 20)]
         context_lines: usize,
+        /// Output format.
         #[arg(long, value_enum, default_value = "json")]
         output: Output,
     },
     /// Validate and save an agent-proposed patch against an exact saved review.
     ProposePatch {
+        /// Saved review ID the patch targets.
         review: String,
+        /// Unified diff file proposed by the agent.
         patch: std::path::PathBuf,
+        /// Output format.
         #[arg(long, value_enum, default_value = "json")]
         output: Output,
     },
     /// Apply a saved patch only when its exact digest is explicitly approved, then rerun review.
     ApplyPatch {
+        /// Proposal digest to apply.
         digest: String,
+        /// Repeat the proposal digest to confirm you reviewed the patch.
         #[arg(long, value_name = "SHA256_DIGEST")]
         approve: String,
+        /// Output format.
         #[arg(long, value_enum, default_value = "json")]
         output: Output,
     },
+    /// Record an audited lifecycle status for a finding (not a waiver).
     SetStatus {
+        /// Finding ID.
         id: String,
+        /// New lifecycle status.
         #[arg(long, value_enum)]
         status: StatusArg,
+        /// Why the status changed (kept in the audit log).
         #[arg(long)]
         reason: String,
     },
@@ -1961,44 +2197,62 @@ enum FindingsCommand {
 enum FindingFeedbackCommand {
     /// Record a reasoned human review label for a finding occurrence.
     Set {
+        /// Finding ID.
         id: String,
+        /// Snapshot ID the finding occurred on.
         #[arg(long)]
         snapshot: String,
+        /// Feedback label.
         #[arg(long, value_enum)]
         label: FeedbackLabelArg,
+        /// Why this label applies.
         #[arg(long)]
         reason: String,
+        /// Name of the person giving feedback.
         #[arg(long)]
         reviewer: String,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
     /// List saved feedback, optionally for one finding.
     List {
+        /// Limit to one finding ID.
         #[arg(long)]
         finding: Option<String>,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
 }
 #[derive(Subcommand)]
 enum WaiversCommand {
+    /// Waive a finding for one exact snapshot until it expires.
     Create {
+        /// Finding ID to waive.
         finding_id: String,
+        /// Saved review ID whose snapshot the waiver is scoped to.
         #[arg(long)]
         review: String,
+        /// Why the finding is waived.
         #[arg(long)]
         reason: String,
+        /// Name of the person granting the waiver.
         #[arg(long)]
         author: String,
+        /// Days until the waiver expires.
         #[arg(long, default_value_t = 30)]
         expires_in_days: u32,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
+    /// List waivers recorded for a saved review.
     List {
+        /// Saved review ID.
         #[arg(long)]
         review: String,
+        /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
@@ -2359,6 +2613,12 @@ fn review_to_sarif(review: &vero_application::ReviewResult) -> Result<serde_json
     }))
 }
 
+fn write_completions(shell: clap_complete::Shell, output: &mut dyn std::io::Write) {
+    use clap::CommandFactory;
+    let mut command = Cli::command();
+    clap_complete::generate(shell, &mut command, "vero", output);
+}
+
 fn main() -> ExitCode {
     let json_output = json_output_requested(&std::env::args_os().collect::<Vec<_>>());
     match run() {
@@ -2470,6 +2730,14 @@ fn run() -> Result<u8> {
             std::fs::write(path, "version: 1\nreview:\n  include: [\"**/*.rs\", \"**/*.go\"]\n  exclude: [\"**/generated/**\"]\nproviders: {}\nreviewers: {}\nverification: {}\nhosting: {}\npolicy:\n  required_reviewers: []\n  required_verifications: []\n  block_severities: [critical, high]\n  minimum_confidence: 80\n  on_incomplete: block\n")?;
             println!("Created .vero.yaml");
             Ok(0)
+        }
+        Command::Completions { shell } => {
+            let mut script = Vec::new();
+            write_completions(shell, &mut script);
+            match std::io::stdout().lock().write_all(&script) {
+                Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => Err(error.into()),
+                _ => Ok(0),
+            }
         }
         Command::Skills { command } => match command {
             SkillsCommand::List => {
@@ -7570,6 +7838,60 @@ mod tests {
     use clap::Parser;
     use std::collections::BTreeSet;
     use vero_core::Severity;
+
+    fn undocumented_cli_items(command: &clap::Command, path: &str, problems: &mut Vec<String>) {
+        if command.get_about().is_none() && !path.is_empty() {
+            problems.push(format!("{path}: missing about"));
+        }
+        for argument in command.get_arguments() {
+            let id = argument.get_id().as_str();
+            if matches!(id, "help" | "version") || argument.is_hide_set() {
+                continue;
+            }
+            if argument.get_help().is_none() {
+                problems.push(format!("{path} --{id}: missing help"));
+            }
+        }
+        for subcommand in command.get_subcommands() {
+            if subcommand.get_name() == "help" {
+                continue;
+            }
+            let child = format!("{path} {}", subcommand.get_name())
+                .trim()
+                .to_owned();
+            undocumented_cli_items(subcommand, &child, problems);
+        }
+    }
+
+    #[test]
+    fn every_cli_command_and_argument_has_help_text() {
+        use clap::CommandFactory;
+        let command = Cli::command();
+        command.clone().debug_assert();
+        let mut problems = Vec::new();
+        undocumented_cli_items(&command, "", &mut problems);
+        assert!(
+            problems.is_empty(),
+            "{} undocumented CLI items:\n{}",
+            problems.len(),
+            problems.join("\n")
+        );
+    }
+
+    #[test]
+    fn completions_command_emits_a_script_for_supported_shells() {
+        for shell in ["bash", "zsh", "fish"] {
+            let parsed = Cli::try_parse_from(["vero", "completions", shell]);
+            assert!(parsed.is_ok(), "completions {shell} should parse");
+        }
+        let mut script = Vec::new();
+        super::write_completions(clap_complete::Shell::Zsh, &mut script);
+        let script = String::from_utf8(script).unwrap();
+        assert!(
+            script.contains("#compdef vero"),
+            "unexpected script: {script}"
+        );
+    }
 
     #[test]
     fn markdown_report_writer_replaces_regular_files_and_rejects_symlinks() {
