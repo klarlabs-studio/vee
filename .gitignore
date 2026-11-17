@@ -4,5 +4,6 @@ node_modules/
 !.vero/reviewers/
 .vero/reviewers/*
 !.vero/reviewers/*.md
+!.vero/packs/
 *.rlib
 __pycache__/
