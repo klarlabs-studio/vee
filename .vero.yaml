@@ -57,10 +57,20 @@ reviewers:
       - web/playwright.config.js
       - web/vite.config.js
       - scripts/ui-smoke.py
-verification: {}
+verification:
+  # nox security scan (secrets, code, dependencies, IaC), offline. Error-level
+  # results on changed lines block; pre-existing results never do. See ADR 0002.
+  security:
+    executable: scripts/verification/nox-sarif.sh
+    egress: local
+    env_allowlist: [PATH, HOME, TMPDIR]
+    timeout_seconds: 300
+    output_limit_bytes: 8388608
+    sarif:
+      block_levels: [error]
 policy:
   required_reviewers: [correctness, correctness-core, cli-contract, cli-surface, cli-acceptance, local-ui]
-  required_verifications: []
+  required_verifications: [security]
   block_severities: [critical, high]
   minimum_confidence: 80
   on_incomplete: block
