@@ -17,8 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install cargo-audit
         run: cargo install cargo-audit --version 0.23.0 --locked
       - name: Audit locked dependencies
@@ -95,7 +97,7 @@ jobs:
         with:
           node-version: 22
       - name: Install Ruby for mutation-effectiveness fixtures
-        uses: ruby/setup-ruby@v1
+        uses: ruby/setup-ruby@4e97ecde5048e1e0816923020652678063ffbf65 # v1.339.0
         with:
           ruby-version: '3.3'
       - name: Install TypeScript language service for impact acceptance
@@ -104,12 +106,13 @@ jobs:
           npm install --global typescript@6.0.3
           echo "VERO_TSSERVER=$(npm root --global)/typescript/lib/tsserver.js" >> "$GITHUB_ENV"
           test -f "$(npm root --global)/typescript/lib/tsserver.js"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
+          toolchain: stable
           components: clippy, rustfmt
       - name: Install rust-analyzer for Rust impact acceptance
         run: rustup component add rust-analyzer
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run workspace tests
