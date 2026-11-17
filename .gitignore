@@ -5,3 +5,4 @@ node_modules/
 .vero/reviewers/*
 !.vero/reviewers/*.md
 *.rlib
+__pycache__/

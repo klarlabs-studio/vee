@@ -2564,6 +2564,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "url",
  "vero-application",
  "vero-core",
  "vero-git",
