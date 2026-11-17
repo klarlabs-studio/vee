@@ -29,11 +29,34 @@ impl ChangeScope {
     }
 }
 
+/// Reject a caller-supplied revision that git could parse as an option (leading
+/// `-`), or that is empty or contains whitespace or control characters. Callers pass
+/// revisions from the CLI, MCP, and HTTP API, so this is the injection boundary.
+pub fn validate_revision(revision: &str) -> Result<(), String> {
+    if revision.is_empty() {
+        return Err("revision cannot be empty".into());
+    }
+    if revision.starts_with('-') {
+        return Err(format!("revision {revision:?} must not start with '-'"));
+    }
+    if revision
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err(format!(
+            "revision {revision:?} must not contain whitespace or control characters"
+        ));
+    }
+    Ok(())
+}
+
 pub fn commit_scope(specification: &str) -> Result<ChangeScope, String> {
     if let Some((from, to)) = specification.split_once("..") {
         if from.trim().is_empty() || to.trim().is_empty() || to.contains("..") {
             return Err("commit range must be FROM..TO with both refs specified".into());
         }
+        validate_revision(from)?;
+        validate_revision(to)?;
         Ok(ChangeScope::CommitRange {
             from: from.to_string(),
             to: to.to_string(),
@@ -41,6 +64,7 @@ pub fn commit_scope(specification: &str) -> Result<ChangeScope, String> {
     } else if specification.trim().is_empty() {
         Err("commit ref cannot be empty".into())
     } else {
+        validate_revision(specification)?;
         Ok(ChangeScope::Commit {
             oid: specification.to_string(),
         })
@@ -60,6 +84,7 @@ pub fn repository_root(path: &Path) -> Result<PathBuf, String> {
 }
 
 pub fn merge_base(path: &Path, base_ref: &str) -> Result<String, String> {
+    validate_revision(base_ref)?;
     let output = git(path, &["merge-base", base_ref, "HEAD"])?;
     String::from_utf8(output)
         .map(|value| value.trim().to_string())
@@ -747,6 +772,27 @@ fn git(path: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn revisions_that_git_would_parse_as_options_are_rejected() {
+        for revision in ["--output=/tmp/x", "-h", "", " ", "main\0x", "a\nb"] {
+            assert!(
+                validate_revision(revision).is_err(),
+                "{revision:?} must be rejected"
+            );
+            assert!(commit_scope(&format!("{revision}..HEAD")).is_err());
+            assert!(commit_scope(&format!("HEAD..{revision}")).is_err());
+        }
+        assert!(commit_scope("--all").is_err());
+        assert!(merge_base(std::path::Path::new("."), "--is-ancestor").is_err());
+        for revision in ["main", "origin/main", "HEAD~2", "v1.0.0", "a1b2c3d"] {
+            assert!(
+                validate_revision(revision).is_ok(),
+                "{revision:?} is a valid revision"
+            );
+        }
+    }
+
     use super::*;
     use std::fs;
 
