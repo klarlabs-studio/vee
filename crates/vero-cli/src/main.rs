@@ -12,6 +12,7 @@ use vero_core::{
 
 mod acceptance;
 mod analytics;
+mod attestation;
 mod contracts;
 mod coverage;
 mod finding_task;
@@ -1042,6 +1043,11 @@ enum VerificationCommand {
         output: Output,
     },
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum AttestationFormat {
+    Dsse,
+    Statement,
+}
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum CoverageStream {
     Stdout,
@@ -1078,6 +1084,34 @@ enum ReviewsCommand {
         /// Export a particular persisted gate decision; defaults to the latest decision.
         #[arg(long)]
         decision_id: Option<String>,
+    },
+    /// Export a gate decision as an in-toto attestation (DSSE-signed by default) for supply-chain tooling.
+    Attest {
+        /// Saved review ID.
+        id: String,
+        /// Attest a particular persisted gate decision; defaults to the latest decision.
+        #[arg(long)]
+        decision_id: Option<String>,
+        /// `dsse`: an Ed25519-signed DSSE envelope; `statement`: the unsigned in-toto Statement, for signing with external tools.
+        #[arg(long, value_enum, default_value = "dsse")]
+        format: AttestationFormat,
+        /// Ed25519 PKCS#8 private key (from `vero reviews keygen`); required for `dsse`.
+        #[arg(long, required_if_eq("format", "dsse"))]
+        private_key: Option<std::path::PathBuf>,
+        /// Key identifier recorded in the signature; required for `dsse`.
+        #[arg(long, required_if_eq("format", "dsse"))]
+        key_id: Option<String>,
+    },
+    /// Verify a DSSE-signed Vero attestation with an Ed25519 public key.
+    VerifyAttestation {
+        /// Path to the DSSE envelope.
+        path: std::path::PathBuf,
+        /// Ed25519 public key in raw 32-byte form (from `vero reviews keygen`).
+        #[arg(long)]
+        public_key: std::path::PathBuf,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
     },
     /// Verify the integrity and internal bindings of an exported evidence bundle.
     VerifyBundle {
@@ -1364,6 +1398,71 @@ enum ReportFormat {
 
 const MAX_IMPORTED_REVIEW_BYTES: u64 = 10 * 1024 * 1024;
 static IMPORT_TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A saved review with its `gate` replaced by the selected persisted decision
+/// (default: the latest), checked to belong to the same snapshot, configuration,
+/// and replay inputs. Shared by evidence bundles and attestations.
+fn review_with_decision(
+    root: &std::path::Path,
+    id: &str,
+    decision_id: Option<&str>,
+) -> Result<vero_application::ReviewResult> {
+    let store = ReviewStore::open(&root.join(".vero/vero.sqlite")).map_err(anyhow::Error::msg)?;
+    let payload = store
+        .get(id)
+        .map_err(anyhow::Error::msg)?
+        .with_context(|| format!("review {id} was not found"))?;
+    let mut review = vero_application::deserialize_review_result(&payload)
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let decisions = store
+        .gate_decisions_for_review(id)
+        .map_err(anyhow::Error::msg)?;
+    let selected = match decision_id {
+        Some(wanted) => decisions
+            .into_iter()
+            .find(|decision| decision.decision_id == wanted)
+            .ok_or_else(|| {
+                usage_failure("requested gate decision was not found for this review")
+            })?,
+        None => decisions
+            .into_iter()
+            .last()
+            .unwrap_or_else(|| review.gate.clone()),
+    };
+    if selected.snapshot_id != review.snapshot_id {
+        return Err(configuration_failure("selected gate decision belongs to a different snapshot and cannot be exported with this review"));
+    }
+    if selected.effective_config_digest != review.effective_config_digest
+        || selected.replay_inputs != review.gate.replay_inputs
+    {
+        return Err(configuration_failure("selected gate decision uses configuration or replay inputs not retained by the original review; export the original review decision or create a new review"));
+    }
+    review.effective_config_digest = selected.effective_config_digest.clone();
+    review.status = match selected.status {
+        GateStatus::Pass => "pass",
+        GateStatus::Block => "block",
+        GateStatus::Incomplete => "incomplete",
+    }
+    .into();
+    review.gate = selected;
+    Ok(review)
+}
+
+/// The commit an attestation can name as its subject: only when the reviewed
+/// snapshot is exactly that commit's change, so a verifier binding the
+/// attestation to a revision attests what was actually reviewed.
+fn attested_commit(root: &std::path::Path, change_set: &ChangeSet) -> Result<Option<String>> {
+    Ok(match change_set.scope.as_str() {
+        scope if scope.starts_with("commit:") || scope.starts_with("commit_range:") => {
+            change_set.head_oid.clone()
+        }
+        "base_and_worktree" => committed_snapshot_matches_review(root, change_set)
+            .map_err(anyhow::Error::msg)?
+            .then(|| change_set.head_oid.clone())
+            .flatten(),
+        _ => None,
+    })
+}
 
 fn evidence_bundle(review: &vero_application::ReviewResult) -> Result<serde_json::Value> {
     let review_value = serde_json::to_value(review)?;
@@ -5014,48 +5113,11 @@ fn run() -> Result<u8> {
                     Ok(0)
                 }
                 ReviewsCommand::Bundle { id, decision_id } => {
-                    let store =
-                        ReviewStore::open(&std::path::Path::new(&top).join(".vero/vero.sqlite"))
-                            .map_err(anyhow::Error::msg)?;
-                    let payload = store
-                        .get(&id)
-                        .map_err(anyhow::Error::msg)?
-                        .with_context(|| format!("review {id} was not found"))?;
-                    let mut review = vero_application::deserialize_review_result(&payload)
-                        .map_err(|error| anyhow::anyhow!(error))?;
-                    let decisions = store
-                        .gate_decisions_for_review(&id)
-                        .map_err(anyhow::Error::msg)?;
-                    let selected = match decision_id {
-                        Some(wanted) => decisions
-                            .into_iter()
-                            .find(|decision| decision.decision_id == wanted)
-                            .ok_or_else(|| {
-                                usage_failure(
-                                    "requested gate decision was not found for this review",
-                                )
-                            })?,
-                        None => decisions
-                            .into_iter()
-                            .last()
-                            .unwrap_or_else(|| review.gate.clone()),
-                    };
-                    if selected.snapshot_id != review.snapshot_id {
-                        return Err(configuration_failure("selected gate decision belongs to a different snapshot and cannot be exported with this review"));
-                    }
-                    if selected.effective_config_digest != review.effective_config_digest
-                        || selected.replay_inputs != review.gate.replay_inputs
-                    {
-                        return Err(configuration_failure("selected gate decision uses configuration or replay inputs not retained by the original review; export the original review decision or create a new review"));
-                    }
-                    review.effective_config_digest = selected.effective_config_digest.clone();
-                    review.status = match selected.status {
-                        GateStatus::Pass => "pass",
-                        GateStatus::Block => "block",
-                        GateStatus::Incomplete => "incomplete",
-                    }
-                    .into();
-                    review.gate = selected;
+                    let review = review_with_decision(
+                        std::path::Path::new(&top),
+                        &id,
+                        decision_id.as_deref(),
+                    )?;
                     let bundle = evidence_bundle(&review)?;
                     let bytes = serde_json::to_vec(&bundle)?;
                     anyhow::ensure!(
@@ -5066,6 +5128,89 @@ fn run() -> Result<u8> {
                     stdout.write_all(&bytes)?;
                     stdout.write_all(b"\n")?;
                     Ok(0)
+                }
+                ReviewsCommand::Attest {
+                    id,
+                    decision_id,
+                    format,
+                    private_key,
+                    key_id,
+                } => {
+                    let root = std::path::Path::new(&top);
+                    let review = review_with_decision(root, &id, decision_id.as_deref())?;
+                    let bundle = evidence_bundle(&review)?;
+                    let manifest_digest = bundle["manifest_digest"].as_str().unwrap_or_default();
+                    let commit = attested_commit(root, &review.change_set)?;
+                    let statement =
+                        attestation::statement(&review, manifest_digest, commit.as_deref())?;
+                    let document = match format {
+                        AttestationFormat::Statement => statement,
+                        AttestationFormat::Dsse => {
+                            let key_id = key_id.unwrap_or_default();
+                            if key_id.trim().is_empty() {
+                                return Err(usage_failure("--key-id cannot be empty"));
+                            }
+                            let private_key = private_key.unwrap_or_default();
+                            let key_bytes = std::fs::read(&private_key).with_context(|| {
+                                format!("reading private key {}", private_key.display())
+                            })?;
+                            let key = ring::signature::Ed25519KeyPair::from_pkcs8(&key_bytes)
+                                .map_err(|_| {
+                                    configuration_failure(
+                                        "private key must be a valid Ed25519 PKCS#8 DER file",
+                                    )
+                                })?;
+                            attestation::sign(&statement, &key, &key_id)?
+                        }
+                    };
+                    emit_json(&document)?;
+                    Ok(0)
+                }
+                ReviewsCommand::VerifyAttestation {
+                    path,
+                    public_key,
+                    output,
+                } => {
+                    let file = std::fs::File::open(&path)
+                        .with_context(|| format!("opening attestation {}", path.display()))?;
+                    let mut bytes = Vec::new();
+                    file.take(MAX_IMPORTED_REVIEW_BYTES + 1)
+                        .read_to_end(&mut bytes)
+                        .with_context(|| format!("reading attestation {}", path.display()))?;
+                    anyhow::ensure!(
+                        bytes.len() as u64 <= MAX_IMPORTED_REVIEW_BYTES,
+                        "attestation exceeds 10 MiB"
+                    );
+                    let envelope: serde_json::Value = serde_json::from_slice(&bytes)
+                        .map_err(|_| usage_failure("attestation is not valid JSON"))?;
+                    let key = std::fs::read(&public_key)
+                        .with_context(|| format!("reading public key {}", public_key.display()))?;
+                    let report = attestation::verify(&envelope, &key);
+                    match output {
+                        Output::Json => emit_json(&report)?,
+                        Output::Text => {
+                            if report["valid"] == true {
+                                println!(
+                                    "Valid: gate {} (decision {}) signed by {}",
+                                    report["gate_status"].as_str().unwrap_or("?"),
+                                    report["decision_id"].as_str().unwrap_or("?"),
+                                    report["key_id"].as_str().unwrap_or("?")
+                                );
+                                for subject in report["subjects"].as_array().into_iter().flatten() {
+                                    println!(
+                                        "Subject: {}",
+                                        subject["name"].as_str().unwrap_or("?")
+                                    );
+                                }
+                            } else {
+                                println!(
+                                    "Invalid: {}",
+                                    report["message"].as_str().unwrap_or("verification failed")
+                                );
+                            }
+                        }
+                    }
+                    Ok(if report["valid"] == true { 0 } else { 2 })
                 }
                 ReviewsCommand::VerifyBundle {
                     path,

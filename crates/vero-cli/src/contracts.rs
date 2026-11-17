@@ -16,6 +16,7 @@ macro_rules! schemas {
 const SCHEMAS: &[(&str, &str)] = schemas![
     "acceptance-traceability-v1",
     "analyzer-report-v1",
+    "attestation-verification-v1",
     "cross-repository-impact-v16",
     "doctor-report-v1",
     "evidence-v1",
@@ -40,6 +41,7 @@ const SCHEMAS: &[(&str, &str)] = schemas![
     "provider-detection-v1",
     "quality-analytics-v9",
     "repository-config-v1",
+    "review-gate-attestation-v1",
     "review-output-v2",
     "rule-approvals-v2",
     "rule-candidates-v3",

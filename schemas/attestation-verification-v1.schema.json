@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/attestation-verification-v1.schema.json",
+  "title": "Vero attestation verification v1",
+  "description": "Result of `vero reviews verify-attestation --output json`. The statement is present only when a signature verifies with the supplied key.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "valid",
+    "message"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "valid": {
+      "type": "boolean"
+    },
+    "message": {
+      "type": "string"
+    },
+    "key_id": {
+      "type": "string"
+    },
+    "subjects": {
+      "type": "array"
+    },
+    "gate_status": {
+      "enum": [
+        "pass",
+        "block",
+        "incomplete"
+      ]
+    },
+    "decision_id": {
+      "type": "string"
+    },
+    "statement": {
+      "$ref": "review-gate-attestation-v1.schema.json"
+    }
+  },
+  "if": {
+    "properties": {
+      "valid": {
+        "const": true
+      }
+    }
+  },
+  "then": {
+    "required": [
+      "key_id",
+      "subjects",
+      "gate_status",
+      "decision_id",
+      "statement"
+    ]
+  },
+  "additionalProperties": false
+}
