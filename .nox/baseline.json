@@ -729,6 +729,24 @@
       "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
       "owner": "vero-maintainers",
       "created_at": "2026-11-17T21:18:47.188379Z"
+    },
+    {
+      "fingerprint": "67e1f64541d0ef551ba5db17841b0899a9b57592e39f222b939a77bf4ca9ab5f",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T22:28:20.462663Z"
+    },
+    {
+      "fingerprint": "b1a7a87e912036a0e825bb0978457bf87597d8ace5a65a0580073864ecb370fd",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T22:28:20.462667Z"
     }
   ]
 }
