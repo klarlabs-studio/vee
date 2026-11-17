@@ -255,6 +255,24 @@ The JSON contract is defined in [schemas/verification-run-v1.schema.json](schema
 
 For profiles that emit LCOV to stdout or stderr (for example, a configured `cargo llvm-cov --lcov` invocation), list runs attached to an exact snapshot with `vero verification list --snapshot <snapshot-id> --output json` and summarize measured coverage with `vero verification coverage <run-id> --stream stdout --output json`. Vero verifies the saved artifact digest and immutable snapshot manifest before parsing. The report includes file-level executable-line coverage plus added/modified executable-line coverage when a bounded textual diff can be computed from the captured base and snapshot. It reports unknown when the baseline or diff is unavailable. Coverage is limited to the selected profile's execution and does not prove tests are adequate. JSON follows [verification-list-v1.schema.json](schemas/verification-list-v1.schema.json) and [coverage-report-v1.schema.json](schemas/coverage-report-v1.schema.json).
 
+### Trusted analyzers (SARIF)
+
+Any linter or security scanner that writes SARIF 2.1.0 to stdout can gate merges deterministically. Add a `sarif` section to its verification profile and require it:
+
+```yaml
+verification:
+  semgrep:
+    executable: semgrep
+    args: [scan, --sarif, --quiet, --config, p/default]
+    env_allowlist: [PATH, HOME]
+    sarif:
+      block_levels: [error]   # empty list = advisory
+policy:
+  required_verifications: [semgrep]
+```
+
+Run it on the same scope as the review (`vero verify --profile semgrep --base main`), then review with `--gate`. Only results located on lines added or modified in the snapshot count; pre-existing results never block. Results at a level listed in `block_levels` block the gate and appear in `blocking_findings` as `analyzer:<profile>:<id>`. A non-zero analyzer exit with valid SARIF is complete; a run that produced no valid SARIF makes the gate incomplete. Inspect a run with `vero verification findings <run-id>` (MCP: `get_analyzer_findings`), and waive an accepted result for one snapshot with `vero waivers create <analyzer-finding-id> --review <id> ...`. The derived reports are stored in the gate decision's replay inputs. JSON follows [analyzer-report-v1.schema.json](schemas/analyzer-report-v1.schema.json); see [ADR 0002](docs/adr/0002-trusted-analyzers-block-the-gate.md).
+
 For Go repositories, a profile can opt into package-level test targeting from impact results by placing `{impacted_test_packages}` as a standalone argument, for example `args: [test, -json, "{impacted_test_packages}"]` with `executable: go`. Go targeted verification requires JSON package and individual-test pass events so a package where every test was skipped cannot be counted as tested. For Rust workspaces, use `{impacted_rust_test_filters}` with a Cargo test profile, for example `args: [test, --workspace, "{impacted_rust_test_filters}"]` and `executable: cargo`. Since Vero clears inherited environment variables, configure required names such as `PATH`, `HOME`, `CARGO_HOME`, and `RUSTUP_HOME` in each profile's `env_allowlist`. Run either with `vero verify --profile <profile> --impacted-tests --base main`. Vero expands Go targets to sorted, unique packages, or Rust targets to package-qualified test names and invokes Cargo with an explicit `--package` selection for each target. Changed Rust test files are included directly even when their tests have no impact-reference edges. It records the selected targets in the verification run and fails closed if impact coverage is incomplete, a Rust impact location cannot be mapped to a test function and package, no test target is found, or Go/Cargo reports success without running tests for every selected target. No shell interpolation is used. Targeted runs do not satisfy snapshot-wide required verification profiles.
 
 ## Local investigation UI
