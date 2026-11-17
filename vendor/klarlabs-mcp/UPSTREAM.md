@@ -11,6 +11,9 @@ default transport policy is MCP 2026-07-28 with discovery only. Vero adds an
 explicit stdio compatibility entry point for pre-2026 `initialize` clients;
 HTTP and the default stdio entry point retain modern-only behavior. This
 compatibility is covered by Vero's CLI integration test.
+Vero also adds `ToolBuilder::output_schema_json`, which declares an output schema
+from a JSON Schema document, so tools can publish the same schema files the CLI
+emits instead of a schema derived from a Rust type.
 
 `tests/build_go_reference.py` requires the exact clean checkout above. Reference
 fixtures use actual upstream handlers/transports and modern request metadata.
