@@ -60,8 +60,11 @@ reviewers:
 verification:
   # nox security scan (secrets, code, dependencies, IaC), offline. Error-level
   # results on changed lines block; pre-existing results never do. See ADR 0002.
+  # Needs nox 1.69 or later for `--output -` (SARIF on stdout, no report files);
+  # an older nox writes no SARIF to stdout, which leaves the gate incomplete.
   security:
-    executable: scripts/verification/nox-sarif.sh
+    executable: nox
+    args: [scan, ., --format, sarif, --output, "-", --offline, --tracked-only, --quiet]
     egress: local
     env_allowlist: [PATH, HOME, TMPDIR]
     timeout_seconds: 300
