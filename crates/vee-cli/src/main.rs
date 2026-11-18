@@ -6226,6 +6226,10 @@ fn run() -> Result<u8> {
                     );
                     anyhow::ensure!(reviewed.change_set.head_oid.as_deref() == Some(remote.head_oid.as_str()), "reviewed head does not match the current pull request head; rerun Vee against the PR head");
                     anyhow::ensure!(reviewed.change_set.base_oid.as_deref() == Some(remote.base_oid.as_str()), "reviewed base does not match the current pull request base; rerun Vee against the current PR diff");
+                    // Equal to the provider's commits (checked above), but captured
+                    // from local Git, so these are what reach git as arguments.
+                    let reviewed_base = reviewed.change_set.base_oid.clone().unwrap_or_default();
+                    let reviewed_head = reviewed.change_set.head_oid.clone().unwrap_or_default();
                     let (conclusion, title) = match reviewed.gate.status {
                         vee_core::GateStatus::Pass => {
                             (vee_hosting::CheckConclusion::Success, "Vee passed")
@@ -6277,8 +6281,8 @@ fn run() -> Result<u8> {
                                 "--no-ext-diff",
                                 "--unified=0",
                             ])
-                            .arg(remote.base_oid.as_str())
-                            .arg(remote.head_oid.as_str())
+                            .arg(&reviewed_base)
+                            .arg(&reviewed_head)
                             .arg("--")
                             .arg(path)
                             .current_dir(&top)
@@ -6431,6 +6435,10 @@ fn run() -> Result<u8> {
                 );
                 anyhow::ensure!(reviewed.change_set.head_oid.as_deref() == Some(remote.head_oid.as_str()), "reviewed head does not match the current pull request head; rerun Vee against the PR head");
                 anyhow::ensure!(reviewed.change_set.base_oid.as_deref() == Some(remote.base_oid.as_str()), "reviewed base does not match the current pull request base; rerun Vee against the current PR diff");
+                // Equal to the provider's commits (checked above), but captured
+                // from local Git, so these are what reach git as arguments.
+                let reviewed_base = reviewed.change_set.base_oid.clone().unwrap_or_default();
+                let reviewed_head = reviewed.change_set.head_oid.clone().unwrap_or_default();
                 let changed = provider
                     .list_changed_files(&pull_request, &remote.revision)
                     .map_err(anyhow::Error::msg)?;
@@ -6457,8 +6465,8 @@ fn run() -> Result<u8> {
                                 "--no-ext-diff",
                                 "--unified=0",
                             ])
-                            .arg(remote.base_oid.as_str())
-                            .arg(remote.head_oid.as_str())
+                            .arg(&reviewed_base)
+                            .arg(&reviewed_head)
                             .arg("--")
                             .arg(path)
                             .current_dir(&top)
