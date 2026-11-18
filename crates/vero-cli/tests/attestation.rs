@@ -8,6 +8,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+mod support;
+use support::vero as vero_command;
+
 fn git(root: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .arg("-C")
@@ -26,7 +29,7 @@ fn git(root: &Path, args: &[&str]) -> String {
 }
 
 fn vero(root: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_vero"))
+    vero_command()
         .args(args)
         .current_dir(root)
         .output()

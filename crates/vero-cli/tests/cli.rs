@@ -2,6 +2,9 @@ use std::{fs, process::Command};
 use vero_core::ports::*;
 use vero_core::{ActorName, Reason};
 
+mod support;
+use support::vero;
+
 fn accept_with_timeout(listener: &std::net::TcpListener) -> std::io::Result<std::net::TcpStream> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
@@ -40,7 +43,7 @@ fn impacted_test_plan_emits_snapshot_bound_argv_without_execution() {
     fs::write(root.join("src/lib.rs"), "pub fn changed_api() { let _ = true; }\n#[cfg(test)] mod tests { #[test] fn uses_api() { super::changed_api(); } }\n").unwrap();
     fs::write(root.join(".vero.yaml"), "version: 1\nverification:\n  rust-unit:\n    executable: cargo\n    args: [test, --manifest-path, Cargo.toml, \"{impacted_rust_test_filters}\"]\n").unwrap();
 
-    let result = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let result = vero()
         .args([
             "tests",
             "plan",
@@ -83,6 +86,7 @@ fn impacted_test_plan_emits_snapshot_bound_argv_without_execution() {
 }
 
 fn publish_fixture_config_digest(root: &std::path::Path) -> String {
+    support::isolate_process_environment();
     fs::write(root.join(".vero.yaml"), "version: 1\n").unwrap();
     let config = vero_application::load_repository_config(root).unwrap();
     vero_application::effective_review_config_digest_with_work_item(&config, root, &[], &[], None)
@@ -120,7 +124,7 @@ fn pr_draft_uses_snapshot_context_and_emits_schema_valid_non_gating_output() {
     )
     .unwrap();
 
-    let result = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let result = vero()
         .args(["pr", "draft", "--working-tree", "--output", "json"])
         .current_dir(root)
         .output()
@@ -215,7 +219,7 @@ fn test_generation_saves_snapshot_bound_sandbox_checked_patch_without_applying()
     )
     .unwrap();
 
-    let result = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let result = vero()
         .args(["tests", "generate", "--working-tree", "--output", "json"])
         .current_dir(root)
         .output()
@@ -264,7 +268,7 @@ fn test_generation_saves_snapshot_bound_sandbox_checked_patch_without_applying()
     assert!(!root.join("tests/changed_test.rs").exists());
 
     let proposal_id = report["proposal_id"].as_str().unwrap();
-    let wrong_approval = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let wrong_approval = vero()
         .args([
             "tests",
             "apply",
@@ -283,7 +287,7 @@ fn test_generation_saves_snapshot_bound_sandbox_checked_patch_without_applying()
         "pub fn changed() -> bool { true }\n",
     )
     .unwrap();
-    let stale_apply = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let stale_apply = vero()
         .args(["tests", "apply", proposal_id, "--approve", proposal_id])
         .current_dir(root)
         .output()
@@ -297,7 +301,7 @@ fn test_generation_saves_snapshot_bound_sandbox_checked_patch_without_applying()
     )
     .unwrap();
 
-    let apply = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let apply = vero()
         .args([
             "tests",
             "apply",
@@ -330,7 +334,7 @@ fn test_generation_saves_snapshot_bound_sandbox_checked_patch_without_applying()
     assert!(root.join("tests/changed_test.rs").is_file());
     assert!(!root.join("tests/refined_test.rs").exists());
 
-    let run = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let run = vero()
         .args([
             "tests",
             "run",
@@ -352,7 +356,7 @@ fn test_generation_saves_snapshot_bound_sandbox_checked_patch_without_applying()
     permissions.set_mode(0o755);
     fs::set_permissions(&provider, permissions).unwrap();
 
-    let refine = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let refine = vero()
         .args([
             "tests",
             "refine",
@@ -386,7 +390,7 @@ fn test_generation_saves_snapshot_bound_sandbox_checked_patch_without_applying()
     assert_eq!(refined["refinement"]["attempt"], 1);
 
     let refined_id = refined["proposal_id"].as_str().unwrap();
-    let refined_apply = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let refined_apply = vero()
         .args([
             "tests",
             "apply",
@@ -410,7 +414,7 @@ fn test_generation_saves_snapshot_bound_sandbox_checked_patch_without_applying()
     let refined_application: serde_json::Value =
         serde_json::from_slice(&refined_apply.stdout).unwrap();
 
-    let run = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let run = vero()
         .args([
             "tests",
             "run",
@@ -472,7 +476,7 @@ fn test_generation_saves_snapshot_bound_sandbox_checked_patch_without_applying()
 
     let mutant_patch = provider_directory.path().join("mutant.patch");
     fs::write(&mutant_patch, "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-pub fn changed() -> bool { false }\n+pub fn changed() -> bool { true }\n").unwrap();
-    let assessment = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let assessment = vero()
         .args([
             "tests",
             "effectiveness",
@@ -561,7 +565,7 @@ fn test_generation_saves_snapshot_bound_sandbox_checked_patch_without_applying()
     assert!(jsonschema::validator_for(&manifest_schema)
         .unwrap()
         .is_valid(&manifest));
-    let corpus = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let corpus = vero()
         .args([
             "tests",
             "effectiveness-corpus",
@@ -661,7 +665,7 @@ fn owners_cli_emits_advisory_digest_bound_codeowners_report() {
         "* @team/all\nsrc/** @team/rust\n",
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args(["owners", "--path", "src/lib.rs", "--output", "json"])
         .current_dir(repository.path())
         .output()
@@ -699,7 +703,7 @@ fn repository_map_cli_reports_digest_bound_manifest_edges_deterministically() {
     )
     .unwrap();
     let run = || {
-        Command::new(env!("CARGO_BIN_EXE_vero"))
+        vero()
             .args(["repos", "map"])
             .arg(consumer.path())
             .arg(provider.path())
@@ -872,7 +876,7 @@ fn change_package_binds_dirty_repository_snapshots_and_dependency_edges() {
     .unwrap();
     fs::write(consumer.join("new.rs"), "pub fn new_file() {}\n").unwrap();
     let run = || {
-        Command::new(env!("CARGO_BIN_EXE_vero"))
+        vero()
             .args(["repos", "package"])
             .arg(&provider)
             .arg(&consumer)
@@ -928,7 +932,7 @@ fn change_package_binds_dirty_repository_snapshots_and_dependency_edges() {
     let second = run();
     let second: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
     assert_eq!(package["package_id"], second["package_id"]);
-    let linked = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let linked = vero()
         .args(["repos", "package"])
         .arg(&provider)
         .arg(&consumer)
@@ -960,7 +964,7 @@ fn change_package_binds_dirty_repository_snapshots_and_dependency_edges() {
             "number": 17
         })
     );
-    let invalid_link = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let invalid_link = vero()
         .args(["repos", "package"])
         .arg(&provider)
         .arg(&consumer)
@@ -1016,7 +1020,7 @@ fn change_package_discovers_only_local_pr_refs_matching_head() {
         .current_dir(&repo)
         .status()
         .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args([
             "repos",
             "package",
@@ -1144,7 +1148,7 @@ fn change_package_explicitly_refreshes_and_binds_linked_provider_state() {
         write!(stream, "HTTP/1.1 200 OK\r\nETag: \"revision-7\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
     });
     fs::write(repo.join(".vero.yaml"), format!("version: 1\noffline: false\nhosting:\n  provider: github\n  host: 127.0.0.1\n  api_base: {api}\n  token_env: VERO_TEST_GH_TOKEN\n")).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args([
             "repos",
             "package",
@@ -1301,7 +1305,7 @@ fn change_package_refresh_routes_through_all_other_hosting_adapters() {
         )
         .unwrap();
         let link = format!("service={identity_host}/{repository_path}#42");
-        let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+        let output = vero()
             .args([
                 "repos",
                 "package",
@@ -1416,7 +1420,7 @@ fn cross_repository_impact_cli_reports_api_breaks_and_finds_code_references() {
     fs::write(app.join("main.rs"), "fn main() { changed_api(); }\n").unwrap();
     commit_all(&app, "application consumer");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args(["repos", "impact"])
         .arg(&producer)
         .arg(&consumer)
@@ -2110,7 +2114,7 @@ fn mcp_cross_repository_impact_matches_cli_and_rejects_paths_outside_server_root
         .build()
         .unwrap();
     runtime.block_on(async move {
-        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_vero"));
+        let mut command = tokio::process::Command::from(vero());
         command
             .args(["mcp", "serve", "--transport", "stdio"])
             .current_dir(root)
@@ -2250,7 +2254,7 @@ fn webhook_retention_command_previews_then_prunes_completed_receipts() {
         .complete_webhook_delivery("github", "recent-event", &lease_token, recent_time + 1)
         .unwrap();
 
-    let preview = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let preview = vero()
         .args([
             "hosting",
             "prune-webhooks",
@@ -2279,7 +2283,7 @@ fn webhook_retention_command_previews_then_prunes_completed_receipts() {
     assert_eq!(preview["deleted_receipts"], 0);
     assert_eq!(preview["dry_run"], true);
 
-    let applied = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let applied = vero()
         .args([
             "hosting",
             "prune-webhooks",
@@ -2336,7 +2340,7 @@ fn webhook_retention_command_previews_then_prunes_completed_receipts() {
 
 #[test]
 fn hosting_issue_context_documents_source_and_digest_options() {
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args(["hosting", "issue-context", "--help"])
         .output()
         .unwrap();
@@ -2351,7 +2355,7 @@ fn hosting_issue_context_documents_source_and_digest_options() {
 
 #[test]
 fn hosting_pr_context_documents_provider_options() {
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args(["hosting", "pr-context", "--help"])
         .output()
         .unwrap();
@@ -2369,7 +2373,7 @@ fn hosting_pr_context_documents_provider_options() {
 
 #[test]
 fn hosting_pr_issues_documents_provider_options() {
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args(["hosting", "pr-issues", "--help"])
         .output()
         .unwrap();
@@ -2422,7 +2426,7 @@ fn github_pr_issues_are_available_as_untrusted_cli_tasks() {
         .unwrap()
         .success());
     fs::write(directory.path().join(".vero.yaml"), "version: 1\n").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args([
             "hosting",
             "pr-issues",
@@ -2460,7 +2464,7 @@ fn github_pr_issues_are_available_as_untrusted_cli_tasks() {
         report["issues"][0]["classification"],
         "untrusted_external_review"
     );
-    let archives = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let archives = vero()
         .args(["reviews", "imported", "list", "--output", "json"])
         .current_dir(directory.path())
         .output()
@@ -2474,7 +2478,7 @@ fn github_pr_issues_are_available_as_untrusted_cli_tasks() {
     );
     assert_eq!(archives["reviews"][0]["issue_count"], 3);
     assert_eq!(archives["reviews"][0]["gate_eligible"], false);
-    let archive = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let archive = vero()
         .args([
             "reviews",
             "imported",
@@ -2493,7 +2497,7 @@ fn github_pr_issues_are_available_as_untrusted_cli_tasks() {
     assert_eq!(archive["archive_type"], "provider_discussions");
     assert_eq!(archive["issues"].as_array().unwrap().len(), 3);
     assert_eq!(archive["gate_eligible"], false);
-    let searched = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let searched = vero()
         .args([
             "reviews",
             "imported",
@@ -2522,7 +2526,7 @@ fn github_pr_issues_are_available_as_untrusted_cli_tasks() {
     );
     let mut last_feedback = serde_json::Value::Null;
     for external_id in ["42", "43", "44"] {
-        let feedback = Command::new(env!("CARGO_BIN_EXE_vero"))
+        let feedback = vero()
             .args([
                 "reviews",
                 "imported",
@@ -2560,7 +2564,7 @@ fn github_pr_issues_are_available_as_untrusted_cli_tasks() {
         );
         last_feedback = feedback;
     }
-    let listed = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let listed = vero()
         .args([
             "reviews",
             "imported",
@@ -2586,7 +2590,7 @@ fn github_pr_issues_are_available_as_untrusted_cli_tasks() {
         .unwrap()
         .iter()
         .any(|item| item["feedback_id"] == last_feedback["feedback"]["feedback_id"]));
-    let candidates = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let candidates = vero()
         .args(["rules", "candidates", "--output", "json"])
         .current_dir(directory.path())
         .output()
@@ -2607,7 +2611,7 @@ fn github_pr_issues_are_available_as_untrusted_cli_tasks() {
         include_str!("../../../schemas/rule-candidates-v3.schema.json"),
         "rule candidates",
     );
-    let approved = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let approved = vero()
         .args([
             "rules",
             "approve",
@@ -2678,7 +2682,7 @@ fn gitlab_pr_issues_are_exposed_as_untrusted_revision_bound_context() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join(".vero.yaml"), "version: 1\n").unwrap();
     let api_base = format!("http://{address}/api/v4/");
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args([
             "hosting",
             "pr-issues",
@@ -2762,7 +2766,7 @@ fn bitbucket_pr_issues_are_exposed_as_untrusted_revision_bound_context() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join(".vero.yaml"), "version: 1\n").unwrap();
     let api_base = format!("http://{address}/2.0/");
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args([
             "hosting",
             "pr-issues",
@@ -2848,7 +2852,7 @@ fn gerrit_pr_issues_are_available_for_the_current_patch_set() {
     });
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join(".vero.yaml"), "version: 1\n").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args([
             "hosting",
             "pr-issues",
@@ -2923,7 +2927,7 @@ fn bitbucket_pull_request_context_is_available_through_the_cli() {
     });
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join(".vero.yaml"), "version: 1\n").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args([
             "hosting",
             "pr-context",
@@ -3029,7 +3033,7 @@ fn finding_task_exports_bounded_snapshot_context_and_reports_staleness() {
     )
     .unwrap();
 
-    let review = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let review = vero()
         .args(["review", "--working-tree", "--output", "json"])
         .current_dir(root)
         .output()
@@ -3048,7 +3052,7 @@ fn finding_task_exports_bounded_snapshot_context_and_reports_staleness() {
         .unwrap_or_else(|| panic!("review has no src/lib.rs finding: {review}"))["id"]
         .as_str()
         .unwrap();
-    let task = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let task = vero()
         .args(["findings", "task", finding_id, "--context-lines", "1"])
         .args(["--output", "json"])
         .current_dir(root)
@@ -3109,7 +3113,7 @@ fn finding_task_exports_bounded_snapshot_context_and_reports_staleness() {
     let mut package_args = vec!["findings", "package"];
     package_args.extend(finding_ids.iter().map(String::as_str));
     package_args.extend(["--output", "json"]);
-    let package_output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let package_output = vero()
         .args(package_args)
         .current_dir(root)
         .output()
@@ -3138,7 +3142,7 @@ fn finding_task_exports_bounded_snapshot_context_and_reports_staleness() {
         "fn value() {\n    let count = 0;\n}\n",
     )
     .unwrap();
-    let stale = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let stale = vero()
         .args(["findings", "task", finding_id, "--output", "json"])
         .current_dir(root)
         .output()
@@ -3159,7 +3163,7 @@ fn finding_task_exports_bounded_snapshot_context_and_reports_staleness() {
 
 #[test]
 fn hosting_publish_documents_snapshot_revision_requirements() {
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args(["hosting", "publish", "--help"])
         .output()
         .unwrap();
@@ -3176,7 +3180,7 @@ fn hosting_publish_documents_snapshot_revision_requirements() {
 #[test]
 fn keygen_rejects_distinct_spellings_of_the_same_output_path() {
     let directory = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args([
             "reviews",
             "keygen",
@@ -3325,7 +3329,7 @@ fn hosting_publish_rejects_changed_base_before_fetching_diff_or_publishing() {
         String::from_utf8_lossy(&request).to_string()
     });
 
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args([
             "hosting",
             "publish",
@@ -3559,7 +3563,7 @@ fn gerrit_publish_command_emits_revision_bound_tagged_gate_summary() {
         requests
     });
 
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args([
             "hosting",
             "publish",
@@ -3792,7 +3796,7 @@ fn github_publish_command_emits_snapshot_bound_check_run() {
         requests
     });
 
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args([
             "hosting",
             "publish",
@@ -4027,7 +4031,7 @@ fn bitbucket_publish_command_emits_revision_bound_build_status() {
         requests
     });
 
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args([
             "hosting",
             "publish",
@@ -4259,7 +4263,7 @@ fn gitlab_publish_command_emits_revision_bound_commit_status() {
         requests
     });
 
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args([
             "hosting",
             "publish",
@@ -4472,7 +4476,7 @@ fn azure_devops_publish_command_emits_revision_bound_status_and_added_line_threa
     });
 
     let api_base = format!("http://{address}/");
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args([
             "hosting",
             "publish",
@@ -4575,7 +4579,7 @@ fn azure_devops_pr_issues_are_exposed_as_untrusted_revision_bound_context() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join(".vero.yaml"), "version: 1\n").unwrap();
     let api_base = format!("http://{address}/");
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args([
             "hosting",
             "pr-issues",
@@ -4659,7 +4663,7 @@ fn gitlab_issue_context_is_available_through_the_cli() {
         ),
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args([
             "hosting",
             "issue-context",
@@ -4721,7 +4725,7 @@ fn azure_devops_work_item_context_is_available_through_the_cli() {
     });
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join(".vero.yaml"), "version: 1\n").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args([
             "hosting",
             "issue-context",
@@ -4763,10 +4767,7 @@ fn azure_devops_work_item_context_is_available_through_the_cli() {
 
 #[test]
 fn review_documents_digest_bound_work_item_option() {
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
-        .args(["review", "--help"])
-        .output()
-        .unwrap();
+    let output = vero().args(["review", "--help"]).output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(help.contains("--work-item <OWNER/REPO#NUMBER>"));
@@ -4860,7 +4861,7 @@ fn gate_check_rejects_review_after_remote_work_item_changes() {
     )
     .unwrap();
 
-    let review = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let review = vero()
         .args([
             "review",
             "--working-tree",
@@ -4887,7 +4888,7 @@ fn gate_check_rejects_review_after_remote_work_item_changes() {
     );
     let review_id = review["review_id"].as_str().unwrap();
 
-    let acceptance = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let acceptance = vero()
         .args([
             "acceptance",
             "report",
@@ -4940,7 +4941,7 @@ fn gate_check_rejects_review_after_remote_work_item_changes() {
         .unwrap()
         .is_valid(&mapping));
     fs::write(&mapping_path, serde_json::to_vec(&mapping).unwrap()).unwrap();
-    let validation = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let validation = vero()
         .args([
             "acceptance",
             "validate",
@@ -4975,7 +4976,7 @@ fn gate_check_rejects_review_after_remote_work_item_changes() {
     let mut not_met_mapping = mapping.clone();
     not_met_mapping["assessments"][0]["assessment"] = serde_json::json!("not_met");
     fs::write(&mapping_path, serde_json::to_vec(&not_met_mapping).unwrap()).unwrap();
-    let not_met = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let not_met = vero()
         .args([
             "acceptance",
             "validate",
@@ -5001,7 +5002,7 @@ fn gate_check_rejects_review_after_remote_work_item_changes() {
         serde_json::to_vec(&uncertain_mapping).unwrap(),
     )
     .unwrap();
-    let incomplete = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let incomplete = vero()
         .args([
             "acceptance",
             "validate",
@@ -5023,7 +5024,7 @@ fn gate_check_rejects_review_after_remote_work_item_changes() {
     let mut stale_mapping = mapping.clone();
     stale_mapping["snapshot_id"] = serde_json::json!("sha256:stale");
     fs::write(&mapping_path, serde_json::to_vec(&stale_mapping).unwrap()).unwrap();
-    let stale = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let stale = vero()
         .args([
             "acceptance",
             "validate",
@@ -5046,7 +5047,7 @@ fn gate_check_rejects_review_after_remote_work_item_changes() {
         serde_json::to_vec(&invalid_path_mapping).unwrap(),
     )
     .unwrap();
-    let invalid_path = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let invalid_path = vero()
         .args([
             "acceptance",
             "validate",
@@ -5062,7 +5063,7 @@ fn gate_check_rejects_review_after_remote_work_item_changes() {
         .unwrap();
     assert_eq!(invalid_path.status.code(), Some(3));
 
-    let gate = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let gate = vero()
         .args(["gate", "check", "--review", review_id, "--output", "json"])
         .env("VERO_TEST_GITLAB_TOKEN", "test-token")
         .current_dir(root)
@@ -5082,7 +5083,7 @@ fn gate_check_rejects_review_after_remote_work_item_changes() {
 
 #[test]
 fn hosting_webhook_serve_documents_repository_and_network_binding() {
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args(["hosting", "webhook-serve", "--help"])
         .output()
         .unwrap();
@@ -5197,7 +5198,7 @@ fn repository_config_schema_accepts_initialized_and_configured_examples() {
         .find(|candidate| candidate.is_file())
         .unwrap();
     std::os::unix::fs::symlink(git, bin.join("git")).unwrap();
-    let init = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let init = vero()
         .current_dir(directory.path())
         .arg("init")
         .env("PATH", &bin)
@@ -5322,7 +5323,7 @@ fn agent_skill_install_rejects_symlinked_destination() {
         .success());
     fs::create_dir_all(directory.path().join(".agents")).unwrap();
     symlink(outside.path(), directory.path().join(".agents/skills")).unwrap();
-    let result = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let result = vero()
         .current_dir(directory.path())
         .args(["skills", "install"])
         .output()
@@ -5354,7 +5355,7 @@ fn standards_command_resolves_scoped_sources_with_provenance_and_bounds() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args([
             "standards",
             "--path",
@@ -5408,7 +5409,7 @@ fn standards_command_resolves_scoped_sources_with_provenance_and_bounds() {
         .any(|item| item.as_str().unwrap().contains("precedence 50")));
     assert_eq!(sources[0]["path"], ".vero/policy.yaml");
 
-    let escaped = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let escaped = vero()
         .args(["standards", "--path", "../secrets.txt", "--output", "json"])
         .current_dir(root)
         .output()
@@ -5428,7 +5429,7 @@ fn offline_mode_blocks_remote_standards_before_network_access() {
         .success());
     fs::write(root.join(".vero.yaml"), "version: 1\noffline: true\n").unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args([
             "standards",
             "--sync-url",
@@ -5493,7 +5494,7 @@ fn vero_offline_environment_override_cannot_be_weakened_by_repository_config() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args(["review", "--working-tree", "--output", "json"])
         .current_dir(root)
         .env("VERO_OFFLINE", "1")
@@ -5548,7 +5549,7 @@ fn vero_offline_environment_override_rejects_network_verification_before_executi
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args([
             "verify",
             "--profile",
@@ -5675,7 +5676,7 @@ fn offline_mode_blocks_remote_review_and_hosting_commands_before_credentials_or_
     ];
 
     for (args, expected_message) in cases {
-        let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+        let output = vero()
             .args(*args)
             .current_dir(root)
             .env_remove("VERO_OFFLINE_TEST_TOKEN")
@@ -5752,7 +5753,7 @@ fn rule_candidate_report_uses_versioned_schema_and_does_not_mutate_policy() {
             .unwrap();
     }
     drop(store);
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args(["rules", "candidates", "--output", "json"])
         .current_dir(root)
         .output()
@@ -5779,7 +5780,7 @@ fn rule_candidate_report_uses_versioned_schema_and_does_not_mutate_policy() {
     );
     let candidate_id = value["candidates"][0]["candidate_id"].as_str().unwrap();
     let evidence_digest = value["candidates"][0]["evidence_digest"].as_str().unwrap();
-    let stale_approval = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let stale_approval = vero()
         .args([
             "rules",
             "approve",
@@ -5799,7 +5800,7 @@ fn rule_candidate_report_uses_versioned_schema_and_does_not_mutate_policy() {
         .output()
         .unwrap();
     assert_eq!(stale_approval.status.code(), Some(3));
-    let approval_output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let approval_output = vero()
         .args([
             "rules",
             "approve",
@@ -5839,14 +5840,14 @@ fn rule_candidate_report_uses_versioned_schema_and_does_not_mutate_policy() {
         "rule approval",
     );
     let approval_id = approval["approval_id"].as_str().unwrap();
-    let list_output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let list_output = vero()
         .args(["rules", "list", "--output", "json"])
         .current_dir(root)
         .output()
         .unwrap();
     let listed: serde_json::Value = serde_json::from_slice(&list_output.stdout).unwrap();
     assert_eq!(listed.as_array().unwrap().len(), 1);
-    let replacement_output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let replacement_output = vero()
         .args([
             "rules",
             "approve",
@@ -5898,7 +5899,7 @@ fn rule_candidate_report_uses_versioned_schema_and_does_not_mutate_policy() {
         )
         .unwrap();
     drop(store);
-    let effectiveness_output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let effectiveness_output = vero()
         .args([
             "rules",
             "effectiveness",
@@ -5937,7 +5938,7 @@ fn rule_candidate_report_uses_versioned_schema_and_does_not_mutate_policy() {
         "rule effectiveness",
     );
     let replacement_id = replacement["approval_id"].as_str().unwrap();
-    let revoke_output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let revoke_output = vero()
         .args([
             "rules",
             "revoke",
@@ -6010,7 +6011,7 @@ fn test_recommendations_are_snapshot_bound_and_cautious_about_missing_edges() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args(["tests", "recommend", "--working-tree", "--output", "json"])
         .current_dir(root)
         .output()
@@ -6104,7 +6105,7 @@ fn test_recommendations_are_snapshot_bound_and_cautious_about_missing_edges() {
         })
         .unwrap();
     drop(store);
-    let listed = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let listed = vero()
         .args([
             "verification",
             "list",
@@ -6131,7 +6132,7 @@ fn test_recommendations_are_snapshot_bound_and_cautious_about_missing_edges() {
         include_str!("../../../schemas/verification-list-v1.schema.json"),
         "verification list",
     );
-    let covered = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let covered = vero()
         .args([
             "tests",
             "recommend",
@@ -6178,7 +6179,7 @@ fn test_recommendations_are_snapshot_bound_and_cautious_about_missing_edges() {
         .unwrap()
         .contains("changed executable-line coverage is 0/1"));
 
-    let measured = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let measured = vero()
         .args([
             "verification",
             "coverage",
@@ -6222,7 +6223,7 @@ fn test_recommendations_are_snapshot_bound_and_cautious_about_missing_edges() {
         })
         .unwrap();
     drop(store);
-    let stale = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let stale = vero()
         .args([
             "tests",
             "recommend",
@@ -6267,7 +6268,7 @@ fn standards_resolver_does_not_follow_symlinked_rule_directories() {
         .success());
     fs::write(outside.path().join("policy.yaml"), "secret: outside\n").unwrap();
     symlink(outside.path(), directory.path().join(".vero")).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args(["standards", "--output", "json"])
         .current_dir(directory.path())
         .output()
@@ -6364,7 +6365,7 @@ fn configured_openai_compatible_local_provider_runs_through_review_and_gate() {
         stream.write_all(result).unwrap();
     });
     fs::write(root.join(".vero.yaml"), format!("version: 1\noffline: true\nproviders:\n  local:\n    kind: openai_compatible\n    egress: local\n    endpoint: {endpoint}\n    model: local-test-model\nreviewers:\n  correctness:\n    provider: local\n    instructions_file: reviewer.md\npolicy:\n  required_reviewers: [correctness]\n  on_incomplete: block\n")).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args(["review", "--working-tree", "--gate", "--output", "json"])
         .current_dir(&root)
         .output()
@@ -6459,7 +6460,7 @@ fn gated_review_with_no_reviewer_is_incomplete_and_persisted() {
     assert!(git(&["commit", "-qm", "initial"]).status.success());
     fs::write(root.join(".vero.yaml"), "version: 1\n").unwrap();
     fs::write(root.join("tracked.rs"), "fn main() { let _x = 1; }\n").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .arg("review")
         .arg("--gate")
         .arg("--output")
@@ -6484,7 +6485,7 @@ fn gated_review_with_no_reviewer_is_incomplete_and_persisted() {
         let linked_report = output_dir.path().join("review.md");
         fs::write(&protected, "preserve this file\n").unwrap();
         symlink(&protected, &linked_report).unwrap();
-        let rejected = Command::new(env!("CARGO_BIN_EXE_vero"))
+        let rejected = vero()
             .arg("review")
             .arg("--gate")
             .arg("--markdown")
@@ -6598,7 +6599,7 @@ fn json_mode_emits_versioned_error_document_for_invalid_configuration() {
     assert!(git(&["commit", "-qm", "initial"]).status.success());
     fs::write(root.join(".vero.yaml"), "version: [invalid\n").unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args(["review", "--working-tree", "--output", "json"])
         .current_dir(root)
         .output()
@@ -6630,7 +6631,7 @@ fn pr_issues_rejects_unsupported_configured_provider_as_json_error() {
         "version: 1\nhosting:\n  provider: unknown-host\n",
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args([
             "hosting",
             "pr-issues",
@@ -6656,7 +6657,7 @@ fn pr_issues_rejects_unsupported_configured_provider_as_json_error() {
 
 #[test]
 fn json_mode_emits_versioned_error_document_for_invalid_invocation() {
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args(["review", "--output", "json", "--not-a-review-option"])
         .output()
         .unwrap();
@@ -6683,10 +6684,7 @@ fn commands_with_json_defaults_emit_json_for_argument_errors() {
         vec!["reviews", "verify-bundle"],
         vec!["rules", "effectiveness", "--invalid"],
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_vero"))
-            .args(&arguments)
-            .output()
-            .unwrap();
+        let output = vero().args(&arguments).output().unwrap();
         assert_eq!(output.status.code(), Some(3), "{arguments:?}");
         let value: serde_json::Value = serde_json::from_slice(&output.stdout)
             .unwrap_or_else(|error| panic!("{arguments:?} emitted invalid JSON: {error}"));
@@ -6699,7 +6697,7 @@ fn commands_with_json_defaults_emit_json_for_argument_errors() {
         assert!(output.stderr.is_empty(), "{arguments:?}");
     }
 
-    let text = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let text = vero()
         .args(["findings", "task", "--output", "text"])
         .output()
         .unwrap();
@@ -6711,7 +6709,7 @@ fn commands_with_json_defaults_emit_json_for_argument_errors() {
 #[test]
 fn json_mode_maps_repository_execution_failure_to_exit_code_two() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args(["review", "--working-tree", "--output", "json"])
         .current_dir(dir.path())
         .output()
@@ -6728,10 +6726,7 @@ fn json_mode_maps_repository_execution_failure_to_exit_code_two() {
 
 #[test]
 fn top_level_help_is_a_successful_cli_invocation() {
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
-        .arg("--help")
-        .output()
-        .unwrap();
+    let output = vero().arg("--help").output().unwrap();
     assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stdout).contains("Usage:"));
     assert!(output.stderr.is_empty());
@@ -6770,7 +6765,7 @@ fn gate_check_unknown_review_is_a_usage_error() {
         .success());
     fs::create_dir_all(root.join(".vero")).unwrap();
     vero_store_sqlite::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args([
             "gate",
             "check",
@@ -6822,7 +6817,7 @@ fn review_commit_uses_the_selected_commit_tree_not_dirty_worktree() {
         .to_owned();
     fs::write(root.join("source.rs"), "fn dirty_worktree() {}\n").unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args(["review", "--commit", "HEAD~1..HEAD", "--output", "json"])
         .current_dir(root)
         .output()
@@ -6896,7 +6891,7 @@ policy:
     )
     .unwrap();
     fs::write(root.join("source.rs"), "fn main() { let _x = 1; }\n").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args(["review", "--gate", "--output", "json"])
         .current_dir(root)
         .output()
@@ -6964,7 +6959,7 @@ fn impact_cli_emits_snapshot_bound_evidence_paths() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args(["impact", "--working-tree", "--output", "json"])
         .current_dir(root)
         .env("VERO_TSSERVER", root.join("missing-tsserver"))
@@ -7137,7 +7132,7 @@ fn mcp_stdio_exposes_findings_tool_over_the_pinned_protocol() {
         .build()
         .unwrap();
     runtime.block_on(async move {
-        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_vero"));
+        let mut command = tokio::process::Command::from(vero());
         command
             .args(["mcp", "serve", "--transport", "stdio"])
             .current_dir(root)
@@ -7565,7 +7560,7 @@ fn mcp_gate_check_rejects_source_changed_after_review() {
     assert!(git(&["commit", "-qm", "initial"]).status.success());
     fs::write(root.join(".vero.yaml"), "version: 1\n").unwrap();
     fs::write(root.join("tracked.rs"), "fn main() { let _x = 1; }\n").unwrap();
-    let reviewed = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let reviewed = vero()
         .args(["review", "--gate", "--output", "json"])
         .current_dir(root)
         .output()
@@ -7580,7 +7575,7 @@ fn mcp_gate_check_rejects_source_changed_after_review() {
         .build()
         .unwrap();
     runtime.block_on(async move {
-        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_vero"));
+        let mut command = tokio::process::Command::from(vero());
         command
             .args(["mcp", "serve", "--transport", "stdio"])
             .current_dir(root)
@@ -7640,7 +7635,7 @@ fn explicit_verification_profile_persists_failure_against_snapshot() {
     assert!(git(&["commit", "-qm", "initial"]).status.success());
     fs::write(root.join(".vero.yaml"), "version: 1\nverification:\n  failing-check:\n    executable: /usr/bin/false\n    timeout_seconds: 2\n    output_limit_bytes: 64\n").unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args(["verify", "--profile", "failing-check", "--output", "json"])
         .current_dir(root)
         .output()
@@ -7662,7 +7657,7 @@ fn explicit_verification_profile_persists_failure_against_snapshot() {
     );
     assert!(root.join(".vero/vero.sqlite").exists());
     let run_id = value["run_id"].as_str().unwrap();
-    let show = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let show = vero()
         .args(["verification", "show", run_id, "--output", "json"])
         .current_dir(root)
         .output()
@@ -7722,7 +7717,7 @@ fn impacted_go_verification_expands_and_persists_package_targets() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args([
             "verify",
             "--profile",
@@ -7848,13 +7843,7 @@ fn p2_acceptance_review_impact_targeted_tests_gate_and_staleness() {
     )
     .unwrap();
 
-    let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_vero"))
-            .args(args)
-            .current_dir(root)
-            .output()
-            .unwrap()
-    };
+    let run = |args: &[&str]| vero().args(args).current_dir(root).output().unwrap();
     let review = run(&["review", "--working-tree", "--gate", "--output", "json"]);
     assert_eq!(
         review.status.code(),
@@ -8048,13 +8037,13 @@ fn required_verification_gate_uses_latest_result_for_exact_snapshot() {
     fs::write(root.join(".vero.yaml"), config).unwrap();
 
     let run_verify = || {
-        Command::new(env!("CARGO_BIN_EXE_vero"))
+        vero()
             .args(["verify", "--profile", "unit", "--output", "json"])
             .current_dir(root)
             .output()
             .unwrap()
     };
-    let initial_review = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let initial_review = vero()
         .args(["review", "--gate", "--output", "json"])
         .current_dir(root)
         .output()
@@ -8077,7 +8066,7 @@ fn required_verification_gate_uses_latest_result_for_exact_snapshot() {
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
-    let recheck = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let recheck = vero()
         .args(["gate", "check", "--review", review_id, "--output", "json"])
         .current_dir(root)
         .output()
@@ -8105,7 +8094,7 @@ fn required_verification_gate_uses_latest_result_for_exact_snapshot() {
 
     let second = run_verify();
     assert_eq!(second.status.code(), Some(1));
-    let package = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let package = vero()
         .args(["repos", "package"])
         .arg(root)
         .args(["--output", "json"])
@@ -8120,7 +8109,7 @@ fn required_verification_gate_uses_latest_result_for_exact_snapshot() {
         "stale_verification"
     );
     assert_eq!(package_json["readiness"], "incomplete");
-    let revoked = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let revoked = vero()
         .args(["gate", "check", "--review", review_id, "--output", "json"])
         .current_dir(root)
         .output()
@@ -8137,7 +8126,7 @@ fn required_verification_gate_uses_latest_result_for_exact_snapshot() {
         .as_str()
         .unwrap()
         .contains("unit"));
-    let history = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let history = vero()
         .args(["gate", "history", "--review", review_id, "--output", "json"])
         .current_dir(root)
         .output()
@@ -8211,7 +8200,7 @@ esac
     fs::write(root.join(".vero.yaml"), config).unwrap();
     let report_dir = tempfile::tempdir().unwrap();
     let markdown_report = report_dir.path().join("review-report.md");
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .arg("review")
         .arg("--reviewer")
         .arg("correctness")
@@ -8284,7 +8273,7 @@ esac
     let finding_id = value["findings"][0]["id"].as_str().unwrap().to_owned();
     let snapshot_id = value["snapshot_id"].as_str().unwrap().to_owned();
     let review_id = value["review_id"].as_str().unwrap();
-    let gate_check = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let gate_check = vero()
         .args(["gate", "check", "--review", review_id, "--output", "json"])
         .current_dir(root)
         .output()
@@ -8316,11 +8305,7 @@ esac
             "decisions",
         ),
     ] {
-        let result = Command::new(env!("CARGO_BIN_EXE_vero"))
-            .args(args)
-            .current_dir(root)
-            .output()
-            .unwrap();
+        let result = vero().args(args).current_dir(root).output().unwrap();
         assert_eq!(result.status.code(), Some(0));
         let response: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
         assert_matches_schema(&response, schema_text, "CLI response");
@@ -8331,7 +8316,7 @@ esac
         );
         assert!(!response[key].is_null());
     }
-    let sarif = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let sarif = vero()
         .args(["reviews", "export", review_id, "--format", "sarif"])
         .current_dir(root)
         .output()
@@ -8360,7 +8345,7 @@ esac
         sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]["startLine"],
         1
     );
-    let targeted_verification = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let targeted_verification = vero()
         .args([
             "verify",
             finding_id.as_str(),
@@ -8392,7 +8377,7 @@ esac
     assert!(root
         .join(targeted_run["stdout_artifact"]["path"].as_str().unwrap())
         .exists());
-    let detail = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let detail = vero()
         .args(["findings", "show", finding_id.as_str(), "--output", "json"])
         .current_dir(root)
         .output()
@@ -8412,7 +8397,7 @@ esac
         .unwrap();
     runtime.block_on(async move {
         use mcp_rs::client::Client;
-        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_vero"));
+        let mut command = tokio::process::Command::from(vero());
         command
             .args(["mcp", "serve", "--transport", "stdio"])
             .current_dir(root)
@@ -8473,7 +8458,7 @@ esac
         assert_eq!(page["findings"][0]["finding"]["id"], mcp_finding_id);
         client.close().await.unwrap();
     });
-    let list = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let list = vero()
         .args([
             "findings",
             "list",
@@ -8496,7 +8481,7 @@ esac
     );
     assert_eq!(listed["schema_version"], 2);
     assert_eq!(listed["findings"].as_array().unwrap().len(), 1, "{listed}");
-    let show = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let show = vero()
         .args(["findings", "show", finding_id.as_str(), "--output", "json"])
         .current_dir(root)
         .output()
@@ -8510,7 +8495,7 @@ esac
     );
     assert_eq!(shown["schema_version"], 2);
     assert_eq!(shown["finding"]["occurrence_count"], 1);
-    let update = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let update = vero()
         .args([
             "findings",
             "set-status",
@@ -8524,7 +8509,7 @@ esac
         .output()
         .unwrap();
     assert_eq!(update.status.code(), Some(0));
-    let verified = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let verified = vero()
         .args([
             "findings", "list", "--status", "verified", "--output", "json",
         ])
@@ -8582,7 +8567,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
         provider.display()
     )).unwrap();
 
-    let review = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let review = vero()
         .args([
             "review",
             "--base",
@@ -8609,7 +8594,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
     );
     let finding_id = review["findings"][0]["id"].as_str().unwrap();
 
-    let task = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let task = vero()
         .args(["findings", "task", finding_id, "--output", "json"])
         .current_dir(root)
         .output()
@@ -8631,7 +8616,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
     fs::create_dir_all(root.join("tools")).unwrap();
     let patch = root.join("agent.patch");
     fs::write(&patch, "diff --git a/src.rs b/src.rs\n--- a/src.rs\n+++ b/src.rs\n@@ -1 +1 @@\n-pub fn value() -> i32 { 1 }\n+pub fn value() -> i32 { 2 }\n").unwrap();
-    let proposed = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let proposed = vero()
         .args(["findings", "propose-patch", "--review", review_id])
         .arg("../agent.patch")
         .args(["--output", "json"])
@@ -8656,7 +8641,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
         "pub fn value() -> i32 { 1 }\n"
     );
 
-    let second_review = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let second_review = vero()
         .args([
             "review",
             "--base",
@@ -8672,7 +8657,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
     assert!(second_review.status.success());
     let second_review: serde_json::Value = serde_json::from_slice(&second_review.stdout).unwrap();
     assert_ne!(second_review["review_id"], review_id);
-    let colliding_proposal = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let colliding_proposal = vero()
         .args([
             "findings",
             "propose-patch",
@@ -8697,7 +8682,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
 
     let apply_lock = root.join(".vero/proposals/apply.lock");
     fs::write(&apply_lock, "pid=another-process\n").unwrap();
-    let concurrent_apply = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let concurrent_apply = vero()
         .args(["findings", "apply-patch", digest, "--approve", digest])
         .current_dir(root)
         .output()
@@ -8712,7 +8697,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
     let instruction_path = root.join("reviewer.md");
     let original_instructions = fs::read_to_string(&instruction_path).unwrap();
     fs::write(&instruction_path, "The review instructions have changed.\n").unwrap();
-    let stale_config = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let stale_config = vero()
         .args(["findings", "apply-patch", digest, "--approve", digest])
         .current_dir(root)
         .output()
@@ -8724,7 +8709,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
     );
     fs::write(&instruction_path, original_instructions).unwrap();
 
-    let rejected = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let rejected = vero()
         .args([
             "findings",
             "apply-patch",
@@ -8741,7 +8726,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
         "pub fn value() -> i32 { 1 }\n"
     );
 
-    let applied = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let applied = vero()
         .args([
             "findings",
             "apply-patch",
@@ -8780,7 +8765,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
         proposal_record["follow_up_review_id"],
         applied["review"]["review_id"]
     );
-    let replay = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let replay = vero()
         .args(["findings", "apply-patch", digest, "--approve", digest])
         .current_dir(root)
         .output()
@@ -8852,7 +8837,7 @@ printf '%s' '{"schema_version":1,"findings":[]}'
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args(["review", "--gate", "--output", "json"])
         .env("VERO_CONFIG", &user_config)
         .current_dir(root)
@@ -8877,7 +8862,7 @@ printf '%s' '{"schema_version":1,"findings":[]}'
         "version: 1\nproviders:\n  local-codex:\n    kind: cli\n    executable: /bin/true\n    egress: local\n",
     )
     .unwrap();
-    let check = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let check = vero()
         .args(["gate", "check", "--review", review_id, "--output", "json"])
         .env("VERO_CONFIG", &user_config)
         .current_dir(root)
@@ -8953,7 +8938,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args(["review", "--working-tree", "--gate", "--output", "json"])
         .current_dir(root)
         .output()
@@ -8984,7 +8969,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{
     let mut permissions = fs::metadata(&provider).unwrap().permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&provider, permissions).unwrap();
-    let check = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let check = vero()
         .args([
             "gate",
             "check",
@@ -9055,7 +9040,7 @@ fn snapshot_waiver_is_auditable_expires_and_only_applies_to_its_review() {
     )
     .unwrap();
 
-    let review_output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let review_output = vero()
         .args([
             "review",
             "--working-tree",
@@ -9092,7 +9077,7 @@ fn snapshot_waiver_is_auditable_expires_and_only_applies_to_its_review() {
         .unwrap()
         .contains("unchecked dangerous call"));
 
-    let sarif = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let sarif = vero()
         .args(["reviews", "export", review_id, "--format", "sarif"])
         .current_dir(root)
         .output()
@@ -9113,7 +9098,7 @@ fn snapshot_waiver_is_auditable_expires_and_only_applies_to_its_review() {
         ("Accepted", ""),
         ("Accepted", too_long_author.as_str()),
     ] {
-        let rejected = Command::new(env!("CARGO_BIN_EXE_vero"))
+        let rejected = vero()
             .args([
                 "waivers", "create", finding_id, "--review", review_id, "--reason", reason,
                 "--author", author,
@@ -9124,7 +9109,7 @@ fn snapshot_waiver_is_auditable_expires_and_only_applies_to_its_review() {
         assert_eq!(rejected.status.code(), Some(3), "{reason:?} / {author:?}");
     }
 
-    let created = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let created = vero()
         .args([
             "waivers",
             "create",
@@ -9160,7 +9145,7 @@ fn snapshot_waiver_is_auditable_expires_and_only_applies_to_its_review() {
     assert_eq!(waiver["snapshot_id"], review["snapshot_id"]);
     assert_eq!(waiver["author"], "maintainer@example.invalid");
 
-    let checked = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let checked = vero()
         .args(["gate", "check", "--review", review_id, "--output", "json"])
         .current_dir(root)
         .output()
@@ -9183,7 +9168,7 @@ fn snapshot_waiver_is_auditable_expires_and_only_applies_to_its_review() {
         .unwrap()
         .contains(waiver["id"].as_str().unwrap()));
 
-    let listed = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let listed = vero()
         .args(["waivers", "list", "--review", review_id, "--output", "json"])
         .current_dir(root)
         .output()
@@ -9221,7 +9206,7 @@ fn snapshot_waiver_is_auditable_expires_and_only_applies_to_its_review() {
         .is_valid(&list));
 
     fs::write(root.join("tracked.rs"), "fn main() { safer(); }\n").unwrap();
-    let stale = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let stale = vero()
         .args(["gate", "check", "--review", review_id, "--output", "json"])
         .current_dir(root)
         .output()
@@ -9268,7 +9253,7 @@ fn malformed_provider_findings_make_the_gate_incomplete() {
     fs::set_permissions(&provider, permissions).unwrap();
     fs::write(root.join(".vero.yaml"), format!("version: 1\nproviders:\n  fake:\n    kind: cli\n    executable: {}\nreviewers:\n  correctness:\n    provider: fake\n    instructions_file: reviewer.md\npolicy:\n  required_reviewers: [correctness]\n  on_incomplete: block\n", provider.display())).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args(["review", "--gate", "--output", "json"])
         .current_dir(root)
         .output()
@@ -9321,7 +9306,7 @@ fn gate_check_rejects_snapshot_after_source_edit() {
     permissions.set_mode(0o755);
     fs::set_permissions(&provider, permissions).unwrap();
     fs::write(root.join(".vero.yaml"), format!("version: 1\nproviders:\n  fake:\n    kind: cli\n    executable: {}\nreviewers:\n  correctness:\n    provider: fake\n    instructions_file: reviewer.md\npolicy:\n  required_reviewers: [correctness]\n  block_severities: [high]\n  minimum_confidence: 80\n  on_incomplete: block\n", provider.display())).unwrap();
-    let review = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let review = vero()
         .arg("review")
         .arg("--gate")
         .arg("--output")
@@ -9337,7 +9322,7 @@ fn gate_check_rejects_snapshot_after_source_edit() {
     );
     let review_json: serde_json::Value = serde_json::from_slice(&review.stdout).unwrap();
     let review_id = review_json["review_id"].as_str().unwrap();
-    let first_check = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let first_check = vero()
         .args(["gate", "check", "--review", review_id, "--output", "json"])
         .current_dir(root)
         .output()
@@ -9349,7 +9334,7 @@ fn gate_check_rejects_snapshot_after_source_edit() {
         .unwrap()
         .replace("minimum_confidence: 80", "minimum_confidence: 79");
     fs::write(&config_path, changed_config).unwrap();
-    let config_stale = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let config_stale = vero()
         .args(["gate", "check", "--review", review_id, "--output", "json"])
         .current_dir(root)
         .output()
@@ -9370,7 +9355,7 @@ fn gate_check_rejects_snapshot_after_source_edit() {
         "fn main() { let _changed = true; }\n",
     )
     .unwrap();
-    let stale_check = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let stale_check = vero()
         .args(["gate", "check", "--review", review_id, "--output", "json"])
         .current_dir(root)
         .output()
@@ -9415,7 +9400,7 @@ fn staged_snapshot_ignores_unstaged_edits_to_same_path() {
     fs::write(root.join("file.rs"), "unstaged contents one\n").unwrap();
     fs::write(root.join(".vero.yaml"), "version: 1\n").unwrap();
     let run_review = || {
-        let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+        let output = vero()
             .arg("review")
             .arg("--staged")
             .arg("--output")
@@ -9467,7 +9452,7 @@ fn working_tree_scope_excludes_staged_only_paths() {
     assert!(git(&["add", "staged.rs"]).status.success());
     fs::write(root.join("working.rs"), "unstaged edit\n").unwrap();
     fs::write(root.join(".vero.yaml"), "version: 1\n").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .arg("review")
         .arg("--working-tree")
         .arg("--output")
@@ -9536,7 +9521,7 @@ fn reviews_list_and_show_return_persisted_review_records() {
     .unwrap();
     fs::write(root.join("file.rs"), "fn main() { let x = 1; }\n").unwrap();
 
-    let review = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let review = vero()
         .args(["review", "--working-tree", "--output", "json"])
         .current_dir(root)
         .output()
@@ -9552,7 +9537,7 @@ fn reviews_list_and_show_return_persisted_review_records() {
         .iter()
         .any(|file| { file["path"] == "file.rs" && file["status"] == "full_source" }));
 
-    let listed = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let listed = vero()
         .args(["reviews", "list", "--output", "json"])
         .current_dir(root)
         .output()
@@ -9573,7 +9558,7 @@ fn reviews_list_and_show_return_persisted_review_records() {
     assert_eq!(listed["reviews"].as_array().unwrap().len(), 1);
     assert_eq!(listed["reviews"][0]["review_id"], review_id);
 
-    let shown = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let shown = vero()
         .args(["reviews", "show", review_id, "--output", "json"])
         .current_dir(root)
         .output()
@@ -9589,7 +9574,7 @@ fn reviews_list_and_show_return_persisted_review_records() {
     assert_eq!(shown["snapshot_id"], review["snapshot_id"]);
     assert_eq!(shown["reviewer_context"], review["reviewer_context"]);
 
-    let checked = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let checked = vero()
         .args(["gate", "check", "--review", review_id, "--output", "json"])
         .current_dir(root)
         .output()
@@ -9602,7 +9587,7 @@ fn reviews_list_and_show_return_persisted_review_records() {
     );
     let checked: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
 
-    let exported = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let exported = vero()
         .args(["reviews", "export", review_id, "--format", "vero-json"])
         .current_dir(root)
         .output()
@@ -9619,7 +9604,7 @@ fn reviews_list_and_show_return_persisted_review_records() {
         "portable review export",
     );
 
-    let bundle_output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let bundle_output = vero()
         .args([
             "reviews",
             "bundle",
@@ -9648,7 +9633,7 @@ fn reviews_list_and_show_return_persisted_review_records() {
     );
     let bundle_path = root.join("evidence-bundle.json");
     fs::write(&bundle_path, &bundle_output.stdout).unwrap();
-    let verified = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let verified = vero()
         .args(["reviews", "verify-bundle"])
         .arg(&bundle_path)
         .args(["--output", "json"])
@@ -9682,7 +9667,7 @@ fn reviews_list_and_show_return_persisted_review_records() {
     store
         .save_gate_decision(review_id, &alternate_decision)
         .unwrap();
-    let mismatched_bundle = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let mismatched_bundle = vero()
         .args(["reviews", "bundle", review_id, "--decision-id"])
         .arg(&alternate_decision.decision_id)
         .current_dir(root)
@@ -9712,7 +9697,7 @@ fn reviews_list_and_show_return_persisted_review_records() {
         serde_json::to_vec(&empty_review_bundle).unwrap(),
     )
     .unwrap();
-    let empty_rejected = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let empty_rejected = vero()
         .args(["reviews", "verify-bundle"])
         .arg(&bundle_path)
         .args(["--output", "json"])
@@ -9725,7 +9710,7 @@ fn reviews_list_and_show_return_persisted_review_records() {
     fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
     let private_key = root.join("signing-key.der");
     let public_key = root.join("verify-key.bin");
-    let generated = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let generated = vero()
         .args(["reviews", "keygen", "--private-key"])
         .arg(&private_key)
         .args(["--public-key"])
@@ -9738,7 +9723,7 @@ fn reviews_list_and_show_return_persisted_review_records() {
         "{}",
         String::from_utf8_lossy(&generated.stderr)
     );
-    let signed = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let signed = vero()
         .args(["reviews", "sign-bundle"])
         .arg(&bundle_path)
         .args(["--private-key"])
@@ -9752,7 +9737,7 @@ fn reviews_list_and_show_return_persisted_review_records() {
         "{}",
         String::from_utf8_lossy(&signed.stderr)
     );
-    let signed_verify = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let signed_verify = vero()
         .args(["reviews", "verify-bundle"])
         .arg(&bundle_path)
         .args(["--public-key"])
@@ -9783,7 +9768,7 @@ fn reviews_list_and_show_return_persisted_review_records() {
     let mut tampered = signed_bundle;
     tampered["review"]["findings"][0]["rationale"] = serde_json::json!("tampered");
     fs::write(&bundle_path, serde_json::to_vec(&tampered).unwrap()).unwrap();
-    let rejected = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let rejected = vero()
         .args(["reviews", "verify-bundle"])
         .arg(&bundle_path)
         .args(["--public-key"])
@@ -9812,7 +9797,7 @@ fn reviews_list_and_show_return_persisted_review_records() {
         &serde_json::to_vec(&inconsistent["manifest"]).unwrap()
     ));
     fs::write(&bundle_path, serde_json::to_vec(&inconsistent).unwrap()).unwrap();
-    let replay_rejected = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let replay_rejected = vero()
         .args(["reviews", "verify-bundle"])
         .arg(&bundle_path)
         .args(["--output", "json"])
@@ -9841,7 +9826,7 @@ fn reviews_list_and_show_return_persisted_review_records() {
         serde_json::to_vec(&mismatched_snapshot).unwrap(),
     )
     .unwrap();
-    let snapshot_rejected = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let snapshot_rejected = vero()
         .args(["reviews", "verify-bundle"])
         .arg(&bundle_path)
         .args(["--output", "json"])
@@ -9862,7 +9847,7 @@ fn reviews_list_and_show_return_persisted_review_records() {
         .success());
     let transfer = destination.path().join("review.json");
     fs::write(&transfer, &exported.stdout).unwrap();
-    let imported = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let imported = vero()
         .args(["reviews", "import"])
         .arg(&transfer)
         .args(["--output", "json"])
@@ -9879,14 +9864,14 @@ fn reviews_list_and_show_return_persisted_review_records() {
     assert_eq!(imported["review_id"], review_id);
     assert_eq!(imported["trust"], "untrusted_external");
     assert_eq!(imported["gate_eligible"], false);
-    let local_reviews = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let local_reviews = vero()
         .args(["reviews", "list", "--output", "json"])
         .current_dir(destination.path())
         .output()
         .unwrap();
     let local_reviews: serde_json::Value = serde_json::from_slice(&local_reviews.stdout).unwrap();
     assert_eq!(local_reviews["reviews"].as_array().unwrap().len(), 0);
-    let history = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let history = vero()
         .args(["reviews", "imported", "list", "--output", "json"])
         .current_dir(destination.path())
         .output()
@@ -9899,7 +9884,7 @@ fn reviews_list_and_show_return_persisted_review_records() {
     let history: serde_json::Value = serde_json::from_slice(&history.stdout).unwrap();
     assert_eq!(history["reviews"].as_array().unwrap().len(), 1);
     assert_eq!(history["reviews"][0]["gate_eligible"], false);
-    let searched = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let searched = vero()
         .args([
             "reviews",
             "imported",
@@ -9939,7 +9924,7 @@ fn reviews_list_and_show_return_persisted_review_records() {
     assert_eq!(searched["matches"][1]["relevance_score"], 3);
     assert_eq!(searched["trust"], "untrusted_external");
     assert_eq!(searched["gate_eligible"], false);
-    let limited = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let limited = vero()
         .args([
             "reviews",
             "imported",
@@ -9954,7 +9939,7 @@ fn reviews_list_and_show_return_persisted_review_records() {
     assert_ne!(limited.status.code(), Some(0));
     let oversized = destination.path().join("oversized.json");
     fs::write(&oversized, vec![b' '; 10 * 1024 * 1024 + 1]).unwrap();
-    let rejected = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let rejected = vero()
         .args(["reviews", "import"])
         .arg(&oversized)
         .current_dir(destination.path())
@@ -9981,7 +9966,7 @@ fn review_import_rejects_fifo_without_blocking() {
     let fifo = directory.path().join("review.fifo");
     let path_bytes = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
     assert_eq!(unsafe { libc::mkfifo(path_bytes.as_ptr(), 0o600) }, 0);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let mut child = vero()
         .args(["reviews", "import"])
         .arg(&fifo)
         .current_dir(directory.path())
@@ -10013,7 +9998,7 @@ fn mcp_tools_declare_titles_safety_annotations_and_documented_inputs() {
     init_git(directory.path());
     fs::write(directory.path().join("tracked.txt"), "fixture\n").unwrap();
     commit_all(directory.path(), "fixture");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let mut child = vero()
         .args(["mcp", "serve", "--transport", "stdio"])
         .current_dir(directory.path())
         .stdin(std::process::Stdio::piped())
@@ -10161,7 +10146,7 @@ fn mcp_stdio_supports_legacy_initialize_and_read_only_tool_calls() {
     fs::write(directory.path().join("tracked.txt"), "fixture\n").unwrap();
     commit_all(directory.path(), "fixture");
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let mut child = vero()
         .args(["mcp", "serve", "--transport", "stdio"])
         .current_dir(directory.path())
         .stdin(std::process::Stdio::piped())

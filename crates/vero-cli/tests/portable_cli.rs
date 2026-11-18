@@ -1,8 +1,7 @@
 use std::{fs, process::Command};
 
-fn vero() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_vero"))
-}
+mod support;
+use support::vero;
 
 /// A machine whose only AI backend is a fake Codex CLI: an isolated user config,
 /// a PATH containing just that CLI, and an Ollama port nothing listens on.

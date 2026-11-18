@@ -9,6 +9,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
+mod support;
+use support::vero as vero_command;
+
 fn git(root: &Path, args: &[&str]) {
     let status = Command::new("git")
         .arg("-C")
@@ -31,7 +34,7 @@ fn executable(path: &Path, script: &str) {
 }
 
 fn vero(root: &Path, args: &[&str]) -> (Option<i32>, Value) {
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero_command()
         .args(args)
         .args(["--output", "json"])
         .current_dir(root)
