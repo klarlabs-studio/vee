@@ -1,5 +1,6 @@
 use std::{fs, process::Command};
 use vero_core::ports::*;
+use vero_core::{ActorName, Reason};
 
 fn accept_with_timeout(listener: &std::net::TcpListener) -> std::io::Result<std::net::TcpStream> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
@@ -5745,8 +5746,8 @@ fn rule_candidate_report_uses_versioned_schema_and_does_not_mutate_policy() {
                 &finding_id,
                 &snapshot_id,
                 FindingFeedbackLabel::FalsePositive,
-                "The reported path is unreachable in this configuration",
-                &format!("reviewer-{index}"),
+                &Reason::new("The reported path is unreachable in this configuration").unwrap(),
+                &ActorName::new("reviewer", &format!("reviewer-{index}")).unwrap(),
             )
             .unwrap();
     }
@@ -5892,8 +5893,8 @@ fn rule_candidate_report_uses_versioned_schema_and_does_not_mutate_policy() {
             "finding-0",
             "snapshot-0",
             FindingFeedbackLabel::Confirmed,
-            "A later review verified the finding.",
-            "reviewer-later",
+            &Reason::new("A later review verified the finding.").unwrap(),
+            &ActorName::new("reviewer", "reviewer-later").unwrap(),
         )
         .unwrap();
     drop(store);
@@ -9104,6 +9105,24 @@ fn snapshot_waiver_is_auditable_expires_and_only_applies_to_its_review() {
         sarif["runs"][0]["results"][0]["partialFingerprints"]["vero/v1"],
         review["findings"][0]["fingerprint"]
     );
+
+    // Waiver text follows the same bounds as every other recorded reason and actor.
+    let too_long_author = "a".repeat(201);
+    for (reason, author) in [
+        ("   ", "maintainer"),
+        ("Accepted", ""),
+        ("Accepted", too_long_author.as_str()),
+    ] {
+        let rejected = Command::new(env!("CARGO_BIN_EXE_vero"))
+            .args([
+                "waivers", "create", finding_id, "--review", review_id, "--reason", reason,
+                "--author", author,
+            ])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert_eq!(rejected.status.code(), Some(3), "{reason:?} / {author:?}");
+    }
 
     let created = Command::new(env!("CARGO_BIN_EXE_vero"))
         .args([

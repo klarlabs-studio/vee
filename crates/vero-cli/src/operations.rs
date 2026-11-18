@@ -14,16 +14,14 @@ use std::path::{Path, PathBuf};
 use vero_application::{GateCheckResult, ReviewResult};
 use vero_core::ports::*;
 use vero_core::{
-    Evidence, FindingFeedback, FindingFeedbackLabel, FindingRecord, FindingStatus,
-    RepositoryConfig, Severity, VerificationRun,
+    ActorName, Evidence, FindingFeedback, FindingFeedbackLabel, FindingRecord, FindingStatus,
+    FindingStatusChange, Reason, RepositoryConfig, Severity, VerificationRun,
 };
 use vero_store_sqlite::ReviewStore;
 
 pub const DEFAULT_PAGE_SIZE: usize = 50;
 pub const MAX_PAGE_SIZE: usize = 100;
 pub const DEFAULT_CONTEXT_LINES: usize = 20;
-const MAX_REASON_CHARS: usize = 4_000;
-const MAX_NAME_CHARS: usize = 200;
 const MAX_SCOPE_CHARS: usize = 1_024;
 const MAX_INSTRUCTION_BYTES: usize = 20_000;
 /// Upper bound on findings scanned when mining rule candidates.
@@ -357,22 +355,17 @@ pub fn set_finding_status(
     status: FindingStatus,
     reason: &str,
 ) -> Result<FindingStatusUpdate> {
-    require_text("reason", reason, MAX_REASON_CHARS)?;
-    if status == FindingStatus::Waived {
-        return Err(usage_failure(
-            "waivers require a scoped snapshot, author, and expiry; use the waiver workflow (`vero waivers create`)",
-        ));
-    }
-    let reason = reason.trim().to_owned();
+    let change = FindingStatusChange::new(status, Reason::new(reason).map_err(usage_failure)?)
+        .map_err(usage_failure)?;
     workspace
         .store()?
-        .set_finding_status(finding_id, status, &reason)
+        .set_finding_status(finding_id, &change)
         .map_err(anyhow::Error::msg)?;
     Ok(FindingStatusUpdate {
         schema_version: 1,
         finding_id: finding_id.to_owned(),
         status,
-        reason,
+        reason: change.reason().as_str().to_owned(),
         note: "Lifecycle status is audit metadata. Use the waiver workflow for a scoped gate exception."
             .into(),
     })
@@ -390,16 +383,16 @@ pub fn record_finding_feedback(
     workspace: &Workspace,
     request: FeedbackRequest<'_>,
 ) -> Result<FindingFeedback> {
-    require_text("reason", request.reason, MAX_REASON_CHARS)?;
-    require_text("reviewer", request.reviewer, MAX_NAME_CHARS)?;
+    let reason = Reason::new(request.reason).map_err(usage_failure)?;
+    let reviewer = ActorName::new("reviewer", request.reviewer).map_err(usage_failure)?;
     workspace
         .store()?
         .add_finding_feedback(
             request.finding_id,
             request.snapshot_id,
             request.label,
-            request.reason,
-            request.reviewer,
+            &reason,
+            &reviewer,
         )
         .map_err(anyhow::Error::msg)
 }
@@ -673,8 +666,8 @@ pub fn record_external_feedback(
     workspace: &Workspace,
     request: ExternalFeedbackRequest<'_>,
 ) -> Result<ExternalFeedbackRecorded> {
-    require_text("reason", request.reason, MAX_REASON_CHARS)?;
-    require_text("reviewer", request.reviewer, MAX_NAME_CHARS)?;
+    Reason::new(request.reason).map_err(usage_failure)?;
+    ActorName::new("reviewer", request.reviewer).map_err(usage_failure)?;
     let feedback = crate::imported_history::record_feedback(
         workspace.root(),
         crate::imported_history::FeedbackRecordInput {
@@ -770,8 +763,8 @@ pub fn approve_rule(
     request: ApproveRuleRequest,
 ) -> Result<vero_core::RuleApproval> {
     require_text("scope", &request.scope, MAX_SCOPE_CHARS)?;
-    require_text("approver", &request.approver, MAX_NAME_CHARS)?;
-    require_text("reason", &request.reason, MAX_REASON_CHARS)?;
+    let approver = ActorName::new("approver", &request.approver).map_err(usage_failure)?;
+    let reason = Reason::new(&request.reason).map_err(usage_failure)?;
     if request.instruction.trim().is_empty() || request.instruction.len() > MAX_INSTRUCTION_BYTES {
         return Err(usage_failure(format!(
             "instruction must contain 1 to {MAX_INSTRUCTION_BYTES} bytes"
@@ -813,7 +806,7 @@ pub fn approve_rule(
                 "{}\0{}\0{}\0{}",
                 request.candidate_id,
                 candidate.evidence_digest,
-                request.approver,
+                approver.as_str(),
                 now.as_nanos()
             )
             .as_bytes()
@@ -831,12 +824,12 @@ pub fn approve_rule(
         feedback_label: candidate.feedback_label,
         scope: request.scope,
         instruction: request.instruction,
-        approver: request.approver,
-        approval_reason: request.reason,
+        approver: approver.as_str().to_owned(),
+        approval_reason: reason.as_str().to_owned(),
         supersedes_approval_id: request.supersedes_approval_id,
         expires_at_unix,
         created_at: String::new(),
-        status: String::new(),
+        status: vero_core::RuleApprovalStatus::Active,
         events: Vec::new(),
     };
     store
@@ -867,11 +860,11 @@ pub fn revoke_rule(
     actor: &str,
     reason: &str,
 ) -> Result<vero_core::RuleApproval> {
-    require_text("actor", actor, MAX_NAME_CHARS)?;
-    require_text("reason", reason, MAX_REASON_CHARS)?;
+    let actor = ActorName::new("actor", actor).map_err(usage_failure)?;
+    let reason = Reason::new(reason).map_err(usage_failure)?;
     let mut store = workspace.store()?;
     store
-        .revoke_rule_approval(approval_id, actor, reason)
+        .revoke_rule_approval(approval_id, &actor, &reason)
         .map_err(anyhow::Error::msg)?;
     saved_approval(&store, approval_id)
 }

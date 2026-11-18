@@ -3509,7 +3509,7 @@ fn run() -> Result<u8> {
                             println!(
                                 "{}  {}  {}  {}",
                                 approval.approval_id,
-                                approval.status,
+                                approval.status.as_str(),
                                 approval.category,
                                 approval.scope
                             );
@@ -7077,9 +7077,9 @@ fn run() -> Result<u8> {
                                 format!("finding {finding_id} was not observed in review {review}")
                             })?,
                     };
-                    if reason.trim().is_empty() || author.trim().is_empty() {
-                        anyhow::bail!("--reason and --author must not be empty");
-                    }
+                    let reason = vero_core::Reason::new(&reason).map_err(usage_failure)?;
+                    let author =
+                        vero_core::ActorName::new("author", &author).map_err(usage_failure)?;
                     let created_at_unix = current_unix_time()?;
                     let expires_at_unix = created_at_unix
                         .checked_add(i64::from(expires_in_days) * 86_400)
@@ -7100,8 +7100,8 @@ fn run() -> Result<u8> {
                         id,
                         finding_fingerprint: fingerprint,
                         snapshot_id: reviewed.snapshot_id,
-                        reason,
-                        author,
+                        reason: reason.as_str().to_owned(),
+                        author: author.as_str().to_owned(),
                         provenance: "local_cli".into(),
                         created_at_unix,
                         expires_at_unix,

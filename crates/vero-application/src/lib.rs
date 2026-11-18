@@ -3167,7 +3167,7 @@ fn validate_rule_attributions(
                     attribution.rule_id, attribution.approval_id
                 ));
             };
-            if approval.status != "active" {
+            if !approval.is_active() {
                 return Err(format!(
                     "reported approval {} is not active",
                     attribution.approval_id
@@ -3218,7 +3218,7 @@ mod rule_attribution_contract_tests {
         }
     }
 
-    fn approval(status: &str) -> vero_core::RuleApproval {
+    fn approval(status: vero_core::RuleApprovalStatus) -> vero_core::RuleApproval {
         vero_core::RuleApproval {
             schema_version: 1,
             approval_id: "approval_2".into(),
@@ -3236,14 +3236,14 @@ mod rule_attribution_contract_tests {
             supersedes_approval_id: None,
             expires_at_unix: None,
             created_at: "2026-11-15T00:00:00Z".into(),
-            status: status.into(),
+            status,
             events: vec![],
         }
     }
 
     #[test]
     fn rule_attribution_requires_exact_active_approval_and_assigns_reviewer() {
-        let approvals = [approval("active")];
+        let approvals = [approval(vero_core::RuleApprovalStatus::Active)];
         let mut findings = [finding()];
 
         validate_rule_attributions(&mut findings, &approvals, "security").unwrap();
@@ -3259,14 +3259,14 @@ mod rule_attribution_contract_tests {
         let mut findings = [finding()];
         assert!(validate_rule_attributions(&mut findings, &[], "security").is_err());
 
-        let inactive = [approval("revoked")];
+        let inactive = [approval(vero_core::RuleApprovalStatus::Revoked)];
         let mut findings = [finding()];
         assert!(validate_rule_attributions(&mut findings, &inactive, "security").is_err());
     }
 
     #[test]
     fn rule_attribution_must_match_the_finding_location_scope() {
-        let approvals = [approval("active")];
+        let approvals = [approval(vero_core::RuleApprovalStatus::Active)];
         let mut findings = [finding()];
         findings[0].path = Some("api/handler.rs".into());
         assert!(
@@ -8225,7 +8225,7 @@ pub fn active_rule_approvals(
     let approvals = rules.list_rule_approvals()?;
     Ok(approvals
         .into_iter()
-        .filter(|approval| approval.status == "active")
+        .filter(|approval| approval.is_active())
         .collect())
 }
 
@@ -8690,6 +8690,7 @@ mod tests {
     use super::*;
     use std::process::Command;
     use vero_core::ports::*;
+    use vero_core::{ActorName, Reason};
     use vero_store_sqlite::ReviewStore;
 
     #[test]
@@ -10138,7 +10139,7 @@ mod tests {
                 supersedes_approval_id: None,
                 expires_at_unix: None,
                 created_at: String::new(),
-                status: String::new(),
+                status: vero_core::RuleApprovalStatus::Active,
                 events: Vec::new(),
             })
             .unwrap();
@@ -11931,7 +11932,7 @@ printf '%s\n' '{{"type":"item.completed","item":{{"type":"agent_message","text":
                 supersedes_approval_id: None,
                 expires_at_unix: None,
                 created_at: String::new(),
-                status: String::new(),
+                status: vero_core::RuleApprovalStatus::Active,
                 events: Vec::new(),
             })
             .unwrap();
@@ -11959,7 +11960,11 @@ printf '%s\n' '{{"type":"item.completed","item":{{"type":"agent_message","text":
                 .is_empty()
         );
         store
-            .revoke_rule_approval("approval-scoped", "maintainer", "Replaced")
+            .revoke_rule_approval(
+                "approval-scoped",
+                &ActorName::new("actor", "maintainer").unwrap(),
+                &Reason::new("Replaced").unwrap(),
+            )
             .unwrap();
         assert!(
             applicable_rule_guidance(&active_rule_approvals(&store).unwrap(), &[], &files)

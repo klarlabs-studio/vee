@@ -797,22 +797,8 @@ impl ReviewRepository for ReviewStore {
 }
 
 impl FindingRepository for ReviewStore {
-    fn set_finding_status(
-        &mut self,
-        id: &str,
-        status: FindingStatus,
-        reason: &str,
-    ) -> Result<(), String> {
-        if status == FindingStatus::Waived {
-            return Err(
-                "waivers require a scoped snapshot, provenance, author, and expiry; use the waiver workflow"
-                    .into(),
-            );
-        }
-        if reason.trim().is_empty() {
-            return Err("finding status reason must not be empty".into());
-        }
-        let changed = self.connection.execute("UPDATE findings SET status=?2,status_reason=?3,last_seen=CURRENT_TIMESTAMP WHERE id=?1", rusqlite::params![id,status.as_str(),reason]).map_err(|e| e.to_string())?;
+    fn set_finding_status(&mut self, id: &str, change: &FindingStatusChange) -> Result<(), String> {
+        let changed = self.connection.execute("UPDATE findings SET status=?2,status_reason=?3,last_seen=CURRENT_TIMESTAMP WHERE id=?1", rusqlite::params![id, change.status().as_str(), change.reason().as_str()]).map_err(|e| e.to_string())?;
         if changed == 0 {
             return Err(format!("finding {id} was not found"));
         }
@@ -824,12 +810,9 @@ impl FindingRepository for ReviewStore {
         finding_id: &str,
         snapshot_id: &str,
         label: FindingFeedbackLabel,
-        reason: &str,
-        reviewer: &str,
+        reason: &Reason,
+        reviewer: &ActorName,
     ) -> Result<FindingFeedback, String> {
-        if reason.trim().is_empty() || reviewer.trim().is_empty() {
-            return Err("finding feedback requires a non-empty reason and reviewer".into());
-        }
         let tx = self
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -848,8 +831,8 @@ impl FindingRepository for ReviewStore {
             format!(
                 "{finding_id}\0{snapshot_id}\0{}\0{}\0{}",
                 label.as_str(),
-                reviewer.trim(),
-                reason.trim()
+                reviewer.as_str(),
+                reason.as_str()
             )
             .as_bytes(),
         );
@@ -862,8 +845,8 @@ impl FindingRepository for ReviewStore {
             finding_id: finding_id.to_owned(),
             snapshot_id: snapshot_id.to_owned(),
             label,
-            reason: reason.trim().to_owned(),
-            reviewer: reviewer.trim().to_owned(),
+            reason: reason.as_str().to_owned(),
+            reviewer: reviewer.as_str().to_owned(),
             created_at,
         };
         let payload = serde_json::to_string(&feedback).map_err(|error| error.to_string())?;
@@ -1394,7 +1377,7 @@ impl RuleApprovalRepository for ReviewStore {
         stored.version = version;
         stored.created_at = created_at.clone();
         stored.activated_at_unix = Some(now_unix);
-        stored.status = "active".into();
+        stored.status = RuleApprovalStatus::Active;
         stored.events = vec![RuleApprovalEvent {
             event_id: activation_event_id.clone(),
             event: "activated".into(),
@@ -1421,12 +1404,9 @@ impl RuleApprovalRepository for ReviewStore {
     fn revoke_rule_approval(
         &mut self,
         approval_id: &str,
-        actor: &str,
-        reason: &str,
+        actor: &ActorName,
+        reason: &Reason,
     ) -> Result<(), String> {
-        if actor.trim().is_empty() || reason.trim().is_empty() {
-            return Err("revocation requires a non-empty actor and reason".into());
-        }
         let tx = self
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -1441,17 +1421,22 @@ impl RuleApprovalRepository for ReviewStore {
         let event_id = digest(
             format!(
                 "{approval_id}\0revoked\0{}\0{}\0{}",
-                actor.trim(),
-                reason.trim(),
+                actor.as_str(),
+                reason.as_str(),
                 created_at
             )
             .as_bytes(),
         );
-        tx.execute("INSERT INTO rule_approval_events(event_id,approval_id,event,actor,reason,created_at) VALUES (?1,?2,'revoked',?3,?4,?5)", rusqlite::params![event_id, approval_id, actor.trim(), reason.trim(), created_at]).map_err(|e| e.to_string())?;
+        tx.execute("INSERT INTO rule_approval_events(event_id,approval_id,event,actor,reason,created_at) VALUES (?1,?2,'revoked',?3,?4,?5)", rusqlite::params![event_id, approval_id, actor.as_str(), reason.as_str(), created_at]).map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())
     }
 
     fn list_rule_approvals(&self) -> Result<Vec<RuleApproval>, String> {
+        // An unreadable clock treats every expiring approval as expired.
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs() as i64)
+            .unwrap_or(i64::MAX);
         let mut statement = self
             .connection
             .prepare(
@@ -1471,15 +1456,7 @@ impl RuleApprovalRepository for ReviewStore {
             approval.events = events_statement.query_map([&id], |row| Ok(RuleApprovalEvent { event_id: row.get(0)?, event: row.get(1)?, actor: row.get(2)?, reason: row.get(3)?, created_at: row.get(4)? })).map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?;
             approval.schema_version = 2;
             approval.version = approval.version.max(1);
-            approval.status = if approval.events.iter().any(|event| event.event == "revoked") {
-                "revoked".into()
-            } else if approval.events.iter().any(|event| event.event == "superseded") {
-                "superseded".into()
-            } else if approval.expires_at_unix.is_some_and(|expiry| expiry <= std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_secs() as i64).unwrap_or(i64::MAX)) {
-                "expired".into()
-            } else {
-                "active".into()
-            };
+            approval.status = approval.status_at(now_unix);
             Ok(approval)
         }).collect()
     }
@@ -2707,8 +2684,8 @@ mod tests {
                 "id-one",
                 "snap-1",
                 FindingFeedbackLabel::Confirmed,
-                "Reproduced the boundary defect",
-                "reviewer@example.invalid",
+                &Reason::new("Reproduced the boundary defect").unwrap(),
+                &ActorName::new("reviewer", "reviewer@example.invalid").unwrap(),
             )
             .unwrap();
         assert_eq!(feedback.label, FindingFeedbackLabel::Confirmed);
@@ -2722,8 +2699,8 @@ mod tests {
                     "id-one",
                     "snap-1",
                     FindingFeedbackLabel::Confirmed,
-                    "Reproduced the boundary defect",
-                    "reviewer@example.invalid",
+                    &Reason::new("Reproduced the boundary defect").unwrap(),
+                    &ActorName::new("reviewer", "reviewer@example.invalid").unwrap()
                 )
                 .unwrap(),
             feedback,
@@ -2734,8 +2711,8 @@ mod tests {
                 "id-one",
                 "unrelated-snapshot",
                 FindingFeedbackLabel::FalsePositive,
-                "No issue",
-                "reviewer@example.invalid",
+                &Reason::new("No issue").unwrap(),
+                &ActorName::new("reviewer", "reviewer@example.invalid").unwrap()
             )
             .is_err());
         let waiver = Waiver {
@@ -2754,8 +2731,11 @@ mod tests {
         store
             .set_finding_status(
                 "id-one",
-                FindingStatus::Verified,
-                "reviewed source evidence",
+                &FindingStatusChange::new(
+                    FindingStatus::Verified,
+                    Reason::new("reviewed source evidence").unwrap(),
+                )
+                .unwrap(),
             )
             .unwrap();
         let mut later_assessment = item.clone();
@@ -2780,7 +2760,14 @@ mod tests {
         assert_eq!(first_page[0].assessments.len(), 1);
         assert_eq!(first_page[0].assessments[0].rationale, "unsafe operation");
         store
-            .set_finding_status("id-one", FindingStatus::Resolved, "fixed in change")
+            .set_finding_status(
+                "id-one",
+                &FindingStatusChange::new(
+                    FindingStatus::Resolved,
+                    Reason::new("fixed in change").unwrap(),
+                )
+                .unwrap(),
+            )
             .unwrap();
         store
             .save_review("rev-3", "snap-3", "cfg", "block", "{}", &[item])
@@ -2799,10 +2786,12 @@ mod tests {
             .list_findings(Some(Severity::Low), None, None)
             .unwrap()
             .is_empty());
-        assert!(store
-            .set_finding_status("id-one", FindingStatus::Waived, "ignore")
-            .unwrap_err()
-            .contains("use the waiver workflow"));
+        // The store accepts only a FindingStatusChange, which cannot waive.
+        assert!(
+            FindingStatusChange::new(FindingStatus::Waived, Reason::new("ignore").unwrap())
+                .unwrap_err()
+                .contains("waiver workflow")
+        );
     }
 
     #[test]
@@ -3007,13 +2996,13 @@ mod tests {
             supersedes_approval_id: None,
             expires_at_unix: None,
             created_at: String::new(),
-            status: String::new(),
+            status: vero_core::RuleApprovalStatus::Active,
             events: Vec::new(),
         };
         store.create_rule_approval(&approval).unwrap();
         let saved = store.list_rule_approvals().unwrap();
         assert_eq!(saved.len(), 1);
-        assert_eq!(saved[0].status, "active");
+        assert_eq!(saved[0].status, vero_core::RuleApprovalStatus::Active);
         assert_eq!(saved[0].events.len(), 1);
         assert_eq!(saved[0].version, 1);
         let replacement = RuleApproval {
@@ -3025,17 +3014,28 @@ mod tests {
         };
         store.create_rule_approval(&replacement).unwrap();
         let versions = store.list_rule_approvals().unwrap();
-        assert_eq!(versions[0].status, "superseded");
+        assert_eq!(
+            versions[0].status,
+            vero_core::RuleApprovalStatus::Superseded
+        );
         assert_eq!(versions[1].version, 2);
         store
-            .revoke_rule_approval("approval-2", "maintainer", "Guidance is obsolete")
+            .revoke_rule_approval(
+                "approval-2",
+                &ActorName::new("actor", "maintainer").unwrap(),
+                &Reason::new("Guidance is obsolete").unwrap(),
+            )
             .unwrap();
         let revoked = store.list_rule_approvals().unwrap();
-        assert_eq!(revoked[1].status, "revoked");
+        assert_eq!(revoked[1].status, vero_core::RuleApprovalStatus::Revoked);
         assert_eq!(revoked[1].events.len(), 2);
         assert_eq!(revoked[1].events[1].event, "revoked");
         assert!(store
-            .revoke_rule_approval("approval-2", "maintainer", "duplicate")
+            .revoke_rule_approval(
+                "approval-2",
+                &ActorName::new("actor", "maintainer").unwrap(),
+                &Reason::new("duplicate").unwrap()
+            )
             .is_err());
     }
 
@@ -3067,7 +3067,7 @@ mod tests {
                     + 3600,
             ),
             created_at: String::new(),
-            status: String::new(),
+            status: vero_core::RuleApprovalStatus::Active,
             events: Vec::new(),
         };
         store.create_rule_approval(&approval).unwrap();
@@ -3090,7 +3090,7 @@ mod tests {
             )
             .unwrap();
         let expired = store.list_rule_approvals().unwrap();
-        assert_eq!(expired[0].status, "expired");
+        assert_eq!(expired[0].status, vero_core::RuleApprovalStatus::Expired);
         let mut replacement = approval;
         replacement.approval_id = "approval-after-expiry".into();
         replacement.expires_at_unix = None;
@@ -3101,7 +3101,7 @@ mod tests {
             .find(|item| item.approval_id == "approval-after-expiry")
             .unwrap();
         assert_eq!(replacement.version, 2);
-        assert_eq!(replacement.status, "active");
+        assert_eq!(replacement.status, vero_core::RuleApprovalStatus::Active);
     }
 
     #[test]

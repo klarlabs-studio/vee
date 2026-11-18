@@ -439,7 +439,7 @@ pub(crate) fn effectiveness(
         results.push(RuleEffectiveness {
             approval_id: approval.approval_id.clone(),
             version: approval.version,
-            status: approval.status.clone(),
+            status: approval.status.as_str().to_owned(),
             source_feedback_ids: approval.source_feedback_ids.clone(),
             evidence_digest: approval.evidence_digest.clone(),
             baseline,

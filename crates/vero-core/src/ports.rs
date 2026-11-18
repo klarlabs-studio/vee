@@ -29,20 +29,15 @@ pub trait ReviewRepository {
 
 /// Consolidated findings across reviews, their lifecycle status, and human feedback on them.
 pub trait FindingRepository {
-    fn set_finding_status(
-        &mut self,
-        id: &str,
-        status: FindingStatus,
-        reason: &str,
-    ) -> Result<(), String>;
+    fn set_finding_status(&mut self, id: &str, change: &FindingStatusChange) -> Result<(), String>;
 
     fn add_finding_feedback(
         &mut self,
         finding_id: &str,
         snapshot_id: &str,
         label: FindingFeedbackLabel,
-        reason: &str,
-        reviewer: &str,
+        reason: &Reason,
+        reviewer: &ActorName,
     ) -> Result<FindingFeedback, String>;
 
     fn list_finding_feedback(&self) -> Result<Vec<FindingFeedback>, String>;
@@ -117,8 +112,8 @@ pub trait RuleApprovalRepository {
     fn revoke_rule_approval(
         &mut self,
         approval_id: &str,
-        actor: &str,
-        reason: &str,
+        actor: &ActorName,
+        reason: &Reason,
     ) -> Result<(), String>;
 
     fn list_rule_approvals(&self) -> Result<Vec<RuleApproval>, String>;

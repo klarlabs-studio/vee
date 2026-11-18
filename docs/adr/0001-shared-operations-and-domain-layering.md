@@ -1,6 +1,6 @@
 # ADR 0001: One operations layer for all transports, and a path to domain layering
 
-- **Status:** Accepted (step 1 and step 2.1 implemented); steps 2.2 and 2.3 in progress
+- **Status:** Accepted (step 1, steps 2.1 and 2.2 implemented); step 2.3 in progress
 - **Date:** 2026-11-17
 
 ## Context
@@ -77,6 +77,15 @@ Restructure toward domain layering, in this order:
 2. **Invariants in the model.** Finding status transitions (no waiving through a
    status change), typed approval status, and bounded value types for reasons and
    actor names.
+
+   *Implemented (2026-11-18):* `vero_core::lifecycle` defines `Reason` (1–4,000
+   characters) and `ActorName` (1–200 characters), both trimmed;
+   `FindingStatusChange`, which cannot be built with `waived`; and
+   `RuleApprovalStatus`, derived by `RuleApproval::status_at` from the
+   append-only events and expiry. The repository ports accept only these
+   values, so the CLI, MCP, and HTTP transports, and the SQLite store, no
+   longer carry their own copies of these checks. Waiver reasons and authors
+   now have the same bounds (they previously only had to be non-empty).
 3. **Use cases in `vero-application`, by bounded context:** Review (capture,
    reviewers, findings), Gate & Policy (decisions, waivers, evidence), Verification,
    Learning (feedback, rule candidates and approvals), and Context & Impact.

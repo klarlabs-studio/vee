@@ -401,6 +401,7 @@ fn severity_name(severity: Severity) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vero_core::{ActorName, Reason};
     use vero_store_sqlite::ReviewStore;
 
     #[test]
@@ -708,8 +709,8 @@ mod tests {
                     finding_id,
                     snapshot_id,
                     label,
-                    "reviewed fixture",
-                    "reviewer",
+                    &Reason::new("reviewed fixture").unwrap(),
+                    &ActorName::new("reviewer", "reviewer").unwrap(),
                 )
                 .unwrap();
         }

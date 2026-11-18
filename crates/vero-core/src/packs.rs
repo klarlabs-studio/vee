@@ -197,10 +197,12 @@ fn validate_pack(directory: &Path, pack: &PolicyPack) -> Result<(), String> {
         }
     }
     for rule in &pack.rules {
-        if rule.status != "active" {
+        if !rule.is_active() {
             return Err(format!(
                 "pack {}: rule {} must be active (got {})",
-                pack.name, rule.approval_id, rule.status
+                pack.name,
+                rule.approval_id,
+                rule.status.as_str()
             ));
         }
     }

@@ -2,8 +2,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+pub mod lifecycle;
 pub mod packs;
 pub mod ports;
+pub use lifecycle::{ActorName, FindingStatusChange, Reason, RuleApprovalStatus};
 pub use packs::{PackReference, PolicyPack};
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -91,7 +93,9 @@ pub struct RuleApproval {
     #[serde(default)]
     pub expires_at_unix: Option<i64>,
     pub created_at: String,
-    pub status: String,
+    /// Derived from `events` and expiry when loaded; see [`RuleApproval::status_at`].
+    #[serde(default)]
+    pub status: RuleApprovalStatus,
     pub events: Vec<RuleApprovalEvent>,
 }
 

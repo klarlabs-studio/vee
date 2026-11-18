@@ -856,37 +856,20 @@ async fn update_finding_status(
     Json(update): Json<FindingStatusUpdate>,
 ) -> Result<Json<FindingStatusUpdated>, ApiError> {
     check_origin(&headers, &state.origin, state.auth_token.as_deref())?;
-    let reason = update.reason.trim();
-    if reason.is_empty() || reason.chars().count() > 4000 {
-        return Err(ApiError {
-            error: "reason must contain 1 to 4000 characters".into(),
-        });
-    }
-    let status = match update.status.as_str() {
-        "open" => FindingStatus::Open,
-        "verified" => FindingStatus::Verified,
-        "refuted" => FindingStatus::Refuted,
-        "resolved" => FindingStatus::Resolved,
-        "waived" => {
-            return Err(ApiError {
-                error: "waivers require a scoped snapshot, provenance, author, and expiry; use the waiver workflow".into(),
-            });
-        }
-        _ => {
-            return Err(ApiError {
-                error: "status must be open, verified, refuted, or resolved".into(),
-            });
-        }
-    };
+    let reason = vero_core::Reason::new(&update.reason).map_err(api_error)?;
+    let status = FindingStatus::parse(&update.status).map_err(|_| ApiError {
+        error: "status must be open, verified, refuted, or resolved".into(),
+    })?;
+    let change = vero_core::FindingStatusChange::new(status, reason).map_err(api_error)?;
     open_store(&state.root)
         .map_err(api_error)?
-        .set_finding_status(&finding_id, status, reason)
+        .set_finding_status(&finding_id, &change)
         .map_err(api_error)?;
     Ok(Json(FindingStatusUpdated {
         schema_version: 1,
         finding_id,
         status: update.status,
-        reason: reason.into(),
+        reason: change.reason().as_str().into(),
         note: "Lifecycle status is audit metadata. Use the waiver workflow for a scoped gate exception.".into(),
     }))
 }

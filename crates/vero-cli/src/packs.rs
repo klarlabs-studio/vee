@@ -139,7 +139,7 @@ pub fn export(workspace: &Workspace, request: ExportRequest<'_>) -> Result<PackS
     let rules = if request.include_rules {
         let mut rules: Vec<_> = crate::operations::list_rule_approvals(workspace)?
             .into_iter()
-            .filter(|approval| approval.status == "active")
+            .filter(|approval| approval.is_active())
             .collect();
         for rule in &config.pack_rules {
             if !rules
