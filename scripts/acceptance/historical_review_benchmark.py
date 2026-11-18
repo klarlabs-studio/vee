@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import runpy
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -26,8 +27,18 @@ def git(repo: pathlib.Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def resolve_executable(name: str) -> pathlib.Path:
+    """Resolve a path, or a bare command name through PATH, to an absolute path."""
+    if os.sep not in name and (os.altsep is None or os.altsep not in name):
+        found = shutil.which(name)
+        if found is None:
+            raise SystemExit(f"{name} was not found on PATH")
+        name = found
+    return pathlib.Path(name).resolve(strict=True)
+
+
 def main() -> int:
-    vee = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "target/debug/vee").resolve(strict=True)
+    vee = resolve_executable(sys.argv[1] if len(sys.argv) > 1 else "target/debug/vee")
     runner = pathlib.Path(__file__).resolve().parents[1] / "historical-review-benchmark.py"
     with tempfile.TemporaryDirectory(prefix="vee-historical-acceptance-") as temporary:
         root = pathlib.Path(temporary)
