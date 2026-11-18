@@ -5356,8 +5356,11 @@ impl RustAnalyzerSession {
                     "textDocument": {"definition": {"dynamicRegistration": false, "linkSupport": true}},
                     "experimental": {"serverStatusNotification": true}
                 },
+                // Cross-repository definitions live in local crates, so skip
+                // indexing the standard library: it dominates startup and made
+                // resolution exceed its time budget on a loaded machine.
                 "initializationOptions": {
-                    "cargo": {"buildScripts": {"enable": false}, "extraArgs": ["--offline"]},
+                    "cargo": {"buildScripts": {"enable": false}, "extraArgs": ["--offline"], "sysroot": null},
                     "procMacro": {"enable": false},
                     "checkOnSave": {"enable": false}
                 }
