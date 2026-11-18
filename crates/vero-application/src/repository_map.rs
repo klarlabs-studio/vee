@@ -6267,9 +6267,9 @@ impl ConsumerSymbolVisitor<'_> {
                                 proc_macro2::TokenTree::Punct(punct) if punct.as_char() == '.'
                             );
                         let context = if after_dot {
-                            "macro_method_call"
+                            "method_call"
                         } else {
-                            "macro_function_call"
+                            "function_call"
                         };
                         self.record_call_symbol(identifier, context);
                     }
@@ -7226,9 +7226,9 @@ mod tests {
         assert_eq!(
             found,
             vec![
-                ("changed", 2, Some(18), "macro_function_call"),
-                ("changed_method", 2, Some(42), "macro_method_call"),
-                ("changed", 3, Some(32), "macro_function_call"),
+                ("changed", 2, Some(18), "function_call"),
+                ("changed_method", 2, Some(42), "method_call"),
+                ("changed", 3, Some(32), "function_call"),
             ]
         );
     }
