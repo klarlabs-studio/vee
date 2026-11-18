@@ -1,6 +1,6 @@
 # ADR 0001: One operations layer for all transports, and a path to domain layering
 
-- **Status:** Accepted (step 1 and step 2 implemented; unit tests still to be split by context)
+- **Status:** Accepted (steps 1 and 2 implemented)
 - **Date:** 2026-11-17
 
 ## Context
@@ -129,7 +129,7 @@ Restructure toward domain layering, in this order:
    `vero-process` or `vero-git` waits for a second runner, such as a remote
    or sandboxed one.
 
-   Remaining: split the unit tests in `tests` by context.
+   Unit tests live next to their context, in `src/tests/<context>.rs`.
 
 ## Consequences
 
