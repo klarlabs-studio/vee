@@ -51,6 +51,7 @@ pub fn execute_verification_capture(
     configure_process_group(&mut command);
     let mut child = command
         .env_clear()
+        .envs(platform_environment())
         .envs(environment.iter().cloned())
         .current_dir(working_directory)
         .stdin(Stdio::null())
@@ -447,6 +448,7 @@ pub fn execute_provider_cancellable(
     configure_process_group(&mut command);
     let mut child = command
         .env_clear()
+        .envs(platform_environment())
         .envs(request.environment.iter().cloned())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -540,6 +542,48 @@ pub fn execute_provider_cancellable(
     }
 }
 
+/// Variables that Windows programs need to start (`SYSTEMROOT`), find
+/// temporary and per-user directories (`TEMP`, `LOCALAPPDATA`, ...), and
+/// resolve executables (`PATHEXT`). None carries credentials. Child processes
+/// that otherwise start from an empty environment receive these, below any
+/// explicitly allowed variables. Empty elsewhere, where `PATH` and `HOME` are
+/// enough and are allowed explicitly.
+pub const PLATFORM_ENVIRONMENT: &[&str] = if cfg!(windows) {
+    &[
+        "SYSTEMROOT",
+        "SYSTEMDRIVE",
+        "WINDIR",
+        "COMSPEC",
+        "PATHEXT",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PROGRAMDATA",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "PROGRAMW6432",
+        "COMMONPROGRAMFILES",
+        "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE",
+    ]
+} else {
+    &[]
+};
+
+/// The [`PLATFORM_ENVIRONMENT`] variables this process has, for
+/// `Command::envs` right after `env_clear` and before explicitly allowed
+/// variables.
+pub fn platform_environment() -> Vec<(&'static str, std::ffi::OsString)> {
+    PLATFORM_ENVIRONMENT
+        .iter()
+        .filter_map(|name| Some((*name, std::env::var_os(name)?)))
+        .collect()
+}
+
 #[cfg(unix)]
 fn configure_process_group(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
@@ -568,6 +612,30 @@ fn terminate_process_tree(child: &mut std::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_children_receive_the_platform_environment() {
+        let mut command = std::process::Command::new("cmd");
+        command
+            .args(["/C", "echo %SYSTEMROOT%"])
+            .env_clear()
+            .envs(platform_environment());
+        let output = command.output().unwrap();
+        let echoed = String::from_utf8_lossy(&output.stdout);
+        assert!(!echoed.contains("%SYSTEMROOT%"), "{echoed}");
+        assert!(echoed.to_ascii_lowercase().contains("windows"), "{echoed}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_children_receive_no_implicit_environment() {
+        let mut command = std::process::Command::new("/usr/bin/env");
+        command.env_clear().envs(platform_environment());
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    }
 
     #[cfg(unix)]
     #[test]

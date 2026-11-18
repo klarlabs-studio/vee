@@ -1071,6 +1071,7 @@ pub(crate) fn query_typescript_references(
         .arg("0")
         .current_dir(&root)
         .env_clear()
+        .envs(vee_process::platform_environment())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -1401,6 +1402,7 @@ pub(crate) fn query_gopls_references(
         .arg("serve")
         .current_dir(&root)
         .env_clear()
+        .envs(vee_process::platform_environment())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -2378,6 +2380,7 @@ pub(crate) fn run_python_ast(
         .arg(PYTHON_AST_PROGRAM)
         .current_dir(isolated.path())
         .env_clear()
+        .envs(vee_process::platform_environment())
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

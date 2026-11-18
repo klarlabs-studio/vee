@@ -5320,6 +5320,7 @@ impl RustAnalyzerSession {
         command
             .current_dir(root)
             .env_clear()
+            .envs(vee_process::platform_environment())
             .env("CARGO_NET_OFFLINE", "true")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -5981,6 +5982,7 @@ fn run_typescript_definition(
         .arg("0")
         .current_dir(working_directory)
         .env_clear()
+        .envs(vee_process::platform_environment())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
