@@ -4163,7 +4163,7 @@ pub fn cross_impact(
         producer_root,
         consumer_roots,
         &BTreeMap::new(),
-        RustSemanticBudget::DEFAULT,
+        SemanticBudgets::DEFAULT,
     )
 }
 
@@ -4173,7 +4173,7 @@ fn cross_impact_with_baselines(
     producer_root: &Path,
     consumer_roots: &[PathBuf],
     baseline_contracts: &BTreeMap<String, Vec<u8>>,
-    rust_budget: RustSemanticBudget,
+    budgets: SemanticBudgets,
 ) -> Result<CrossRepositoryImpact, String> {
     if consumer_roots.is_empty() {
         return Err("provide at least one consumer repository".into());
@@ -4466,6 +4466,7 @@ fn cross_impact_with_baselines(
         &go_references,
         producer_root,
         consumer_roots,
+        budgets.go,
     );
     coverage_complete &= go_coverage_complete;
     limitations.extend(go_limitations);
@@ -4483,7 +4484,7 @@ fn cross_impact_with_baselines(
         producer_impact,
         producer_root,
         consumer_roots,
-        rust_budget,
+        budgets.rust,
     );
     coverage_complete &= rust_coverage_complete;
     limitations.extend(rust_limitations);
@@ -4507,6 +4508,7 @@ fn cross_impact_with_baselines(
             producer_impact,
             producer_root,
             consumer_roots,
+            budgets.typescript_total,
         );
     coverage_complete &= typescript_coverage_complete;
     limitations.extend(typescript_limitations);
@@ -4775,7 +4777,7 @@ pub fn analyze_cross_impact(
         &producer,
         consumers,
         &baseline_contracts,
-        RustSemanticBudget::DEFAULT,
+        SemanticBudgets::DEFAULT,
     )
 }
 
@@ -5020,8 +5022,41 @@ fn is_lexical_declaration(prefix: &str, suffix: &str) -> bool {
     after.starts_with('=') && !after.starts_with("==") && !after.starts_with("=>")
 }
 
-/// Time limits for rust-analyzer resolution. Exceeding one is reported as a
-/// limitation and leaves the affected matches syntax-inferred.
+/// Time limits for semantic cross-repository resolution. Exceeding one is
+/// reported as a limitation and leaves the affected matches heuristic.
+#[derive(Clone, Copy, Debug)]
+struct SemanticBudgets {
+    rust: RustSemanticBudget,
+    go: GoSemanticBudget,
+    /// All TypeScript server lookups together.
+    typescript_total: std::time::Duration,
+}
+
+impl SemanticBudgets {
+    const DEFAULT: Self = Self {
+        rust: RustSemanticBudget::DEFAULT,
+        go: GoSemanticBudget::DEFAULT,
+        typescript_total: std::time::Duration::from_secs(45),
+    };
+}
+
+/// Time limits for gopls resolution.
+#[derive(Clone, Copy, Debug)]
+struct GoSemanticBudget {
+    /// All consumer repositories together.
+    total: std::time::Duration,
+    /// One `gopls definition` run.
+    request: std::time::Duration,
+}
+
+impl GoSemanticBudget {
+    const DEFAULT: Self = Self {
+        total: std::time::Duration::from_secs(45),
+        request: std::time::Duration::from_secs(15),
+    };
+}
+
+/// Time limits for rust-analyzer resolution.
 #[derive(Clone, Copy, Debug)]
 struct RustSemanticBudget {
     /// All consumer repositories together.
@@ -5620,6 +5655,7 @@ fn resolve_go_consumer_references(
     candidate_indices: &[usize],
     producer_root: &Path,
     consumer_roots: &[PathBuf],
+    budget: GoSemanticBudget,
 ) -> (bool, Vec<String>) {
     let _gopls_lock = GO_CROSS_REPO_LOCK
         .lock()
@@ -5654,10 +5690,10 @@ fn resolve_go_consumer_references(
     let checked_count = candidate_indices.len().min(MAX_GO_SEMANTIC_REFERENCES);
     let analysis_started = std::time::Instant::now();
     for index in candidate_indices.iter().take(checked_count).copied() {
-        if analysis_started.elapsed() >= std::time::Duration::from_secs(45) {
+        if analysis_started.elapsed() >= budget.total {
             complete = false;
             limitations.push(
-                "gopls cross-repository resolution reached its 45 second total time limit; remaining Go matches are lexical heuristics.".into(),
+                format!("gopls cross-repository resolution reached its {} second total time limit; remaining Go matches are lexical heuristics.", budget.total.as_secs()),
             );
             break;
         }
@@ -5673,7 +5709,7 @@ fn resolve_go_consumer_references(
         }
         let source = repository.join(&reference.path);
         let position = format!("{}:{}:{column}", source.display(), reference.line);
-        match run_gopls_definition(&executable, &repository, &position) {
+        match run_gopls_definition(&executable, &repository, &position, budget.request) {
             Ok(Some(definition)) => {
                 let Ok(definition) = definition.canonicalize() else {
                     complete = false;
@@ -5729,6 +5765,7 @@ fn resolve_typescript_consumer_references(
     producer_impact: &crate::ImpactAssessment,
     producer_root: &Path,
     consumer_roots: &[PathBuf],
+    total_budget: std::time::Duration,
 ) -> (bool, Vec<String>) {
     let candidates = candidate_indices
         .iter()
@@ -5793,10 +5830,10 @@ fn resolve_typescript_consumer_references(
     let start = std::time::Instant::now();
     let checked = candidates.len().min(MAX_TYPESCRIPT_SEMANTIC_REFERENCES);
     for index in candidates.iter().take(checked).copied() {
-        let remaining = std::time::Duration::from_secs(45).saturating_sub(start.elapsed());
+        let remaining = total_budget.saturating_sub(start.elapsed());
         if remaining.is_zero() {
             complete = false;
-            limitations.push("TypeScript cross-repository resolution reached its 45 second total time limit; remaining matches are lexical heuristics.".into());
+            limitations.push(format!("TypeScript cross-repository resolution reached its {} second total time limit; remaining matches are lexical heuristics.", total_budget.as_secs()));
             break;
         }
         let Some(reference) = references.get_mut(index) else {
@@ -6168,6 +6205,7 @@ fn run_gopls_definition(
     executable: &Path,
     working_directory: &Path,
     position: &str,
+    time_limit: std::time::Duration,
 ) -> Result<Option<PathBuf>, String> {
     use std::{io::Read, process::Stdio, time::Duration};
 
@@ -6206,7 +6244,7 @@ fn run_gopls_definition(
         {
             break status;
         }
-        if started.elapsed() >= Duration::from_secs(15) {
+        if started.elapsed() >= time_limit {
             let _ = child.kill();
             let _ = child.wait();
             let _ = reader.join();
@@ -9094,21 +9132,62 @@ operations:
             limitations: Vec::new(),
         };
         let dependency_map = build(&[producer.clone(), consumer.clone()]).unwrap();
-        let report =
-            cross_impact(&producer_impact, &dependency_map, &producer, &[consumer]).unwrap();
+        let report = cross_impact_with_baselines(
+            &producer_impact,
+            &dependency_map,
+            &producer,
+            std::slice::from_ref(&consumer),
+            &BTreeMap::new(),
+            UNHURRIED_BUDGETS,
+        )
+        .unwrap();
         assert!(report.coverage_complete, "{:?}", report.limitations);
         assert_eq!(report.references.len(), 1);
         assert_eq!(report.references[0].certainty, "semantic_resolved");
         assert_eq!(report.references[0].symbol, "Changed");
+
+        let exhausted = cross_impact_with_baselines(
+            &producer_impact,
+            &dependency_map,
+            &producer,
+            &[consumer],
+            &BTreeMap::new(),
+            SemanticBudgets {
+                go: GoSemanticBudget {
+                    total: std::time::Duration::ZERO,
+                    ..UNHURRIED_BUDGETS.go
+                },
+                ..UNHURRIED_BUDGETS
+            },
+        )
+        .unwrap();
+        assert!(!exhausted.coverage_complete);
+        assert!(
+            exhausted
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains(
+                    "gopls cross-repository resolution reached its 0 second total time limit"
+                )),
+            "{:?}",
+            exhausted.limitations
+        );
         assert_eq!(report.references[0].path, "client.go");
     }
 
-    /// A budget no healthy rust-analyzer run reaches, for tests that assert
+    /// Budgets no healthy language server reaches, for tests that assert
     /// semantic resolution rather than time-limit handling.
-    const UNHURRIED_RUST_BUDGET: RustSemanticBudget = RustSemanticBudget {
-        total: std::time::Duration::from_secs(600),
-        initialize: std::time::Duration::from_secs(300),
-        request: std::time::Duration::from_secs(120),
+    const UNHURRIED_BUDGETS: SemanticBudgets = SemanticBudgets {
+        rust: RustSemanticBudget {
+            total: std::time::Duration::from_secs(600),
+            initialize: std::time::Duration::from_secs(300),
+            request: std::time::Duration::from_secs(120),
+        },
+        go: GoSemanticBudget {
+            total: std::time::Duration::from_secs(600),
+            request: std::time::Duration::from_secs(120),
+        },
+        typescript_total: std::time::Duration::from_secs(600),
     };
 
     #[test]
@@ -9157,7 +9236,7 @@ operations:
             &producer,
             std::slice::from_ref(&consumer),
             &BTreeMap::new(),
-            UNHURRIED_RUST_BUDGET,
+            UNHURRIED_BUDGETS,
         )
         .unwrap();
         assert!(report.coverage_complete, "{:?}", report.limitations);
@@ -9220,7 +9299,7 @@ operations:
             &producer,
             std::slice::from_ref(&consumer),
             &BTreeMap::new(),
-            UNHURRIED_RUST_BUDGET,
+            UNHURRIED_BUDGETS,
         )
         .unwrap();
         assert!(report.coverage_complete, "{:?}", report.limitations);
@@ -9276,8 +9355,15 @@ operations:
             limitations: Vec::new(),
         };
         let dependency_map = build(&[producer.clone(), consumer.clone()]).unwrap();
-        let report =
-            cross_impact(&producer_impact, &dependency_map, &producer, &[consumer]).unwrap();
+        let report = cross_impact_with_baselines(
+            &producer_impact,
+            &dependency_map,
+            &producer,
+            std::slice::from_ref(&consumer),
+            &BTreeMap::new(),
+            UNHURRIED_BUDGETS,
+        )
+        .unwrap();
         assert!(report.coverage_complete, "{:?}", report.limitations);
         assert_eq!(report.references.len(), 2, "{:?}", report.references);
         assert!(report
@@ -9285,6 +9371,30 @@ operations:
             .iter()
             .all(|reference| reference.certainty == "semantic_resolved"
                 && reference.path == "src/client.ts"));
+
+        let exhausted = cross_impact_with_baselines(
+            &producer_impact,
+            &dependency_map,
+            &producer,
+            &[consumer],
+            &BTreeMap::new(),
+            SemanticBudgets {
+                typescript_total: std::time::Duration::ZERO,
+                ..UNHURRIED_BUDGETS
+            },
+        )
+        .unwrap();
+        assert!(!exhausted.coverage_complete);
+        assert!(
+            exhausted
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains(
+                    "TypeScript cross-repository resolution reached its 0 second total time limit"
+                )),
+            "{:?}",
+            exhausted.limitations
+        );
     }
 
     #[test]
@@ -9340,8 +9450,15 @@ operations:
             limitations: Vec::new(),
         };
         let dependency_map = build(&[producer.clone(), consumer.clone()]).unwrap();
-        let report =
-            cross_impact(&producer_impact, &dependency_map, &producer, &[consumer]).unwrap();
+        let report = cross_impact_with_baselines(
+            &producer_impact,
+            &dependency_map,
+            &producer,
+            std::slice::from_ref(&consumer),
+            &BTreeMap::new(),
+            UNHURRIED_BUDGETS,
+        )
+        .unwrap();
         assert!(report.coverage_complete, "{:?}", report.limitations);
         assert_eq!(report.references.len(), 2, "{:?}", report.references);
         assert!(
