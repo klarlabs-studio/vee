@@ -705,7 +705,7 @@ fn verify_snapshot_files(root: &Path, snapshot: &ChangeSet) -> Result<(), String
         .iter()
         .map(|file| PathBuf::from(&file.path))
         .collect::<Vec<_>>();
-    let copied = vero_core::snapshot_files(root, &paths)?;
+    let copied = vero_git::snapshot_files(root, &paths)?;
     for expected in &snapshot.files {
         let actual = copied.iter().find(|file| file.path == expected.path);
         if expected.status == "deleted" {

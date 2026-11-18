@@ -18,10 +18,10 @@ pub fn validate_bytes(root: &Path, patch: &[u8]) -> Result<PatchSandboxResult, S
     if paths.is_empty() {
         return Err("patch contains no file changes".into());
     }
-    let input_files = vero_core::snapshot_files(root, &paths)?;
+    let input_files = vero_git::snapshot_files(root, &paths)?;
     let sandbox = tempfile::tempdir().map_err(|error| error.to_string())?;
     materialize(root, sandbox.path(), &input_files)?;
-    let copied = vero_core::snapshot_files(sandbox.path(), &paths)?;
+    let copied = vero_git::snapshot_files(sandbox.path(), &paths)?;
     if copied != input_files {
         return Err("patch inputs changed while preparing the isolated sandbox".into());
     }
@@ -31,7 +31,7 @@ pub fn validate_bytes(root: &Path, patch: &[u8]) -> Result<PatchSandboxResult, S
         patch,
     )?;
     run_git(sandbox.path(), &["apply", "--no-index", "--"], patch)?;
-    let result_files = vero_core::snapshot_files(sandbox.path(), &paths)?;
+    let result_files = vero_git::snapshot_files(sandbox.path(), &paths)?;
     let canonical =
         serde_json::to_vec(&(&input_files, &result_files)).map_err(|error| error.to_string())?;
     Ok(PatchSandboxResult {

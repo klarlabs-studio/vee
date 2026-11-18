@@ -4462,7 +4462,7 @@ fn run() -> Result<u8> {
                     current.digest == source_snapshot.digest,
                     "source snapshot changed during test patch validation"
                 );
-                let final_inputs = vero_core::snapshot_files(
+                let final_inputs = vero_git::snapshot_files(
                     &root,
                     &sandbox_result
                         .input_files
@@ -4482,7 +4482,7 @@ fn run() -> Result<u8> {
                 }
                 patch_sandbox::apply_bytes(&root, &apply_args, &patch_bytes)
                     .map_err(anyhow::Error::msg)?;
-                let observed_outputs = vero_core::snapshot_files(
+                let observed_outputs = vero_git::snapshot_files(
                     &root,
                     &sandbox_result
                         .result_files
@@ -7506,7 +7506,7 @@ fn run() -> Result<u8> {
                         current,
                         "source snapshot changed during patch validation; patch was not applied"
                     );
-                    let final_inputs = vero_core::snapshot_files(
+                    let final_inputs = vero_git::snapshot_files(
                         std::path::Path::new(&top),
                         &sandbox_result
                             .input_files
@@ -7530,7 +7530,7 @@ fn run() -> Result<u8> {
                         &patch_bytes,
                     )
                     .map_err(anyhow::Error::msg)?;
-                    let observed_outputs = vero_core::snapshot_files(
+                    let observed_outputs = vero_git::snapshot_files(
                         std::path::Path::new(&top),
                         &sandbox_result
                             .result_files

@@ -3147,8 +3147,11 @@ mod tests {
             env_allowlist: vec![],
             sarif: None,
         };
-        let first = vero_process::execute_verification("snapshot-1", "tests", dir.path(), &profile).unwrap();
-        let second = vero_process::execute_verification("snapshot-1", "tests", dir.path(), &profile).unwrap();
+        let first = vero_process::execute_verification("snapshot-1", "tests", dir.path(), &profile)
+            .unwrap();
+        let second =
+            vero_process::execute_verification("snapshot-1", "tests", dir.path(), &profile)
+                .unwrap();
         assert_eq!(first.status, VerificationStatus::Failed);
         assert_eq!(first.exit_code, Some(7));
         assert_eq!(first.stdout_digest, second.stdout_digest);

@@ -71,6 +71,9 @@ Restructure toward domain layering, in this order:
    function opening `.vero/vero.sqlite` itself. Reviewer provider and
    verification subprocess execution moved to the `vero-process` adapter, so
    `vero-core` no longer depends on `libc`, `tempfile`, or `tokio-util`.
+   Working-tree and index snapshot capture (`snapshot_files`,
+   `snapshot_index_files`) moved to `vero-git`, so `vero-core` no longer runs
+   processes or reads the working tree.
 2. **Invariants in the model.** Finding status transitions (no waiving through a
    status change), typed approval status, and bounded value types for reasons and
    actor names.
