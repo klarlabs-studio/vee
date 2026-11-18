@@ -13,6 +13,7 @@ use std::{
     sync::Arc,
 };
 use vero_application::ReviewResult;
+use vero_core::ports::*;
 use vero_core::{FindingRecord, FindingStatus, RepositoryConfig, ReviewSummary, Severity};
 use vero_store_sqlite::ReviewStore;
 

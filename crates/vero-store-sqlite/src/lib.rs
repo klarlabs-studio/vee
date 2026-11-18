@@ -4,6 +4,7 @@
 
 use rusqlite::OptionalExtension;
 use std::path::Path;
+use vero_core::ports::*;
 use vero_core::*;
 
 pub struct ReviewStore {
@@ -530,243 +531,6 @@ impl ReviewStore {
         Ok(Self { connection })
     }
 
-    pub fn hosted_finding_threads(
-        &self,
-        target_key: &str,
-    ) -> Result<std::collections::BTreeSet<String>, String> {
-        if target_key.trim().is_empty() {
-            return Err("hosting target identity is required".into());
-        }
-        let mut statement = self.connection
-            .prepare("SELECT fingerprint FROM hosted_finding_threads WHERE target_key=?1 ORDER BY fingerprint")
-            .map_err(|error| error.to_string())?;
-        let rows = statement
-            .query_map([target_key], |row| row.get::<_, String>(0))
-            .map_err(|error| error.to_string())?;
-        rows.collect::<Result<std::collections::BTreeSet<_>, _>>()
-            .map_err(|error| error.to_string())
-    }
-
-    pub fn replace_hosted_finding_threads(
-        &mut self,
-        target_key: &str,
-        fingerprints: &std::collections::BTreeSet<String>,
-    ) -> Result<(), String> {
-        if target_key.trim().is_empty() {
-            return Err("hosting target identity is required".into());
-        }
-        let tx = self
-            .connection
-            .transaction()
-            .map_err(|error| error.to_string())?;
-        tx.execute(
-            "DELETE FROM hosted_finding_threads WHERE target_key=?1",
-            [target_key],
-        )
-        .map_err(|error| error.to_string())?;
-        for fingerprint in fingerprints {
-            tx.execute(
-                "INSERT INTO hosted_finding_threads(target_key,fingerprint) VALUES (?1,?2)",
-                rusqlite::params![target_key, fingerprint],
-            )
-            .map_err(|error| error.to_string())?;
-        }
-        tx.commit().map_err(|error| error.to_string())
-    }
-
-    /// Atomically claim a signature-verified webhook event. A repeated event ID
-    /// with different content is rejected. Expired leases can be reclaimed so
-    /// a crashed worker does not permanently lose the delivery.
-    #[allow(clippy::too_many_arguments)]
-    pub fn claim_webhook_delivery(
-        &mut self,
-        provider: &str,
-        event_id: &str,
-        event_type: &str,
-        delivery_attempt: u32,
-        payload_digest: &str,
-        now_unix: i64,
-        lease_seconds: i64,
-    ) -> Result<WebhookClaim, String> {
-        if provider.trim().is_empty()
-            || event_id.trim().is_empty()
-            || event_type.trim().is_empty()
-            || delivery_attempt == 0
-            || !is_sha256_digest(payload_digest)
-            || lease_seconds <= 0
-        {
-            return Err(
-                "webhook delivery identity, digest, and positive lease are required".into(),
-            );
-        }
-        use rusqlite::TransactionBehavior;
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| error.to_string())?;
-        tx.execute(
-            "INSERT OR IGNORE INTO webhook_deliveries(provider,event_id,event_type,delivery_attempt,payload_digest,state,received_at_unix) VALUES (?1,?2,?3,?4,?5,'received',?6)",
-            rusqlite::params![provider,event_id,event_type,delivery_attempt,payload_digest,now_unix],
-        ).map_err(|error| error.to_string())?;
-        let (stored_digest, state, lease_expiry): (String,String,i64) = tx.query_row(
-            "SELECT payload_digest,state,lease_expires_at_unix FROM webhook_deliveries WHERE provider=?1 AND event_id=?2",
-            rusqlite::params![provider,event_id],
-            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
-        ).map_err(|error| error.to_string())?;
-        if stored_digest != payload_digest {
-            return Err("webhook event ID was reused with a different payload digest".into());
-        }
-        if state == "processed" {
-            tx.commit().map_err(|error| error.to_string())?;
-            return Ok(WebhookClaim::AlreadyProcessed);
-        }
-        if state == "processing" && lease_expiry > now_unix {
-            tx.commit().map_err(|error| error.to_string())?;
-            return Ok(WebhookClaim::InProgress);
-        }
-        static LEASE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let sequence = LEASE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let lease_token = format!("{}:{now_unix}:{sequence}", std::process::id());
-        tx.execute(
-            "UPDATE webhook_deliveries SET event_type=?1,delivery_attempt=MAX(delivery_attempt,?2),state='processing',lease_token=?3,lease_expires_at_unix=?4 WHERE provider=?5 AND event_id=?6",
-            rusqlite::params![event_type,delivery_attempt,lease_token,now_unix.saturating_add(lease_seconds),provider,event_id],
-        ).map_err(|error| error.to_string())?;
-        tx.commit().map_err(|error| error.to_string())?;
-        Ok(WebhookClaim::Acquired { lease_token })
-    }
-
-    /// Extend the processing lease only when the caller still owns it.
-    pub fn renew_webhook_delivery(
-        &mut self,
-        provider: &str,
-        event_id: &str,
-        lease_token: &str,
-        now_unix: i64,
-        lease_seconds: i64,
-    ) -> Result<(), String> {
-        if provider.trim().is_empty()
-            || event_id.trim().is_empty()
-            || lease_token.trim().is_empty()
-            || lease_seconds <= 0
-        {
-            return Err("webhook lease identity and positive duration are required".into());
-        }
-        let changed = self.connection.execute(
-            "UPDATE webhook_deliveries SET lease_expires_at_unix=?1 WHERE provider=?2 AND event_id=?3 AND state='processing' AND lease_token=?4 AND lease_expires_at_unix>?5",
-            rusqlite::params![now_unix.saturating_add(lease_seconds), provider, event_id, lease_token, now_unix],
-        ).map_err(|error| error.to_string())?;
-        if changed != 1 {
-            return Err("webhook delivery lease is no longer owned by this worker".into());
-        }
-        Ok(())
-    }
-
-    /// Mark a delivery complete only for the worker that currently owns its lease.
-    pub fn complete_webhook_delivery(
-        &mut self,
-        provider: &str,
-        event_id: &str,
-        lease_token: &str,
-        now_unix: i64,
-    ) -> Result<(), String> {
-        let changed = self.connection.execute(
-            "UPDATE webhook_deliveries SET state='processed',processed_at_unix=?1,lease_token=NULL,lease_expires_at_unix=0 WHERE provider=?2 AND event_id=?3 AND state='processing' AND lease_token=?4 AND lease_expires_at_unix>?5",
-            rusqlite::params![now_unix,provider,event_id,lease_token,now_unix],
-        ).map_err(|error| error.to_string())?;
-        if changed != 1 {
-            return Err("webhook delivery lease is no longer owned by this worker".into());
-        }
-        Ok(())
-    }
-
-    /// Count or remove completed webhook receipts older than a caller-selected
-    /// cutoff. In-flight and retryable deliveries are never eligible.
-    pub fn prune_processed_webhook_deliveries_before(
-        &mut self,
-        cutoff_unix: i64,
-        apply: bool,
-    ) -> Result<u64, String> {
-        if cutoff_unix < 0 {
-            return Err("webhook retention cutoff must be a non-negative timestamp".into());
-        }
-        let tx = self
-            .connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|error| error.to_string())?;
-        let count: i64 = tx
-            .query_row(
-                "SELECT COUNT(*) FROM webhook_deliveries WHERE state='processed' AND processed_at_unix IS NOT NULL AND processed_at_unix<?1",
-                [cutoff_unix],
-                |row| row.get(0),
-            )
-            .map_err(|error| error.to_string())?;
-        if apply {
-            tx.execute(
-                "DELETE FROM webhook_deliveries WHERE state='processed' AND processed_at_unix IS NOT NULL AND processed_at_unix<?1",
-                [cutoff_unix],
-            )
-            .map_err(|error| error.to_string())?;
-        }
-        tx.commit().map_err(|error| error.to_string())?;
-        u64::try_from(count).map_err(|error| error.to_string())
-    }
-
-    /// Release a failed delivery so the hosting provider can retry immediately.
-    pub fn release_webhook_delivery(
-        &mut self,
-        provider: &str,
-        event_id: &str,
-        lease_token: &str,
-    ) -> Result<(), String> {
-        let changed = self.connection.execute(
-            "UPDATE webhook_deliveries SET state='received',lease_token=NULL,lease_expires_at_unix=0 WHERE provider=?1 AND event_id=?2 AND state='processing' AND lease_token=?3",
-            rusqlite::params![provider,event_id,lease_token],
-        ).map_err(|error| error.to_string())?;
-        if changed != 1 {
-            return Err("webhook delivery lease is no longer owned by this worker".into());
-        }
-        Ok(())
-    }
-
-    /// Retrieve a successful provider response keyed by the complete request and tool identity.
-    pub fn provider_cache_get(&self, request_key: &str) -> Result<Option<Vec<u8>>, String> {
-        let cached: Option<(String, Vec<u8>)> = self
-            .connection
-            .query_row(
-                "SELECT stdout_digest,stdout FROM provider_cache WHERE request_key=?1",
-                [request_key],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(|error| error.to_string())?;
-        match cached {
-            Some((expected, stdout)) if digest(&stdout) == expected => Ok(Some(stdout)),
-            Some(_) => Err("provider cache response failed its content digest check".into()),
-            None => Ok(None),
-        }
-    }
-
-    /// Store a validated successful response. Callers must validate the provider schema first.
-    pub fn provider_cache_put(
-        &mut self,
-        request_key: &str,
-        provider_version: &str,
-        stdout: &[u8],
-    ) -> Result<(), String> {
-        if !is_sha256_digest(request_key) {
-            return Err("provider cache key must be a SHA-256 digest".into());
-        }
-        if provider_version.trim().is_empty() {
-            return Err("provider cache requires a known provider version".into());
-        }
-        self.connection
-            .execute(
-                "INSERT OR IGNORE INTO provider_cache(request_key,provider_version,stdout_digest,stdout) VALUES (?1,?2,?3,?4)",
-                rusqlite::params![request_key, provider_version, digest(stdout), stdout],
-            )
-            .map_err(|error| error.to_string())?;
-        Ok(())
-    }
     pub fn save(
         &mut self,
         id: &str,
@@ -783,262 +547,6 @@ impl ReviewStore {
         .map_err(|e| e.to_string())?;
         tx.execute("INSERT INTO reviews(id,snapshot_id,config_digest,status,payload) VALUES (?1,?2,?3,?4,?5)", rusqlite::params![id,snapshot_id,config_digest,status,payload]).map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())
-    }
-    pub fn get(&self, id: &str) -> Result<Option<String>, String> {
-        self.connection
-            .query_row("SELECT payload FROM reviews WHERE id=?1", [id], |row| {
-                row.get(0)
-            })
-            .optional()
-            .map_err(|e| e.to_string())
-    }
-
-    /// Record the manifest of a snapshot that a verification ran on, so reports
-    /// can reconstruct its changes without a review. Existing manifests are kept.
-    pub fn record_snapshot_manifest(
-        &mut self,
-        snapshot_id: &str,
-        manifest_json: &str,
-    ) -> Result<(), String> {
-        validate_snapshot_manifest(snapshot_id, manifest_json)?;
-        self.connection
-            .execute(
-                "INSERT OR IGNORE INTO snapshots(snapshot_id,manifest_json) VALUES (?1,?2)",
-                rusqlite::params![snapshot_id, manifest_json],
-            )
-            .map_err(|error| error.to_string())?;
-        // Legacy rows hold an empty placeholder; replace it with the real manifest.
-        self.connection
-            .execute(
-                "UPDATE snapshots SET manifest_json=?2 WHERE snapshot_id=?1 AND manifest_json='{}'",
-                rusqlite::params![snapshot_id, manifest_json],
-            )
-            .map_err(|error| error.to_string())?;
-        Ok(())
-    }
-
-    pub fn snapshot_manifest(&self, snapshot_id: &str) -> Result<Option<String>, String> {
-        self.connection
-            .query_row(
-                "SELECT manifest_json FROM snapshots WHERE snapshot_id=?1",
-                [snapshot_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| error.to_string())
-    }
-
-    pub fn list_reviews(&self) -> Result<Vec<ReviewSummary>, String> {
-        let mut statement = self
-            .connection
-            .prepare("SELECT id,snapshot_id,status,created_at FROM reviews ORDER BY created_at DESC,id DESC")
-            .map_err(|error| error.to_string())?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok(ReviewSummary {
-                    review_id: row.get(0)?,
-                    snapshot_id: row.get(1)?,
-                    status: row.get(2)?,
-                    created_at: row.get(3)?,
-                })
-            })
-            .map_err(|error| error.to_string())?;
-        rows.map(|row| row.map_err(|error| error.to_string()))
-            .collect()
-    }
-
-    pub fn save_verification(&mut self, run: &VerificationRun) -> Result<(), String> {
-        self.save_verification_with_artifacts(run)
-    }
-
-    pub fn save_verification_with_artifacts(
-        &mut self,
-        run: &VerificationRun,
-    ) -> Result<(), String> {
-        let payload = serde_json::to_string(run).map_err(|error| error.to_string())?;
-        let tx = self
-            .connection
-            .transaction()
-            .map_err(|error| error.to_string())?;
-        tx.execute(
-            "INSERT OR IGNORE INTO verification_runs(run_id,snapshot_id,profile_id,finding_id,command_digest,status,exit_code,stdout_digest,stderr_digest,payload) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-            rusqlite::params![run.run_id, run.snapshot_id, run.profile_id, run.finding_id, run.command_digest, match run.status { VerificationStatus::Passed => "passed", VerificationStatus::Failed => "failed", VerificationStatus::TimedOut => "timed_out", VerificationStatus::Incomplete => "incomplete" }, run.exit_code, run.stdout_digest, run.stderr_digest, payload],
-        ).map_err(|error| error.to_string())?;
-        for (stream, reference) in [
-            ("stdout", run.stdout_artifact.as_ref()),
-            ("stderr", run.stderr_artifact.as_ref()),
-        ] {
-            if let Some(reference) = reference {
-                let expected_digest = if stream == "stdout" {
-                    &run.stdout_digest
-                } else {
-                    &run.stderr_digest
-                };
-                if &reference.digest != expected_digest
-                    || !reference.path.starts_with(".vero/artifacts/sha256/")
-                    || reference.path.contains("..")
-                {
-                    return Err(format!("invalid {stream} verification artifact reference"));
-                }
-                tx.execute(
-                    "INSERT OR IGNORE INTO artifacts(digest,path,size_bytes) VALUES (?1,?2,?3)",
-                    rusqlite::params![
-                        reference.digest,
-                        reference.path,
-                        i64::try_from(reference.size_bytes)
-                            .map_err(|error| format!("artifact size is too large: {error}"))?,
-                    ],
-                )
-                .map_err(|error| error.to_string())?;
-                tx.execute(
-                    "INSERT OR IGNORE INTO verification_artifacts(run_id,stream,digest) VALUES (?1,?2,?3)",
-                    rusqlite::params![run.run_id, stream, reference.digest],
-                )
-                .map_err(|error| error.to_string())?;
-            }
-        }
-        tx.commit().map_err(|error| error.to_string())?;
-        Ok(())
-    }
-
-    pub fn verification_artifact(
-        &self,
-        run_id: &str,
-        stream: &str,
-    ) -> Result<Option<ArtifactReference>, String> {
-        if !matches!(stream, "stdout" | "stderr") {
-            return Err("verification artifact stream must be stdout or stderr".into());
-        }
-        self.connection
-            .query_row(
-                "SELECT artifacts.digest,artifacts.path,artifacts.size_bytes FROM verification_artifacts JOIN artifacts USING(digest) WHERE run_id=?1 AND stream=?2",
-                rusqlite::params![run_id, stream],
-                |row| {
-                    let size_bytes: i64 = row.get(2)?;
-                    let size_bytes = u64::try_from(size_bytes).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            2,
-                            rusqlite::types::Type::Integer,
-                            Box::new(error),
-                        )
-                    })?;
-                    Ok(ArtifactReference {
-                        digest: row.get(0)?,
-                        path: row.get(1)?,
-                        size_bytes,
-                    })
-                },
-            )
-            .optional()
-            .map_err(|error| error.to_string())
-    }
-
-    pub fn verification(&self, run_id: &str) -> Result<Option<VerificationRun>, String> {
-        self.connection
-            .query_row(
-                "SELECT payload FROM verification_runs WHERE run_id=?1",
-                [run_id],
-                |row| {
-                    let payload: String = row.get(0)?;
-                    serde_json::from_str(&payload).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            0,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })
-                },
-            )
-            .optional()
-            .map_err(|error| error.to_string())
-    }
-
-    pub fn verifications_for_snapshot(
-        &self,
-        snapshot_id: &str,
-    ) -> Result<Vec<VerificationRun>, String> {
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT payload FROM verification_runs WHERE snapshot_id=?1 ORDER BY rowid DESC",
-            )
-            .map_err(|error| error.to_string())?;
-        let rows = statement
-            .query_map([snapshot_id], |row| {
-                let payload: String = row.get(0)?;
-                serde_json::from_str(&payload).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        0,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })
-            })
-            .map_err(|error| error.to_string())?;
-        rows.map(|row| row.map_err(|error| error.to_string()))
-            .collect()
-    }
-
-    /// Returns local verification runs explicitly attached to a finding.
-    /// These runs are distinct from snapshot-wide checks used by gate policy.
-    pub fn verifications_for_finding(
-        &self,
-        finding_id: &str,
-    ) -> Result<Vec<VerificationRun>, String> {
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT payload FROM verification_runs WHERE finding_id=?1 ORDER BY rowid DESC",
-            )
-            .map_err(|error| error.to_string())?;
-        let rows = statement
-            .query_map([finding_id], |row| {
-                let payload: String = row.get(0)?;
-                serde_json::from_str(&payload).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        0,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })
-            })
-            .map_err(|error| error.to_string())?;
-        rows.map(|row| row.map_err(|error| error.to_string()))
-            .collect()
-    }
-
-    /// Returns newest verification metadata first, plus the total row count.
-    /// This query deliberately avoids deserializing payloads or reading logs.
-    pub fn recent_verification_summaries(
-        &self,
-        limit: usize,
-    ) -> Result<(Vec<VerificationSummary>, usize), String> {
-        let total: i64 = self
-            .connection
-            .query_row("SELECT COUNT(*) FROM verification_runs", [], |row| {
-                row.get(0)
-            })
-            .map_err(|error| error.to_string())?;
-        let mut statement = self
-            .connection
-            .prepare("SELECT run_id,snapshot_id,profile_id,status,created_at FROM verification_runs ORDER BY rowid DESC LIMIT ?1")
-            .map_err(|error| error.to_string())?;
-        let rows = statement
-            .query_map([limit.min(i64::MAX as usize) as i64], |row| {
-                Ok(VerificationSummary {
-                    run_id: row.get(0)?,
-                    snapshot_id: row.get(1)?,
-                    profile_id: row.get(2)?,
-                    status: row.get(3)?,
-                    created_at: row.get(4)?,
-                })
-            })
-            .map_err(|error| error.to_string())?;
-        let mut summaries = Vec::new();
-        for row in rows {
-            summaries.push(row.map_err(|error| error.to_string())?);
-        }
-        Ok((summaries, total.max(0) as usize))
     }
 
     pub fn save_review(
@@ -1060,20 +568,6 @@ impl ReviewStore {
             evidence: &[],
             snapshot_manifest: "{}",
             decision: None,
-        })
-    }
-
-    pub fn save_review_with_decision(&mut self, write: ReviewWrite<'_>) -> Result<(), String> {
-        self.save_review_inner(ReviewPersistence {
-            id: write.id,
-            snapshot_id: write.snapshot_id,
-            config_digest: write.config_digest,
-            status: write.status,
-            payload: write.payload,
-            findings: write.findings,
-            evidence: write.evidence,
-            snapshot_manifest: write.snapshot_manifest,
-            decision: Some(write.decision),
         })
     }
 
@@ -1171,7 +665,116 @@ impl ReviewStore {
         tx.commit().map_err(|e| e.to_string())
     }
 
-    pub fn evidence_for_review(&self, review_id: &str) -> Result<Vec<Evidence>, String> {
+    fn load_assessments(
+        &self,
+        finding_id: &str,
+        review_id: Option<&str>,
+    ) -> Result<Vec<Finding>, String> {
+        let mut statement = self.connection.prepare("SELECT finding_json FROM finding_assessments WHERE finding_id=?1 AND (?2 IS NULL OR review_id=?2) ORDER BY review_id,assessment_digest").map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(rusqlite::params![finding_id, review_id], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|error| error.to_string())?;
+        rows.map(|row| {
+            serde_json::from_str(&row.map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())
+        })
+        .collect()
+    }
+
+    fn load_occurrences(&self, finding_id: &str) -> Result<Vec<FindingOccurrence>, String> {
+        let mut statement = self.connection.prepare("SELECT review_id,snapshot_id,observed_at FROM finding_occurrences WHERE finding_id=?1 ORDER BY observed_at,review_id").map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map([finding_id], |row| {
+                Ok(FindingOccurrence {
+                    review_id: row.get(0)?,
+                    snapshot_id: row.get(1)?,
+                    observed_at: row.get(2)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.map(|row| row.map_err(|e| e.to_string())).collect()
+    }
+}
+
+impl ReviewRepository for ReviewStore {
+    fn get(&self, id: &str) -> Result<Option<String>, String> {
+        self.connection
+            .query_row("SELECT payload FROM reviews WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(|e| e.to_string())
+    }
+
+    fn record_snapshot_manifest(
+        &mut self,
+        snapshot_id: &str,
+        manifest_json: &str,
+    ) -> Result<(), String> {
+        validate_snapshot_manifest(snapshot_id, manifest_json)?;
+        self.connection
+            .execute(
+                "INSERT OR IGNORE INTO snapshots(snapshot_id,manifest_json) VALUES (?1,?2)",
+                rusqlite::params![snapshot_id, manifest_json],
+            )
+            .map_err(|error| error.to_string())?;
+        // Legacy rows hold an empty placeholder; replace it with the real manifest.
+        self.connection
+            .execute(
+                "UPDATE snapshots SET manifest_json=?2 WHERE snapshot_id=?1 AND manifest_json='{}'",
+                rusqlite::params![snapshot_id, manifest_json],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn snapshot_manifest(&self, snapshot_id: &str) -> Result<Option<String>, String> {
+        self.connection
+            .query_row(
+                "SELECT manifest_json FROM snapshots WHERE snapshot_id=?1",
+                [snapshot_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())
+    }
+
+    fn list_reviews(&self) -> Result<Vec<ReviewSummary>, String> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT id,snapshot_id,status,created_at FROM reviews ORDER BY created_at DESC,id DESC")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(ReviewSummary {
+                    review_id: row.get(0)?,
+                    snapshot_id: row.get(1)?,
+                    status: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.map(|row| row.map_err(|error| error.to_string()))
+            .collect()
+    }
+
+    fn save_review_with_decision(&mut self, write: ReviewWrite<'_>) -> Result<(), String> {
+        self.save_review_inner(ReviewPersistence {
+            id: write.id,
+            snapshot_id: write.snapshot_id,
+            config_digest: write.config_digest,
+            status: write.status,
+            payload: write.payload,
+            findings: write.findings,
+            evidence: write.evidence,
+            snapshot_manifest: write.snapshot_manifest,
+            decision: Some(write.decision),
+        })
+    }
+
+    fn evidence_for_review(&self, review_id: &str) -> Result<Vec<Evidence>, String> {
         let mut statement = self
             .connection
             .prepare("SELECT payload FROM evidence_records WHERE review_id=?1 ORDER BY evidence_id")
@@ -1191,43 +794,10 @@ impl ReviewStore {
         rows.map(|row| row.map_err(|error| error.to_string()))
             .collect()
     }
+}
 
-    pub fn save_gate_decision(
-        &self,
-        review_id: &str,
-        decision: &GateDecision,
-    ) -> Result<(), String> {
-        save_gate_decision_connection(&self.connection, review_id, decision)
-    }
-
-    pub fn gate_decisions_for_review(&self, review_id: &str) -> Result<Vec<GateDecision>, String> {
-        let mut statement = self
-            .connection
-            .prepare("SELECT payload,effective_config_digest FROM gate_decisions WHERE review_id=?1 ORDER BY rowid")
-            .map_err(|error| error.to_string())?;
-        let rows = statement
-            .query_map([review_id], |row| {
-                let payload: String = row.get(0)?;
-                let config_digest: String = row.get(1)?;
-                let mut decision: GateDecision =
-                    serde_json::from_str(&payload).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            0,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })?;
-                if decision.effective_config_digest.is_empty() {
-                    decision.effective_config_digest = config_digest;
-                }
-                Ok(decision)
-            })
-            .map_err(|error| error.to_string())?;
-        rows.map(|row| row.map_err(|error| error.to_string()))
-            .collect()
-    }
-
-    pub fn set_finding_status(
+impl FindingRepository for ReviewStore {
+    fn set_finding_status(
         &mut self,
         id: &str,
         status: FindingStatus,
@@ -1249,7 +819,7 @@ impl ReviewStore {
         Ok(())
     }
 
-    pub fn add_finding_feedback(
+    fn add_finding_feedback(
         &mut self,
         finding_id: &str,
         snapshot_id: &str,
@@ -1313,7 +883,7 @@ impl ReviewStore {
         Ok(persisted)
     }
 
-    pub fn list_finding_feedback(&self) -> Result<Vec<FindingFeedback>, String> {
+    fn list_finding_feedback(&self) -> Result<Vec<FindingFeedback>, String> {
         let mut statement = self
             .connection
             .prepare("SELECT payload FROM finding_feedback ORDER BY created_at,feedback_id")
@@ -1334,7 +904,370 @@ impl ReviewStore {
             .collect()
     }
 
-    pub fn create_rule_approval(&mut self, approval: &RuleApproval) -> Result<(), String> {
+    fn finding(&self, id: &str) -> Result<Option<FindingRecord>, String> {
+        let mut record = self.connection.query_row("SELECT f.finding_json,f.status,f.status_reason,(SELECT COUNT(*) FROM finding_occurrences o WHERE o.finding_id=f.id),f.first_seen,f.last_seen FROM findings f WHERE f.id=?1", [id], finding_record_from_row).optional().map_err(|e| e.to_string())?;
+        if let Some(record) = &mut record {
+            record.occurrences = self.load_occurrences(&record.finding.id)?;
+            record.assessments = self.load_assessments(&record.finding.id, None)?;
+        }
+        Ok(record)
+    }
+
+    fn list_findings(
+        &self,
+        severity: Option<Severity>,
+        status: Option<FindingStatus>,
+        review_id: Option<&str>,
+    ) -> Result<Vec<FindingRecord>, String> {
+        let severity = severity.map(severity_name);
+        let status = status.map(FindingStatus::as_str);
+        let mut statement = self.connection.prepare("SELECT f.finding_json,f.status,f.status_reason,(SELECT COUNT(*) FROM finding_occurrences o WHERE o.finding_id=f.id),f.first_seen,f.last_seen FROM findings f WHERE (?1 IS NULL OR ((?3 IS NULL AND f.severity=?1) OR EXISTS(SELECT 1 FROM finding_assessments a WHERE a.finding_id=f.id AND ((?3 IS NOT NULL AND a.review_id=?3) OR (?3 IS NULL AND a.review_id=(SELECT o.review_id FROM finding_occurrences o WHERE o.finding_id=f.id ORDER BY o.occurrence_order DESC,o.review_id DESC LIMIT 1))) AND json_extract(a.finding_json,'$.severity')=?1))) AND (?2 IS NULL OR f.status=?2) AND (?3 IS NULL OR EXISTS(SELECT 1 FROM finding_occurrences x WHERE x.finding_id=f.id AND x.review_id=?3)) ORDER BY f.last_seen DESC,f.id").map_err(|e| e.to_string())?;
+        let records = statement
+            .query_map(
+                rusqlite::params![severity, status, review_id],
+                finding_record_from_row,
+            )
+            .map_err(|e| e.to_string())?;
+        let mut records: Vec<FindingRecord> = records
+            .map(|record| record.map_err(|e| e.to_string()))
+            .collect::<Result<_, _>>()?;
+        for record in &mut records {
+            record.occurrences = self.load_occurrences(&record.finding.id)?;
+            record.assessments = self.load_assessments(&record.finding.id, review_id)?;
+        }
+        Ok(records)
+    }
+
+    fn list_findings_page(
+        &self,
+        severity: Option<Severity>,
+        status: Option<FindingStatus>,
+        review_id: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<FindingRecord>, usize), String> {
+        if limit == 0 {
+            return Err("finding page limit must be positive".into());
+        }
+        let limit = i64::try_from(limit).map_err(|error| error.to_string())?;
+        let offset = i64::try_from(offset).map_err(|error| error.to_string())?;
+        let severity = severity.map(severity_name);
+        let status = status.map(FindingStatus::as_str);
+        let total: i64 = self
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM findings f WHERE (?1 IS NULL OR ((?3 IS NULL AND f.severity=?1) OR EXISTS(SELECT 1 FROM finding_assessments a WHERE a.finding_id=f.id AND ((?3 IS NOT NULL AND a.review_id=?3) OR (?3 IS NULL AND a.review_id=(SELECT o.review_id FROM finding_occurrences o WHERE o.finding_id=f.id ORDER BY o.occurrence_order DESC,o.review_id DESC LIMIT 1))) AND json_extract(a.finding_json,'$.severity')=?1))) AND (?2 IS NULL OR f.status=?2) AND (?3 IS NULL OR EXISTS(SELECT 1 FROM finding_occurrences x WHERE x.finding_id=f.id AND x.review_id=?3))",
+                rusqlite::params![severity, status, review_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let total = usize::try_from(total).map_err(|error| error.to_string())?;
+        let mut statement = self
+            .connection
+            .prepare("SELECT f.finding_json,f.status,f.status_reason,(SELECT COUNT(*) FROM finding_occurrences o WHERE o.finding_id=f.id),f.first_seen,f.last_seen FROM findings f WHERE (?1 IS NULL OR ((?3 IS NULL AND f.severity=?1) OR EXISTS(SELECT 1 FROM finding_assessments a WHERE a.finding_id=f.id AND ((?3 IS NOT NULL AND a.review_id=?3) OR (?3 IS NULL AND a.review_id=(SELECT o.review_id FROM finding_occurrences o WHERE o.finding_id=f.id ORDER BY o.occurrence_order DESC,o.review_id DESC LIMIT 1))) AND json_extract(a.finding_json,'$.severity')=?1))) AND (?2 IS NULL OR f.status=?2) AND (?3 IS NULL OR EXISTS(SELECT 1 FROM finding_occurrences x WHERE x.finding_id=f.id AND x.review_id=?3)) ORDER BY f.last_seen DESC,f.id LIMIT ?4 OFFSET ?5")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(
+                rusqlite::params![severity, status, review_id, limit, offset],
+                finding_record_from_row,
+            )
+            .map_err(|error| error.to_string())?;
+        let mut records: Vec<FindingRecord> = rows
+            .map(|record| record.map_err(|error| error.to_string()))
+            .collect::<Result<_, _>>()?;
+        for record in &mut records {
+            record.occurrences = self.load_occurrences(&record.finding.id)?;
+            record.assessments = self.load_assessments(&record.finding.id, review_id)?;
+        }
+        Ok((records, total))
+    }
+}
+
+impl GateRepository for ReviewStore {
+    fn save_gate_decision(
+        &mut self,
+        review_id: &str,
+        decision: &GateDecision,
+    ) -> Result<(), String> {
+        save_gate_decision_connection(&self.connection, review_id, decision)
+    }
+
+    fn gate_decisions_for_review(&self, review_id: &str) -> Result<Vec<GateDecision>, String> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT payload,effective_config_digest FROM gate_decisions WHERE review_id=?1 ORDER BY rowid")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([review_id], |row| {
+                let payload: String = row.get(0)?;
+                let config_digest: String = row.get(1)?;
+                let mut decision: GateDecision =
+                    serde_json::from_str(&payload).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
+                if decision.effective_config_digest.is_empty() {
+                    decision.effective_config_digest = config_digest;
+                }
+                Ok(decision)
+            })
+            .map_err(|error| error.to_string())?;
+        rows.map(|row| row.map_err(|error| error.to_string()))
+            .collect()
+    }
+
+    fn create_waiver(&mut self, waiver: &Waiver) -> Result<(), String> {
+        if waiver.schema_version != 1 {
+            return Err(format!(
+                "unsupported waiver schema version {}",
+                waiver.schema_version
+            ));
+        }
+        if waiver.id.trim().is_empty()
+            || waiver.finding_fingerprint.trim().is_empty()
+            || waiver.snapshot_id.trim().is_empty()
+            || waiver.reason.trim().is_empty()
+            || waiver.author.trim().is_empty()
+            || waiver.provenance.trim().is_empty()
+        {
+            return Err("waiver fields must not be empty".into());
+        }
+        if waiver.expires_at_unix <= waiver.created_at_unix {
+            return Err("waiver expiry must be after creation".into());
+        }
+        self.connection
+            .execute(
+                "INSERT INTO waivers(id,finding_fingerprint,snapshot_id,reason,author,provenance,created_at_unix,expires_at_unix) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                rusqlite::params![
+                    waiver.id,
+                    waiver.finding_fingerprint,
+                    waiver.snapshot_id,
+                    waiver.reason,
+                    waiver.author,
+                    waiver.provenance,
+                    waiver.created_at_unix,
+                    waiver.expires_at_unix,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn waivers_for_snapshot(&self, snapshot_id: &str) -> Result<Vec<Waiver>, String> {
+        let mut statement = self.connection.prepare(
+            "SELECT id,finding_fingerprint,snapshot_id,reason,author,provenance,created_at_unix,expires_at_unix FROM waivers WHERE snapshot_id=?1 ORDER BY id",
+        ).map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([snapshot_id], |row| {
+                Ok(Waiver {
+                    schema_version: 1,
+                    id: row.get(0)?,
+                    finding_fingerprint: row.get(1)?,
+                    snapshot_id: row.get(2)?,
+                    reason: row.get(3)?,
+                    author: row.get(4)?,
+                    provenance: row.get(5)?,
+                    created_at_unix: row.get(6)?,
+                    expires_at_unix: row.get(7)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.map(|row| row.map_err(|error| error.to_string()))
+            .collect()
+    }
+}
+
+impl VerificationRepository for ReviewStore {
+    fn save_verification(&mut self, run: &VerificationRun) -> Result<(), String> {
+        self.save_verification_with_artifacts(run)
+    }
+
+    fn save_verification_with_artifacts(&mut self, run: &VerificationRun) -> Result<(), String> {
+        let payload = serde_json::to_string(run).map_err(|error| error.to_string())?;
+        let tx = self
+            .connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        tx.execute(
+            "INSERT OR IGNORE INTO verification_runs(run_id,snapshot_id,profile_id,finding_id,command_digest,status,exit_code,stdout_digest,stderr_digest,payload) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            rusqlite::params![run.run_id, run.snapshot_id, run.profile_id, run.finding_id, run.command_digest, match run.status { VerificationStatus::Passed => "passed", VerificationStatus::Failed => "failed", VerificationStatus::TimedOut => "timed_out", VerificationStatus::Incomplete => "incomplete" }, run.exit_code, run.stdout_digest, run.stderr_digest, payload],
+        ).map_err(|error| error.to_string())?;
+        for (stream, reference) in [
+            ("stdout", run.stdout_artifact.as_ref()),
+            ("stderr", run.stderr_artifact.as_ref()),
+        ] {
+            if let Some(reference) = reference {
+                let expected_digest = if stream == "stdout" {
+                    &run.stdout_digest
+                } else {
+                    &run.stderr_digest
+                };
+                if &reference.digest != expected_digest
+                    || !reference.path.starts_with(".vero/artifacts/sha256/")
+                    || reference.path.contains("..")
+                {
+                    return Err(format!("invalid {stream} verification artifact reference"));
+                }
+                tx.execute(
+                    "INSERT OR IGNORE INTO artifacts(digest,path,size_bytes) VALUES (?1,?2,?3)",
+                    rusqlite::params![
+                        reference.digest,
+                        reference.path,
+                        i64::try_from(reference.size_bytes)
+                            .map_err(|error| format!("artifact size is too large: {error}"))?,
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO verification_artifacts(run_id,stream,digest) VALUES (?1,?2,?3)",
+                    rusqlite::params![run.run_id, stream, reference.digest],
+                )
+                .map_err(|error| error.to_string())?;
+            }
+        }
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn verification_artifact(
+        &self,
+        run_id: &str,
+        stream: &str,
+    ) -> Result<Option<ArtifactReference>, String> {
+        if !matches!(stream, "stdout" | "stderr") {
+            return Err("verification artifact stream must be stdout or stderr".into());
+        }
+        self.connection
+            .query_row(
+                "SELECT artifacts.digest,artifacts.path,artifacts.size_bytes FROM verification_artifacts JOIN artifacts USING(digest) WHERE run_id=?1 AND stream=?2",
+                rusqlite::params![run_id, stream],
+                |row| {
+                    let size_bytes: i64 = row.get(2)?;
+                    let size_bytes = u64::try_from(size_bytes).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Integer,
+                            Box::new(error),
+                        )
+                    })?;
+                    Ok(ArtifactReference {
+                        digest: row.get(0)?,
+                        path: row.get(1)?,
+                        size_bytes,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|error| error.to_string())
+    }
+
+    fn verification(&self, run_id: &str) -> Result<Option<VerificationRun>, String> {
+        self.connection
+            .query_row(
+                "SELECT payload FROM verification_runs WHERE run_id=?1",
+                [run_id],
+                |row| {
+                    let payload: String = row.get(0)?;
+                    serde_json::from_str(&payload).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })
+                },
+            )
+            .optional()
+            .map_err(|error| error.to_string())
+    }
+
+    fn verifications_for_snapshot(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<Vec<VerificationRun>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT payload FROM verification_runs WHERE snapshot_id=?1 ORDER BY rowid DESC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([snapshot_id], |row| {
+                let payload: String = row.get(0)?;
+                serde_json::from_str(&payload).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.map(|row| row.map_err(|error| error.to_string()))
+            .collect()
+    }
+
+    fn verifications_for_finding(&self, finding_id: &str) -> Result<Vec<VerificationRun>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT payload FROM verification_runs WHERE finding_id=?1 ORDER BY rowid DESC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([finding_id], |row| {
+                let payload: String = row.get(0)?;
+                serde_json::from_str(&payload).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.map(|row| row.map_err(|error| error.to_string()))
+            .collect()
+    }
+
+    fn recent_verification_summaries(
+        &self,
+        limit: usize,
+    ) -> Result<(Vec<VerificationSummary>, usize), String> {
+        let total: i64 = self
+            .connection
+            .query_row("SELECT COUNT(*) FROM verification_runs", [], |row| {
+                row.get(0)
+            })
+            .map_err(|error| error.to_string())?;
+        let mut statement = self
+            .connection
+            .prepare("SELECT run_id,snapshot_id,profile_id,status,created_at FROM verification_runs ORDER BY rowid DESC LIMIT ?1")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([limit.min(i64::MAX as usize) as i64], |row| {
+                Ok(VerificationSummary {
+                    run_id: row.get(0)?,
+                    snapshot_id: row.get(1)?,
+                    profile_id: row.get(2)?,
+                    status: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        let mut summaries = Vec::new();
+        for row in rows {
+            summaries.push(row.map_err(|error| error.to_string())?);
+        }
+        Ok((summaries, total.max(0) as usize))
+    }
+}
+
+impl RuleApprovalRepository for ReviewStore {
+    fn create_rule_approval(&mut self, approval: &RuleApproval) -> Result<(), String> {
         if approval.schema_version != 2 || approval.approval_id.trim().is_empty() {
             return Err("rule approval requires schema version 2 and a non-empty ID".into());
         }
@@ -1485,7 +1418,7 @@ impl ReviewStore {
         tx.commit().map_err(|e| e.to_string())
     }
 
-    pub fn revoke_rule_approval(
+    fn revoke_rule_approval(
         &mut self,
         approval_id: &str,
         actor: &str,
@@ -1518,7 +1451,7 @@ impl ReviewStore {
         tx.commit().map_err(|e| e.to_string())
     }
 
-    pub fn list_rule_approvals(&self) -> Result<Vec<RuleApproval>, String> {
+    fn list_rule_approvals(&self) -> Result<Vec<RuleApproval>, String> {
         let mut statement = self
             .connection
             .prepare(
@@ -1550,175 +1483,236 @@ impl ReviewStore {
             Ok(approval)
         }).collect()
     }
+}
 
-    pub fn create_waiver(&mut self, waiver: &Waiver) -> Result<(), String> {
-        if waiver.schema_version != 1 {
-            return Err(format!(
-                "unsupported waiver schema version {}",
-                waiver.schema_version
-            ));
+impl ProviderResponseCache for ReviewStore {
+    fn provider_cache_get(&self, request_key: &str) -> Result<Option<Vec<u8>>, String> {
+        let cached: Option<(String, Vec<u8>)> = self
+            .connection
+            .query_row(
+                "SELECT stdout_digest,stdout FROM provider_cache WHERE request_key=?1",
+                [request_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        match cached {
+            Some((expected, stdout)) if digest(&stdout) == expected => Ok(Some(stdout)),
+            Some(_) => Err("provider cache response failed its content digest check".into()),
+            None => Ok(None),
         }
-        if waiver.id.trim().is_empty()
-            || waiver.finding_fingerprint.trim().is_empty()
-            || waiver.snapshot_id.trim().is_empty()
-            || waiver.reason.trim().is_empty()
-            || waiver.author.trim().is_empty()
-            || waiver.provenance.trim().is_empty()
-        {
-            return Err("waiver fields must not be empty".into());
+    }
+
+    fn provider_cache_put(
+        &mut self,
+        request_key: &str,
+        provider_version: &str,
+        stdout: &[u8],
+    ) -> Result<(), String> {
+        if !is_sha256_digest(request_key) {
+            return Err("provider cache key must be a SHA-256 digest".into());
         }
-        if waiver.expires_at_unix <= waiver.created_at_unix {
-            return Err("waiver expiry must be after creation".into());
+        if provider_version.trim().is_empty() {
+            return Err("provider cache requires a known provider version".into());
         }
         self.connection
             .execute(
-                "INSERT INTO waivers(id,finding_fingerprint,snapshot_id,reason,author,provenance,created_at_unix,expires_at_unix) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-                rusqlite::params![
-                    waiver.id,
-                    waiver.finding_fingerprint,
-                    waiver.snapshot_id,
-                    waiver.reason,
-                    waiver.author,
-                    waiver.provenance,
-                    waiver.created_at_unix,
-                    waiver.expires_at_unix,
-                ],
+                "INSERT OR IGNORE INTO provider_cache(request_key,provider_version,stdout_digest,stdout) VALUES (?1,?2,?3,?4)",
+                rusqlite::params![request_key, provider_version, digest(stdout), stdout],
             )
             .map_err(|error| error.to_string())?;
         Ok(())
     }
+}
 
-    pub fn waivers_for_snapshot(&self, snapshot_id: &str) -> Result<Vec<Waiver>, String> {
-        let mut statement = self.connection.prepare(
-            "SELECT id,finding_fingerprint,snapshot_id,reason,author,provenance,created_at_unix,expires_at_unix FROM waivers WHERE snapshot_id=?1 ORDER BY id",
-        ).map_err(|error| error.to_string())?;
-        let rows = statement
-            .query_map([snapshot_id], |row| {
-                Ok(Waiver {
-                    schema_version: 1,
-                    id: row.get(0)?,
-                    finding_fingerprint: row.get(1)?,
-                    snapshot_id: row.get(2)?,
-                    reason: row.get(3)?,
-                    author: row.get(4)?,
-                    provenance: row.get(5)?,
-                    created_at_unix: row.get(6)?,
-                    expires_at_unix: row.get(7)?,
-                })
-            })
+impl HostedDeliveryRepository for ReviewStore {
+    fn hosted_finding_threads(
+        &self,
+        target_key: &str,
+    ) -> Result<std::collections::BTreeSet<String>, String> {
+        if target_key.trim().is_empty() {
+            return Err("hosting target identity is required".into());
+        }
+        let mut statement = self.connection
+            .prepare("SELECT fingerprint FROM hosted_finding_threads WHERE target_key=?1 ORDER BY fingerprint")
             .map_err(|error| error.to_string())?;
-        rows.map(|row| row.map_err(|error| error.to_string()))
-            .collect()
+        let rows = statement
+            .query_map([target_key], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<std::collections::BTreeSet<_>, _>>()
+            .map_err(|error| error.to_string())
     }
 
-    pub fn finding(&self, id: &str) -> Result<Option<FindingRecord>, String> {
-        let mut record = self.connection.query_row("SELECT f.finding_json,f.status,f.status_reason,(SELECT COUNT(*) FROM finding_occurrences o WHERE o.finding_id=f.id),f.first_seen,f.last_seen FROM findings f WHERE f.id=?1", [id], finding_record_from_row).optional().map_err(|e| e.to_string())?;
-        if let Some(record) = &mut record {
-            record.occurrences = self.load_occurrences(&record.finding.id)?;
-            record.assessments = self.load_assessments(&record.finding.id, None)?;
+    fn replace_hosted_finding_threads(
+        &mut self,
+        target_key: &str,
+        fingerprints: &std::collections::BTreeSet<String>,
+    ) -> Result<(), String> {
+        if target_key.trim().is_empty() {
+            return Err("hosting target identity is required".into());
         }
-        Ok(record)
-    }
-
-    pub fn list_findings(
-        &self,
-        severity: Option<Severity>,
-        status: Option<FindingStatus>,
-        review_id: Option<&str>,
-    ) -> Result<Vec<FindingRecord>, String> {
-        let severity = severity.map(severity_name);
-        let status = status.map(FindingStatus::as_str);
-        let mut statement = self.connection.prepare("SELECT f.finding_json,f.status,f.status_reason,(SELECT COUNT(*) FROM finding_occurrences o WHERE o.finding_id=f.id),f.first_seen,f.last_seen FROM findings f WHERE (?1 IS NULL OR ((?3 IS NULL AND f.severity=?1) OR EXISTS(SELECT 1 FROM finding_assessments a WHERE a.finding_id=f.id AND ((?3 IS NOT NULL AND a.review_id=?3) OR (?3 IS NULL AND a.review_id=(SELECT o.review_id FROM finding_occurrences o WHERE o.finding_id=f.id ORDER BY o.occurrence_order DESC,o.review_id DESC LIMIT 1))) AND json_extract(a.finding_json,'$.severity')=?1))) AND (?2 IS NULL OR f.status=?2) AND (?3 IS NULL OR EXISTS(SELECT 1 FROM finding_occurrences x WHERE x.finding_id=f.id AND x.review_id=?3)) ORDER BY f.last_seen DESC,f.id").map_err(|e| e.to_string())?;
-        let records = statement
-            .query_map(
-                rusqlite::params![severity, status, review_id],
-                finding_record_from_row,
-            )
-            .map_err(|e| e.to_string())?;
-        let mut records: Vec<FindingRecord> = records
-            .map(|record| record.map_err(|e| e.to_string()))
-            .collect::<Result<_, _>>()?;
-        for record in &mut records {
-            record.occurrences = self.load_occurrences(&record.finding.id)?;
-            record.assessments = self.load_assessments(&record.finding.id, review_id)?;
-        }
-        Ok(records)
-    }
-
-    pub fn list_findings_page(
-        &self,
-        severity: Option<Severity>,
-        status: Option<FindingStatus>,
-        review_id: Option<&str>,
-        limit: usize,
-        offset: usize,
-    ) -> Result<(Vec<FindingRecord>, usize), String> {
-        if limit == 0 {
-            return Err("finding page limit must be positive".into());
-        }
-        let limit = i64::try_from(limit).map_err(|error| error.to_string())?;
-        let offset = i64::try_from(offset).map_err(|error| error.to_string())?;
-        let severity = severity.map(severity_name);
-        let status = status.map(FindingStatus::as_str);
-        let total: i64 = self
+        let tx = self
             .connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        tx.execute(
+            "DELETE FROM hosted_finding_threads WHERE target_key=?1",
+            [target_key],
+        )
+        .map_err(|error| error.to_string())?;
+        for fingerprint in fingerprints {
+            tx.execute(
+                "INSERT INTO hosted_finding_threads(target_key,fingerprint) VALUES (?1,?2)",
+                rusqlite::params![target_key, fingerprint],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        tx.commit().map_err(|error| error.to_string())
+    }
+
+    fn claim_webhook_delivery(
+        &mut self,
+        provider: &str,
+        event_id: &str,
+        event_type: &str,
+        delivery_attempt: u32,
+        payload_digest: &str,
+        now_unix: i64,
+        lease_seconds: i64,
+    ) -> Result<WebhookClaim, String> {
+        if provider.trim().is_empty()
+            || event_id.trim().is_empty()
+            || event_type.trim().is_empty()
+            || delivery_attempt == 0
+            || !is_sha256_digest(payload_digest)
+            || lease_seconds <= 0
+        {
+            return Err(
+                "webhook delivery identity, digest, and positive lease are required".into(),
+            );
+        }
+        use rusqlite::TransactionBehavior;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        tx.execute(
+            "INSERT OR IGNORE INTO webhook_deliveries(provider,event_id,event_type,delivery_attempt,payload_digest,state,received_at_unix) VALUES (?1,?2,?3,?4,?5,'received',?6)",
+            rusqlite::params![provider,event_id,event_type,delivery_attempt,payload_digest,now_unix],
+        ).map_err(|error| error.to_string())?;
+        let (stored_digest, state, lease_expiry): (String,String,i64) = tx.query_row(
+            "SELECT payload_digest,state,lease_expires_at_unix FROM webhook_deliveries WHERE provider=?1 AND event_id=?2",
+            rusqlite::params![provider,event_id],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).map_err(|error| error.to_string())?;
+        if stored_digest != payload_digest {
+            return Err("webhook event ID was reused with a different payload digest".into());
+        }
+        if state == "processed" {
+            tx.commit().map_err(|error| error.to_string())?;
+            return Ok(WebhookClaim::AlreadyProcessed);
+        }
+        if state == "processing" && lease_expiry > now_unix {
+            tx.commit().map_err(|error| error.to_string())?;
+            return Ok(WebhookClaim::InProgress);
+        }
+        static LEASE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = LEASE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let lease_token = format!("{}:{now_unix}:{sequence}", std::process::id());
+        tx.execute(
+            "UPDATE webhook_deliveries SET event_type=?1,delivery_attempt=MAX(delivery_attempt,?2),state='processing',lease_token=?3,lease_expires_at_unix=?4 WHERE provider=?5 AND event_id=?6",
+            rusqlite::params![event_type,delivery_attempt,lease_token,now_unix.saturating_add(lease_seconds),provider,event_id],
+        ).map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(WebhookClaim::Acquired { lease_token })
+    }
+
+    fn renew_webhook_delivery(
+        &mut self,
+        provider: &str,
+        event_id: &str,
+        lease_token: &str,
+        now_unix: i64,
+        lease_seconds: i64,
+    ) -> Result<(), String> {
+        if provider.trim().is_empty()
+            || event_id.trim().is_empty()
+            || lease_token.trim().is_empty()
+            || lease_seconds <= 0
+        {
+            return Err("webhook lease identity and positive duration are required".into());
+        }
+        let changed = self.connection.execute(
+            "UPDATE webhook_deliveries SET lease_expires_at_unix=?1 WHERE provider=?2 AND event_id=?3 AND state='processing' AND lease_token=?4 AND lease_expires_at_unix>?5",
+            rusqlite::params![now_unix.saturating_add(lease_seconds), provider, event_id, lease_token, now_unix],
+        ).map_err(|error| error.to_string())?;
+        if changed != 1 {
+            return Err("webhook delivery lease is no longer owned by this worker".into());
+        }
+        Ok(())
+    }
+
+    fn complete_webhook_delivery(
+        &mut self,
+        provider: &str,
+        event_id: &str,
+        lease_token: &str,
+        now_unix: i64,
+    ) -> Result<(), String> {
+        let changed = self.connection.execute(
+            "UPDATE webhook_deliveries SET state='processed',processed_at_unix=?1,lease_token=NULL,lease_expires_at_unix=0 WHERE provider=?2 AND event_id=?3 AND state='processing' AND lease_token=?4 AND lease_expires_at_unix>?5",
+            rusqlite::params![now_unix,provider,event_id,lease_token,now_unix],
+        ).map_err(|error| error.to_string())?;
+        if changed != 1 {
+            return Err("webhook delivery lease is no longer owned by this worker".into());
+        }
+        Ok(())
+    }
+
+    fn prune_processed_webhook_deliveries_before(
+        &mut self,
+        cutoff_unix: i64,
+        apply: bool,
+    ) -> Result<u64, String> {
+        if cutoff_unix < 0 {
+            return Err("webhook retention cutoff must be a non-negative timestamp".into());
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let count: i64 = tx
             .query_row(
-                "SELECT COUNT(*) FROM findings f WHERE (?1 IS NULL OR ((?3 IS NULL AND f.severity=?1) OR EXISTS(SELECT 1 FROM finding_assessments a WHERE a.finding_id=f.id AND ((?3 IS NOT NULL AND a.review_id=?3) OR (?3 IS NULL AND a.review_id=(SELECT o.review_id FROM finding_occurrences o WHERE o.finding_id=f.id ORDER BY o.occurrence_order DESC,o.review_id DESC LIMIT 1))) AND json_extract(a.finding_json,'$.severity')=?1))) AND (?2 IS NULL OR f.status=?2) AND (?3 IS NULL OR EXISTS(SELECT 1 FROM finding_occurrences x WHERE x.finding_id=f.id AND x.review_id=?3))",
-                rusqlite::params![severity, status, review_id],
+                "SELECT COUNT(*) FROM webhook_deliveries WHERE state='processed' AND processed_at_unix IS NOT NULL AND processed_at_unix<?1",
+                [cutoff_unix],
                 |row| row.get(0),
             )
             .map_err(|error| error.to_string())?;
-        let total = usize::try_from(total).map_err(|error| error.to_string())?;
-        let mut statement = self
-            .connection
-            .prepare("SELECT f.finding_json,f.status,f.status_reason,(SELECT COUNT(*) FROM finding_occurrences o WHERE o.finding_id=f.id),f.first_seen,f.last_seen FROM findings f WHERE (?1 IS NULL OR ((?3 IS NULL AND f.severity=?1) OR EXISTS(SELECT 1 FROM finding_assessments a WHERE a.finding_id=f.id AND ((?3 IS NOT NULL AND a.review_id=?3) OR (?3 IS NULL AND a.review_id=(SELECT o.review_id FROM finding_occurrences o WHERE o.finding_id=f.id ORDER BY o.occurrence_order DESC,o.review_id DESC LIMIT 1))) AND json_extract(a.finding_json,'$.severity')=?1))) AND (?2 IS NULL OR f.status=?2) AND (?3 IS NULL OR EXISTS(SELECT 1 FROM finding_occurrences x WHERE x.finding_id=f.id AND x.review_id=?3)) ORDER BY f.last_seen DESC,f.id LIMIT ?4 OFFSET ?5")
-            .map_err(|error| error.to_string())?;
-        let rows = statement
-            .query_map(
-                rusqlite::params![severity, status, review_id, limit, offset],
-                finding_record_from_row,
+        if apply {
+            tx.execute(
+                "DELETE FROM webhook_deliveries WHERE state='processed' AND processed_at_unix IS NOT NULL AND processed_at_unix<?1",
+                [cutoff_unix],
             )
             .map_err(|error| error.to_string())?;
-        let mut records: Vec<FindingRecord> = rows
-            .map(|record| record.map_err(|error| error.to_string()))
-            .collect::<Result<_, _>>()?;
-        for record in &mut records {
-            record.occurrences = self.load_occurrences(&record.finding.id)?;
-            record.assessments = self.load_assessments(&record.finding.id, review_id)?;
         }
-        Ok((records, total))
+        tx.commit().map_err(|error| error.to_string())?;
+        u64::try_from(count).map_err(|error| error.to_string())
     }
 
-    fn load_assessments(
-        &self,
-        finding_id: &str,
-        review_id: Option<&str>,
-    ) -> Result<Vec<Finding>, String> {
-        let mut statement = self.connection.prepare("SELECT finding_json FROM finding_assessments WHERE finding_id=?1 AND (?2 IS NULL OR review_id=?2) ORDER BY review_id,assessment_digest").map_err(|error| error.to_string())?;
-        let rows = statement
-            .query_map(rusqlite::params![finding_id, review_id], |row| {
-                row.get::<_, String>(0)
-            })
-            .map_err(|error| error.to_string())?;
-        rows.map(|row| {
-            serde_json::from_str(&row.map_err(|error| error.to_string())?)
-                .map_err(|error| error.to_string())
-        })
-        .collect()
-    }
-
-    fn load_occurrences(&self, finding_id: &str) -> Result<Vec<FindingOccurrence>, String> {
-        let mut statement = self.connection.prepare("SELECT review_id,snapshot_id,observed_at FROM finding_occurrences WHERE finding_id=?1 ORDER BY observed_at,review_id").map_err(|e| e.to_string())?;
-        let rows = statement
-            .query_map([finding_id], |row| {
-                Ok(FindingOccurrence {
-                    review_id: row.get(0)?,
-                    snapshot_id: row.get(1)?,
-                    observed_at: row.get(2)?,
-                })
-            })
-            .map_err(|e| e.to_string())?;
-        rows.map(|row| row.map_err(|e| e.to_string())).collect()
+    fn release_webhook_delivery(
+        &mut self,
+        provider: &str,
+        event_id: &str,
+        lease_token: &str,
+    ) -> Result<(), String> {
+        let changed = self.connection.execute(
+            "UPDATE webhook_deliveries SET state='received',lease_token=NULL,lease_expires_at_unix=0 WHERE provider=?1 AND event_id=?2 AND state='processing' AND lease_token=?3",
+            rusqlite::params![provider,event_id,lease_token],
+        ).map_err(|error| error.to_string())?;
+        if changed != 1 {
+            return Err("webhook delivery lease is no longer owned by this worker".into());
+        }
+        Ok(())
     }
 }
 

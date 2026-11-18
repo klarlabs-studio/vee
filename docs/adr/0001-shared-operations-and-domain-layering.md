@@ -1,6 +1,6 @@
 # ADR 0001: One operations layer for all transports, and a path to domain layering
 
-- **Status:** Accepted (step 1 implemented); step 2 proposed
+- **Status:** Accepted (step 1 and step 2.1 implemented); steps 2.2 and 2.3 in progress
 - **Date:** 2026-11-17
 
 ## Context
@@ -59,6 +59,17 @@ Restructure toward domain layering, in this order:
 1. **Repository port.** Define review, finding, verification, and rule-approval
    repository traits in the domain; move `ReviewStore` into a `vero-store-sqlite`
    adapter crate. Keep subprocess provider execution in an adapter crate.
+
+   *Implemented (2026-11-18):* `vero_core::ports` defines one trait per bounded
+   context (`ReviewRepository`, `FindingRepository`, `GateRepository`,
+   `VerificationRepository`, `RuleApprovalRepository`, `ProviderResponseCache`,
+   `HostedDeliveryRepository`) and `Repositories` for all of them.
+   `vero-store-sqlite` implements them; `vero-core` no longer depends on
+   `rusqlite`, and `vero-application` uses the store only in tests. Active rule
+   approvals, which the effective config digest binds, are now read through
+   `RuleApprovalRepository` and passed in explicitly instead of the digest
+   function opening `.vero/vero.sqlite` itself. Subprocess provider execution
+   is still in `vero-core`.
 2. **Invariants in the model.** Finding status transitions (no waiving through a
    status change), typed approval status, and bounded value types for reasons and
    actor names.

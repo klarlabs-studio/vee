@@ -474,6 +474,7 @@ fn exact_snapshot_gate(root: &Path, snapshot_id: &str) -> Result<ExactSnapshotGa
         return Err(format!("{} must be a regular file", database.display()));
     }
     let store = vero_store_sqlite::ReviewStore::open(&database)?;
+    let store: &dyn vero_core::ports::Repositories = &store;
     let mut matching_review_without_gate = None;
     for review in store.list_reviews()? {
         if review.snapshot_id != snapshot_id {
@@ -491,7 +492,7 @@ fn exact_snapshot_gate(root: &Path, snapshot_id: &str) -> Result<ExactSnapshotGa
             .get(&review.review_id)?
             .ok_or_else(|| format!("saved review {} has no payload", review.review_id))?;
         let gate_validity = match vero_application::deserialize_review_result(&payload) {
-            Ok(saved) => current_gate_validity(root, snapshot_id, &saved, &store)?,
+            Ok(saved) => current_gate_validity(root, snapshot_id, &saved, store)?,
             Err(_) => "replay_unavailable".into(),
         };
         let status = match decision.status {
@@ -532,7 +533,7 @@ fn current_gate_validity(
     root: &Path,
     snapshot_id: &str,
     saved: &vero_application::ReviewResult,
-    store: &vero_store_sqlite::ReviewStore,
+    store: &dyn vero_core::ports::Repositories,
 ) -> Result<String, String> {
     if saved.snapshot_id != snapshot_id {
         return Ok("stale_snapshot".into());
@@ -550,6 +551,7 @@ fn current_gate_validity(
         &config,
         root,
         &saved.selected_reviewers,
+        &vero_application::active_rule_approvals(store)?,
         saved.work_item.as_ref(),
     )?;
     if digest != saved.effective_config_digest {
@@ -8451,6 +8453,8 @@ operations:
     }
 
     use super::*;
+
+    use vero_core::ports::*;
 
     #[cfg(unix)]
     #[test]

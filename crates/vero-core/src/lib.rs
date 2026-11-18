@@ -3,6 +3,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 pub mod packs;
+pub mod ports;
 pub use packs::{PackReference, PolicyPack};
 
 pub const SCHEMA_VERSION: u32 = 1;

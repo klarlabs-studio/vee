@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use vero_application::{GateCheckResult, ReviewResult};
+use vero_core::ports::*;
 use vero_core::{
     Evidence, FindingFeedback, FindingFeedbackLabel, FindingRecord, FindingStatus,
     RepositoryConfig, Severity, VerificationRun,
@@ -85,7 +86,7 @@ impl Workspace {
         Ok(config)
     }
 
-    fn saved_review(&self, store: &ReviewStore, review_id: &str) -> Result<ReviewResult> {
+    fn saved_review(&self, store: &dyn Repositories, review_id: &str) -> Result<ReviewResult> {
         let payload = store
             .get(review_id)
             .map_err(anyhow::Error::msg)?
@@ -94,7 +95,7 @@ impl Workspace {
             .map_err(|error| anyhow::anyhow!("stored review {review_id} is invalid: {error}"))
     }
 
-    fn finding(&self, store: &ReviewStore, finding_id: &str) -> Result<FindingRecord> {
+    fn finding(&self, store: &dyn Repositories, finding_id: &str) -> Result<FindingRecord> {
         store
             .finding(finding_id)
             .map_err(anyhow::Error::msg)?
@@ -416,7 +417,7 @@ pub fn gate_check(
     review_id: &str,
     token_env_override: Option<&str>,
 ) -> Result<GateCheckResult> {
-    let store = workspace.store()?;
+    let mut store = workspace.store()?;
     let review = workspace.saved_review(&store, review_id)?;
     let current =
         vero_application::capture_current_change_set(workspace.root(), &review.change_set)
@@ -446,10 +447,13 @@ pub fn gate_check(
             )?)
         }
     };
+    let active_approvals =
+        vero_application::active_rule_approvals(&store).map_err(anyhow::Error::msg)?;
     let config_digest = vero_application::effective_review_config_digest_with_work_item(
         &config,
         workspace.root(),
         &review.selected_reviewers,
+        &active_approvals,
         current_work_item.as_ref(),
     )
     .map_err(anyhow::Error::msg)?;
@@ -457,7 +461,7 @@ pub fn gate_check(
         .verifications_for_snapshot(&current.digest)
         .map_err(anyhow::Error::msg)?;
     let decision = vero_application::evaluate_and_persist_gate(
-        &store,
+        &mut store,
         vero_application::GateEvaluation {
             review_id,
             reviewed_snapshot_id: &review.snapshot_id,
@@ -718,7 +722,7 @@ pub fn list_external_feedback(
 
 fn mine_candidates(
     workspace: &Workspace,
-    store: Option<&ReviewStore>,
+    store: Option<&dyn Repositories>,
 ) -> Result<crate::rule_candidates::CandidateReport> {
     let external_feedback = crate::imported_history::list_feedback(workspace.root(), None)
         .map_err(configuration_failure)?;
@@ -744,7 +748,10 @@ fn mine_candidates(
 
 pub fn rule_candidates(workspace: &Workspace) -> Result<crate::rule_candidates::CandidateReport> {
     let store = workspace.existing_store()?;
-    mine_candidates(workspace, store.as_ref())
+    mine_candidates(
+        workspace,
+        store.as_ref().map(|store| store as &dyn Repositories),
+    )
 }
 
 pub struct ApproveRuleRequest {
@@ -838,7 +845,7 @@ pub fn approve_rule(
     saved_approval(&store, &approval.approval_id)
 }
 
-fn saved_approval(store: &ReviewStore, approval_id: &str) -> Result<vero_core::RuleApproval> {
+fn saved_approval(store: &dyn Repositories, approval_id: &str) -> Result<vero_core::RuleApproval> {
     store
         .list_rule_approvals()
         .map_err(anyhow::Error::msg)?

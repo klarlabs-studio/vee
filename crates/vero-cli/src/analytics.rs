@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use vero_core::ports::*;
 use vero_core::{FindingFeedbackLabel, FindingStatus, GateStatus, Severity, VerificationStatus};
-use vero_store_sqlite::ReviewStore;
 
 const MAX_DIAGNOSTIC_RUNS: usize = 500;
 const MAX_DIAGNOSTIC_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
@@ -77,7 +77,10 @@ pub struct FeedbackRate {
     pub observed_rate: Option<f64>,
 }
 
-pub fn summarize(root: &std::path::Path, store: &ReviewStore) -> Result<QualityAnalytics, String> {
+pub fn summarize(
+    root: &std::path::Path,
+    store: &dyn Repositories,
+) -> Result<QualityAnalytics, String> {
     let config = vero_application::load_repository_config(root)?;
     let reviews = store.list_reviews()?;
     let mut latest_gate_decisions = BTreeMap::new();
@@ -398,6 +401,7 @@ fn severity_name(severity: Severity) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vero_store_sqlite::ReviewStore;
 
     #[test]
     fn empty_repository_has_stable_zero_counts() {

@@ -44,7 +44,7 @@ struct ChangedLineCoverage {
 
 pub fn report(
     root: &Path,
-    store: &vero_store_sqlite::ReviewStore,
+    store: &dyn vero_core::ports::Repositories,
     run: &VerificationRun,
     stream: &str,
 ) -> Result<CoverageReport, String> {
@@ -354,6 +354,7 @@ mod tests {
 
     #[test]
     fn report_uses_persisted_artifact_and_exact_snapshot_manifest() {
+        use vero_core::ports::*;
         use vero_core::{GateDecision, GateStatus, ReviewWrite, VerificationStatus};
         use vero_store_sqlite::ReviewStore;
 

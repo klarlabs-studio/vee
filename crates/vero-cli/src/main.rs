@@ -5,6 +5,7 @@ use std::{
     io::{Read, Write},
     process::ExitCode,
 };
+use vero_core::ports::*;
 use vero_core::{
     ChangeSet, GateStatus, RepositoryConfig, Severity, VerificationRun, VerificationStatus,
 };
@@ -2930,7 +2931,7 @@ fn print_doctor_report(report: &setup::DoctorReport) {
 /// Fingerprint of an analyzer finding recorded in one of the review's gate
 /// decisions (at review time or a later `gate check`) on the review's snapshot.
 fn analyzer_finding_fingerprint(
-    store: &ReviewStore,
+    store: &dyn Repositories,
     review: &vero_application::ReviewResult,
     finding_id: &str,
 ) -> Result<Option<String>> {
@@ -6369,6 +6370,8 @@ fn run() -> Result<u8> {
                         &current_config,
                         std::path::Path::new(&top),
                         &reviewed.selected_reviewers,
+                        &vero_application::active_rule_approvals(&store)
+                            .map_err(anyhow::Error::msg)?,
                         current_work_item.as_ref(),
                     )
                     .map_err(anyhow::Error::msg)?;
@@ -6376,7 +6379,7 @@ fn run() -> Result<u8> {
                     .verifications_for_snapshot(&current_snapshot.digest)
                     .map_err(anyhow::Error::msg)?;
                 reviewed.gate = vero_application::evaluate_and_persist_gate(
-                    &store,
+                    &mut store,
                     vero_application::GateEvaluation {
                         review_id: &review_id,
                         reviewed_snapshot_id: &reviewed.snapshot_id,
@@ -7442,6 +7445,8 @@ fn run() -> Result<u8> {
                             &config,
                             std::path::Path::new(&top),
                             &saved.selected_reviewers,
+                            &vero_application::active_rule_approvals(&store)
+                                .map_err(anyhow::Error::msg)?,
                             current_work_item.as_ref(),
                         )
                         .map_err(anyhow::Error::msg)?;
@@ -7854,6 +7859,7 @@ mod tests {
     };
     use clap::Parser;
     use std::collections::BTreeSet;
+    use vero_core::ports::HostedDeliveryRepository;
     use vero_core::Severity;
 
     fn undocumented_cli_items(command: &clap::Command, path: &str, problems: &mut Vec<String>) {

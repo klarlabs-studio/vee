@@ -2,12 +2,12 @@ use serde::{Deserialize, Serialize};
 pub mod sarif;
 use std::path::{Path, PathBuf};
 use syn::spanned::Spanned;
+use vero_core::ports::{Repositories, RuleApprovalRepository};
 use vero_core::{
     digest, stale_gate_decision, ChangeSet, Evidence, EvidenceClassification, EvidenceKind,
     EvidenceVerification, GateDecision, GateStatus, Policy, ProviderRequest, ProviderResult,
     RepositoryConfig, ReviewWrite, Severity, VerificationRun, WebhookClaim,
 };
-use vero_store_sqlite::ReviewStore;
 
 pub const GATE_CHECK_SCHEMA_VERSION: u32 = 1;
 const MAX_CHANGED_LINE_DIFF_BYTES: usize = 128 * 1024;
@@ -23,7 +23,7 @@ pub struct WebhookDispatchClaim {
 /// lease after their action succeeds, and release it when processing fails.
 pub fn verify_and_claim_webhook_delivery<P: vero_hosting::GitHostingProvider + ?Sized>(
     provider: &P,
-    store: &mut ReviewStore,
+    store: &mut dyn Repositories,
     headers: &std::collections::BTreeMap<String, String>,
     body: &[u8],
     lease_seconds: i64,
@@ -1774,7 +1774,7 @@ pub fn run_review(
     root: &Path,
     change_set: ChangeSet,
     config: &RepositoryConfig,
-    store: &mut ReviewStore,
+    store: &mut dyn Repositories,
 ) -> Result<ReviewResult, String> {
     run_review_cancellable(root, change_set, config, store, None)
 }
@@ -1783,7 +1783,7 @@ pub fn run_review_cancellable(
     root: &Path,
     change_set: ChangeSet,
     config: &RepositoryConfig,
-    store: &mut ReviewStore,
+    store: &mut dyn Repositories,
     cancellation: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<ReviewResult, String> {
     run_review_with_provider_and_selection(
@@ -1801,7 +1801,7 @@ pub fn run_review_with_provider(
     root: &Path,
     change_set: ChangeSet,
     config: &RepositoryConfig,
-    store: &mut ReviewStore,
+    store: &mut dyn Repositories,
     provider_adapter: &dyn ReviewProvider,
     cancellation: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<ReviewResult, String> {
@@ -1820,7 +1820,7 @@ pub fn run_review_with_provider_and_selection(
     root: &Path,
     change_set: ChangeSet,
     config: &RepositoryConfig,
-    store: &mut ReviewStore,
+    store: &mut dyn Repositories,
     provider_adapter: &dyn ReviewProvider,
     requested_reviewers: Option<&[String]>,
     cancellation: Option<&tokio_util::sync::CancellationToken>,
@@ -1844,7 +1844,7 @@ pub fn run_review_selecting_reviewers(
     root: &Path,
     change_set: ChangeSet,
     config: &RepositoryConfig,
-    store: &mut ReviewStore,
+    store: &mut dyn Repositories,
     reviewer_ids: Option<&[String]>,
 ) -> Result<ReviewResult, String> {
     run_review_selecting_reviewers_with_work_item(
@@ -1861,7 +1861,7 @@ pub fn run_review_selecting_reviewers_with_work_item(
     root: &Path,
     change_set: ChangeSet,
     config: &RepositoryConfig,
-    store: &mut ReviewStore,
+    store: &mut dyn Repositories,
     reviewer_ids: Option<&[String]>,
     work_item: Option<vero_hosting::WorkItemSnapshot>,
 ) -> Result<ReviewResult, String> {
@@ -1880,7 +1880,7 @@ pub fn run_review_selecting_reviewers_with_work_item_and_token_env(
     root: &Path,
     change_set: ChangeSet,
     config: &RepositoryConfig,
-    store: &mut ReviewStore,
+    store: &mut dyn Repositories,
     reviewer_ids: Option<&[String]>,
     work_item: Option<vero_hosting::WorkItemSnapshot>,
     work_item_token_env: Option<String>,
@@ -1904,7 +1904,7 @@ pub fn run_review_with_provider_and_selection_context(
     root: &Path,
     change_set: ChangeSet,
     config: &RepositoryConfig,
-    store: &mut ReviewStore,
+    store: &mut dyn Repositories,
     options: ReviewRunOptions<'_>,
 ) -> Result<ReviewResult, String> {
     let ReviewRunOptions {
@@ -1921,10 +1921,12 @@ pub fn run_review_with_provider_and_selection_context(
     let selected_reviewers = resolve_reviewer_selection(config, requested_reviewers)?;
     let provider_versions =
         capture_provider_versions(config, root, &selected_reviewers, cancellation);
+    let active_approvals = active_rule_approvals(&*store)?;
     let base_config_digest = effective_review_config_digest_with_provider_versions(
         config,
         root,
         &selected_reviewers,
+        &active_approvals,
         &provider_versions,
     )?;
     let config_digest = bind_work_item_digest(
@@ -1975,7 +1977,7 @@ pub fn run_review_with_provider_and_selection_context(
         .collect();
     let mut complete = !enabled_reviewers.is_empty() && required_reviewers_available;
     let applicable_rule_guidance =
-        applicable_rule_guidance(root, &config.pack_rules, &change_set.files)?;
+        applicable_rule_guidance(&active_approvals, &config.pack_rules, &change_set.files)?;
     // Impact is computed from the immutable snapshot and is used only to select
     // bounded source context. Its inferred edges are explicitly labeled below.
     let impact_context = analyze_impact(root, &change_set);
@@ -2693,18 +2695,24 @@ pub fn run_review_with_provider_and_selection_context(
             });
         }
     }
-    match effective_review_config_digest_with_provider_versions(
-        config,
-        root,
-        &selected_reviewers,
-        &provider_versions,
-    )
-    .and_then(|current| {
-        bind_work_item_digest(
-            &current,
-            work_item.as_ref().map(|item| item.content_digest.as_str()),
-        )
-    }) {
+    // Approvals may change while reviewers run; re-read them so the staleness
+    // check sees the configuration as it is now.
+    match active_rule_approvals(&*store)
+        .and_then(|current_approvals| {
+            effective_review_config_digest_with_provider_versions(
+                config,
+                root,
+                &selected_reviewers,
+                &current_approvals,
+                &provider_versions,
+            )
+        })
+        .and_then(|current| {
+            bind_work_item_digest(
+                &current,
+                work_item.as_ref().map(|item| item.content_digest.as_str()),
+            )
+        }) {
         Ok(current) if current == config_digest => {}
         Ok(_) => {
             complete = false;
@@ -3456,7 +3464,7 @@ pub fn run_verification(
     snapshot: &ChangeSet,
     profile_id: &str,
     config: &RepositoryConfig,
-    store: &mut ReviewStore,
+    store: &mut dyn Repositories,
 ) -> Result<VerificationRun, String> {
     ensure_snapshot_current(root, snapshot, "before verification")?;
     store.record_snapshot_manifest(&snapshot.digest, &snapshot_manifest_json(snapshot)?)?;
@@ -3695,7 +3703,7 @@ pub fn run_impacted_test_verification(
     snapshot: &ChangeSet,
     profile_id: &str,
     config: &RepositoryConfig,
-    store: &mut ReviewStore,
+    store: &mut dyn Repositories,
 ) -> Result<VerificationRun, String> {
     ensure_snapshot_current(root, snapshot, "before impact-targeted verification")?;
     store.record_snapshot_manifest(&snapshot.digest, &snapshot_manifest_json(snapshot)?)?;
@@ -4639,7 +4647,7 @@ pub fn run_finding_verification(
     finding_id: &str,
     profile_id: &str,
     config: &RepositoryConfig,
-    store: &mut ReviewStore,
+    store: &mut dyn Repositories,
 ) -> Result<VerificationRun, String> {
     ensure_snapshot_current(root, snapshot, "before finding verification")?;
     if finding_id.trim().is_empty() {
@@ -8003,7 +8011,7 @@ impl GateCheckResult {
 }
 
 pub fn evaluate_and_persist_gate(
-    store: &ReviewStore,
+    store: &mut dyn Repositories,
     input: GateEvaluation<'_>,
 ) -> Result<GateDecision, String> {
     let GateEvaluation {
@@ -8154,7 +8162,13 @@ fn configured_reviewer_policies(
         .collect()
 }
 
-pub fn effective_config_digest(config: &RepositoryConfig, root: &Path) -> Result<String, String> {
+/// Digest of everything that shapes a review's configuration, including the
+/// `active_approvals` (see [`active_rule_approvals`]).
+pub fn effective_config_digest(
+    config: &RepositoryConfig,
+    root: &Path,
+    active_approvals: &[vero_core::RuleApproval],
+) -> Result<String, String> {
     let instruction_digests: std::collections::BTreeMap<_, _> = config
         .reviewers
         .iter()
@@ -8185,7 +8199,7 @@ pub fn effective_config_digest(config: &RepositoryConfig, root: &Path) -> Result
             Ok((id.clone(), digests))
         })
         .collect::<Result<_, String>>()?;
-    let active_rule_approvals = active_rule_approvals(root)?;
+    let active_rule_approvals = active_approvals;
     let mut execution_config = serde_json::to_value(config).map_err(|error| error.to_string())?;
     if let Some(providers) = execution_config
         .get_mut("providers")
@@ -8203,12 +8217,12 @@ pub fn effective_config_digest(config: &RepositoryConfig, root: &Path) -> Result
     Ok(digest(&bytes))
 }
 
-fn active_rule_approvals(root: &Path) -> Result<Vec<vero_core::RuleApproval>, String> {
-    let database = root.join(".vero/vero.sqlite");
-    if !database.exists() {
-        return Ok(Vec::new());
-    }
-    let approvals = vero_store_sqlite::ReviewStore::open(&database)?.list_rule_approvals()?;
+/// The rule approvals currently active in `rules`; they shape reviewer guidance
+/// and are bound into the effective config digest.
+pub fn active_rule_approvals(
+    rules: &dyn RuleApprovalRepository,
+) -> Result<Vec<vero_core::RuleApproval>, String> {
+    let approvals = rules.list_rule_approvals()?;
     Ok(approvals
         .into_iter()
         .filter(|approval| approval.status == "active")
@@ -8218,11 +8232,11 @@ fn active_rule_approvals(root: &Path) -> Result<Vec<vero_core::RuleApproval>, St
 /// Active local approvals plus rules from pinned packs; a local approval wins
 /// when both carry the same approval ID.
 fn applicable_rule_guidance(
-    root: &Path,
+    active_approvals: &[vero_core::RuleApproval],
     pack_rules: &[vero_core::RuleApproval],
     files: &[vero_core::SnapshotFile],
 ) -> Result<Vec<vero_core::RuleApproval>, String> {
-    let mut active = active_rule_approvals(root)?;
+    let mut active = active_approvals.to_vec();
     for rule in pack_rules {
         if !active
             .iter()
@@ -8270,12 +8284,14 @@ pub fn effective_review_config_digest(
     config: &RepositoryConfig,
     root: &Path,
     selected_reviewers: &[String],
+    active_approvals: &[vero_core::RuleApproval],
 ) -> Result<String, String> {
     let provider_versions = capture_provider_versions(config, root, selected_reviewers, None);
     let base = effective_review_config_digest_with_provider_versions(
         config,
         root,
         selected_reviewers,
+        active_approvals,
         &provider_versions,
     )?;
     bind_work_item_digest(&base, None)
@@ -8285,6 +8301,7 @@ pub fn effective_review_config_digest_with_work_item(
     config: &RepositoryConfig,
     root: &Path,
     reviewer_ids: &[String],
+    active_approvals: &[vero_core::RuleApproval],
     work_item: Option<&vero_hosting::WorkItemSnapshot>,
 ) -> Result<String, String> {
     if let Some(item) = work_item {
@@ -8295,6 +8312,7 @@ pub fn effective_review_config_digest_with_work_item(
         config,
         root,
         reviewer_ids,
+        active_approvals,
         &provider_versions,
     )?;
     bind_work_item_digest(&base, work_item.map(|item| item.content_digest.as_str()))
@@ -8324,9 +8342,10 @@ pub fn effective_review_config_digest_with_provider_versions(
     config: &RepositoryConfig,
     root: &Path,
     selected_reviewers: &[String],
+    active_approvals: &[vero_core::RuleApproval],
     provider_versions: &std::collections::BTreeMap<String, Option<String>>,
 ) -> Result<String, String> {
-    let config_digest = effective_config_digest(config, root)?;
+    let config_digest = effective_config_digest(config, root, active_approvals)?;
     let provider_environment_digests =
         provider_environment_digests(config, selected_reviewers, |name| std::env::var(name).ok())?;
     let mut selected = selected_reviewers.to_vec();
@@ -8670,6 +8689,8 @@ mod changed_line_range_tests {
 mod tests {
     use super::*;
     use std::process::Command;
+    use vero_core::ports::*;
+    use vero_store_sqlite::ReviewStore;
 
     #[test]
     fn markdown_report_distinguishes_empty_complete_review_from_incomplete_analysis() {
@@ -10356,7 +10377,7 @@ mod tests {
         // The user's checkout can move on after the immutable commit snapshot
         // was selected. Verification must still see the committed file bytes.
         std::fs::write(root.join("source.rs"), "fn dirty_checkout() {}\n").unwrap();
-        let config_digest = effective_review_config_digest(&config, root, &[]).unwrap();
+        let config_digest = effective_review_config_digest(&config, root, &[], &[]).unwrap();
         let mut store = ReviewStore::open(&root.join("reviews.sqlite")).unwrap();
         store
             .save(
@@ -10371,7 +10392,7 @@ mod tests {
         let verification = run_verification(root, &snapshot, "unit", &config, &mut store).unwrap();
         let verification_runs = store.verifications_for_snapshot(&snapshot.digest).unwrap();
         let passing = evaluate_and_persist_gate(
-            &store,
+            &mut store,
             GateEvaluation {
                 review_id: "rev_local_verifier",
                 reviewed_snapshot_id: &snapshot.digest,
@@ -10394,7 +10415,7 @@ mod tests {
         std::fs::write(&executable, "#!/bin/sh\nexit 1\n").unwrap();
         let stale_evidence = store.verifications_for_snapshot(&snapshot.digest).unwrap();
         let rejected = evaluate_and_persist_gate(
-            &store,
+            &mut store,
             GateEvaluation {
                 review_id: "rev_local_verifier",
                 reviewed_snapshot_id: &snapshot.digest,
@@ -11547,6 +11568,7 @@ printf '%s\n' '{{"type":"item.completed","item":{{"type":"agent_message","text":
                 &config,
                 root,
                 &reviewer_ids,
+                &[],
                 Some(&item)
             )
             .unwrap()
@@ -11558,6 +11580,7 @@ printf '%s\n' '{{"type":"item.completed","item":{{"type":"agent_message","text":
             &config,
             root,
             &reviewer_ids,
+            &[],
             Some(&changed_item),
         )
         .unwrap();
@@ -11566,7 +11589,7 @@ printf '%s\n' '{{"type":"item.completed","item":{{"type":"agent_message","text":
             .verifications_for_snapshot(&review.snapshot_id)
             .unwrap();
         let recheck = evaluate_and_persist_gate(
-            &store,
+            &mut store,
             GateEvaluation {
                 review_id: &review.review_id,
                 reviewed_snapshot_id: &review.snapshot_id,
@@ -11813,7 +11836,7 @@ printf '%s\n' '{{"type":"item.completed","item":{{"type":"agent_message","text":
         .unwrap();
         let config = RepositoryConfig::load(&config_path).unwrap();
 
-        assert!(effective_config_digest(&config, directory.path())
+        assert!(effective_config_digest(&config, directory.path(), &[])
             .unwrap_err()
             .contains("path escapes repository root"));
     }
@@ -11844,11 +11867,14 @@ printf '%s\n' '{{"type":"item.completed","item":{{"type":"agent_message","text":
         )
         .unwrap();
         let config = RepositoryConfig::load(&root.join(".vero.yaml")).unwrap();
-        let initial = effective_config_digest(&config, root).unwrap();
+        let initial = effective_config_digest(&config, root, &[]).unwrap();
 
         std::fs::write(root.join("support.md"), "Changed API contract.\n").unwrap();
 
-        assert_ne!(initial, effective_config_digest(&config, root).unwrap());
+        assert_ne!(
+            initial,
+            effective_config_digest(&config, root, &[]).unwrap()
+        );
     }
 
     #[test]
@@ -11863,12 +11889,12 @@ printf '%s\n' '{{"type":"item.completed","item":{{"type":"agent_message","text":
         };
         std::fs::write(&config_path, config(2)).unwrap();
         let first = RepositoryConfig::load(&config_path).unwrap();
-        let first_digest = effective_config_digest(&first, root).unwrap();
+        let first_digest = effective_config_digest(&first, root, &[]).unwrap();
         std::fs::write(&config_path, config(3)).unwrap();
         let updated = RepositoryConfig::load(&config_path).unwrap();
         assert_eq!(
             first_digest,
-            effective_config_digest(&updated, root).unwrap()
+            effective_config_digest(&updated, root, &[]).unwrap()
         );
     }
 
@@ -11883,7 +11909,7 @@ printf '%s\n' '{{"type":"item.completed","item":{{"type":"agent_message","text":
         )
         .unwrap();
         let config = RepositoryConfig::load(&root.join(".vero.yaml")).unwrap();
-        let before = effective_config_digest(&config, root).unwrap();
+        let before = effective_config_digest(&config, root, &[]).unwrap();
         let database = root.join(".vero/vero.sqlite");
         std::fs::create_dir_all(database.parent().unwrap()).unwrap();
         let mut store = vero_store_sqlite::ReviewStore::open(&database).unwrap();
@@ -11915,27 +11941,35 @@ printf '%s\n' '{{"type":"item.completed","item":{{"type":"agent_message","text":
             content_digest: "digest".into(),
             status: "modified".into(),
         }];
-        let guidance = applicable_rule_guidance(root, &[], &files).unwrap();
+        let guidance =
+            applicable_rule_guidance(&active_rule_approvals(&store).unwrap(), &[], &files).unwrap();
         assert_eq!(guidance.len(), 1);
         assert_eq!(guidance[0].approval_id, "approval-scoped");
-        let after_approval = effective_config_digest(&config, root).unwrap();
+        let after_approval =
+            effective_config_digest(&config, root, &active_rule_approvals(&store).unwrap())
+                .unwrap();
         assert_ne!(before, after_approval);
         let unrelated = vec![vero_core::SnapshotFile {
             path: "src/api.rs".into(),
             ..files[0].clone()
         }];
-        assert!(applicable_rule_guidance(root, &[], &unrelated)
-            .unwrap()
-            .is_empty());
+        assert!(
+            applicable_rule_guidance(&active_rule_approvals(&store).unwrap(), &[], &unrelated)
+                .unwrap()
+                .is_empty()
+        );
         store
             .revoke_rule_approval("approval-scoped", "maintainer", "Replaced")
             .unwrap();
-        assert!(applicable_rule_guidance(root, &[], &files)
-            .unwrap()
-            .is_empty());
+        assert!(
+            applicable_rule_guidance(&active_rule_approvals(&store).unwrap(), &[], &files)
+                .unwrap()
+                .is_empty()
+        );
         assert_ne!(
             after_approval,
-            effective_config_digest(&config, root).unwrap()
+            effective_config_digest(&config, root, &active_rule_approvals(&store).unwrap())
+                .unwrap()
         );
     }
 
@@ -13207,9 +13241,9 @@ policy: { required_reviewers: [correctness] }
         )
         .unwrap();
         std::fs::write(directory.path().join("reviewer.md"), "Review carefully.").unwrap();
-        let config_digest = effective_config_digest(&config, directory.path()).unwrap();
+        let config_digest = effective_config_digest(&config, directory.path(), &[]).unwrap();
         let decision = evaluate_and_persist_gate(
-            &store,
+            &mut store,
             GateEvaluation {
                 review_id: "rev_missing_reviewer",
                 reviewed_snapshot_id: &current.digest,
@@ -13239,6 +13273,8 @@ policy: { required_reviewers: [correctness] }
 mod webhook_dispatch_tests {
     use super::*;
     use std::collections::BTreeMap;
+    use vero_core::ports::HostedDeliveryRepository;
+    use vero_store_sqlite::ReviewStore;
 
     struct StubHostingProvider {
         signature_verified: bool,

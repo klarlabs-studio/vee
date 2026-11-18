@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::path::{Component, Path, PathBuf};
+use vero_core::ports::*;
 use vero_core::FindingRecord;
-use vero_store_sqlite::ReviewStore;
 
 const MAX_CONTEXT_LINES: usize = 40;
 const MAX_CONTEXT_BYTES: usize = 32 * 1024;
@@ -59,7 +59,7 @@ pub struct FindingWorkPackage {
 
 pub fn build_package(
     root: &Path,
-    store: &ReviewStore,
+    store: &dyn Repositories,
     finding_ids: &[String],
     context_lines: usize,
 ) -> Result<FindingWorkPackage, String> {
@@ -130,7 +130,7 @@ pub struct SourceContext {
 
 pub fn build(
     root: &Path,
-    store: &ReviewStore,
+    store: &dyn Repositories,
     mut record: FindingRecord,
     context_lines: usize,
 ) -> Result<FindingTask, String> {

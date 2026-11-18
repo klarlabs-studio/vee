@@ -1,4 +1,5 @@
 use std::{fs, process::Command};
+use vero_core::ports::*;
 
 fn accept_with_timeout(listener: &std::net::TcpListener) -> std::io::Result<std::net::TcpStream> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
@@ -83,7 +84,7 @@ fn impacted_test_plan_emits_snapshot_bound_argv_without_execution() {
 fn publish_fixture_config_digest(root: &std::path::Path) -> String {
     fs::write(root.join(".vero.yaml"), "version: 1\n").unwrap();
     let config = vero_application::load_repository_config(root).unwrap();
-    vero_application::effective_review_config_digest_with_work_item(&config, root, &[], None)
+    vero_application::effective_review_config_digest_with_work_item(&config, root, &[], &[], None)
         .unwrap()
 }
 
@@ -5698,6 +5699,7 @@ fn offline_mode_blocks_remote_review_and_hosting_commands_before_credentials_or_
 
 #[test]
 fn rule_candidate_report_uses_versioned_schema_and_does_not_mutate_policy() {
+    use vero_core::ports::*;
     use vero_core::{Finding, FindingFeedbackLabel, Severity};
     use vero_store_sqlite::ReviewStore;
 
@@ -9657,7 +9659,7 @@ fn reviews_list_and_show_return_persisted_review_records() {
         .unwrap()
         .policy
         .minimum_confidence = 99;
-    let store = vero_store_sqlite::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
+    let mut store = vero_store_sqlite::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
     store
         .save_gate_decision(review_id, &alternate_decision)
         .unwrap();

@@ -32,7 +32,7 @@ pub struct ParsedDiagnostic {
 
 pub fn diagnose(
     root: &Path,
-    store: &vero_store_sqlite::ReviewStore,
+    store: &dyn vero_core::ports::Repositories,
     run: &VerificationRun,
 ) -> Result<VerificationDiagnosis, String> {
     let mut limitations = vec![
@@ -408,6 +408,7 @@ fn truncate_chars(value: &str, maximum: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vero_core::ports::*;
 
     #[test]
     fn classifies_common_compiler_and_test_failure_lines() {
