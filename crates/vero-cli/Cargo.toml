@@ -14,6 +14,7 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 vero-core = { path = "../vero-core" }
+vero-store-sqlite = { path = "../vero-store-sqlite" }
 vero-application = { path = "../vero-application" }
 vero-git = { path = "../vero-git" }
 vero-http = { path = "../vero-http" }

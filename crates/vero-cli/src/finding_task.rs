@@ -1,6 +1,7 @@
 use serde::Serialize;
 use std::path::{Component, Path, PathBuf};
-use vero_core::{FindingRecord, ReviewStore};
+use vero_core::FindingRecord;
+use vero_store_sqlite::ReviewStore;
 
 const MAX_CONTEXT_LINES: usize = 40;
 const MAX_CONTEXT_BYTES: usize = 32 * 1024;

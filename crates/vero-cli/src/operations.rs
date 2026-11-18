@@ -14,8 +14,9 @@ use std::path::{Path, PathBuf};
 use vero_application::{GateCheckResult, ReviewResult};
 use vero_core::{
     Evidence, FindingFeedback, FindingFeedbackLabel, FindingRecord, FindingStatus,
-    RepositoryConfig, ReviewStore, Severity, VerificationRun,
+    RepositoryConfig, Severity, VerificationRun,
 };
+use vero_store_sqlite::ReviewStore;
 
 pub const DEFAULT_PAGE_SIZE: usize = 50;
 pub const MAX_PAGE_SIZE: usize = 100;

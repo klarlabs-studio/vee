@@ -368,7 +368,7 @@ pub struct EffectivenessWindow {
 }
 
 pub(crate) fn effectiveness(
-    store: &vero_core::ReviewStore,
+    store: &vero_store_sqlite::ReviewStore,
     requested_id: Option<&str>,
     external_feedback: &[super::imported_history::ExternalReviewFeedback],
 ) -> Result<RuleEffectivenessReport, String> {

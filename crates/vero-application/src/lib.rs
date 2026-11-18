@@ -5,8 +5,9 @@ use syn::spanned::Spanned;
 use vero_core::{
     digest, stale_gate_decision, ChangeSet, Evidence, EvidenceClassification, EvidenceKind,
     EvidenceVerification, GateDecision, GateStatus, Policy, ProviderRequest, ProviderResult,
-    RepositoryConfig, ReviewStore, ReviewWrite, Severity, VerificationRun, WebhookClaim,
+    RepositoryConfig, ReviewWrite, Severity, VerificationRun, WebhookClaim,
 };
+use vero_store_sqlite::ReviewStore;
 
 pub const GATE_CHECK_SCHEMA_VERSION: u32 = 1;
 const MAX_CHANGED_LINE_DIFF_BYTES: usize = 128 * 1024;
@@ -4929,7 +4930,9 @@ fn analyze_impact_with_typescript_server(
             break;
         }
         if pending.is_empty() {
-            let end = (index + READ_CHUNK).min(candidates.len()).min(MAX_SOURCE_FILES);
+            let end = (index + READ_CHUNK)
+                .min(candidates.len())
+                .min(MAX_SOURCE_FILES);
             pending.extend(vero_git::read_snapshot_files(
                 root,
                 change_set,
@@ -8205,7 +8208,7 @@ fn active_rule_approvals(root: &Path) -> Result<Vec<vero_core::RuleApproval>, St
     if !database.exists() {
         return Ok(Vec::new());
     }
-    let approvals = vero_core::ReviewStore::open(&database)?.list_rule_approvals()?;
+    let approvals = vero_store_sqlite::ReviewStore::open(&database)?.list_rule_approvals()?;
     Ok(approvals
         .into_iter()
         .filter(|approval| approval.status == "active")
@@ -11883,7 +11886,7 @@ printf '%s\n' '{{"type":"item.completed","item":{{"type":"agent_message","text":
         let before = effective_config_digest(&config, root).unwrap();
         let database = root.join(".vero/vero.sqlite");
         std::fs::create_dir_all(database.parent().unwrap()).unwrap();
-        let mut store = vero_core::ReviewStore::open(&database).unwrap();
+        let mut store = vero_store_sqlite::ReviewStore::open(&database).unwrap();
         store
             .create_rule_approval(&vero_core::RuleApproval {
                 schema_version: 2,

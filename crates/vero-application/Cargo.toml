@@ -11,6 +11,7 @@ serde_yaml.workspace = true
 jsonschema.workspace = true
 toml.workspace = true
 vero-core = { path = "../vero-core" }
+vero-store-sqlite = { path = "../vero-store-sqlite" }
 vero-git = { path = "../vero-git" }
 vero-hosting = { path = "../vero-hosting" }
 tokio-util.workspace = true

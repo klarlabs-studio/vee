@@ -1,8 +1,7 @@
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
-use vero_core::{
-    FindingFeedbackLabel, FindingStatus, GateStatus, ReviewStore, Severity, VerificationStatus,
-};
+use vero_core::{FindingFeedbackLabel, FindingStatus, GateStatus, Severity, VerificationStatus};
+use vero_store_sqlite::ReviewStore;
 
 const MAX_DIAGNOSTIC_RUNS: usize = 500;
 const MAX_DIAGNOSTIC_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;

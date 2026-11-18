@@ -2570,6 +2570,7 @@ dependencies = [
  "vero-git",
  "vero-hosting",
  "vero-http",
+ "vero-store-sqlite",
 ]
 
 [[package]]
@@ -2593,6 +2594,7 @@ dependencies = [
  "vero-core",
  "vero-git",
  "vero-hosting",
+ "vero-store-sqlite",
 ]
 
 [[package]]
@@ -2600,7 +2602,6 @@ name = "vero-core"
 version = "0.1.0"
 dependencies = [
  "libc",
- "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2647,6 +2648,19 @@ dependencies = [
  "vero-core",
  "vero-git",
  "vero-hosting",
+ "vero-store-sqlite",
+]
+
+[[package]]
+name = "vero-store-sqlite"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "vero-core",
 ]
 
 [[package]]

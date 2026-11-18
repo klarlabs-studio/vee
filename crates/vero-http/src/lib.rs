@@ -13,9 +13,8 @@ use std::{
     sync::Arc,
 };
 use vero_application::ReviewResult;
-use vero_core::{
-    FindingRecord, FindingStatus, RepositoryConfig, ReviewStore, ReviewSummary, Severity,
-};
+use vero_core::{FindingRecord, FindingStatus, RepositoryConfig, ReviewSummary, Severity};
+use vero_store_sqlite::ReviewStore;
 
 const INDEX_HTML: &str = include_str!(concat!(env!("OUT_DIR"), "/index.html"));
 const APP_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/app.js"));

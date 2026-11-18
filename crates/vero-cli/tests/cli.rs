@@ -2214,7 +2214,7 @@ fn webhook_retention_command_previews_then_prunes_completed_receipts() {
     let vero_dir = directory.path().join(".vero");
     fs::create_dir_all(&vero_dir).unwrap();
     let database = vero_dir.join("vero.sqlite");
-    let mut store = vero_core::ReviewStore::open(&database).unwrap();
+    let mut store = vero_store_sqlite::ReviewStore::open(&database).unwrap();
     let old_digest = vero_core::digest(b"old event");
     let vero_core::WebhookClaim::Acquired { lease_token } = store
         .claim_webhook_delivery("github", "old-event", "push", 1, &old_digest, 10, 30)
@@ -3250,7 +3250,7 @@ fn hosting_publish_rejects_changed_base_before_fetching_diff_or_publishing() {
     .unwrap();
     fs::create_dir_all(root.join(".vero")).unwrap();
     let config_digest = publish_fixture_config_digest(root);
-    let mut store = vero_core::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
+    let mut store = vero_store_sqlite::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
     let review = serde_json::json!({
         "schema_version": 2,
         "review_id": "review-base-stale",
@@ -3424,7 +3424,7 @@ fn gerrit_publish_command_emits_revision_bound_tagged_gate_summary() {
     .unwrap();
     fs::create_dir_all(root.join(".vero")).unwrap();
     let config_digest = publish_fixture_config_digest(root);
-    let mut store = vero_core::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
+    let mut store = vero_store_sqlite::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
     let review = serde_json::json!({
         "schema_version": 2,
         "review_id": "review-gerrit-publish",
@@ -3674,7 +3674,7 @@ fn github_publish_command_emits_snapshot_bound_check_run() {
     .unwrap();
     fs::create_dir_all(root.join(".vero")).unwrap();
     let config_digest = publish_fixture_config_digest(root);
-    let mut store = vero_core::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
+    let mut store = vero_store_sqlite::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
     let review = serde_json::json!({
         "schema_version": 2,
         "review_id": "review-github-publish",
@@ -3898,7 +3898,7 @@ fn bitbucket_publish_command_emits_revision_bound_build_status() {
     .unwrap();
     fs::create_dir_all(root.join(".vero")).unwrap();
     let config_digest = publish_fixture_config_digest(root);
-    let mut store = vero_core::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
+    let mut store = vero_store_sqlite::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
     let review = serde_json::json!({
         "schema_version": 2,
         "review_id": "review-bitbucket-publish",
@@ -4138,7 +4138,7 @@ fn gitlab_publish_command_emits_revision_bound_commit_status() {
     .unwrap();
     fs::create_dir_all(root.join(".vero")).unwrap();
     let config_digest = publish_fixture_config_digest(root);
-    let mut store = vero_core::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
+    let mut store = vero_store_sqlite::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
     let review = serde_json::json!({
         "schema_version": 2,
         "review_id": "review-gitlab-publish",
@@ -4353,7 +4353,7 @@ fn azure_devops_publish_command_emits_revision_bound_status_and_added_line_threa
     .unwrap();
     fs::create_dir_all(root.join(".vero")).unwrap();
     let config_digest = publish_fixture_config_digest(root);
-    let mut store = vero_core::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
+    let mut store = vero_store_sqlite::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
     let review = serde_json::json!({
         "schema_version": 2, "review_id": "review-azure-publish", "snapshot_id": change_set.digest,
         "status": "pass", "findings": [{
@@ -5698,7 +5698,8 @@ fn offline_mode_blocks_remote_review_and_hosting_commands_before_credentials_or_
 
 #[test]
 fn rule_candidate_report_uses_versioned_schema_and_does_not_mutate_policy() {
-    use vero_core::{Finding, FindingFeedbackLabel, ReviewStore, Severity};
+    use vero_core::{Finding, FindingFeedbackLabel, Severity};
+    use vero_store_sqlite::ReviewStore;
 
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
@@ -6040,7 +6041,7 @@ fn test_recommendations_are_snapshot_bound_and_cautious_about_missing_edges() {
         ".vero/artifacts/sha256/{}",
         &artifact_digest["sha256:".len()..]
     );
-    let mut store = vero_core::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
+    let mut store = vero_store_sqlite::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
     let change_set =
         vero_application::capture_change_set(root, vero_git::ChangeScope::WorkingTree).unwrap();
     assert_eq!(change_set.digest, snapshot_id);
@@ -6199,7 +6200,7 @@ fn test_recommendations_are_snapshot_bound_and_cautious_about_missing_edges() {
         "coverage report",
     );
 
-    let mut store = vero_core::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
+    let mut store = vero_store_sqlite::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
     store
         .save_verification(&vero_core::VerificationRun {
             schema_version: 1,
@@ -6765,7 +6766,7 @@ fn gate_check_unknown_review_is_a_usage_error() {
         .unwrap()
         .success());
     fs::create_dir_all(root.join(".vero")).unwrap();
-    vero_core::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
+    vero_store_sqlite::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_vero"))
         .args([
             "gate",
@@ -7061,7 +7062,7 @@ fn mcp_stdio_exposes_findings_tool_over_the_pinned_protocol() {
     )
     .unwrap();
     fs::create_dir_all(root.join(".vero")).unwrap();
-    let mut db = vero_core::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
+    let mut db = vero_store_sqlite::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
     db.save_review(
         "review-for-status-test",
         "snapshot-for-status-test",
@@ -9656,7 +9657,7 @@ fn reviews_list_and_show_return_persisted_review_records() {
         .unwrap()
         .policy
         .minimum_confidence = 99;
-    let store = vero_core::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
+    let store = vero_store_sqlite::ReviewStore::open(&root.join(".vero/vero.sqlite")).unwrap();
     store
         .save_gate_decision(review_id, &alternate_decision)
         .unwrap();

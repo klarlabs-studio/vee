@@ -6,9 +6,9 @@ use std::{
     process::ExitCode,
 };
 use vero_core::{
-    ChangeSet, GateStatus, RepositoryConfig, ReviewStore, Severity, VerificationRun,
-    VerificationStatus,
+    ChangeSet, GateStatus, RepositoryConfig, Severity, VerificationRun, VerificationStatus,
 };
+use vero_store_sqlite::ReviewStore;
 
 mod acceptance;
 mod analytics;
@@ -8291,13 +8291,13 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("hosted-threads.sqlite");
         let target = "github:example/repo#12";
-        let mut store = vero_core::ReviewStore::open(&database).unwrap();
+        let mut store = vero_store_sqlite::ReviewStore::open(&database).unwrap();
         store
             .replace_hosted_finding_threads(target, &intent)
             .unwrap();
         drop(store);
 
-        let reopened = vero_core::ReviewStore::open(&database).unwrap();
+        let reopened = vero_store_sqlite::ReviewStore::open(&database).unwrap();
         let recovered = reopened.hosted_finding_threads(target).unwrap();
         assert_eq!(recovered, intent);
 

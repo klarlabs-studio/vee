@@ -32,7 +32,7 @@ pub struct ParsedDiagnostic {
 
 pub fn diagnose(
     root: &Path,
-    store: &vero_core::ReviewStore,
+    store: &vero_store_sqlite::ReviewStore,
     run: &VerificationRun,
 ) -> Result<VerificationDiagnosis, String> {
     let mut limitations = vec![
@@ -544,7 +544,7 @@ mod tests {
     fn diagnosis_links_verified_log_lines_to_the_exact_snapshot() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
-        let mut store = vero_core::ReviewStore::open(&root.join("vero.sqlite")).unwrap();
+        let mut store = vero_store_sqlite::ReviewStore::open(&root.join("vero.sqlite")).unwrap();
         let change_set = ChangeSet::from_entries(
             None,
             None,

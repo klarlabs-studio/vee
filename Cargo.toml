@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/vero-core", "crates/vero-application", "crates/vero-git", "crates/vero-hosting", "crates/vero-http", "crates/vero-cli"]
+members = ["crates/vero-core", "crates/vero-store-sqlite", "crates/vero-application", "crates/vero-git", "crates/vero-hosting", "crates/vero-http", "crates/vero-cli"]
 
 [workspace.package]
 version = "0.1.0"

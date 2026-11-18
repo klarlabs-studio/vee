@@ -473,7 +473,7 @@ fn exact_snapshot_gate(root: &Path, snapshot_id: &str) -> Result<ExactSnapshotGa
     if !database_metadata.file_type().is_file() {
         return Err(format!("{} must be a regular file", database.display()));
     }
-    let store = vero_core::ReviewStore::open(&database)?;
+    let store = vero_store_sqlite::ReviewStore::open(&database)?;
     let mut matching_review_without_gate = None;
     for review in store.list_reviews()? {
         if review.snapshot_id != snapshot_id {
@@ -532,7 +532,7 @@ fn current_gate_validity(
     root: &Path,
     snapshot_id: &str,
     saved: &vero_application::ReviewResult,
-    store: &vero_core::ReviewStore,
+    store: &vero_store_sqlite::ReviewStore,
 ) -> Result<String, String> {
     if saved.snapshot_id != snapshot_id {
         return Ok("stale_snapshot".into());
@@ -8709,7 +8709,7 @@ operations:
         let metadata = directory.path().join(".vero");
         std::fs::create_dir_all(&metadata).unwrap();
         let database = metadata.join("vero.sqlite");
-        let mut store = vero_core::ReviewStore::open(&database).unwrap();
+        let mut store = vero_store_sqlite::ReviewStore::open(&database).unwrap();
         store
             .save_review("review-1", "snapshot-current", "config", "pass", "{}", &[])
             .unwrap();
