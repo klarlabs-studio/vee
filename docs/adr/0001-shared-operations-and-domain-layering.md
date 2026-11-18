@@ -1,6 +1,6 @@
 # ADR 0001: One operations layer for all transports, and a path to domain layering
 
-- **Status:** Accepted (step 1, steps 2.1 and 2.2 implemented); step 2.3 in progress
+- **Status:** Accepted (step 1, steps 2.1 and 2.2 implemented; step 2.3 partly implemented)
 - **Date:** 2026-11-17
 
 ## Context
@@ -91,6 +91,24 @@ Restructure toward domain layering, in this order:
    Learning (feedback, rule candidates and approvals), and Context & Impact.
    Move `operations.rs` and the use-case modules out of `vero-cli`, so `vero-http`
    uses the same operations as the CLI and MCP.
+
+   *Partly implemented (2026-11-18):* `operations`, onboarding (`setup`),
+   `packs`, and the use-case modules (acceptance, analytics, attestation,
+   coverage, finding tasks, imported history, ownership, patch sandbox, PR
+   description, repository map, rule candidates, standards, test generation,
+   effectiveness, and recommendations) are now modules of `vero-application`,
+   with the error markers (`failure`), proposal files (`proposals`), and
+   work-item fetching (`work_items`) they use. `Workspace` takes a
+   `RepositoryStores` factory, so `vero-application` has no SQLite dependency
+   outside its tests. `vero-cli` keeps argument parsing, output rendering,
+   the MCP adapter, and composition.
+
+   Remaining: route `vero-http` handlers through `operations` (their response
+   documents differ from the published contracts and the dashboard reads
+   them, so each needs a contract check); split `vero-application/src/lib.rs`
+   into the bounded-context modules above; and decide whether verification
+   and provider subprocesses (`vero-process`) sit behind ports, as Git
+   capture (`vero-git`) does not today.
 
 ## Consequences
 
