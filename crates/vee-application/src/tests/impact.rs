@@ -214,11 +214,16 @@ fn typescript_project_references_resolve_aliases_without_same_name_false_edges()
     assert!(impact.coverage_complete);
     assert!(impact.changed_symbols.contains(&"ChangedAPI".into()));
     assert!(impact.changed_symbols.contains(&"ChangedJSAPI".into()));
-    assert!(impact.analyzers.iter().any(|analyzer| {
-        analyzer.id == "typescript-language-service"
-            && analyzer.status == "used"
-            && analyzer.version.is_some()
-    }));
+    assert!(
+        impact.analyzers.iter().any(|analyzer| {
+            analyzer.id == "typescript-language-service"
+                && analyzer.status == "used"
+                && analyzer.version.is_some()
+        }),
+        "analyzers: {:?}\nlimitations: {:#?}",
+        impact.analyzers,
+        impact.limitations
+    );
     assert!(impact.paths.iter().any(|edge| {
         edge.affected_path == "src/consumer.ts"
             && edge.relationship == "resolved_symbol_reference"
@@ -831,13 +836,17 @@ fn impact_reports_evidenced_rust_and_go_references_with_uncertainty() {
     );
     let mut no_tests_config = config.clone();
     let fake_cargo_directory = tempfile::tempdir().unwrap();
-    let fake_cargo = fake_cargo_directory.path().join("fake-cargo");
+    // Windows runs only executables with a PATHEXT extension, so the fake
+    // there is a batch file rather than a shell script.
+    #[cfg(windows)]
+    let (fake_cargo_name, fake_cargo_script) =
+        ("fake-cargo.cmd", "@echo no tests matched\r\n@exit /b 0\r\n");
+    #[cfg(not(windows))]
+    let (fake_cargo_name, fake_cargo_script) =
+        ("fake-cargo", "#!/bin/sh\necho 'no tests matched'\nexit 0\n");
+    let fake_cargo = fake_cargo_directory.path().join(fake_cargo_name);
     let fake_cargo_source = fake_cargo_directory.path().join("fake-cargo-source");
-    std::fs::write(
-        &fake_cargo_source,
-        "#!/bin/sh\necho 'no tests matched'\nexit 0\n",
-    )
-    .unwrap();
+    std::fs::write(&fake_cargo_source, fake_cargo_script).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
