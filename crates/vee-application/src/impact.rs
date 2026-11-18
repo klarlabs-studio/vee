@@ -856,11 +856,15 @@ pub(crate) fn analyze_go_references(
     }
 }
 
+/// Find the program `name` on PATH, as `name.exe` on Windows.
 pub(crate) fn find_executable(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH")
-        .into_iter()
-        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
-        .map(|directory| directory.join(name))
+    let executable = if cfg!(windows) && !name.ends_with(".exe") {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    };
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|directory| directory.join(&executable))
         .find(|candidate| candidate.is_file())
         .and_then(|candidate| candidate.canonical().ok())
 }

@@ -5969,7 +5969,8 @@ fn run_typescript_definition(
         .extension()
         .is_some_and(|extension| extension == "js")
     {
-        let node = find_executable("node").ok_or("node not found for configured tsserver")?;
+        let node = crate::impact::find_executable("node")
+            .ok_or("node not found for configured tsserver")?;
         let mut command = std::process::Command::new(node);
         command.arg(executable);
         command
@@ -6162,22 +6163,6 @@ fn find_gopls_executable() -> Option<PathBuf> {
                 .ok()
                 .filter(|metadata| metadata.is_file())
                 .and_then(|_| candidate.canonical().ok())
-        })
-}
-
-fn find_executable(name: &str) -> Option<PathBuf> {
-    let executable = if cfg!(windows) && !name.ends_with(".exe") {
-        format!("{name}.exe")
-    } else {
-        name.to_owned()
-    };
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|directory| directory.join(&executable))
-        .find_map(|candidate| {
-            candidate
-                .is_file()
-                .then(|| candidate.canonical().ok())
-                .flatten()
         })
 }
 
@@ -9634,7 +9619,10 @@ operations:
     #[test]
     fn cross_impact_resolves_javascript_projects_to_changed_producer_files() {
         if skip_without_language_server("tsserver", find_typescript_server().is_some())
-            || skip_without_language_server("node", find_executable("node").is_some())
+            || skip_without_language_server(
+                "node",
+                crate::impact::find_executable("node").is_some(),
+            )
         {
             return;
         }
