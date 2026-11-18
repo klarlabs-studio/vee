@@ -1,6 +1,6 @@
 # ADR 0001: One operations layer for all transports, and a path to domain layering
 
-- **Status:** Accepted (step 1, steps 2.1 and 2.2 implemented; step 2.3 partly implemented)
+- **Status:** Accepted (step 1 and step 2 implemented; unit tests still to be split by context)
 - **Date:** 2026-11-17
 
 ## Context
@@ -121,9 +121,15 @@ Restructure toward domain layering, in this order:
    `source`, with the unit tests in `tests`. `lib.rs` re-exports them, so
    the public API is unchanged.
 
-   Remaining: decide whether verification and provider subprocesses
-   (`vero-process`) sit behind ports, as Git capture (`vero-git`) does not
-   today, and split the unit tests by context.
+   Subprocesses stay direct dependencies (decided 2026-11-18). Reviewer
+   execution is already behind the `ReviewProvider` port, which tests replace.
+   Verification commands and Git capture have one runner each, local
+   processes, and their tests run real processes, as the engineering
+   preferences ask for data and infrastructure tests. A port for
+   `vero-process` or `vero-git` waits for a second runner, such as a remote
+   or sandboxed one.
+
+   Remaining: split the unit tests in `tests` by context.
 
 ## Consequences
 
