@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "corpus_id": "rust-reviewed-behavior-v1",
+  "dataset_kind": "seeded",
+  "source": "Vee authored synthetic Rust behavior fixtures",
+  "source_revision": "fixture-set-v1",
+  "mutants": [
+    {
+      "id": "return-value-regression",
+      "patch": "kills.patch",
+      "patch_digest": "sha256:78884aa5aa390ea6a25e840a2a8e3573764d3c6624d89a0142ebe944d962687d"
+    },
+    {
+      "id": "nonbehavioral-comment-change",
+      "patch": "survives.patch",
+      "patch_digest": "sha256:9ed2360712031bbec7324f8ab2cb44612d77b7eca7eb67e027f4b2cc826d8a8b"
+    }
+  ]
+}

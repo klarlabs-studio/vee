@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/test-patch-proposal-v2.schema.json",
-  "title": "Vero generated test patch proposal",
+  "$id": "https://vee.dev/schemas/test-patch-proposal-v2.schema.json",
+  "title": "Vee generated test patch proposal",
   "type": "object",
   "additionalProperties": false,
   "required": [

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/ownership-report-v1.schema.json",
-  "title": "Vero advisory ownership report",
+  "$id": "https://vee.dev/schemas/ownership-report-v1.schema.json",
+  "title": "Vee advisory ownership report",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "advisory_only", "repository_root", "codeowners_path", "codeowners_digest", "coverage_complete", "results", "limitations", "digest"],

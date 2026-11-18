@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise an installed Vero CLI using only a disposable local repository."""
+"""Exercise an installed Vee CLI using only a disposable local repository."""
 
 from __future__ import annotations
 
@@ -72,7 +72,7 @@ def mcp_review(executable: str, root: Path, review_id: str) -> dict[str, object]
                 "params": {
                     "protocolVersion": "2025-03-26",
                     "capabilities": {},
-                    "clientInfo": {"name": "vero-local-acceptance", "version": "1"},
+                    "clientInfo": {"name": "vee-local-acceptance", "version": "1"},
                 },
             }
         )
@@ -125,25 +125,25 @@ def mcp_review(executable: str, root: Path, review_id: str) -> dict[str, object]
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("vero", help="installed Vero executable (or name on PATH)")
+    parser.add_argument("vee", help="installed Vee executable (or name on PATH)")
     args = parser.parse_args()
-    executable = str(Path(args.vero).resolve()) if Path(args.vero).parent != Path(".") else args.vero
+    executable = str(Path(args.vee).resolve()) if Path(args.vee).parent != Path(".") else args.vee
 
-    with tempfile.TemporaryDirectory(prefix="vero-installed-local-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="vee-installed-local-") as temporary:
         root = Path(temporary)
         run(["git", "init", "-q"], root)
-        run(["git", "config", "user.email", "vero@example.invalid"], root)
-        run(["git", "config", "user.name", "Vero local acceptance"], root)
+        run(["git", "config", "user.email", "vee@example.invalid"], root)
+        run(["git", "config", "user.name", "Vee local acceptance"], root)
         source = root / "app.rs"
         source.write_text("fn main() {}\n", encoding="utf-8")
         run(["git", "add", "app.rs"], root)
         run(["git", "commit", "-qm", "initial"], root)
         source.write_text("fn main() { let changed = true; }\n", encoding="utf-8")
 
-        # Without .vero.yaml the setup is not ready, and doctor says how to fix it.
+        # Without .vee.yaml the setup is not ready, and doctor says how to fix it.
         unready = run([executable, "doctor", "--output", "json"], root, expected=2)
         diagnosis = json.loads(unready.stdout)
-        if diagnosis["ready"] or not any("vero init" in step for step in diagnosis["next_steps"]):
+        if diagnosis["ready"] or not any("vee init" in step for step in diagnosis["next_steps"]):
             raise RuntimeError(f"doctor did not guide setup: {diagnosis}")
 
         (root / "reviewer.md").write_text("Return no findings.\n", encoding="utf-8")
@@ -153,7 +153,7 @@ def main() -> int:
             "print('{\"schema_version\":1,\"findings\":[]}')\n",
             encoding="utf-8",
         )
-        (root / ".vero.yaml").write_text(
+        (root / ".vee.yaml").write_text(
             "version: 1\n"
             "offline: true\n"
             "providers:\n"

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/findings-list-v2.schema.json",
-  "title": "Vero findings list v2",
+  "$id": "https://vee.dev/schemas/findings-list-v2.schema.json",
+  "title": "Vee findings list v2",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -171,5 +171,5 @@
       }
     }
   },
-  "description": "A bounded page of persisted findings. Returned identically by `vero findings list --output json` and the MCP `list_findings` tool."
+  "description": "A bounded page of persisted findings. Returned identically by `vee findings list --output json` and the MCP `list_findings` tool."
 }

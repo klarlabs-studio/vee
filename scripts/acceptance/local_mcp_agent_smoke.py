@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Run a local-only Vero MCP finding-to-remediation acceptance workflow.
+"""Run a local-only Vee MCP finding-to-remediation acceptance workflow.
 
-Requires a built Vero CLI, Git, Python 3.9+, and a local Ollama server/model.
+Requires a built Vee CLI, Git, Python 3.9+, and a local Ollama server/model.
 The script creates and removes a disposable Git repository. It refuses remote
 Ollama endpoints so repository context stays on the local machine.
 """
@@ -70,7 +70,7 @@ class McpClient:
             except queue.Empty as error:
                 raise TimeoutError(f"MCP request timed out: {method}") from error
             if line is None:
-                raise RuntimeError("Vero MCP server exited before returning a response")
+                raise RuntimeError("Vee MCP server exited before returning a response")
             response = json.loads(line)
             if response.get("id") != request_id:
                 continue
@@ -145,9 +145,9 @@ def ollama_json(base_url: str, path: str, payload: dict[str, Any] | None = None)
 
 def make_fixture(root: Path, provider_path: Path) -> None:
     run("git", "init", "-q", cwd=root)
-    run("git", "config", "user.name", "Vero Local Acceptance", cwd=root)
-    run("git", "config", "user.email", "vero@example.invalid", cwd=root)
-    (root / ".gitignore").write_text("/.vero/\n/provider\n/reviewer.md\n")
+    run("git", "config", "user.name", "Vee Local Acceptance", cwd=root)
+    run("git", "config", "user.email", "vee@example.invalid", cwd=root)
+    (root / ".gitignore").write_text("/.vee/\n/provider\n/reviewer.md\n")
     (root / "src.rs").write_text("pub fn value() -> i32 { 0 }\n")
     run("git", "add", ".gitignore", "src.rs", cwd=root)
     run("git", "commit", "-qm", "baseline", cwd=root)
@@ -169,7 +169,7 @@ def make_fixture(root: Path, provider_path: Path) -> None:
         "esac\n"
     )
     provider_path.chmod(0o700)
-    (root / ".vero.yaml").write_text(
+    (root / ".vee.yaml").write_text(
         "version: 1\n"
         "review:\n"
         "  include: ['*.rs', '**/*.rs']\n"
@@ -213,20 +213,20 @@ def normalize_patch(patch: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--vero", type=Path, default=Path("target/debug/vero"))
+    parser.add_argument("--vee", type=Path, default=Path("target/debug/vee"))
     parser.add_argument("--ollama-url", default="http://127.0.0.1:11434")
     parser.add_argument("--model", default="gemma4:e4b")
     args = parser.parse_args()
-    executable = args.vero.expanduser().resolve()
+    executable = args.vee.expanduser().resolve()
     if not executable.is_file():
-        raise SystemExit(f"Vero executable not found: {executable}")
+        raise SystemExit(f"Vee executable not found: {executable}")
     base_url = local_ollama_base(args.ollama_url)
     tags = ollama_json(base_url, "/api/tags")
     available = {item.get("name") for item in tags.get("models", [])}
     if args.model not in available:
         raise SystemExit(f"Ollama model {args.model!r} is not installed locally")
 
-    with tempfile.TemporaryDirectory(prefix="vero-local-mcp-agent-") as temp:
+    with tempfile.TemporaryDirectory(prefix="vee-local-mcp-agent-") as temp:
         root = Path(temp)
         provider_path = root / "provider"
         make_fixture(root, provider_path)
@@ -238,7 +238,7 @@ def main() -> None:
                 {
                     "protocolVersion": PROTOCOL_VERSION,
                     "capabilities": {},
-                    "clientInfo": {"name": "vero-local-agent-acceptance", "version": "0.1"},
+                    "clientInfo": {"name": "vee-local-agent-acceptance", "version": "0.1"},
                 },
             )
             client.notify("notifications/initialized")
@@ -248,7 +248,7 @@ def main() -> None:
             }
             expected_tools = {"review_changes", "list_findings", "get_finding_task", "evaluate_gate"}
             if not expected_tools <= tools:
-                raise RuntimeError(f"Vero MCP is missing tools: {sorted(expected_tools - tools)}")
+                raise RuntimeError(f"Vee MCP is missing tools: {sorted(expected_tools - tools)}")
 
             first = client.call_tool(
                 "review_changes",
@@ -314,7 +314,7 @@ def main() -> None:
             )
             digest = proposal["patch_digest"]
             if proposal.get("validated") is not True:
-                raise RuntimeError("Vero did not validate the proposed patch")
+                raise RuntimeError("Vee did not validate the proposed patch")
 
             applied = json.loads(
                 run(
@@ -330,7 +330,7 @@ def main() -> None:
                 )
             )
             if applied.get("application") != "applied":
-                raise RuntimeError("Vero did not apply the approved patch")
+                raise RuntimeError("Vee did not apply the approved patch")
 
             followup = client.call_tool(
                 "review_changes",

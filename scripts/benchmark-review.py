@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure local Vero review overhead with a deterministic no-network provider.
+"""Measure local Vee review overhead with a deterministic no-network provider.
 
 This is a plumbing baseline, not an AI quality or provider-cost benchmark. It
 creates an isolated Git repository, varies one working-tree snapshot per run,
@@ -69,18 +69,18 @@ def benchmark_case(args: argparse.Namespace, repo_files: int, changed_files: int
     if changed_files > repo_files:
         raise ValueError("--changed-files must be less than or equal to --repo-files")
 
-    with tempfile.TemporaryDirectory(prefix="vero-bench-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="vee-bench-") as temporary:
         repo = Path(temporary)
         git(repo, "init", "-q")
-        git(repo, "config", "user.email", "vero-benchmark@example.invalid")
-        git(repo, "config", "user.name", "Vero benchmark")
+        git(repo, "config", "user.email", "vee-benchmark@example.invalid")
+        git(repo, "config", "user.name", "Vee benchmark")
 
         provider = repo / "fake-provider.py"
         provider.write_text(PROVIDER_SOURCE, encoding="utf-8")
         (repo / "reviewer.md").write_text(
             "Return no findings for this benchmark fixture.\n", encoding="utf-8"
         )
-        (repo / ".vero.yaml").write_text(
+        (repo / ".vee.yaml").write_text(
             "version: 1\n"
             "review:\n  include: [\"**/*.rs\"]\n"
             "  max_context_files: 512\n"
@@ -121,18 +121,18 @@ def benchmark_case(args: argparse.Namespace, repo_files: int, changed_files: int
 
             started = time.perf_counter()
             result = run(
-                [args.vero, "review", "--base", "HEAD", "--output", "json"], repo
+                [args.vee, "review", "--base", "HEAD", "--output", "json"], repo
             )
             elapsed = time.perf_counter() - started
             if result.returncode != 0:
                 raise RuntimeError(
-                    f"vero review failed with exit {result.returncode}: "
+                    f"vee review failed with exit {result.returncode}: "
                     f"{result.stderr.strip()}\n{result.stdout.strip()}"
                 )
             try:
                 report = json.loads(result.stdout)
             except json.JSONDecodeError as error:
-                raise RuntimeError("vero did not emit one JSON review document") from error
+                raise RuntimeError("vee did not emit one JSON review document") from error
             if report.get("status") not in {"pass", "block"}:
                 raise RuntimeError(f"benchmark review was not complete: {report.get('status')}")
             if observed_changed_files is None:
@@ -174,17 +174,17 @@ def benchmark(args: argparse.Namespace) -> dict[str, Any]:
         )
         for repo_files, changed_files in cases
     }
-    binary = Path(args.vero)
+    binary = Path(args.vee)
     version = subprocess.run(
-        [args.vero, "--version"], text=True, capture_output=True, check=False
+        [args.vee, "--version"], text=True, capture_output=True, check=False
     )
     if version.returncode:
-        raise RuntimeError(f"could not read Vero version: {version.stderr.strip()}")
+        raise RuntimeError(f"could not read Vee version: {version.stderr.strip()}")
     return {
         "schema_version": 1,
         "benchmark": "local_review_plumbing",
         "provider_mode": "deterministic_local_fake_no_network",
-        "vero": {
+        "vee": {
             "version": version.stdout.strip(),
             "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
         },
@@ -210,7 +210,7 @@ def benchmark(args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--vero", default="target/debug/vero", help="path to the Vero binary")
+    parser.add_argument("--vee", default="target/debug/vee", help="path to the Vee binary")
     parser.add_argument("--repo-files", type=int, default=100)
     parser.add_argument("--changed-files", type=int, default=5)
     parser.add_argument("--lines-per-file", type=int, default=100)
@@ -233,8 +233,8 @@ def main() -> int:
             parser.error("each --matrix must be REPO_FILES:CHANGED_FILES with 1 <= changed <= repo")
     else:
         args.matrix = [(100, 5), (1000, 25), (5000, 100)]
-    resolved_vero = shutil.which(args.vero) or args.vero
-    args.vero = str(Path(resolved_vero).resolve())
+    resolved_vee = shutil.which(args.vee) or args.vee
+    args.vee = str(Path(resolved_vee).resolve())
     if min(args.repo_files, args.changed_files, args.lines_per_file, args.iterations) < 1:
         parser.error("repo-files, changed-files, lines-per-file, and iterations must be positive")
     if args.warmups < 0:

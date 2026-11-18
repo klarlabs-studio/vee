@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/finding-detail-v2.schema.json",
-  "title": "Vero finding detail v2",
+  "$id": "https://vee.dev/schemas/finding-detail-v2.schema.json",
+  "title": "Vee finding detail v2",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -158,5 +158,5 @@
     }
   },
   "$defs": {},
-  "description": "A finding with its lifecycle, referenced evidence, and finding-scoped verification runs. Returned identically by `vero findings show --output json` and the MCP `get_finding` tool."
+  "description": "A finding with its lifecycle, referenced evidence, and finding-scoped verification runs. Returned identically by `vee findings show --output json` and the MCP `get_finding` tool."
 }

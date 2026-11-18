@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/cross-repository-impact-v13.schema.json",
-  "title": "Vero cross-repository impact with parameter serialization coverage",
+  "$id": "https://vee.dev/schemas/cross-repository-impact-v13.schema.json",
+  "title": "Vee cross-repository impact with parameter serialization coverage",
   "type": "object",
   "additionalProperties": false,
   "required": [

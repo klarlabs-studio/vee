@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/finding-status-update-v1.schema.json",
-  "title": "Vero Finding Status Update v1",
+  "$id": "https://vee.dev/schemas/finding-status-update-v1.schema.json",
+  "title": "Vee Finding Status Update v1",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "finding_id", "status", "reason", "note"],

@@ -12,7 +12,7 @@ import tempfile
 from pathlib import Path
 
 
-EXCLUDED = {".git", ".vero", "target", "node_modules", "test-results", "playwright-report"}
+EXCLUDED = {".git", ".vee", "target", "node_modules", "test-results", "playwright-report"}
 
 
 def digest(path: Path) -> str:
@@ -39,7 +39,7 @@ def run(command: list[str], cwd: Path) -> None:
 def main() -> int:
     source = Path(__file__).resolve().parent.parent
     try:
-        with tempfile.TemporaryDirectory(prefix="vero-clean-build-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="vee-clean-build-") as temporary:
             staging = Path(temporary) / "source"
             shutil.copytree(
                 source,
@@ -76,7 +76,7 @@ def main() -> int:
                     "cargo",
                     "install",
                     "--path",
-                    "crates/vero-cli",
+                    "crates/vee-cli",
                     "--locked",
                     "--force",
                     "--root",
@@ -84,7 +84,7 @@ def main() -> int:
                 ],
                 staging,
             )
-            executable = install_root / "bin" / ("vero.exe" if sys.platform == "win32" else "vero")
+            executable = install_root / "bin" / ("vee.exe" if sys.platform == "win32" else "vee")
             run([str(executable), "--version"], staging)
             run(
                 [

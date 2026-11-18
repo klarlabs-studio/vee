@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/impact-assessment-v3.schema.json",
-  "title": "Vero Impact Assessment v3",
+  "$id": "https://vee.dev/schemas/impact-assessment-v3.schema.json",
+  "title": "Vee Impact Assessment v3",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "snapshot_id", "coverage_complete", "analyzers", "changed_paths", "changed_symbols", "groups", "paths", "limitations"],

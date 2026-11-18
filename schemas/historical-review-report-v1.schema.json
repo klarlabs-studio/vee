@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/historical-review-report-v1.schema.json",
-  "title": "Vero historical review benchmark report v1",
+  "$id": "https://vee.dev/schemas/historical-review-report-v1.schema.json",
+  "title": "Vee historical review benchmark report v1",
   "type": "object",
   "required": [
     "schema_version",
@@ -9,7 +9,7 @@
     "corpus_id",
     "manifest_digest",
     "benchmark_config_digest",
-    "vero_version",
+    "vee_version",
     "verifier_digest",
     "case_count",
     "completed_cases",
@@ -55,7 +55,7 @@
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
     },
-    "vero_version": {
+    "vee_version": {
       "type": "string"
     },
     "verifier_digest": {

@@ -33,7 +33,7 @@ def report(case_id: str, *, state: str = "complete", model: str = "local-model",
         "schema_version": 1, "benchmark": "historical_review", "corpus_id": "private-corpus",
         "manifest_digest": "sha256:" + "a" * 64,
         "benchmark_config_digest": "sha256:" + "b" * 64,
-        "vero_version": "vero 0.1.0", "verifier_digest": "sha256:" + "e" * 64,
+        "vee_version": "vee 0.1.0", "verifier_digest": "sha256:" + "e" * 64,
         "completed_cases": int(state == "complete"), "incomplete_cases": int(state != "complete"),
         "out_of_scope_cases": 0, "finding_recall": float(matched) if state == "complete" else None,
         "cases": [case],
@@ -42,7 +42,7 @@ def report(case_id: str, *, state: str = "complete", model: str = "local-model",
 
 def main() -> int:
     script = pathlib.Path(__file__).resolve().parents[1] / "compare-historical-reviews.py"
-    with tempfile.TemporaryDirectory(prefix="vero-compare-acceptance-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="vee-compare-acceptance-") as temporary:
         root = pathlib.Path(temporary)
         first, second, third = root / "first.json", root / "second.json", root / "third.json"
         first.write_text(json.dumps(report("same", model="model-a")), encoding="utf-8")

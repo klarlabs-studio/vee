@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/acceptance-mapping-v1.schema.json",
-  "title": "Vero Acceptance Mapping v1",
+  "$id": "https://vee.dev/schemas/acceptance-mapping-v1.schema.json",
+  "title": "Vee Acceptance Mapping v1",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "review_id", "snapshot_id", "work_item_digest", "author", "recorded_at", "assessments"],

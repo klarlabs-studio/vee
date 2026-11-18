@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Smoke-test the local Vero UI and same-origin API against a running `vero ui`."""
+"""Smoke-test the local Vee UI and same-origin API against a running `vee ui`."""
 import json
 import sys
 from pathlib import Path
@@ -14,7 +14,7 @@ def get(url):
 
 def main():
     origin = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else "http://127.0.0.1:7878"
-    checks = [("/", b"Vero"), ("/app.js", b"createApp"), ("/app.css", b"--green")]
+    checks = [("/", b"Vee"), ("/app.js", b"createApp"), ("/app.css", b"--green")]
     for path, marker in checks:
         status, _, body = get(origin + path)
         assert status == 200 and marker in body, f"UI asset failed: {path}"
@@ -38,7 +38,7 @@ def main():
         assert error.code == 400, f"unexpected cross-origin status {error.code}"
 
     # Invalid configuration must be rejected without modifying the repository file.
-    config_path = Path(".vero.yaml")
+    config_path = Path(".vee.yaml")
     before = config_path.read_bytes()
     invalid = Request(origin + "/api/config", data=b'{"config":{"version":1,"unknown":true}}', method="PUT", headers={
         "Content-Type": "application/json", "Origin": origin
@@ -48,7 +48,7 @@ def main():
         raise AssertionError("invalid config unexpectedly saved")
     except HTTPError as error:
         assert error.code == 400, f"unexpected invalid-config status {error.code}"
-    assert config_path.read_bytes() == before, "rejected config changed .vero.yaml"
+    assert config_path.read_bytes() == before, "rejected config changed .vee.yaml"
     print(json.dumps({"status": "pass", "checks": ["assets", "health", "config", "reviews", "origin_guard", "invalid_config_is_atomic"]}))
 
 

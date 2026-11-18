@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/test-proposal-application-v1.schema.json",
-  "title": "Vero test proposal application result",
+  "$id": "https://vee.dev/schemas/test-proposal-application-v1.schema.json",
+  "title": "Vee test proposal application result",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "proposal_id", "application", "snapshot_id", "concurrent_mutation_detected"],

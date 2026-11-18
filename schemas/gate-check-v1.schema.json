@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/gate-check-v1.schema.json",
-  "title": "Vero Gate Check Result v1",
+  "$id": "https://vee.dev/schemas/gate-check-v1.schema.json",
+  "title": "Vee Gate Check Result v1",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "review_id", "reviewed_snapshot_id", "current_snapshot_id", "effective_config_digest", "status", "decision_id", "blocking_findings", "verification_run_ids", "evidence_digest", "reasons"],

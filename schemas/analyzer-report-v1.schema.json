@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/analyzer-report-v1.schema.json",
-  "title": "Vero analyzer report v1",
-  "description": "Results of a trusted SARIF analyzer run, restricted to changed lines of the verified snapshot. Returned by `vero verification findings --output json` and the MCP `get_analyzer_findings` tool, and recorded in gate replay inputs.",
+  "$id": "https://vee.dev/schemas/analyzer-report-v1.schema.json",
+  "title": "Vee analyzer report v1",
+  "description": "Results of a trusted SARIF analyzer run, restricted to changed lines of the verified snapshot. Returned by `vee verification findings --output json` and the MCP `get_analyzer_findings` tool, and recorded in gate replay inputs.",
   "type": "object",
   "additionalProperties": false,
   "required": [

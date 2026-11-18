@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/imported-review-search-v2.schema.json",
-  "title": "Vero Imported Review Search v2",
+  "$id": "https://vee.dev/schemas/imported-review-search-v2.schema.json",
+  "title": "Vee Imported Review Search v2",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "query", "matches", "trust", "gate_eligible"],

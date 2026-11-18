@@ -30,7 +30,7 @@ def read_report(path: Path) -> tuple[dict[str, Any], str]:
     report = json.loads(raw)
     required = {
         "schema_version", "benchmark", "corpus_id", "manifest_digest",
-        "benchmark_config_digest", "vero_version", "verifier_digest",
+        "benchmark_config_digest", "vee_version", "verifier_digest",
         "cases", "finding_recall", "completed_cases", "incomplete_cases",
         "out_of_scope_cases",
     }
@@ -99,7 +99,7 @@ def identity(report: dict[str, Any]) -> dict[str, Any]:
         "config_digest": report["benchmark_config_digest"],
         "providers_models": providers,
         "reviewers": reviewers,
-        "vero_version": report["vero_version"],
+        "vee_version": report["vee_version"],
         "verifier_digest": report["verifier_digest"],
     }
 
@@ -191,7 +191,7 @@ def atomic_write(path: Path, data: bytes) -> None:
     if path.is_symlink():
         raise ValueError(f"refusing symlink output: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=".vero-compare-", dir=path.parent)
+    fd, temporary = tempfile.mkstemp(prefix=".vee-compare-", dir=path.parent)
     try:
         with os.fdopen(fd, "wb") as stream:
             stream.write(data)

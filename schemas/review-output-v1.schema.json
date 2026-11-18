@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/review-output-v1.schema.json",
-  "title": "Vero review output v1",
+  "$id": "https://vee.dev/schemas/review-output-v1.schema.json",
+  "title": "Vee review output v1",
   "type": "object",
   "required": [
     "schema_version",

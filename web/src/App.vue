@@ -76,7 +76,7 @@ const queueReviewers = computed(() => queueReviewerOptions.value)
 const queueProviders = computed(() => queueProviderOptions.value)
 const analyticsOptions = key => [...new Set(analyticsDimensions.value.flatMap(item => item[key] || []))].sort()
 function repositoryStorageKeyFor(namespace) {
-  return repositoryStorageKey ? `vero.${namespace}.v1:${repositoryStorageKey}` : null
+  return repositoryStorageKey ? `vee.${namespace}.v1:${repositoryStorageKey}` : null
 }
 function readQueueViews() {
   try {
@@ -311,7 +311,7 @@ const verificationDayRuns = computed(() => verificationChartDays.value.some(day 
   : [])
 
 async function api(path, options = {}) {
-  const tokenKey = 'vero.network-ui.token.v1'
+  const tokenKey = 'vee.network-ui.token.v1'
   const send = token => fetch(path, {
     ...options,
     headers: {
@@ -324,8 +324,8 @@ async function api(path, options = {}) {
   try { token = window.sessionStorage.getItem(tokenKey) } catch {}
   let response = await send(token)
   if (response.status === 401) {
-    const supplied = window.prompt('Enter the Vero network UI access token shown in the Vero terminal.')
-    if (!supplied?.trim()) throw new Error('Vero network UI access token is required.')
+    const supplied = window.prompt('Enter the Vee network UI access token shown in the Vee terminal.')
+    if (!supplied?.trim()) throw new Error('Vee network UI access token is required.')
     token = supplied.trim()
     try { window.sessionStorage.setItem(tokenKey, token) } catch {}
     response = await send(token)
@@ -456,7 +456,7 @@ function exportAnalytics(format) {
   const url = URL.createObjectURL(new Blob([content], { type: `${mime};charset=utf-8` }))
   const link = document.createElement('a')
   link.href = url
-  link.download = `vero-local-analytics.${format}`
+  link.download = `vee-local-analytics.${format}`
   link.click()
   window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
@@ -629,7 +629,7 @@ onMounted(async () => {
 <template>
   <div class="shell">
     <aside class="rail">
-      <div class="brand"><span class="brand-mark">V</span><div><strong>vero</strong><small>LOCAL CODE ASSURANCE</small></div></div>
+      <div class="brand"><span class="brand-mark">V</span><div><strong>vee</strong><small>LOCAL CODE ASSURANCE</small></div></div>
       <div class="rail-label">WORKSPACE</div>
       <button class="nav-item" :class="{ active: ['overview', 'findings', 'impact', 'reviewers'].includes(activeTab) }" @click="activeTab = 'overview'">◈ <span>Reviews</span></button>
       <button class="nav-item" :class="{ active: activeTab === 'queue' }" @click="activeTab = 'queue'">☷ <span>Review queue</span></button>
@@ -646,7 +646,7 @@ onMounted(async () => {
     </aside>
 
     <main class="main">
-      <header class="topbar"><div><div class="eyebrow">VERO / INVESTIGATION</div><h1>{{ activeTab === 'settings' ? 'Review configuration' : activeTab === 'analytics' ? 'Review insights' : activeTab === 'queue' ? 'Review queue' : 'Change review' }}</h1></div><div class="top-meta"><span class="live-dot"></span> Running locally</div></header>
+      <header class="topbar"><div><div class="eyebrow">VEE / INVESTIGATION</div><h1>{{ activeTab === 'settings' ? 'Review configuration' : activeTab === 'analytics' ? 'Review insights' : activeTab === 'queue' ? 'Review queue' : 'Change review' }}</h1></div><div class="top-meta"><span class="live-dot"></span> Running locally</div></header>
       <div v-if="error" class="alert"><span>{{ error }}</span><button @click="error = ''">Dismiss</button></div>
 
       <section v-if="activeTab === 'queue'" class="queue-view">
@@ -666,9 +666,9 @@ onMounted(async () => {
           <label>Save current filters<input v-model="queueViewName" aria-label="New queue view name" maxlength="60" placeholder="e.g. Blocked security reviews"></label>
           <button class="text-button" :disabled="!queueViewName.trim()" @click="saveQueueView">Save view</button>
           <small v-if="queueViewMessage" role="status">{{ queueViewMessage }}</small>
-          <small v-else>Saved in this browser profile for this local Vero instance.</small>
+          <small v-else>Saved in this browser profile for this local Vee instance.</small>
         </div>
-        <p class="queue-scope hint">Showing {{ queueItems.length }} matching reviews from the latest {{ Math.min(reviews.length, 500) }} saved records<template v-if="reviews.length > 500">; older records are omitted</template>. “Status unavailable” means Vero could not load the review's retained analytics dimensions; it does not mean ungated.</p>
+        <p class="queue-scope hint">Showing {{ queueItems.length }} matching reviews from the latest {{ Math.min(reviews.length, 500) }} saved records<template v-if="reviews.length > 500">; older records are omitted</template>. “Status unavailable” means Vee could not load the review's retained analytics dimensions; it does not mean ungated.</p>
         <div v-if="queueItems.length" class="queue-list">
           <article v-for="item in queueItems" :key="item.review_id" class="queue-card">
             <div class="queue-card-main"><span class="status-pill" :class="statusTone(item.gate_status)">{{ item.gate_status_stale ? 'possibly outdated' : item.gate_status === 'unknown' ? 'status unavailable' : item.gate_status === 'ungated' ? 'no gate' : item.gate_status }}</span><div><strong>{{ item.review_id }}</strong><small>{{ item.created_at }} · snapshot {{ item.snapshot_id }}</small><small>Review state: {{ item.status }}</small></div></div>
@@ -696,7 +696,7 @@ onMounted(async () => {
           <label>Save current filters<input v-model="analyticsViewName" aria-label="New Insights view name" maxlength="60" placeholder="e.g. Security reviews"></label>
           <button class="text-button" :disabled="!analyticsViewName.trim()" @click="saveAnalyticsView">Save view</button>
           <small v-if="analyticsViewMessage" role="status">{{ analyticsViewMessage }}</small>
-          <small v-else>Saved in this browser profile for this local Vero instance.</small>
+          <small v-else>Saved in this browser profile for this local Vee instance.</small>
         </div>
         <div v-if="analytics" class="analytics-kpis">
           <div class="summary-card"><div class="card-label">FILTERED REVIEWS</div><strong class="metric">{{ chartDays.reduce((total, day) => total + day.total, 0) }}</strong><small>in the visible window from {{ analyticsDimensions.length }} saved reviews</small></div>
@@ -770,7 +770,7 @@ onMounted(async () => {
         <div class="section-head"><div><h2>Repository configuration</h2><p>Reviewers, providers, and policy for this checkout.</p></div><button class="primary" :disabled="saving" @click="saveConfig">{{ saving ? 'Saving…' : 'Save configuration' }}</button></div>
         <div v-if="config" class="config-facts"><div><small>PROVIDERS</small><strong>{{ config.provider_ids.join(', ') || 'None configured' }}</strong></div><div><small>REVIEWERS</small><strong>{{ config.reviewer_ids.join(', ') || 'None configured' }}</strong></div><div><small>POLICY</small><strong>{{ config.config.policy?.on_incomplete || 'block' }} on incomplete</strong></div></div>
         <textarea v-model="configText" spellcheck="false" class="config-editor" aria-label="Repository config JSON"></textarea>
-        <p class="hint">Edits are validated before writing to <code>.vero.yaml</code>. Protected local policy remains enforced.</p>
+        <p class="hint">Edits are validated before writing to <code>.vee.yaml</code>. Protected local policy remains enforced.</p>
       </section>
 
       <template v-else>
@@ -793,7 +793,7 @@ onMounted(async () => {
             <div class="panel"><div class="panel-head"><div><h3>Findings</h3><p>Evidence-backed issues from the selected snapshot.</p></div><button class="text-button" @click="activeTab = 'findings'">View all →</button></div><div v-if="!findings.length" class="empty-state"><span>✓</span><strong>No findings reported</strong><small v-if="selected.review.analysis_complete && selected.review.reviewer_outcomes?.length">Reviewers completed without actionable findings.</small><small v-else-if="!selected.review.analysis_complete">Analysis did not complete; findings may be missing.</small><small v-else>No reviewers ran for this review.</small></div><article v-for="record in findings.slice(0, 5)" :key="record.finding.id" class="finding-row"><span class="severity" :class="statusTone(record.finding.severity)">{{ record.finding.severity }}</span><div><strong>{{ record.finding.category }}</strong><p>{{ record.finding.rationale }}</p><small>{{ record.finding.path || 'No location' }}<template v-if="record.finding.line">:{{ record.finding.line }}</template></small></div></article></div>
             <div class="panel"><div class="panel-head"><div><h3>Review details</h3><p>Snapshot-bound run information.</p></div></div><dl class="details"><dt>Snapshot</dt><dd>{{ selected.review.snapshot_id }}</dd><dt>Config digest</dt><dd>{{ selected.review.effective_config_digest }}</dd><dt>Analysis</dt><dd>{{ selected.review.analysis_complete ? 'Complete' : 'Incomplete' }}</dd><dt>Scope</dt><dd>{{ selected.review.change_set?.scope }}</dd></dl><div class="reason" v-for="reason in selected.review.reasons" :key="reason">{{ reason }}</div></div>
           </section>
-          <section v-else-if="activeTab === 'findings'" class="panel full-panel"><div class="panel-head"><div><h3>Findings</h3><p>{{ findings.length }} findings · status and provenance from Vero’s saved review.</p></div></div><p v-if="findingMessage" class="hint" role="status">{{ findingMessage }}</p><div v-if="!findings.length" class="empty-state"><span>✓</span><strong>{{ selected.review.analysis_complete ? 'No findings reported' : 'Findings may be incomplete' }}</strong><small v-if="!selected.review.analysis_complete">Analysis did not complete; findings may be missing.</small><small v-else-if="selected.review.reviewer_outcomes?.length">Reviewers completed without actionable findings.</small><small v-else>No reviewers ran for this review.</small></div><article v-for="record in findings" :key="record.finding.id" class="finding-row"><span class="severity" :class="statusTone(record.finding.severity)">{{ record.finding.severity }}</span><div class="finding-content"><div><div class="finding-title"><strong>{{ record.finding.category }}</strong><span class="provenance">{{ record.finding.provenance }}</span></div><p>{{ record.finding.rationale }}</p><small>{{ record.finding.path || 'No location' }}<template v-if="record.finding.line">:{{ record.finding.line }}</template> · confidence {{ record.finding.confidence ?? 'unknown' }}</small><small class="disposition-meta">Disposition: {{ record.status }}<template v-if="record.status_reason"> · {{ record.status_reason }}</template></small></div><div class="disposition-controls"><select :aria-label="`Disposition for ${record.finding.id}`" :value="dispositionDrafts[record.finding.id]?.status || record.status" @change="dispositionDrafts[record.finding.id] = { ...dispositionDrafts[record.finding.id], status: $event.target.value, reason: dispositionDrafts[record.finding.id]?.reason || '' }"><option value="open">Open</option><option value="verified">Verified</option><option value="refuted">Refuted</option><option value="resolved">Resolved</option></select><input :aria-label="`Reason for ${record.finding.id}`" :value="dispositionDrafts[record.finding.id]?.reason || ''" placeholder="Reason required" @input="dispositionDrafts[record.finding.id] = { ...dispositionDrafts[record.finding.id], status: dispositionDrafts[record.finding.id]?.status || record.status, reason: $event.target.value }"/><button class="text-button" :disabled="savingFinding === record.finding.id" @click="updateFindingStatus(record)">{{ savingFinding === record.finding.id ? 'Saving…' : 'Save disposition' }}</button></div></div></article><p class="hint">Disposition records are audit metadata and do not waive gate findings. Use the scoped waiver workflow for policy exceptions.</p></section>
+          <section v-else-if="activeTab === 'findings'" class="panel full-panel"><div class="panel-head"><div><h3>Findings</h3><p>{{ findings.length }} findings · status and provenance from Vee’s saved review.</p></div></div><p v-if="findingMessage" class="hint" role="status">{{ findingMessage }}</p><div v-if="!findings.length" class="empty-state"><span>✓</span><strong>{{ selected.review.analysis_complete ? 'No findings reported' : 'Findings may be incomplete' }}</strong><small v-if="!selected.review.analysis_complete">Analysis did not complete; findings may be missing.</small><small v-else-if="selected.review.reviewer_outcomes?.length">Reviewers completed without actionable findings.</small><small v-else>No reviewers ran for this review.</small></div><article v-for="record in findings" :key="record.finding.id" class="finding-row"><span class="severity" :class="statusTone(record.finding.severity)">{{ record.finding.severity }}</span><div class="finding-content"><div><div class="finding-title"><strong>{{ record.finding.category }}</strong><span class="provenance">{{ record.finding.provenance }}</span></div><p>{{ record.finding.rationale }}</p><small>{{ record.finding.path || 'No location' }}<template v-if="record.finding.line">:{{ record.finding.line }}</template> · confidence {{ record.finding.confidence ?? 'unknown' }}</small><small class="disposition-meta">Disposition: {{ record.status }}<template v-if="record.status_reason"> · {{ record.status_reason }}</template></small></div><div class="disposition-controls"><select :aria-label="`Disposition for ${record.finding.id}`" :value="dispositionDrafts[record.finding.id]?.status || record.status" @change="dispositionDrafts[record.finding.id] = { ...dispositionDrafts[record.finding.id], status: $event.target.value, reason: dispositionDrafts[record.finding.id]?.reason || '' }"><option value="open">Open</option><option value="verified">Verified</option><option value="refuted">Refuted</option><option value="resolved">Resolved</option></select><input :aria-label="`Reason for ${record.finding.id}`" :value="dispositionDrafts[record.finding.id]?.reason || ''" placeholder="Reason required" @input="dispositionDrafts[record.finding.id] = { ...dispositionDrafts[record.finding.id], status: dispositionDrafts[record.finding.id]?.status || record.status, reason: $event.target.value }"/><button class="text-button" :disabled="savingFinding === record.finding.id" @click="updateFindingStatus(record)">{{ savingFinding === record.finding.id ? 'Saving…' : 'Save disposition' }}</button></div></div></article><p class="hint">Disposition records are audit metadata and do not waive gate findings. Use the scoped waiver workflow for policy exceptions.</p></section>
           <section v-else-if="activeTab === 'impact'" class="panel full-panel"><div class="panel-head"><div><h3>Change impact</h3><p>Relationships include evidence and certainty labels; this is not a complete call graph.</p></div><span class="coverage" :class="selected.impact?.coverage_complete ? 'good' : 'warn'">{{ selected.impact?.coverage_complete ? 'COVERAGE COMPLETE' : 'LIMITED COVERAGE' }}</span></div><div v-if="!impactPaths.length" class="empty-state"><strong>No impact paths found</strong><small>Changed symbols: {{ selected.impact?.changed_symbols?.join(', ') || 'none identified' }}</small></div><article v-for="(path, index) in impactPaths" :key="index" class="impact-row"><span class="impact-index">{{ String(index + 1).padStart(2, '0') }}</span><div><strong>{{ path.affected_path }} <span class="arrow">→</span> {{ path.source_path }}</strong><small>{{ path.symbol }} · {{ path.relationship }} · {{ path.certainty }} · line {{ path.evidence_line }}</small></div></article><div v-for="limitation in selected.impact?.limitations" :key="limitation" class="reason">{{ limitation }}</div></section>
           <section v-else class="panel full-panel"><div class="panel-head"><div><h3>Reviewer outcomes</h3><p>Each required reviewer must complete for the gate to pass.</p></div></div><article v-for="outcome in selected.review.reviewer_outcomes" :key="outcome.reviewer_id" class="reviewer-row"><span class="reviewer-avatar">{{ outcome.reviewer_id.slice(0, 1).toUpperCase() }}</span><div><strong>{{ outcome.reviewer_id }}</strong><small>{{ outcome.provider_id }} · {{ outcome.provider_kind }}<template v-if="outcome.provider_version"> · {{ outcome.provider_version }}</template></small></div><span class="status-pill" :class="statusTone(outcome.status)">{{ outcome.status }}</span></article><div v-if="!selected.review.reviewer_outcomes?.length" class="empty-state"><strong>No reviewers ran</strong></div></section>
           </template>

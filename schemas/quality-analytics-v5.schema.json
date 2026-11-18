@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/quality-analytics-v5.schema.json",
-  "title": "Vero Local Quality Analytics v5",
+  "$id": "https://vee.dev/schemas/quality-analytics-v5.schema.json",
+  "title": "Vee Local Quality Analytics v5",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "review_count", "latest_gate_decisions", "reviews_without_gate_decision", "findings_by_status", "findings_by_severity", "verification_runs_by_profile", "test_diagnostics_by_profile", "test_diagnostics_limitations", "reviewed_feedback_by_label", "reviewed_feedback_metrics"],

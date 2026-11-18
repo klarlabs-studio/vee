@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/waiver-v1.schema.json",
-  "title": "Vero snapshot-scoped waiver v1",
+  "$id": "https://vee.dev/schemas/waiver-v1.schema.json",
+  "title": "Vee snapshot-scoped waiver v1",
   "type": "object",
   "required": [
     "schema_version",

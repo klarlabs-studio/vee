@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/change-package-v2.schema.json",
-  "title": "Vero local change package v2",
+  "$id": "https://vee.dev/schemas/change-package-v2.schema.json",
+  "title": "Vee local change package v2",
   "type": "object",
   "additionalProperties": false,
   "required": [

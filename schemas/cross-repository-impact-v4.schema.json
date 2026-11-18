@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/cross-repository-impact-v4.schema.json",
-  "title": "Vero cross-repository impact with per-operation API compatibility coverage",
+  "$id": "https://vee.dev/schemas/cross-repository-impact-v4.schema.json",
+  "title": "Vee cross-repository impact with per-operation API compatibility coverage",
   "type": "object",
   "additionalProperties": false,
   "required": [

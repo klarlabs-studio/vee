@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/impacted-test-plan-v1.schema.json",
-  "title": "Vero Impacted Test Plan v1",
+  "$id": "https://vee.dev/schemas/impacted-test-plan-v1.schema.json",
+  "title": "Vee Impacted Test Plan v1",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "snapshot_id", "profile_id", "profile_digest", "executable", "targets", "invocations", "impact_coverage_complete", "limitations", "execution_performed"],

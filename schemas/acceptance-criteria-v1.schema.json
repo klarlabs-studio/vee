@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/acceptance-criteria-v1.schema.json",
-  "title": "Vero structured acceptance criteria v1",
+  "$id": "https://vee.dev/schemas/acceptance-criteria-v1.schema.json",
+  "title": "Vee structured acceptance criteria v1",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "requirements"],

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/gate-history-v1.schema.json",
-  "title": "Vero gate history v1",
+  "$id": "https://vee.dev/schemas/gate-history-v1.schema.json",
+  "title": "Vee gate history v1",
   "type": "object",
   "additionalProperties": false,
   "required": [

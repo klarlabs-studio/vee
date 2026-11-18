@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/local-review-analytics-v2.schema.json",
-  "title": "Vero Local Review Analytics v2",
+  "$id": "https://vee.dev/schemas/local-review-analytics-v2.schema.json",
+  "title": "Vee Local Review Analytics v2",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "review_count", "history_complete", "reviews_by_day", "findings_by_severity", "finding_drilldown", "finding_drilldown_total", "finding_drilldown_complete", "explicit_feedback_by_label", "feedback_note"],

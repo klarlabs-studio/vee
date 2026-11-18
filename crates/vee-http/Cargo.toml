@@ -1,0 +1,24 @@
+[package]
+name = "vee-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+vee-core = { path = "../vee-core" }
+vee-store-sqlite = { path = "../vee-store-sqlite" }
+vee-application = { path = "../vee-application" }
+vee-hosting = { path = "../vee-hosting" }
+tokio.workspace = true
+tower = { version = "0.5", features = ["util"] }
+
+[dev-dependencies]
+serde_yaml.workspace = true
+tempfile.workspace = true
+jsonschema.workspace = true
+vee-git = { path = "../vee-git" }

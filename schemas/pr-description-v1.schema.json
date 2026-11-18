@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/pr-description-v1.schema.json",
-  "title": "Vero pull request description draft",
+  "$id": "https://vee.dev/schemas/pr-description-v1.schema.json",
+  "title": "Vee pull request description draft",
   "type": "object",
   "additionalProperties": false,
   "required": [
