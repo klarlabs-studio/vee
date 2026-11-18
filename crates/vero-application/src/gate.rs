@@ -477,3 +477,7 @@ pub(crate) fn capture_provider_versions(
     }
     versions
 }
+
+#[cfg(test)]
+#[path = "tests/gate.rs"]
+mod tests;

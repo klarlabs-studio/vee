@@ -233,3 +233,7 @@ mod changed_line_range_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "tests/source.rs"]
+mod tests;

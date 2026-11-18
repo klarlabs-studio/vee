@@ -3108,3 +3108,7 @@ pub(crate) fn package_id(root: &Path, path: &str, source: &str) -> Option<String
         directory = directory.parent()?;
     }
 }
+
+#[cfg(test)]
+#[path = "tests/impact.rs"]
+mod tests;

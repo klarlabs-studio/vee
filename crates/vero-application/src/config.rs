@@ -192,3 +192,7 @@ pub fn apply_protected_policy(root: &Path, config: &mut RepositoryConfig) -> Res
         .dedup();
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "tests/config.rs"]
+mod tests;

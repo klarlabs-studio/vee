@@ -2028,3 +2028,7 @@ pub(crate) fn resolve_reviewer_selection(
     }
     Ok(selected)
 }
+
+#[cfg(test)]
+#[path = "tests/review.rs"]
+mod tests;

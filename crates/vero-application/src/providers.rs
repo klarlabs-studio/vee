@@ -1184,3 +1184,7 @@ pub(crate) fn probe_provider_version(
     }
     Ok(Some(version.to_string()))
 }
+
+#[cfg(test)]
+#[path = "tests/providers.rs"]
+mod tests;

@@ -1352,3 +1352,7 @@ pub(crate) fn ensure_local_directory(path: &Path) -> Result<(), String> {
         Err(error) => Err(format!("checking {}: {error}", path.display())),
     }
 }
+
+#[cfg(test)]
+#[path = "tests/verification.rs"]
+mod tests;

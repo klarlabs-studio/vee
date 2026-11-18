@@ -64,3 +64,7 @@ pub(crate) fn rule_feedback_label_name(label: vero_core::FindingFeedbackLabel) -
         vero_core::FindingFeedbackLabel::NotActionable => "not_actionable",
     }
 }
+
+#[cfg(test)]
+#[path = "tests/learning.rs"]
+mod tests;
