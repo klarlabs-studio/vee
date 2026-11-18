@@ -12,6 +12,8 @@ import sys
 import tempfile
 from pathlib import PurePosixPath
 
+import jsonschema
+
 
 def execute(command: list[str], cwd: pathlib.Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, cwd=cwd, text=True, capture_output=True, check=False)
@@ -327,12 +329,7 @@ def main() -> int:
         assert not (root / "provider-ran").exists(), "verification-only must not invoke the review provider"
         schema = json.loads((pathlib.Path(__file__).resolve().parents[2] / "schemas/historical-verification-report-v1.schema.json").read_text())
         assert schema["properties"]["benchmark"]["const"] == verification_report["benchmark"]
-        try:
-            import jsonschema
-        except ImportError:
-            pass
-        else:
-            jsonschema.validate(verification_report, schema)
+        jsonschema.validate(verification_report, schema)
         for revision_runs in (verification_case["buggy_runs"], verification_case["fix_runs"]):
             run_record = revision_runs[0]
             assert run_record["command_digest"].startswith("sha256:")

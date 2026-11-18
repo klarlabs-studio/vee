@@ -7,3 +7,4 @@ node_modules/
 !.vee/packs/
 *.rlib
 __pycache__/
+.venv/

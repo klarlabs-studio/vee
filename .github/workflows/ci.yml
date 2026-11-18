@@ -9,7 +9,8 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Superseded pushes to a branch or PR are cancelled; every main commit keeps its run.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   dependency-audit:
@@ -135,6 +136,9 @@ jobs:
         run: python scripts/acceptance/installed_cli_smoke.py vee
       - name: Compare saved local-review reports
         run: python scripts/acceptance/compare_historical_reviews.py
+      - name: Install acceptance script dependencies
+        if: runner.os != 'Windows'
+        run: python -m pip install -r scripts/acceptance/requirements.txt
       - name: Run local historical-review acceptance
         if: runner.os != 'Windows'
         run: python scripts/acceptance/historical_review_benchmark.py vee
