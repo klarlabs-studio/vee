@@ -1038,13 +1038,65 @@ pub(crate) fn find_typescript_server() -> Option<PathBuf> {
     find_executable("tsserver")
 }
 
+/// Read one `Content-Length`-framed tsserver message; `Ok(None)` at end of
+/// output.
+///
+/// tsserver sets `Content-Length` to the JSON length plus one newline byte but
+/// writes the platform newline after the JSON. On Windows that is `\r\n`, so
+/// one `\n` is left before the next headers. Blank lines before the first
+/// header are therefore skipped rather than read as the end of the headers.
+pub(crate) fn read_tsserver_message(
+    reader: &mut impl std::io::BufRead,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>, String> {
+    let mut content_length = None;
+    let mut saw_header = false;
+    loop {
+        let mut header = Vec::new();
+        if reader
+            .read_until(b'\n', &mut header)
+            .map_err(|error| error.to_string())?
+            == 0
+        {
+            return Ok(None);
+        }
+        if header.len() > 8192 {
+            return Err("tsserver response header exceeded 8 KiB".into());
+        }
+        if header == b"\r\n" || header == b"\n" {
+            if saw_header {
+                break;
+            }
+            continue;
+        }
+        saw_header = true;
+        if let Some(value) = header.strip_prefix(b"Content-Length:") {
+            content_length = std::str::from_utf8(value)
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok());
+        }
+    }
+    let length = content_length.ok_or("tsserver response omitted Content-Length")?;
+    if length > max_bytes {
+        return Err(format!(
+            "tsserver response exceeded {} MiB",
+            max_bytes / (1024 * 1024)
+        ));
+    }
+    let mut body = vec![0; length];
+    reader
+        .read_exact(&mut body)
+        .map_err(|error| error.to_string())?;
+    Ok(Some(body))
+}
+
 pub(crate) fn query_typescript_references(
     root: &Path,
     executable: &Path,
     changed_paths: &[&String],
     source: &std::collections::BTreeMap<String, String>,
 ) -> Result<TypeScriptReferenceQuery, String> {
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::io::{BufReader, Write};
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
 
@@ -1094,45 +1146,17 @@ pub(crate) fn query_typescript_references(
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         loop {
-            let mut content_length = None;
-            loop {
-                let mut header = Vec::new();
-                match reader.read_until(b'\n', &mut header) {
-                    Ok(0) => return,
-                    Ok(_) => {}
-                    Err(error) => {
-                        let _ = sender.send(Err(error.to_string()));
+            match read_tsserver_message(&mut reader, MAX_MESSAGE_BYTES) {
+                Ok(Some(body)) => {
+                    if sender.send(Ok(body)).is_err() {
                         return;
                     }
                 }
-                if header.len() > 8192 {
-                    let _ = sender.send(Err("tsserver response header exceeded 8 KiB".into()));
+                Ok(None) => return,
+                Err(error) => {
+                    let _ = sender.send(Err(error));
                     return;
                 }
-                if header == b"\r\n" || header == b"\n" {
-                    break;
-                }
-                if let Some(value) = header.strip_prefix(b"Content-Length:") {
-                    content_length = std::str::from_utf8(value)
-                        .ok()
-                        .and_then(|value| value.trim().parse::<usize>().ok());
-                }
-            }
-            let Some(length) = content_length else {
-                let _ = sender.send(Err("tsserver response omitted Content-Length".into()));
-                return;
-            };
-            if length > MAX_MESSAGE_BYTES {
-                let _ = sender.send(Err("tsserver response exceeded 2 MiB".into()));
-                return;
-            }
-            let mut body = vec![0; length];
-            if let Err(error) = reader.read_exact(&mut body) {
-                let _ = sender.send(Err(error.to_string()));
-                return;
-            }
-            if sender.send(Ok(body)).is_err() {
-                return;
             }
         }
     });

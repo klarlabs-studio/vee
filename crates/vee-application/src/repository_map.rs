@@ -5961,7 +5961,7 @@ fn run_typescript_definition(
     offset: u32,
     time_budget: std::time::Duration,
 ) -> Result<Option<Vec<PathBuf>>, String> {
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::io::{BufReader, Write};
     use std::process::Stdio;
     use std::sync::mpsc;
     const MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
@@ -6005,45 +6005,17 @@ fn run_typescript_definition(
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         loop {
-            let mut length = None;
-            loop {
-                let mut header = Vec::new();
-                match reader.read_until(b'\n', &mut header) {
-                    Ok(0) => return,
-                    Ok(_) => {}
-                    Err(error) => {
-                        let _ = tx.send(Err(error.to_string()));
+            match crate::impact::read_tsserver_message(&mut reader, MAX_MESSAGE_BYTES) {
+                Ok(Some(body)) => {
+                    if tx.send(Ok(body)).is_err() {
                         return;
                     }
                 }
-                if header.len() > 8192 {
-                    let _ = tx.send(Err("tsserver response header exceeded 8 KiB".into()));
+                Ok(None) => return,
+                Err(error) => {
+                    let _ = tx.send(Err(error));
                     return;
                 }
-                if header == b"\r\n" || header == b"\n" {
-                    break;
-                }
-                if let Some(value) = header.strip_prefix(b"Content-Length:") {
-                    length = std::str::from_utf8(value)
-                        .ok()
-                        .and_then(|v| v.trim().parse::<usize>().ok());
-                }
-            }
-            let Some(length) = length else {
-                let _ = tx.send(Err("tsserver response omitted Content-Length".into()));
-                return;
-            };
-            if length > MAX_MESSAGE_BYTES {
-                let _ = tx.send(Err("tsserver response exceeded 2 MiB".into()));
-                return;
-            }
-            let mut body = vec![0; length];
-            if let Err(error) = reader.read_exact(&mut body) {
-                let _ = tx.send(Err(error.to_string()));
-                return;
-            }
-            if tx.send(Ok(body)).is_err() {
-                return;
             }
         }
     });
