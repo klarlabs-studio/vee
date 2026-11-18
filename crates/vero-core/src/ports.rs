@@ -222,6 +222,9 @@ impl<
 /// Opens the local store of a repository checkout, for use cases that span
 /// several repositories (such as a multi-repository change package).
 pub trait RepositoryStores {
+    /// The store of the checkout at `root`, creating its local state on first use.
+    fn open(&self, root: &Path) -> Result<Box<dyn Repositories>, String>;
+
     /// The store of the checkout at `root`, or `None` when it has no Vero state yet.
     fn open_existing(&self, root: &Path) -> Result<Option<Box<dyn Repositories>>, String>;
 }

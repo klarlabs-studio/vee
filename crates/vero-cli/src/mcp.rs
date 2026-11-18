@@ -895,7 +895,7 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
 }
 
 pub fn serve_stdio() -> anyhow::Result<()> {
-    let server = build_server(Workspace::discover()?)?;
+    let server = build_server(Workspace::discover(crate::local_stores())?)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -954,7 +954,11 @@ mod tests {
     #[test]
     fn every_registered_tool_builds_with_its_published_output_schema() {
         let directory = tempfile::tempdir().unwrap();
-        let _server = build_server(Workspace::new(directory.path().to_path_buf())).unwrap();
+        let _server = build_server(Workspace::new(
+            directory.path().to_path_buf(),
+            crate::local_stores(),
+        ))
+        .unwrap();
     }
 
     #[test]
@@ -991,7 +995,7 @@ mod tests {
         .unwrap();
 
         let error = run_review(
-            &Workspace::new(root.to_path_buf()),
+            &Workspace::new(root.to_path_buf(), crate::local_stores()),
             &StartReviewInput {
                 scope: ReviewScope::WorkingTree,
                 base: None,

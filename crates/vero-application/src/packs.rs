@@ -2,8 +2,8 @@
 //! pack to a repository, list pinned packs, and compute pack digests.
 //! The pack format and merge rules live in `vero_core::packs`.
 
+use crate::failure::usage_failure;
 use crate::operations::Workspace;
-use crate::usage_failure;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -183,7 +183,7 @@ pub fn export(workspace: &Workspace, request: ExportRequest<'_>) -> Result<PackS
 }
 
 fn copy_repository_file(root: &Path, relative: &str, destination: &Path) -> Result<()> {
-    let bytes = vero_application::read_repository_file(root, Path::new(relative))
+    let bytes = crate::read_repository_file(root, Path::new(relative))
         .map_err(anyhow::Error::msg)
         .with_context(|| format!("reading {relative}"))?;
     if let Some(parent) = destination.parent() {
@@ -252,7 +252,7 @@ pub fn add(
         .with_context(|| format!("reading {}", config_path.display()))?;
     let pinned_yaml = pin(&yaml, &relative, &digest, provider).map_err(usage_failure)?;
     // Validate the pinned configuration before writing it.
-    vero_application::validate_repository_config_yaml(root, &pinned_yaml).map_err(|error| {
+    crate::validate_repository_config_yaml(root, &pinned_yaml).map_err(|error| {
         usage_failure(format!("the pack does not fit this repository: {error}"))
     })?;
     std::fs::write(&config_path, pinned_yaml)

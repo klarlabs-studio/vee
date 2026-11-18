@@ -706,7 +706,7 @@ fn check_provider(
                 .clone()
                 .map(|endpoint| format!("{endpoint} (not contacted; no tokens spent)")))
         }
-        _ => vero_application::provider_version(provider, root).map(|version| {
+        _ => crate::provider_version(provider, root).map(|version| {
             Some(version.unwrap_or_else(|| {
                 format!("{} (no version probe configured)", provider.executable)
             }))
@@ -738,10 +738,9 @@ pub fn doctor(probe: &dyn SystemProbe, root: &Path, user_config: Option<&Path>) 
         );
         return report;
     }
-    let config = match vero_application::load_repository_config_with_user_config(root, user_config)
-        .and_then(|mut config| {
-            vero_application::apply_protected_policy(root, &mut config).map(|()| config)
-        }) {
+    let config = match crate::load_repository_config_with_user_config(root, user_config)
+        .and_then(|mut config| crate::apply_protected_policy(root, &mut config).map(|()| config))
+    {
         Ok(config) => config,
         Err(error) => {
             let missing_machine_provider =

@@ -3,19 +3,25 @@ pub mod acceptance;
 pub mod analytics;
 pub mod attestation;
 pub mod coverage;
+pub mod failure;
 pub mod finding_task;
 pub mod imported_history;
+pub mod operations;
 pub mod ownership;
+pub mod packs;
 pub mod patch_sandbox;
 pub mod pr_description;
+pub mod proposals;
 pub mod repository_map;
 pub mod rule_candidates;
 pub mod sarif;
+pub mod setup;
 pub mod standards;
 pub mod test_effectiveness;
 pub mod test_generation;
 pub mod test_recommendations;
 pub mod verification_diagnosis;
+pub mod work_items;
 use std::path::{Path, PathBuf};
 use syn::spanned::Spanned;
 use vero_core::ports::{Repositories, RuleApprovalRepository};
@@ -67,7 +73,7 @@ pub fn verify_and_claim_webhook_delivery<P: vero_hosting::GitHostingProvider + ?
 const MAX_CONTEXT_FILE_BYTES: usize = 128 * 1024;
 const REVIEW_CACHE_CONTRACT_VERSION: u32 = 1;
 
-fn current_unix_time() -> Result<i64, String> {
+pub fn current_unix_time() -> Result<i64, String> {
     let duration = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|error| error.to_string())?;

@@ -1773,6 +1773,21 @@ fn finding_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FindingR
 pub struct SqliteRepositoryStores;
 
 impl RepositoryStores for SqliteRepositoryStores {
+    fn open(&self, root: &Path) -> Result<Box<dyn Repositories>, String> {
+        let metadata_dir = root.join(".vero");
+        if let Err(error) = std::fs::create_dir(&metadata_dir) {
+            if error.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(format!("creating {}: {error}", metadata_dir.display()));
+            }
+        }
+        match self.open_existing(root)? {
+            Some(store) => Ok(store),
+            None => Ok(Box::new(ReviewStore::open(
+                &metadata_dir.join("vero.sqlite"),
+            )?)),
+        }
+    }
+
     fn open_existing(&self, root: &Path) -> Result<Option<Box<dyn Repositories>>, String> {
         let metadata_dir = root.join(".vero");
         match std::fs::symlink_metadata(&metadata_dir) {

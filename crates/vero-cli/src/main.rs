@@ -16,74 +16,36 @@ use vero_application::analytics;
 use vero_application::attestation;
 mod contracts;
 use vero_application::coverage;
-use vero_application::finding_task;
-use vero_application::imported_history;
+use vero_application::failure::{
+    configuration_failure, usage_failure, ConfigurationFailure, UsageFailure,
+};
 use vero_application::imported_history::{
     imported_reviews_dir, parse_portable_review, store_imported_history, MAX_IMPORTED_REVIEW_BYTES,
 };
+use vero_application::proposals::{proposal_directory, read_proposal_file};
+use vero_application::work_items::{effective_work_item_token_env, get_work_item};
 mod mcp;
-mod operations;
-use vero_application::ownership;
-mod packs;
+use vero_application::operations;
+use vero_application::packs;
 use vero_application::patch_sandbox;
-use vero_application::pr_description;
 use vero_application::repository_map;
-use vero_application::rule_candidates;
-mod setup;
+use vero_application::setup;
 use vero_application::standards;
 use vero_application::test_effectiveness;
 use vero_application::test_generation;
-use vero_application::test_recommendations;
 use vero_application::verification_diagnosis;
 
-#[derive(Debug)]
-struct ConfigurationFailure(String);
-
-impl std::fmt::Display for ConfigurationFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
-    }
+/// The local SQLite stores that the CLI and MCP server hand to application services.
+fn local_stores() -> std::sync::Arc<dyn vero_core::ports::RepositoryStores + Send + Sync> {
+    std::sync::Arc::new(vero_store_sqlite::SqliteRepositoryStores)
 }
 
-impl std::error::Error for ConfigurationFailure {}
-
-#[derive(Debug)]
-struct UsageFailure(String);
-
-impl std::fmt::Display for UsageFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for UsageFailure {}
-
-fn configuration_failure(message: impl Into<String>) -> anyhow::Error {
-    anyhow::Error::new(ConfigurationFailure(message.into()))
-}
-
-fn usage_failure(message: impl Into<String>) -> anyhow::Error {
-    anyhow::Error::new(UsageFailure(message.into()))
+fn current_unix_time() -> Result<i64> {
+    vero_application::current_unix_time().map_err(anyhow::Error::msg)
 }
 
 fn load_repository_config(root: &std::path::Path) -> Result<RepositoryConfig> {
     vero_application::load_repository_config(root).map_err(configuration_failure)
-}
-
-fn proposal_directory(root: &std::path::Path) -> Result<std::path::PathBuf> {
-    let vero_dir = root.join(".vero");
-    std::fs::create_dir_all(&vero_dir)?;
-    anyhow::ensure!(
-        std::fs::symlink_metadata(&vero_dir)?.file_type().is_dir(),
-        ".vero must be a real directory"
-    );
-    let proposals = vero_dir.join("proposals");
-    std::fs::create_dir_all(&proposals)?;
-    anyhow::ensure!(
-        std::fs::symlink_metadata(&proposals)?.file_type().is_dir(),
-        ".vero/proposals must be a real directory"
-    );
-    Ok(proposals)
 }
 
 fn is_sha256_digest(value: &str) -> bool {
@@ -260,70 +222,6 @@ fn write_new_proposal_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
         })?;
     file.write_all(bytes)?;
     Ok(())
-}
-
-fn write_immutable_proposal_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
-        Ok(mut file) => file
-            .write_all(bytes)
-            .with_context(|| format!("writing proposal artifact {}", path.display()))?,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let existing = read_proposal_file(path, bytes.len() as u64)?;
-            anyhow::ensure!(
-                existing == bytes,
-                "refusing to replace a proposal artifact with different review or snapshot context"
-            );
-        }
-        Err(error) => return Err(error.into()),
-    }
-    Ok(())
-}
-
-fn read_proposal_file(path: &std::path::Path, max_bytes: u64) -> Result<Vec<u8>> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    anyhow::ensure!(
-        metadata.file_type().is_file(),
-        "proposal artifact must be a regular file"
-    );
-    anyhow::ensure!(
-        metadata.len() <= max_bytes,
-        "proposal artifact exceeds its size limit"
-    );
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    let file = options.open(path)?;
-    let opened_metadata = file.metadata()?;
-    anyhow::ensure!(
-        opened_metadata.is_file() && !opened_metadata.file_type().is_symlink(),
-        "proposal artifact must be a regular file"
-    );
-    anyhow::ensure!(
-        opened_metadata.len() <= max_bytes,
-        "proposal artifact exceeds its size limit"
-    );
-    let mut bytes = Vec::with_capacity(opened_metadata.len().min(max_bytes) as usize);
-    file.take(max_bytes.saturating_add(1))
-        .read_to_end(&mut bytes)?;
-    anyhow::ensure!(
-        bytes.len() as u64 <= max_bytes,
-        "proposal artifact exceeds its size limit"
-    );
-    Ok(bytes)
 }
 
 struct ProposalApplyLock(std::path::PathBuf);
@@ -1953,59 +1851,6 @@ fn work_item_api_base(provider: &str, host: &str, configured: &str) -> anyhow::R
     }
 }
 
-fn effective_work_item_token_env<'a>(provider: &str, configured: &'a str) -> &'a str {
-    if configured != "GH_TOKEN" {
-        return configured;
-    }
-    match provider {
-        "gitlab" => "GL_TOKEN",
-        "azure-devops" => "AZURE_DEVOPS_EXT_PAT",
-        "bitbucket" => "BB_TOKEN",
-        "gerrit" => "GERRIT_TOKEN",
-        _ => configured,
-    }
-}
-
-fn get_work_item(
-    provider_id: &str,
-    api_base: &str,
-    token: String,
-    reference: &vero_hosting::WorkItemRef,
-) -> anyhow::Result<vero_hosting::WorkItemSnapshot> {
-    match provider_id {
-        "github" => {
-            let provider = vero_hosting::github::GitHubAdapter::new(
-                vero_hosting::github::GitHubConfig::new(api_base, token, String::new())
-                    .map_err(configuration_failure)?,
-            )
-            .map_err(configuration_failure)?;
-            vero_hosting::WorkItemProvider::get_work_item(&provider, reference)
-                .map_err(anyhow::Error::msg)
-        }
-        "gitlab" => {
-            let provider = vero_hosting::gitlab::GitLabAdapter::new(
-                vero_hosting::gitlab::GitLabConfig::new(api_base, token)
-                    .map_err(configuration_failure)?,
-            )
-            .map_err(configuration_failure)?;
-            vero_hosting::WorkItemProvider::get_work_item(&provider, reference)
-                .map_err(anyhow::Error::msg)
-        }
-        "azure-devops" => {
-            let provider = vero_hosting::azure_devops::AzureDevOpsAdapter::new(
-                vero_hosting::azure_devops::AzureDevOpsConfig::new(api_base, token)
-                    .map_err(configuration_failure)?,
-            )
-            .map_err(configuration_failure)?;
-            vero_hosting::WorkItemProvider::get_work_item(&provider, reference)
-                .map_err(anyhow::Error::msg)
-        }
-        _ => Err(configuration_failure(format!(
-            "unsupported work item provider `{provider_id}`"
-        ))),
-    }
-}
-
 fn fetch_work_item(
     provider_id: &str,
     specification: &str,
@@ -2459,13 +2304,6 @@ fn current_change_set(root: &str, base_oid: Option<&str>, scope: &str) -> Result
         .map_err(anyhow::Error::msg)
 }
 
-fn current_unix_time() -> Result<i64> {
-    let seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs();
-    i64::try_from(seconds).context("system clock exceeds supported timestamp")
-}
-
 struct HostingWebhookReviewer {
     root: std::path::PathBuf,
     repository: vero_hosting::RepositoryRef,
@@ -2888,7 +2726,7 @@ fn run_packs(command: PacksCommand) -> Result<u8> {
             output,
         } => {
             let summary = packs::export(
-                &operations::Workspace::discover()?,
+                &operations::Workspace::discover(crate::local_stores())?,
                 packs::ExportRequest {
                     destination: &directory,
                     name: &name,
@@ -2913,7 +2751,7 @@ fn run_packs(command: PacksCommand) -> Result<u8> {
             output,
         } => {
             let summary = packs::add(
-                &operations::Workspace::discover()?,
+                &operations::Workspace::discover(crate::local_stores())?,
                 &directory,
                 provider.as_deref(),
                 replace,
@@ -2925,7 +2763,7 @@ fn run_packs(command: PacksCommand) -> Result<u8> {
             Ok(0)
         }
         PacksCommand::List { output } => {
-            let list = packs::list(&operations::Workspace::discover()?)?;
+            let list = packs::list(&operations::Workspace::discover(crate::local_stores())?)?;
             match output {
                 Output::Json => emit_json(&list)?,
                 Output::Text => {
@@ -3142,7 +2980,7 @@ fn run() -> Result<u8> {
             model,
             output,
         } => {
-            let workspace = operations::Workspace::discover()?;
+            let workspace = operations::Workspace::discover(crate::local_stores())?;
             let report = operations::init(&workspace, provider.as_deref(), model.as_deref())?;
             match output {
                 Output::Json => emit_json(&report)?,
@@ -3169,7 +3007,7 @@ fn run() -> Result<u8> {
             Ok(0)
         }
         Command::Doctor { output } => {
-            let workspace = operations::Workspace::discover()?;
+            let workspace = operations::Workspace::discover(crate::local_stores())?;
             let report = operations::doctor(&workspace)?;
             match output {
                 Output::Json => emit_json(&report)?,
@@ -3265,7 +3103,7 @@ fn run() -> Result<u8> {
             }
             }
             let report = operations::applicable_standards(
-                &operations::Workspace::new(root.clone()),
+                &operations::Workspace::new(root.clone(), crate::local_stores()),
                 path.as_deref(),
             )?;
             match output {
@@ -3308,7 +3146,10 @@ fn run() -> Result<u8> {
             Ok(0)
         }
         Command::Owners { paths, output } => {
-            let report = operations::owners(&operations::Workspace::discover()?, &paths)?;
+            let report = operations::owners(
+                &operations::Workspace::discover(crate::local_stores())?,
+                &paths,
+            )?;
             match output {
                 Output::Json => println!("{}", serde_json::to_string(&report)?),
                 Output::Text => {
@@ -3343,7 +3184,9 @@ fn run() -> Result<u8> {
         }
         Command::Rules { command } => match command {
             RulesCommand::Candidates { output } => {
-                let report = operations::rule_candidates(&operations::Workspace::discover()?)?;
+                let report = operations::rule_candidates(&operations::Workspace::discover(
+                    crate::local_stores(),
+                )?)?;
                 match output {
                     Output::Json => emit_json(&report)?,
                     Output::Text => {
@@ -3378,7 +3221,7 @@ fn run() -> Result<u8> {
                 output,
             } => {
                 let result = operations::approve_rule(
-                    &operations::Workspace::discover()?,
+                    &operations::Workspace::discover(crate::local_stores())?,
                     operations::ApproveRuleRequest {
                         candidate_id,
                         evidence_digest,
@@ -3394,8 +3237,9 @@ fn run() -> Result<u8> {
                 Ok(0)
             }
             RulesCommand::List { output } => {
-                let approvals =
-                    operations::list_rule_approvals(&operations::Workspace::discover()?)?;
+                let approvals = operations::list_rule_approvals(&operations::Workspace::discover(
+                    crate::local_stores(),
+                )?)?;
                 match output {
                     Output::Json => emit_json(&approvals)?,
                     Output::Text => {
@@ -3422,7 +3266,7 @@ fn run() -> Result<u8> {
                 output,
             } => {
                 let result = operations::revoke_rule(
-                    &operations::Workspace::discover()?,
+                    &operations::Workspace::discover(crate::local_stores())?,
                     &approval_id,
                     &actor,
                     &reason,
@@ -3440,7 +3284,7 @@ fn run() -> Result<u8> {
                 output,
             } => {
                 let report = operations::rule_effectiveness(
-                    &operations::Workspace::discover()?,
+                    &operations::Workspace::discover(crate::local_stores())?,
                     approval_id.as_deref(),
                 )?;
                 match output {
@@ -3527,7 +3371,7 @@ fn run() -> Result<u8> {
             markdown,
             output,
         } => {
-            let workspace = operations::Workspace::discover()?;
+            let workspace = operations::Workspace::discover(crate::local_stores())?;
             let scope = operations::ScopeRequest::from_flags(base, commit, staged, working_tree)?;
             let config = workspace.effective_config(policy_profile.as_deref())?;
             let hosting_provider = resolve_hosting_setting(
@@ -3613,7 +3457,7 @@ fn run() -> Result<u8> {
             working_tree,
             output,
         } => {
-            let workspace = operations::Workspace::discover()?;
+            let workspace = operations::Workspace::discover(crate::local_stores())?;
             let target = change_target(review, base, commit, staged, working_tree)?;
             let impact = operations::impact(&workspace, target)?;
             match output {
@@ -3711,7 +3555,7 @@ fn run() -> Result<u8> {
             } => {
                 let target = change_target(review, base, commit, staged, working_tree)?;
                 let report = operations::recommend_tests(
-                    &operations::Workspace::discover()?,
+                    &operations::Workspace::discover(crate::local_stores())?,
                     target,
                     coverage_run.as_deref(),
                 )?;
@@ -4573,7 +4417,7 @@ fn run() -> Result<u8> {
             } => {
                 let target = change_target(review, base, commit, staged, working_tree)?;
                 let report = operations::draft_pr_description(
-                    &operations::Workspace::discover()?,
+                    &operations::Workspace::discover(crate::local_stores())?,
                     target,
                     &reviewer,
                 )?;
@@ -4600,7 +4444,7 @@ fn run() -> Result<u8> {
         },
         Command::Acceptance { command } => match command {
             AcceptanceCommand::Report { review, output } => {
-                let workspace = operations::Workspace::discover()?;
+                let workspace = operations::Workspace::discover(crate::local_stores())?;
                 let report = operations::acceptance_report(&workspace, &review)?;
                 match output {
                     Output::Json => emit_json(&report)?,
@@ -4674,7 +4518,7 @@ fn run() -> Result<u8> {
                 token_env,
                 output,
             } => {
-                let workspace = operations::Workspace::discover()?;
+                let workspace = operations::Workspace::discover(crate::local_stores())?;
                 let response = operations::gate_check(&workspace, &review, token_env.as_deref())?;
                 match output {
                     Output::Json => emit_json(&response)?,
@@ -4688,8 +4532,10 @@ fn run() -> Result<u8> {
                 Ok(response.exit_code())
             }
             GateCommand::History { review, output } => {
-                let history =
-                    operations::gate_history(&operations::Workspace::discover()?, &review)?;
+                let history = operations::gate_history(
+                    &operations::Workspace::discover(crate::local_stores())?,
+                    &review,
+                )?;
                 let decisions = &history.decisions;
                 match output {
                     Output::Json => emit_json(&history)?,
@@ -4718,7 +4564,7 @@ fn run() -> Result<u8> {
             working_tree,
             output,
         } => {
-            let workspace = operations::Workspace::discover()?;
+            let workspace = operations::Workspace::discover(crate::local_stores())?;
             let target = match finding_id {
                 Some(finding_id) => {
                     if commit.is_some() || base.is_some() || staged || working_tree {
@@ -4826,7 +4672,7 @@ fn run() -> Result<u8> {
                 Ok(0)
             }
             VerificationCommand::Diagnose { run_id, output } => {
-                let workspace = operations::Workspace::discover()?;
+                let workspace = operations::Workspace::discover(crate::local_stores())?;
                 let diagnosis = operations::diagnose_verification(&workspace, &run_id)?;
                 match output {
                     Output::Json => emit_json(&diagnosis)?,
@@ -4862,8 +4708,10 @@ fn run() -> Result<u8> {
                 Ok(0)
             }
             VerificationCommand::Findings { run_id, output } => {
-                let report =
-                    operations::analyzer_findings(&operations::Workspace::discover()?, &run_id)?;
+                let report = operations::analyzer_findings(
+                    &operations::Workspace::discover(crate::local_stores())?,
+                    &run_id,
+                )?;
                 match output {
                     Output::Json => emit_json(&report)?,
                     Output::Text => print_analyzer_report(&report),
@@ -4974,7 +4822,10 @@ fn run() -> Result<u8> {
                     Ok(0)
                 }
                 ReviewsCommand::Show { id, output } => {
-                    let workspace = operations::Workspace::new(std::path::PathBuf::from(&top));
+                    let workspace = operations::Workspace::new(
+                        std::path::PathBuf::from(&top),
+                        crate::local_stores(),
+                    );
                     let review = operations::get_review(&workspace, &id)?;
                     let review = serde_json::to_value(review)?;
                     match output {
@@ -5395,7 +5246,10 @@ fn run() -> Result<u8> {
                         limit,
                         output,
                     } => {
-                        let workspace = operations::Workspace::new(std::path::PathBuf::from(&top));
+                        let workspace = operations::Workspace::new(
+                            std::path::PathBuf::from(&top),
+                            crate::local_stores(),
+                        );
                         let report =
                             operations::search_imported_history(&workspace, &query, limit)?;
                         match output {
@@ -5429,8 +5283,10 @@ fn run() -> Result<u8> {
                             reviewer,
                             output,
                         } => {
-                            let workspace =
-                                operations::Workspace::new(std::path::PathBuf::from(&top));
+                            let workspace = operations::Workspace::new(
+                                std::path::PathBuf::from(&top),
+                                crate::local_stores(),
+                            );
                             let recorded = operations::record_external_feedback(
                                 &workspace,
                                 operations::ExternalFeedbackRequest {
@@ -5453,8 +5309,10 @@ fn run() -> Result<u8> {
                             archive_digest,
                             output,
                         } => {
-                            let workspace =
-                                operations::Workspace::new(std::path::PathBuf::from(&top));
+                            let workspace = operations::Workspace::new(
+                                std::path::PathBuf::from(&top),
+                                crate::local_stores(),
+                            );
                             let listed = operations::list_external_feedback(
                                 &workspace,
                                 archive_digest.as_deref(),
@@ -5482,7 +5340,7 @@ fn run() -> Result<u8> {
             }
         }
         Command::Analytics { output } => {
-            let workspace = operations::Workspace::discover()?;
+            let workspace = operations::Workspace::discover(crate::local_stores())?;
             let analytics = operations::quality_analytics(&workspace)?;
             match output {
                 Output::Json => emit_json(&analytics)?,
@@ -7019,7 +6877,7 @@ fn run() -> Result<u8> {
                 }
                 WaiversCommand::List { review, output } => {
                     let listed = operations::list_waivers(
-                        &operations::Workspace::new(top.clone()),
+                        &operations::Workspace::new(top.clone(), crate::local_stores()),
                         &review,
                     )?;
                     let waivers = &listed.waivers;
@@ -7043,7 +6901,7 @@ fn run() -> Result<u8> {
             }
         }
         Command::Findings { command } => {
-            let workspace = operations::Workspace::discover()?;
+            let workspace = operations::Workspace::discover(crate::local_stores())?;
             let cwd = std::env::current_dir()?;
             let top = vero_git::repository_root(&cwd)
                 .map_err(anyhow::Error::msg)?

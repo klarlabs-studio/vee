@@ -7,17 +7,16 @@
 //! CLI's usage/configuration markers so both transports report the same message and
 //! the CLI keeps its documented exit codes.
 
-use crate::{configuration_failure, usage_failure};
+use crate::failure::{configuration_failure, usage_failure};
+use crate::{GateCheckResult, ReviewResult};
 use anyhow::{Context, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use vero_application::{GateCheckResult, ReviewResult};
 use vero_core::ports::*;
 use vero_core::{
     ActorName, Evidence, FindingFeedback, FindingFeedbackLabel, FindingRecord, FindingStatus,
     FindingStatusChange, Reason, RepositoryConfig, Severity, VerificationRun,
 };
-use vero_store_sqlite::ReviewStore;
 
 pub const DEFAULT_PAGE_SIZE: usize = 50;
 pub const MAX_PAGE_SIZE: usize = 100;
@@ -28,46 +27,48 @@ const MAX_INSTRUCTION_BYTES: usize = 20_000;
 const RULE_MINING_FINDING_LIMIT: usize = 10_000;
 
 /// The repository a transport operates on, and its local Vero database.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Workspace {
     root: PathBuf,
+    stores: std::sync::Arc<dyn RepositoryStores + Send + Sync>,
+}
+
+impl std::fmt::Debug for Workspace {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Workspace")
+            .field("root", &self.root)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Workspace {
-    pub fn new(root: PathBuf) -> Self {
-        Self { root }
+    /// A workspace at `root` whose local state is opened through `stores`.
+    pub fn new(root: PathBuf, stores: std::sync::Arc<dyn RepositoryStores + Send + Sync>) -> Self {
+        Self { root, stores }
     }
 
     /// The Git checkout containing the current directory.
-    pub fn discover() -> Result<Self> {
+    pub fn discover(stores: std::sync::Arc<dyn RepositoryStores + Send + Sync>) -> Result<Self> {
         let cwd = std::env::current_dir()?;
         let root = vero_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-        Ok(Self::new(root))
+        Ok(Self::new(root, stores))
     }
 
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    pub fn database_path(&self) -> PathBuf {
-        self.root.join(".vero/vero.sqlite")
-    }
-
-    /// Open the review store, creating `.vero/` on first use.
-    pub fn store(&self) -> Result<ReviewStore> {
-        std::fs::create_dir_all(self.root.join(".vero"))?;
-        ReviewStore::open(&self.database_path()).map_err(anyhow::Error::msg)
+    /// Open the review store, creating local state on first use.
+    pub fn store(&self) -> Result<Box<dyn Repositories>> {
+        self.stores.open(&self.root).map_err(anyhow::Error::msg)
     }
 
     /// Open the review store only if it already exists, so read-only operations do
     /// not create local state as a side effect.
-    pub fn existing_store(&self) -> Result<Option<ReviewStore>> {
-        let path = self.database_path();
-        if !path.exists() {
-            return Ok(None);
-        }
-        ReviewStore::open(&path)
-            .map(Some)
+    pub fn existing_store(&self) -> Result<Option<Box<dyn Repositories>>> {
+        self.stores
+            .open_existing(&self.root)
             .map_err(anyhow::Error::msg)
     }
 
@@ -75,12 +76,11 @@ impl Workspace {
     /// policy applied, exactly as reviews and gates evaluate it.
     pub fn effective_config(&self, policy_profile: Option<&str>) -> Result<RepositoryConfig> {
         let mut config =
-            vero_application::load_repository_config(&self.root).map_err(configuration_failure)?;
+            crate::load_repository_config(&self.root).map_err(configuration_failure)?;
         config
             .select_policy_profile(policy_profile)
             .map_err(configuration_failure)?;
-        vero_application::apply_protected_policy(&self.root, &mut config)
-            .map_err(configuration_failure)?;
+        crate::apply_protected_policy(&self.root, &mut config).map_err(configuration_failure)?;
         Ok(config)
     }
 
@@ -89,7 +89,7 @@ impl Workspace {
             .get(review_id)
             .map_err(anyhow::Error::msg)?
             .ok_or_else(|| usage_failure(format!("review {review_id} was not found")))?;
-        vero_application::deserialize_review_result(&payload)
+        crate::deserialize_review_result(&payload)
             .map_err(|error| anyhow::anyhow!("stored review {review_id} is invalid: {error}"))
     }
 
@@ -102,7 +102,7 @@ impl Workspace {
 
     /// Recapture a saved review's scope and fail if the source no longer matches.
     fn current_snapshot_of(&self, review: &ReviewResult) -> Result<vero_core::ChangeSet> {
-        let current = vero_application::capture_current_change_set(&self.root, &review.change_set)
+        let current = crate::capture_current_change_set(&self.root, &review.change_set)
             .map_err(anyhow::Error::msg)?;
         if current.digest != review.snapshot_id {
             return Err(usage_failure(format!(
@@ -209,16 +209,16 @@ pub fn review(
         ));
     }
     let scope = request.scope.resolve(workspace.root())?;
-    let change_set = vero_application::capture_change_set(workspace.root(), scope)
-        .map_err(anyhow::Error::msg)?;
+    let change_set =
+        crate::capture_change_set(workspace.root(), scope).map_err(anyhow::Error::msg)?;
     let mut store = workspace.store()?;
-    vero_application::run_review_with_provider_and_selection_context(
+    crate::run_review_with_provider_and_selection_context(
         workspace.root(),
         change_set,
         &config,
-        &mut store,
-        vero_application::ReviewRunOptions {
-            provider_adapter: &vero_application::CliReviewProvider,
+        &mut *store,
+        crate::ReviewRunOptions {
+            provider_adapter: &crate::CliReviewProvider,
             requested_reviewers: request.reviewer_ids,
             cancellation,
             work_item: request.work_item,
@@ -230,7 +230,7 @@ pub fn review(
 
 pub fn get_review(workspace: &Workspace, review_id: &str) -> Result<ReviewResult> {
     let store = workspace.store()?;
-    workspace.saved_review(&store, review_id)
+    workspace.saved_review(&*store, review_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -293,7 +293,7 @@ pub struct FindingDetail {
 
 pub fn finding_detail(workspace: &Workspace, finding_id: &str) -> Result<FindingDetail> {
     let store = workspace.store()?;
-    let finding = workspace.finding(&store, finding_id)?;
+    let finding = workspace.finding(&*store, finding_id)?;
     let mut evidence: Vec<Evidence> = Vec::new();
     for occurrence in finding.occurrences.iter().rev() {
         for item in store
@@ -324,8 +324,8 @@ pub fn finding_task(
     context_lines: usize,
 ) -> Result<crate::finding_task::FindingTask> {
     let store = workspace.store()?;
-    let record = workspace.finding(&store, finding_id)?;
-    crate::finding_task::build(workspace.root(), &store, record, context_lines)
+    let record = workspace.finding(&*store, finding_id)?;
+    crate::finding_task::build(workspace.root(), &*store, record, context_lines)
         .map_err(anyhow::Error::msg)
 }
 
@@ -335,7 +335,7 @@ pub fn finding_work_package(
     context_lines: usize,
 ) -> Result<crate::finding_task::FindingWorkPackage> {
     let store = workspace.store()?;
-    crate::finding_task::build_package(workspace.root(), &store, finding_ids, context_lines)
+    crate::finding_task::build_package(workspace.root(), &*store, finding_ids, context_lines)
         .map_err(usage_failure)
 }
 
@@ -411,10 +411,9 @@ pub fn gate_check(
     token_env_override: Option<&str>,
 ) -> Result<GateCheckResult> {
     let mut store = workspace.store()?;
-    let review = workspace.saved_review(&store, review_id)?;
-    let current =
-        vero_application::capture_current_change_set(workspace.root(), &review.change_set)
-            .map_err(anyhow::Error::msg)?;
+    let review = workspace.saved_review(&*store, review_id)?;
+    let current = crate::capture_current_change_set(workspace.root(), &review.change_set)
+        .map_err(anyhow::Error::msg)?;
     let config = workspace.effective_config(review.policy_profile.as_deref())?;
     let current_work_item = match review.work_item.as_ref() {
         None => None,
@@ -428,11 +427,12 @@ pub fn gate_check(
                 .or(review.work_item_token_env.as_deref())
                 .or(config.hosting.token_env.as_deref())
                 .unwrap_or("GH_TOKEN");
-            let token_env = crate::effective_work_item_token_env(&item.provider, configured);
+            let token_env =
+                crate::work_items::effective_work_item_token_env(&item.provider, configured);
             let token = std::env::var(token_env).with_context(|| {
                 format!("{token_env} is required to revalidate the external work item used by this review")
             })?;
-            Some(crate::get_work_item(
+            Some(crate::work_items::get_work_item(
                 &item.provider,
                 &item.api_base,
                 token,
@@ -440,9 +440,8 @@ pub fn gate_check(
             )?)
         }
     };
-    let active_approvals =
-        vero_application::active_rule_approvals(&store).map_err(anyhow::Error::msg)?;
-    let config_digest = vero_application::effective_review_config_digest_with_work_item(
+    let active_approvals = crate::active_rule_approvals(&*store).map_err(anyhow::Error::msg)?;
+    let config_digest = crate::effective_review_config_digest_with_work_item(
         &config,
         workspace.root(),
         &review.selected_reviewers,
@@ -453,9 +452,9 @@ pub fn gate_check(
     let verification_runs = store
         .verifications_for_snapshot(&current.digest)
         .map_err(anyhow::Error::msg)?;
-    let decision = vero_application::evaluate_and_persist_gate(
-        &mut store,
-        vero_application::GateEvaluation {
+    let decision = crate::evaluate_and_persist_gate(
+        &mut *store,
+        crate::GateEvaluation {
             review_id,
             reviewed_snapshot_id: &review.snapshot_id,
             current: &current,
@@ -504,48 +503,41 @@ pub fn verify(workspace: &Workspace, request: VerifyRequest<'_>) -> Result<Verif
                     "impacted-test expansion applies to scope verification, not a finding",
                 ));
             }
-            let finding = workspace.finding(&store, &finding_id)?;
+            let finding = workspace.finding(&*store, &finding_id)?;
             let occurrence = finding
                 .occurrences
                 .last()
                 .context("finding has no review occurrence")?;
-            let review = workspace.saved_review(&store, &occurrence.review_id)?;
-            let current = vero_application::capture_current_change_set(root, &review.change_set)
+            let review = workspace.saved_review(&*store, &occurrence.review_id)?;
+            let current = crate::capture_current_change_set(root, &review.change_set)
                 .map_err(anyhow::Error::msg)?;
             if current.digest != occurrence.snapshot_id {
                 return Err(usage_failure(format!(
                     "finding {finding_id} is stale because its source snapshot changed"
                 )));
             }
-            vero_application::run_finding_verification(
+            crate::run_finding_verification(
                 root,
                 &current,
                 &finding_id,
                 request.profile_id,
                 &config,
-                &mut store,
+                &mut *store,
             )
         }
         VerifyTarget::Scope(scope) => {
             let scope = scope.resolve(root)?;
-            let snapshot =
-                vero_application::capture_change_set(root, scope).map_err(anyhow::Error::msg)?;
+            let snapshot = crate::capture_change_set(root, scope).map_err(anyhow::Error::msg)?;
             if request.impacted_tests {
-                vero_application::run_impacted_test_verification(
+                crate::run_impacted_test_verification(
                     root,
                     &snapshot,
                     request.profile_id,
                     &config,
-                    &mut store,
+                    &mut *store,
                 )
             } else {
-                vero_application::run_verification(
-                    root,
-                    &snapshot,
-                    request.profile_id,
-                    &config,
-                    &mut store,
-                )
+                crate::run_verification(root, &snapshot, request.profile_id, &config, &mut *store)
             }
         }
     }
@@ -561,7 +553,7 @@ pub fn diagnose_verification(
         .verification(run_id)
         .map_err(anyhow::Error::msg)?
         .ok_or_else(|| usage_failure(format!("verification run {run_id} was not found")))?;
-    crate::verification_diagnosis::diagnose(workspace.root(), &store, &run)
+    crate::verification_diagnosis::diagnose(workspace.root(), &*store, &run)
         .map_err(anyhow::Error::msg)
 }
 
@@ -581,24 +573,20 @@ impl ChangeTarget {
         match self {
             Self::Review(review_id) => {
                 let store = workspace.store()?;
-                let review = workspace.saved_review(&store, &review_id)?;
+                let review = workspace.saved_review(&*store, &review_id)?;
                 workspace.current_snapshot_of(&review)
             }
             Self::Scope(scope) => {
                 let scope = scope.resolve(workspace.root())?;
-                vero_application::capture_change_set(workspace.root(), scope)
-                    .map_err(anyhow::Error::msg)
+                crate::capture_change_set(workspace.root(), scope).map_err(anyhow::Error::msg)
             }
         }
     }
 }
 
-pub fn impact(
-    workspace: &Workspace,
-    target: ChangeTarget,
-) -> Result<vero_application::ImpactAssessment> {
+pub fn impact(workspace: &Workspace, target: ChangeTarget) -> Result<crate::ImpactAssessment> {
     let change_set = target.change_set(workspace)?;
-    vero_application::analyze_impact(workspace.root(), &change_set).map_err(anyhow::Error::msg)
+    crate::analyze_impact(workspace.root(), &change_set).map_err(anyhow::Error::msg)
 }
 
 /// Trace saved work-item criteria to the review's changes. Impact candidates are
@@ -609,10 +597,10 @@ pub fn acceptance_report(
     review_id: &str,
 ) -> Result<crate::acceptance::AcceptanceReport> {
     let store = workspace.store()?;
-    let review = workspace.saved_review(&store, review_id)?;
+    let review = workspace.saved_review(&*store, review_id)?;
     let (impact, impact_problem) = crate::acceptance::matching_impact(
         &review.snapshot_id,
-        vero_application::analyze_impact(workspace.root(), &review.change_set),
+        crate::analyze_impact(workspace.root(), &review.change_set),
     );
     Ok(crate::acceptance::report_with_impact(
         &review,
@@ -630,7 +618,7 @@ pub fn applicable_standards(
 
 pub fn quality_analytics(workspace: &Workspace) -> Result<crate::analytics::QualityAnalytics> {
     let store = workspace.store()?;
-    crate::analytics::summarize(workspace.root(), &store).map_err(anyhow::Error::msg)
+    crate::analytics::summarize(workspace.root(), &*store).map_err(anyhow::Error::msg)
 }
 
 // ---------------------------------------------------------------------------
@@ -677,7 +665,7 @@ pub fn record_external_feedback(
             label: request.label,
             reason: request.reason,
             reviewer: request.reviewer,
-            recorded_at_unix: crate::current_unix_time()?,
+            recorded_at_unix: crate::current_unix_time().map_err(anyhow::Error::msg)?,
         },
     )
     .map_err(configuration_failure)?;
@@ -741,10 +729,7 @@ fn mine_candidates(
 
 pub fn rule_candidates(workspace: &Workspace) -> Result<crate::rule_candidates::CandidateReport> {
     let store = workspace.existing_store()?;
-    mine_candidates(
-        workspace,
-        store.as_ref().map(|store| store as &dyn Repositories),
-    )
+    mine_candidates(workspace, store.as_deref())
 }
 
 pub struct ApproveRuleRequest {
@@ -779,7 +764,7 @@ pub fn approve_rule(
         Some(_) => return Err(usage_failure("expires_in_days must be between 1 and 3650")),
     };
     let mut store = workspace.store()?;
-    let report = mine_candidates(workspace, Some(&store))?;
+    let report = mine_candidates(workspace, Some(&*store))?;
     if report.truncated {
         return Err(configuration_failure(
             "cannot approve candidates while feedback history is truncated",
@@ -835,7 +820,7 @@ pub fn approve_rule(
     store
         .create_rule_approval(&approval)
         .map_err(anyhow::Error::msg)?;
-    saved_approval(&store, &approval.approval_id)
+    saved_approval(&*store, &approval.approval_id)
 }
 
 fn saved_approval(store: &dyn Repositories, approval_id: &str) -> Result<vero_core::RuleApproval> {
@@ -866,7 +851,7 @@ pub fn revoke_rule(
     store
         .revoke_rule_approval(approval_id, &actor, &reason)
         .map_err(anyhow::Error::msg)?;
-    saved_approval(&store, approval_id)
+    saved_approval(&*store, approval_id)
 }
 
 pub fn rule_effectiveness(
@@ -880,7 +865,7 @@ pub fn rule_effectiveness(
     };
     let external_feedback = crate::imported_history::list_feedback(workspace.root(), None)
         .map_err(configuration_failure)?;
-    crate::rule_candidates::effectiveness(&store, approval_id, &external_feedback)
+    crate::rule_candidates::effectiveness(&*store, approval_id, &external_feedback)
         .map_err(anyhow::Error::msg)
 }
 
@@ -888,7 +873,7 @@ pub fn rule_effectiveness(
 // Setup: provider detection, init, doctor
 
 fn user_config_location() -> Result<PathBuf> {
-    vero_application::user_config_location().ok_or_else(|| {
+    crate::user_config_location().ok_or_else(|| {
         configuration_failure("cannot determine the user config location; set VERO_CONFIG")
     })
 }
@@ -943,8 +928,8 @@ pub fn recommend_tests(
 ) -> Result<crate::test_recommendations::TestRecommendationReport> {
     use crate::test_recommendations::{ExecutionCoverageFile, ExecutionCoverageSummary};
     let change_set = target.change_set(workspace)?;
-    let impact = vero_application::analyze_impact(workspace.root(), &change_set)
-        .map_err(anyhow::Error::msg)?;
+    let impact =
+        crate::analyze_impact(workspace.root(), &change_set).map_err(anyhow::Error::msg)?;
     let coverage = match coverage_run_id {
         None => None,
         Some(run_id) => {
@@ -958,7 +943,7 @@ pub fn recommend_tests(
                     "coverage verification run belongs to a different change snapshot",
                 ));
             }
-            let report = crate::coverage::report(workspace.root(), &store, &run, "stdout")
+            let report = crate::coverage::report(workspace.root(), &*store, &run, "stdout")
                 .map_err(anyhow::Error::msg)?;
             let files = report
                 .files
@@ -1006,7 +991,7 @@ pub fn draft_pr_description(
     workspace: &Workspace,
     target: ChangeTarget,
     reviewer_id: &str,
-) -> Result<vero_application::ProviderTaskResult> {
+) -> Result<crate::ProviderTaskResult> {
     let change_set = target.change_set(workspace)?;
     let config = workspace.effective_config(None)?;
     let context = crate::pr_description::snapshot_context(
@@ -1016,8 +1001,8 @@ pub fn draft_pr_description(
         config.review.max_context_file_bytes,
         config.review.max_context_bytes,
     )?;
-    vero_application::run_provider_task(
-        vero_application::ProviderTaskRequest {
+    crate::run_provider_task(
+        crate::ProviderTaskRequest {
             root: workspace.root(),
             snapshot_id: &change_set.digest,
             config: &config,
@@ -1026,7 +1011,7 @@ pub fn draft_pr_description(
             context,
             output_schema: crate::pr_description::output_schema(),
         },
-        &vero_application::CliReviewProvider,
+        &crate::CliReviewProvider,
     )
     .map_err(anyhow::Error::msg)
 }
@@ -1047,7 +1032,7 @@ pub struct GateHistory {
 
 pub fn gate_history(workspace: &Workspace, review_id: &str) -> Result<GateHistory> {
     let store = workspace.store()?;
-    workspace.saved_review(&store, review_id)?;
+    workspace.saved_review(&*store, review_id)?;
     let decisions = store
         .gate_decisions_for_review(review_id)
         .map_err(anyhow::Error::msg)?;
@@ -1066,7 +1051,7 @@ pub struct WaiverList {
 
 pub fn list_waivers(workspace: &Workspace, review_id: &str) -> Result<WaiverList> {
     let store = workspace.store()?;
-    let review = workspace.saved_review(&store, review_id)?;
+    let review = workspace.saved_review(&*store, review_id)?;
     let waivers = store
         .waivers_for_snapshot(&review.snapshot_id)
         .map_err(anyhow::Error::msg)?;
@@ -1092,7 +1077,7 @@ pub fn propose_patch(
     use std::io::Write as _;
     let root = workspace.root();
     let store = workspace.store()?;
-    let saved = workspace.saved_review(&store, review_id)?;
+    let saved = workspace.saved_review(&*store, review_id)?;
     if !matches!(
         saved.change_set.scope.as_str(),
         "staged" | "working_tree" | "base_and_worktree"
@@ -1101,7 +1086,7 @@ pub fn propose_patch(
             "patch proposals require a mutable staged or working-tree review scope",
         ));
     }
-    let current = vero_application::capture_current_change_set(root, &saved.change_set)
+    let current = crate::capture_current_change_set(root, &saved.change_set)
         .is_ok_and(|snapshot| snapshot.digest == saved.snapshot_id);
     if !current {
         return Err(usage_failure(
@@ -1150,7 +1135,7 @@ pub fn propose_patch(
     let input_digest =
         crate::patch_sandbox::input_digest(&sandbox.input_files).map_err(anyhow::Error::msg)?;
     let digest = format!("sha256:{:x}", sha2::Sha256::digest(patch));
-    let directory = crate::proposal_directory(root)?;
+    let directory = crate::proposals::proposal_directory(root)?;
     let saved_patch = directory.join(format!("{}.patch", &digest[7..]));
     let record_path = directory.join(format!("{}.json", &digest[7..]));
     let proposal = serde_json::json!({
@@ -1174,8 +1159,8 @@ pub fn propose_patch(
             "patch proposal metadata exceeds the 128 KiB apply limit",
         ));
     }
-    crate::write_immutable_proposal_file(&saved_patch, patch)?;
-    crate::write_immutable_proposal_file(&record_path, &record)?;
+    crate::proposals::write_immutable_proposal_file(&saved_patch, patch)?;
+    crate::proposals::write_immutable_proposal_file(&record_path, &record)?;
     Ok(proposal)
 }
 
@@ -1207,7 +1192,7 @@ pub fn analyzer_findings(workspace: &Workspace, run_id: &str) -> Result<vero_cor
         .ok_or_else(|| anyhow::anyhow!("snapshot manifest for run {run_id} is missing"))?;
     let change_set =
         crate::coverage::parse_manifest(&manifest, &run.snapshot_id).map_err(anyhow::Error::msg)?;
-    Ok(vero_application::sarif::analyze_run(
+    Ok(crate::sarif::analyze_run(
         workspace.root(),
         &change_set,
         &run,
