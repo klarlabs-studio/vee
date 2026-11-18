@@ -116,10 +116,14 @@ Restructure toward domain layering, in this order:
    on a repository without `.vero` now return empty results instead of an
    error, matching the CLI and MCP.
 
-   Remaining: split `vero-application/src/lib.rs` into the bounded-context
-   modules above, and decide whether verification and provider subprocesses
+   `vero-application/src/lib.rs` is split into context modules: `config`,
+   `review`, `providers`, `verification`, `impact`, `gate`, `learning`, and
+   `source`, with the unit tests in `tests`. `lib.rs` re-exports them, so
+   the public API is unchanged.
+
+   Remaining: decide whether verification and provider subprocesses
    (`vero-process`) sit behind ports, as Git capture (`vero-git`) does not
-   today.
+   today, and split the unit tests by context.
 
 ## Consequences
 
