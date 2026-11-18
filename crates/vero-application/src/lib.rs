@@ -1024,7 +1024,7 @@ impl ReviewProvider for CliReviewProvider {
     ) -> Result<ProviderResult, String> {
         match request.kind {
             vero_core::ProviderKind::Cli => {
-                vero_core::execute_provider_cancellable(request, cancellation)
+                vero_process::execute_provider_cancellable(request, cancellation)
             }
             vero_core::ProviderKind::CodexCli => execute_codex_cli(request, cancellation),
             vero_core::ProviderKind::GeminiCli => execute_gemini_cli(request, cancellation),
@@ -1437,7 +1437,7 @@ fn execute_claude_cli(
         max_output_tokens: request.max_output_tokens,
         environment: request.environment.clone(),
     };
-    let mut result = vero_core::execute_provider_cancellable(&claude_request, cancellation)?;
+    let mut result = vero_process::execute_provider_cancellable(&claude_request, cancellation)?;
     if result.exit_code != Some(0) {
         return Ok(result);
     }
@@ -1508,7 +1508,7 @@ fn execute_gemini_cli(
         max_output_tokens: request.max_output_tokens,
         environment: request.environment.clone(),
     };
-    let mut result = vero_core::execute_provider_cancellable(&gemini_request, cancellation)?;
+    let mut result = vero_process::execute_provider_cancellable(&gemini_request, cancellation)?;
     if result.exit_code != Some(0) {
         return Ok(result);
     }
@@ -1658,7 +1658,7 @@ fn execute_codex_cli(
         max_output_tokens: request.max_output_tokens,
         environment: request.environment.clone(),
     };
-    let mut result = vero_core::execute_provider_cancellable(&codex_request, cancellation)?;
+    let mut result = vero_process::execute_provider_cancellable(&codex_request, cancellation)?;
     (result.stdout, result.usage) = parse_codex_jsonl_output(&result.stdout)?;
     Ok(result)
 }
@@ -1739,7 +1739,7 @@ fn probe_provider_version(
     } else {
         return Ok(None);
     };
-    let result = vero_core::execute_provider_cancellable(
+    let result = vero_process::execute_provider_cancellable(
         &ProviderRequest {
             kind: vero_core::ProviderKind::Cli,
             executable: provider
@@ -3479,7 +3479,7 @@ pub fn run_verification(
                 .as_deref()
                 .ok_or("commit-scoped snapshot is missing its endpoint commit")?;
             let worktree = CommitVerificationWorktree::create(root, commit)?;
-            let execution = vero_core::execute_verification_capture(
+            let execution = vero_process::execute_verification_capture(
                 &snapshot.digest,
                 profile_id,
                 &worktree.path,
@@ -3488,7 +3488,7 @@ pub fn run_verification(
             worktree.ensure_clean()?;
             execution
         } else {
-            vero_core::execute_verification_capture(&snapshot.digest, profile_id, root, profile)?
+            vero_process::execute_verification_capture(&snapshot.digest, profile_id, root, profile)?
         };
     if execution.run.status == vero_core::VerificationStatus::Passed
         && is_go_test_profile(profile)
@@ -3773,7 +3773,7 @@ pub fn run_impacted_test_verification(
     for (index, args) in invocations.iter().enumerate() {
         let mut targeted_profile = profile.clone();
         targeted_profile.args = args.clone();
-        let mut execution = vero_core::execute_verification_capture(
+        let mut execution = vero_process::execute_verification_capture(
             &snapshot.digest,
             profile_id,
             root,
@@ -4671,7 +4671,7 @@ pub fn run_finding_verification(
         .get(profile_id)
         .ok_or_else(|| format!("unknown verification profile {profile_id}"))?;
     let execution =
-        vero_core::execute_verification_capture(&snapshot.digest, profile_id, root, profile)?;
+        vero_process::execute_verification_capture(&snapshot.digest, profile_id, root, profile)?;
     ensure_snapshot_current(root, snapshot, "during finding verification")?;
     let mut run = persist_verification_output(root, execution)?;
     run.finding_id = Some(finding_id.into());
@@ -7963,7 +7963,7 @@ fn gate_eligible_verification_runs(
         .filter_map(|profile_id| {
             let profile = config.verification.get(profile_id)?;
             let command_digest =
-                vero_core::verification_command_digest(profile, repository_root).ok()?;
+                vero_process::verification_command_digest(profile, repository_root).ok()?;
             Some((profile_id.as_str(), command_digest))
         })
         .collect();

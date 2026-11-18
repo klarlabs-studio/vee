@@ -68,8 +68,9 @@ Restructure toward domain layering, in this order:
    `rusqlite`, and `vero-application` uses the store only in tests. Active rule
    approvals, which the effective config digest binds, are now read through
    `RuleApprovalRepository` and passed in explicitly instead of the digest
-   function opening `.vero/vero.sqlite` itself. Subprocess provider execution
-   is still in `vero-core`.
+   function opening `.vero/vero.sqlite` itself. Reviewer provider and
+   verification subprocess execution moved to the `vero-process` adapter, so
+   `vero-core` no longer depends on `libc`, `tempfile`, or `tokio-util`.
 2. **Invariants in the model.** Finding status transitions (no waiving through a
    status change), typed approval status, and bounded value types for reasons and
    actor names.

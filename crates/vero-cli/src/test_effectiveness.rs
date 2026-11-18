@@ -249,7 +249,7 @@ pub fn assess(
         snapshot,
         profile_id,
         baseline_verification_run_id,
-        verification_command_digest: vero_core::verification_command_digest(profile, root)?,
+        verification_command_digest: vero_process::verification_command_digest(profile, root)?,
         mutant_patch_digest: patch_digest,
         mutant_snapshot_id: mutant_snapshot_id.clone(),
         mutant_paths: validated
@@ -270,7 +270,7 @@ pub fn assess(
     overlay_snapshot(root, sandbox.path(), snapshot)?;
     verify_snapshot_files(sandbox.path(), snapshot)?;
 
-    let baseline = vero_core::execute_verification_capture(
+    let baseline = vero_process::execute_verification_capture(
         &snapshot.digest,
         profile_id,
         sandbox.path(),
@@ -288,7 +288,7 @@ pub fn assess(
         ));
     }
     apply_patch(sandbox.path(), patch_file.path())?;
-    let mutated = vero_core::execute_verification_capture(
+    let mutated = vero_process::execute_verification_capture(
         &mutant_snapshot_id,
         profile_id,
         sandbox.path(),
@@ -513,7 +513,7 @@ pub fn assess_corpus(
         profile_id: profile_id.into(),
         baseline_verification_run_id: baseline_verification_run_id.into(),
         verification_command_digest: verification_command_digest
-            .unwrap_or(vero_core::verification_command_digest(profile, root)?),
+            .unwrap_or(vero_process::verification_command_digest(profile, root)?),
         coverage_run: None,
         corpus_id,
         corpus_digest,
@@ -1581,7 +1581,7 @@ mod tests {
         assert_eq!(report.provenance.license.as_deref(), Some("test-only"));
         assert_eq!(
             report.verification_command_digest,
-            vero_core::verification_command_digest(&profile, &root).unwrap()
+            vero_process::verification_command_digest(&profile, &root).unwrap()
         );
         assert_eq!(report.sample_size, 2);
         assert_eq!(report.killed, 1);

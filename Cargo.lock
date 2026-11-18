@@ -2570,6 +2570,7 @@ dependencies = [
  "vero-git",
  "vero-hosting",
  "vero-http",
+ "vero-process",
  "vero-store-sqlite",
 ]
 
@@ -2594,6 +2595,7 @@ dependencies = [
  "vero-core",
  "vero-git",
  "vero-hosting",
+ "vero-process",
  "vero-store-sqlite",
 ]
 
@@ -2601,13 +2603,11 @@ dependencies = [
 name = "vero-core"
 version = "0.1.0"
 dependencies = [
- "libc",
  "serde",
  "serde_json",
  "serde_yaml",
  "sha2",
  "tempfile",
- "tokio-util",
  "url",
 ]
 
@@ -2652,6 +2652,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "vero-process"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio-util",
+ "vero-core",
+]
+
+[[package]]
 name = "vero-store-sqlite"
 version = "0.1.0"
 dependencies = [
@@ -2661,6 +2673,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "vero-core",
+ "vero-process",
 ]
 
 [[package]]

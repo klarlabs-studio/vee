@@ -12,4 +12,5 @@ rusqlite.workspace = true
 vero-core = { path = "../vero-core" }
 
 [dev-dependencies]
+vero-process = { path = "../vero-process" }
 tempfile.workspace = true

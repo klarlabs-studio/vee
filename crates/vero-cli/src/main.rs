@@ -156,7 +156,7 @@ fn prepare_effectiveness(proposal_id: &str, profile_id: &str) -> Result<Prepared
         .get(profile_id)
         .context("unknown trusted verification profile")?;
     let expected_command_digest =
-        vero_core::verification_command_digest(profile, &root).map_err(anyhow::Error::msg)?;
+        vero_process::verification_command_digest(profile, &root).map_err(anyhow::Error::msg)?;
     let store = ReviewStore::open(&root.join(".vero/vero.sqlite")).map_err(anyhow::Error::msg)?;
     let baseline_run_id = proposal["verification_runs"]
         .as_array()
