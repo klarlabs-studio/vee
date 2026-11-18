@@ -195,7 +195,7 @@ fn read_artifact(root: &Path, artifact: &vee_core::ArtifactReference) -> Result<
     if Path::new(&artifact.path) != expected_relative {
         return Err("artifact path does not match its content digest".into());
     }
-    let canonical_root = std::fs::canonicalize(root).map_err(|error| error.to_string())?;
+    let canonical_root = vee_core::paths::canonicalize(root).map_err(|error| error.to_string())?;
     let mut path = canonical_root.clone();
     for component in expected_relative.components() {
         let Component::Normal(name) = component else {
@@ -210,7 +210,8 @@ fn read_artifact(root: &Path, artifact: &vee_core::ArtifactReference) -> Result<
             return Err("artifact parent is not a directory".into());
         }
     }
-    let canonical_artifact = std::fs::canonicalize(&path).map_err(|error| error.to_string())?;
+    let canonical_artifact =
+        vee_core::paths::canonicalize(&path).map_err(|error| error.to_string())?;
     if canonical_artifact != canonical_root.join(&expected_relative) {
         return Err("artifact resolved outside its content-addressed path".into());
     }

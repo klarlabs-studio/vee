@@ -4,6 +4,7 @@
 
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use vee_core::paths::CanonicalPath as _;
 use vee_core::*;
 
 pub fn execute_verification(
@@ -315,7 +316,7 @@ fn resolve_verification_executable_with_path(
             // the link, so executable hashing binds the underlying bytes.
             return Ok(absolute);
         }
-        return absolute.canonicalize().map_err(|error| {
+        return absolute.canonical().map_err(|error| {
             format!(
                 "resolving verification executable {}: {error}",
                 absolute.display()
@@ -429,7 +430,7 @@ pub fn execute_provider_cancellable(
         } else {
             request.working_directory.join(executable)
         };
-        rooted.canonicalize().map_err(|error| {
+        rooted.canonical().map_err(|error| {
             format!(
                 "resolving provider executable {}: {error}",
                 rooted.display()

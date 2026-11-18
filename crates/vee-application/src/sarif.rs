@@ -189,7 +189,7 @@ fn report_with_changes(
     let Some(sarif_runs) = document["runs"].as_array() else {
         return failed(run, "SARIF document has no runs array".into());
     };
-    let canonical_root = match std::fs::canonicalize(root) {
+    let canonical_root = match vee_core::paths::canonicalize(root) {
         Ok(path) => path,
         Err(error) => return failed(run, format!("cannot resolve repository root: {error}")),
     };
@@ -372,7 +372,7 @@ pub fn read_verification_artifact(
     if Path::new(&artifact.path) != relative {
         return Err("artifact path does not match content digest".into());
     }
-    let root = std::fs::canonicalize(root).map_err(|error| error.to_string())?;
+    let root = vee_core::paths::canonicalize(root).map_err(|error| error.to_string())?;
     let path = root.join(&relative);
     let metadata = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
     if metadata.file_type().is_symlink()
@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn uris_resolve_inside_the_repository_only() {
         let root = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(root.path()).unwrap();
+        let root = vee_core::paths::canonicalize(root.path()).unwrap();
         assert_eq!(
             resolve_uri("src/a%20b.rs", None, &root).as_deref(),
             Some("src/a b.rs")

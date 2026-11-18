@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use vee_core::paths::CanonicalPath as _;
 
 const MAX_REPOSITORIES: usize = 128;
 const MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
@@ -851,7 +852,7 @@ fn collect_changed_openapi_operations(
     producer_root: &Path,
     changed_paths: &[String],
 ) -> (Vec<ApiContractChange>, Vec<String>, Vec<(PathBuf, String)>) {
-    let Ok(root) = producer_root.canonicalize() else {
+    let Ok(root) = producer_root.canonical() else {
         return (
             Vec::new(),
             vec!["Producer root could not be resolved for OpenAPI contract analysis.".into()],
@@ -869,7 +870,7 @@ fn collect_changed_openapi_operations(
             continue;
         }
         let path = root.join(relative);
-        let Ok(canonical) = path.canonicalize() else {
+        let Ok(canonical) = path.canonical() else {
             continue;
         };
         if !canonical.starts_with(&root) {
@@ -3325,13 +3326,13 @@ fn compare_openapi_contracts(
     // Contract paths are canonicalized before the containment check, so the
     // root must be too (symlinked roots, `\\?\` prefixes on Windows).
     let canonical_root = producer_root
-        .canonicalize()
+        .canonical()
         .unwrap_or_else(|_| producer_root.to_path_buf());
     for (path, baseline_bytes) in baselines {
         match asyncapi_operations(baseline_bytes) {
             Ok(Some(baseline)) => {
                 let current_path = producer_root.join(path);
-                let current_path = match current_path.canonicalize() {
+                let current_path = match current_path.canonical() {
                     Ok(current_path) if current_path.starts_with(&canonical_root) => {
                         Some(current_path)
                     }
@@ -3595,7 +3596,7 @@ fn compare_openapi_contracts(
             "OpenAPI compatibility for `{path}` compares route/operationId changes, requiredness, removed request/response media types, parameter types/formats/enums/numeric ranges, pattern changes, size bounds, and conservative oneOf/anyOf branch additions/removals. Parameter content media-type changes are reported; content schemas are compared when both revisions use the same single media type and provide a schema. It also compares selected nested property/type/enum/numeric-range constraints and pattern changes, OpenAPI 3.0 nullable changes when both sides use 3.0, local schema references, effective security requirement scheme/scope sets, and structural definitions for referenced security schemes; pattern changes are review signals without proving regular-expression language inclusion. Other request/parameter/response schema constraints, full schema composition semantics, unresolved references, and runtime security protocol behavior are not fully evaluated."
         ));
         let current_path = producer_root.join(path);
-        let current_path = match current_path.canonicalize() {
+        let current_path = match current_path.canonical() {
             Ok(current_path) if current_path.starts_with(&canonical_root) => Some(current_path),
             Ok(_) => {
                 limitations.push(format!(
@@ -4234,7 +4235,7 @@ fn cross_impact_with_baselines(
     let mut seen_roots = std::collections::BTreeSet::new();
     for supplied in consumer_roots {
         let root = supplied
-            .canonicalize()
+            .canonical()
             .map_err(|e| format!("cannot resolve consumer {}: {e}", supplied.display()))?;
         if !root.is_dir() {
             return Err(format!("consumer {} is not a directory", root.display()));
@@ -4719,7 +4720,7 @@ fn consumer_dependency_fingerprint(
 ) -> Result<String, String> {
     let roots = roots
         .iter()
-        .map(|root| root.canonicalize().map_err(|error| error.to_string()))
+        .map(|root| root.canonical().map_err(|error| error.to_string()))
         .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
     let repositories = map
         .repositories
@@ -4793,12 +4794,12 @@ fn trace_dependency_paths(
     consumer_roots: &[PathBuf],
 ) -> Result<(Vec<CrossRepositoryDependencyPath>, bool), String> {
     let producer_root = producer_root
-        .canonicalize()
+        .canonical()
         .map_err(|e| format!("cannot resolve producer {}: {e}", producer_root.display()))?;
     let consumers: Vec<_> = consumer_roots
         .iter()
         .map(|root| {
-            root.canonicalize()
+            root.canonical()
                 .map_err(|e| format!("cannot resolve consumer {}: {e}", root.display()))
         })
         .collect::<Result<_, _>>()?;
@@ -4935,7 +4936,7 @@ fn collect_source_files(
                 .is_some_and(|ext| CONSUMER_SOURCE_EXTENSIONS.contains(&ext))
         {
             if !path
-                .canonicalize()
+                .canonical()
                 .map_err(|e| e.to_string())?
                 .starts_with(root)
             {
@@ -5103,7 +5104,7 @@ fn resolve_rust_consumer_references(
             ],
         );
     };
-    let producer_root = match producer_root.canonicalize() {
+    let producer_root = match producer_root.canonical() {
         Ok(root) => root,
         Err(error) => {
             return (
@@ -5117,7 +5118,7 @@ fn resolve_rust_consumer_references(
     let mut changed_definitions = std::collections::BTreeSet::new();
     for changed in &producer_impact.changed_paths {
         let path = producer_root.join(changed);
-        if let Ok(path) = path.canonicalize() {
+        if let Ok(path) = path.canonical() {
             if path.starts_with(&producer_root)
                 && path.extension().and_then(|ext| ext.to_str()) == Some("rs")
             {
@@ -5134,7 +5135,7 @@ fn resolve_rust_consumer_references(
 
     let roots: std::collections::BTreeSet<_> = consumer_roots
         .iter()
-        .filter_map(|root| root.canonicalize().ok())
+        .filter_map(|root| root.canonical().ok())
         .collect();
     let mut by_root = BTreeMap::<PathBuf, Vec<usize>>::new();
     for index in candidate_indices {
@@ -5289,7 +5290,7 @@ fn absolute_executable_path(path: &Path) -> Option<PathBuf> {
         // into a plain `rustup` invocation.
         Some(absolute)
     } else {
-        absolute.canonicalize().ok()
+        absolute.canonical().ok()
     }
 }
 
@@ -5452,7 +5453,7 @@ impl RustAnalyzerSession {
         time_budget: std::time::Duration,
     ) -> Result<Option<Vec<PathBuf>>, String> {
         let source = source
-            .canonicalize()
+            .canonical()
             .map_err(|error| format!("could not resolve Rust source file: {error}"))?;
         let uri = reqwest::Url::from_file_path(&source)
             .map_err(|_| "could not encode Rust source path as a file URI".to_owned())?;
@@ -5512,7 +5513,7 @@ impl RustAnalyzerSession {
                 .to_file_path()
                 .map_err(|_| "rust-analyzer returned a non-file definition URI".to_owned())?;
             let path = path
-                .canonicalize()
+                .canonical()
                 .map_err(|error| format!("could not resolve Rust definition path: {error}"))?;
             paths.insert(path);
         }
@@ -5674,7 +5675,7 @@ fn resolve_go_consumer_references(
             ],
         );
     };
-    let producer_root = match producer_root.canonicalize() {
+    let producer_root = match producer_root.canonical() {
         Ok(root) => root,
         Err(error) => {
             return (
@@ -5687,7 +5688,7 @@ fn resolve_go_consumer_references(
     };
     let roots: std::collections::BTreeSet<_> = consumer_roots
         .iter()
-        .filter_map(|root| root.canonicalize().ok())
+        .filter_map(|root| root.canonical().ok())
         .collect();
     let mut complete = true;
     let mut limitations = Vec::new();
@@ -5716,7 +5717,7 @@ fn resolve_go_consumer_references(
         let position = format!("{}:{}:{column}", source.display(), reference.line);
         match run_gopls_definition(&executable, &repository, &position, budget.request) {
             Ok(Some(definition)) => {
-                let Ok(definition) = definition.canonicalize() else {
+                let Ok(definition) = definition.canonical() else {
                     complete = false;
                     limitations.push(format!(
                         "gopls returned a definition that could not be resolved for {}:{}.",
@@ -5797,7 +5798,7 @@ fn resolve_typescript_consumer_references(
             "TypeScript server was not found (set VEE_TSSERVER or add tsserver to PATH); TypeScript/JavaScript consumer matches remain lexical heuristics.".into(),
         ]);
     };
-    let producer_root = match producer_root.canonicalize() {
+    let producer_root = match producer_root.canonical() {
         Ok(root) => root,
         Err(error) => {
             return (
@@ -5811,7 +5812,7 @@ fn resolve_typescript_consumer_references(
     let mut changed_definitions = std::collections::BTreeSet::new();
     for changed in &producer_impact.changed_paths {
         let path = producer_root.join(changed);
-        if let Ok(path) = path.canonicalize() {
+        if let Ok(path) = path.canonical() {
             if path.starts_with(&producer_root)
                 && matches!(
                     path.extension().and_then(|ext| ext.to_str()),
@@ -5827,7 +5828,7 @@ fn resolve_typescript_consumer_references(
     }
     let roots: std::collections::BTreeSet<_> = consumer_roots
         .iter()
-        .filter_map(|root| root.canonicalize().ok())
+        .filter_map(|root| root.canonical().ok())
         .collect();
     let mut complete = true;
     let mut limitations = Vec::new();
@@ -5903,7 +5904,7 @@ fn find_typescript_server() -> Option<PathBuf> {
     if let Some(configured) = std::env::var_os("VEE_TSSERVER") {
         let path = PathBuf::from(configured);
         if path.is_file() {
-            return path.canonicalize().ok();
+            return path.canonical().ok();
         }
     }
     std::env::split_paths(&std::env::var_os("PATH")?)
@@ -5917,7 +5918,7 @@ fn find_typescript_server() -> Option<PathBuf> {
         .find_map(|candidate| {
             candidate
                 .is_file()
-                .then(|| candidate.canonicalize().ok())
+                .then(|| candidate.canonical().ok())
                 .flatten()
         })
 }
@@ -5927,10 +5928,10 @@ fn nearest_typescript_project_config(
     source: &Path,
 ) -> Result<Option<PathBuf>, String> {
     let root = working_directory
-        .canonicalize()
+        .canonical()
         .map_err(|error| format!("could not resolve TypeScript project root: {error}"))?;
     let source = source
-        .canonicalize()
+        .canonical()
         .map_err(|error| format!("could not resolve TypeScript source file: {error}"))?;
     if !source.starts_with(&root) {
         return Err("TypeScript source file is outside its project root".into());
@@ -6135,7 +6136,7 @@ fn run_typescript_definition(
                         .filter_map(|definition| {
                             definition.get("file").and_then(serde_json::Value::as_str)
                         })
-                        .filter_map(|file| PathBuf::from(file).canonicalize().ok())
+                        .filter_map(|file| PathBuf::from(file).canonical().ok())
                         .collect::<Vec<_>>();
                     definitions = Some(result);
                 } else if name == "projectInfo" {
@@ -6186,7 +6187,7 @@ fn find_gopls_executable() -> Option<PathBuf> {
             std::fs::metadata(&candidate)
                 .ok()
                 .filter(|metadata| metadata.is_file())
-                .and_then(|_| candidate.canonicalize().ok())
+                .and_then(|_| candidate.canonical().ok())
         })
 }
 
@@ -6201,7 +6202,7 @@ fn find_executable(name: &str) -> Option<PathBuf> {
         .find_map(|candidate| {
             candidate
                 .is_file()
-                .then(|| candidate.canonicalize().ok())
+                .then(|| candidate.canonical().ok())
                 .flatten()
         })
 }
@@ -6427,7 +6428,7 @@ pub fn build(roots: &[PathBuf]) -> Result<RepositoryMap, String> {
     let mut canonical = std::collections::BTreeSet::new();
     for supplied in roots {
         let root = supplied
-            .canonicalize()
+            .canonical()
             .map_err(|e| format!("cannot resolve {}: {e}", supplied.display()))?;
         if !root.is_dir() {
             return Err(format!("{} is not a directory", root.display()));
@@ -6484,7 +6485,7 @@ pub fn build(roots: &[PathBuf]) -> Result<RepositoryMap, String> {
                 dependency
                     .path
                     .as_ref()
-                    .and_then(|path| package.root.join(path).canonicalize().ok())
+                    .and_then(|path| package.root.join(path).canonical().ok())
             });
             if dependency.path.is_some() && path_target.is_none() {
                 limitations.push(format!(
@@ -6975,7 +6976,7 @@ fn read_package(root: &Path) -> Result<Option<Package>, String> {
             if let Some(replacement) = replacement {
                 if let Some(path) = &replacement.local_path {
                     dependency.path = Some(path.clone());
-                    dependency.resolved_path = root.join(path).canonicalize().ok();
+                    dependency.resolved_path = root.join(path).canonical().ok();
                 } else {
                     dependency.unresolved_go_replacement = true;
                 }
@@ -7077,7 +7078,7 @@ fn read_workspace_members(root: &Path) -> Result<(Vec<Package>, Vec<String>), St
             vec![root.join(pattern)]
         };
         for candidate in candidates {
-            let Ok(canonical) = candidate.canonicalize() else {
+            let Ok(canonical) = candidate.canonical() else {
                 limitations.push(format!(
                     "{}: workspace member `{pattern}` is missing or inaccessible",
                     root.display()
@@ -7126,7 +7127,7 @@ fn read_workspace_members(root: &Path) -> Result<(Vec<Package>, Vec<String>), St
                         dependency.resolved_path = dependency
                             .path
                             .as_ref()
-                            .and_then(|path| root.join(path).canonicalize().ok());
+                            .and_then(|path| root.join(path).canonical().ok());
                         dependency.constraint_source =
                             Some((manifest.clone(), manifest_digest.clone()));
                         dependency.inherited = false;
@@ -7198,8 +7199,8 @@ mod tests {
         let fake_server = workspace.path().join("fake-rust-analyzer.py");
         let script = format!(
             "#!/usr/bin/python3\nimport json,sys\nproducer={:?}\nconsumer={:?}\nseen=set()\ndef read_msg():\n h=b''\n while not h.endswith(b'\\r\\n\\r\\n'):\n  c=sys.stdin.buffer.read(1)\n  if not c: return None\n  h+=c\n n=int(next(x.split(b':',1)[1] for x in h.split(b'\\r\\n') if x.lower().startswith(b'content-length:')))\n return json.loads(sys.stdin.buffer.read(n))\ndef send(x):\n b=json.dumps(x).encode()\n sys.stdout.buffer.write(b'Content-Length: '+str(len(b)).encode()+b'\\r\\n\\r\\n'+b);sys.stdout.buffer.flush()\nwhile True:\n m=read_msg()\n if m is None: break\n if 'id' in m:\n  assert m['id'] not in seen\n  seen.add(m['id'])\n method=m.get('method')\n if method=='initialize': send({{'jsonrpc':'2.0','id':m['id'],'result':{{'capabilities':{{'definitionProvider':True}}}}}})\n elif method=='textDocument/definition':\n  pos=m['params']['position']\n  if pos=={{'line':0,'character':13}}: path=producer\n  elif pos=={{'line':1,'character':14}}: path=consumer\n  else: send({{'jsonrpc':'2.0','id':m['id'],'result':[]}}); continue\n  send({{'jsonrpc':'2.0','id':m['id'],'result':{{'uri':'file://'+path,'range':{{'start':{{'line':0,'character':0}},'end':{{'line':0,'character':1}}}}}}}})\n elif m.get('id') is not None: send({{'jsonrpc':'2.0','id':m['id'],'result':None}})\n",
-            changed.canonicalize().unwrap().to_string_lossy(),
-            second.canonicalize().unwrap().to_string_lossy(),
+            changed.canonical().unwrap().to_string_lossy(),
+            second.canonical().unwrap().to_string_lossy(),
         );
         std::fs::write(&fake_server, script).unwrap();
         let mut permissions = std::fs::metadata(&fake_server).unwrap().permissions();
@@ -7210,7 +7211,7 @@ mod tests {
 
         let mut references = vec![
             super::ConsumerSymbolReference {
-                consumer_repository: consumer.canonicalize().unwrap().display().to_string(),
+                consumer_repository: consumer.canonical().unwrap().display().to_string(),
                 path: "src/first.rs".into(),
                 line: 1,
                 symbol: "changed_api".into(),
@@ -7223,7 +7224,7 @@ mod tests {
                 dependency_paths: Vec::new(),
             },
             super::ConsumerSymbolReference {
-                consumer_repository: consumer.canonicalize().unwrap().display().to_string(),
+                consumer_repository: consumer.canonical().unwrap().display().to_string(),
                 path: "src/second.rs".into(),
                 line: 2,
                 symbol: "changed_api".into(),
@@ -8677,7 +8678,7 @@ operations:
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("client.rs");
         std::fs::write(&source, "fn client() {}\n").unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = directory.path().canonical().unwrap();
         let source = root.join("client.rs");
         let original = std::fs::read(&source).unwrap();
         let digest = format!("sha256:{}", hex(&Sha256::digest(&original)));
@@ -8716,7 +8717,7 @@ operations:
     #[test]
     fn dependency_path_traversal_is_bounded_and_reports_incomplete_coverage() {
         let workspace = tempfile::tempdir().unwrap();
-        let workspace_root = workspace.path().canonicalize().unwrap();
+        let workspace_root = workspace.path().canonical().unwrap();
         let mut repositories = Vec::new();
         let mut roots = Vec::new();
         for level in 0..=16 {
@@ -9084,7 +9085,7 @@ operations:
         )
         .expect_err("stale dependency map must be rejected")
         .contains("manifests changed before"));
-        let contract_path = producer.join("api/openapi.yaml").canonicalize().unwrap();
+        let contract_path = producer.join("api/openapi.yaml").canonical().unwrap();
         verify_producer_contracts(&[(contract_path.clone(), operation.producer_digest.clone())])
             .unwrap();
         std::fs::write(&contract_path, "openapi: changed\n").unwrap();
@@ -9836,7 +9837,7 @@ operations:
             .iter()
             .any(|item| item.contains("replacement that is not a selected local filesystem path")));
 
-        let local_provider = provider_a.path().canonicalize().unwrap();
+        let local_provider = provider_a.path().canonical().unwrap();
         std::fs::write(
             consumer.path().join("go.mod"),
             format!(
@@ -9914,7 +9915,7 @@ operations:
             Some(
                 workspace
                     .path()
-                    .canonicalize()
+                    .canonical()
                     .unwrap()
                     .join("Cargo.toml")
                     .to_str()

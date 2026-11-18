@@ -1,6 +1,7 @@
 //! Context & impact: changed symbols and the code that references them, per language analyzer.
 
 use super::*;
+use vee_core::paths::CanonicalPath as _;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImpactEdge {
@@ -861,7 +862,7 @@ pub(crate) fn find_executable(name: &str) -> Option<PathBuf> {
         .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
         .map(|directory| directory.join(name))
         .find(|candidate| candidate.is_file())
-        .and_then(|candidate| candidate.canonicalize().ok())
+        .and_then(|candidate| candidate.canonical().ok())
 }
 
 pub(crate) fn analyze_typescript_references(
@@ -1030,7 +1031,7 @@ pub(crate) fn typescript_declaration_positions(
 pub(crate) fn find_typescript_server() -> Option<PathBuf> {
     if let Some(configured) = std::env::var_os("VEE_TSSERVER") {
         return PathBuf::from(configured)
-            .canonicalize()
+            .canonical()
             .ok()
             .filter(|path| path.is_file());
     }
@@ -1052,7 +1053,7 @@ pub(crate) fn query_typescript_references(
     const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
     const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-    let root = root.canonicalize().map_err(|error| error.to_string())?;
+    let root = root.canonical().map_err(|error| error.to_string())?;
     let mut command = if executable
         .extension()
         .is_some_and(|extension| extension == "js")
@@ -1215,7 +1216,7 @@ pub(crate) fn query_typescript_references(
                 failures = true;
                 continue;
             }
-            let Ok(absolute) = absolute.canonicalize() else {
+            let Ok(absolute) = absolute.canonical() else {
                 failures = true;
                 continue;
             };
@@ -1287,7 +1288,7 @@ pub(crate) fn query_typescript_references(
                         continue;
                     };
                     let candidate = Path::new(file_name);
-                    let Ok(candidate) = candidate.canonicalize() else {
+                    let Ok(candidate) = candidate.canonical() else {
                         continue;
                     };
                     let Ok(relative) = candidate.strip_prefix(&root) else {
@@ -1392,7 +1393,7 @@ pub(crate) fn query_gopls_references(
     const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
     const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-    let root = root.canonicalize().map_err(|error| error.to_string())?;
+    let root = root.canonical().map_err(|error| error.to_string())?;
     let root_uri = url::Url::from_directory_path(&root)
         .map_err(|_| "repository root cannot be represented as a file URI")?;
     let mut command = Command::new(executable);
@@ -1646,7 +1647,7 @@ pub(crate) fn query_gopls_references(
                                     let Ok(path) = uri.to_file_path() else {
                                         return false;
                                     };
-                                    let Ok(path) = path.canonicalize() else {
+                                    let Ok(path) = path.canonical() else {
                                         return false;
                                     };
                                     let Ok(relative) = path.strip_prefix(&root) else {
@@ -1681,7 +1682,7 @@ pub(crate) fn query_gopls_references(
                     let Ok(path) = file_uri.to_file_path() else {
                         continue;
                     };
-                    let Ok(path) = path.canonicalize() else {
+                    let Ok(path) = path.canonical() else {
                         continue;
                     };
                     let Ok(relative) = path.strip_prefix(&root) else {
@@ -2333,7 +2334,7 @@ pub(crate) fn find_python_interpreter() -> Option<PathBuf> {
     std::env::split_paths(&path)
         .flat_map(|directory| names.iter().map(move |name| directory.join(name)))
         .find(|candidate| candidate.is_file())
-        .and_then(|candidate| candidate.canonicalize().ok())
+        .and_then(|candidate| candidate.canonical().ok())
 }
 
 pub(crate) fn run_python_ast(

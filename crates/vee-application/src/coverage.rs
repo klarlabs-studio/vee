@@ -190,7 +190,7 @@ fn parse_lcov(text: &str, root: &Path) -> Result<BTreeMap<String, BTreeMap<u64, 
     let mut records = BTreeMap::<String, BTreeMap<u64, u64>>::new();
     let mut current: Option<String> = None;
     let mut count = 0usize;
-    let canonical_root = std::fs::canonicalize(root).map_err(|error| error.to_string())?;
+    let canonical_root = vee_core::paths::canonicalize(root).map_err(|error| error.to_string())?;
     for line in text.lines() {
         if let Some(path) = line.strip_prefix("SF:") {
             if current.is_some() {
@@ -198,7 +198,7 @@ fn parse_lcov(text: &str, root: &Path) -> Result<BTreeMap<String, BTreeMap<u64, 
             }
             let path = Path::new(path);
             let relative = if path.is_absolute() {
-                let canonical_path = std::fs::canonicalize(path)
+                let canonical_path = vee_core::paths::canonicalize(path)
                     .map_err(|_| "LCOV absolute source path cannot be resolved")?;
                 canonical_path
                     .strip_prefix(&canonical_root)
@@ -295,7 +295,7 @@ fn read_artifact(root: &Path, artifact: &ArtifactReference) -> Result<Vec<u8>, S
     if Path::new(&artifact.path) != relative {
         return Err("artifact path does not match content digest".into());
     }
-    let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
+    let root = vee_core::paths::canonicalize(root).map_err(|e| e.to_string())?;
     let path = root.join(relative);
     let metadata = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
     if metadata.file_type().is_symlink()
@@ -305,7 +305,7 @@ fn read_artifact(root: &Path, artifact: &ArtifactReference) -> Result<Vec<u8>, S
     {
         return Err("artifact is not a bounded regular file with the recorded size".into());
     }
-    let canonical = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
+    let canonical = vee_core::paths::canonicalize(&path).map_err(|e| e.to_string())?;
     if !canonical.starts_with(root.join(".vee/artifacts/sha256")) {
         return Err("artifact escaped repository artifact directory".into());
     }

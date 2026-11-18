@@ -118,7 +118,8 @@ fn add_path(paths: &mut Vec<PathBuf>, bytes: &[u8]) -> Result<(), String> {
 }
 
 fn materialize(root: &Path, sandbox: &Path, files: &[SnapshotFile]) -> Result<(), String> {
-    let canonical_sandbox = std::fs::canonicalize(sandbox).map_err(|error| error.to_string())?;
+    let canonical_sandbox =
+        vee_core::paths::canonicalize(sandbox).map_err(|error| error.to_string())?;
     for entry in files {
         let relative = Path::new(&entry.path);
         let source = root.join(relative);
@@ -130,7 +131,8 @@ fn materialize(root: &Path, sandbox: &Path, files: &[SnapshotFile]) -> Result<()
             std::fs::symlink_metadata(&source).map_err(|error| error.to_string())?;
         let parent = target.parent().ok_or("patch path has no parent")?;
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        let canonical_parent = std::fs::canonicalize(parent).map_err(|error| error.to_string())?;
+        let canonical_parent =
+            vee_core::paths::canonicalize(parent).map_err(|error| error.to_string())?;
         if !canonical_parent.starts_with(&canonical_sandbox) {
             return Err(format!(
                 "patch path escapes isolated sandbox: {}",

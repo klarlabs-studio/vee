@@ -19,9 +19,9 @@ pub fn read_repository_file(root: &Path, relative: &Path) -> Result<Vec<u8>, Str
             relative.display()
         ));
     }
-    let canonical_root = std::fs::canonicalize(root).map_err(|error| error.to_string())?;
+    let canonical_root = vee_core::paths::canonicalize(root).map_err(|error| error.to_string())?;
     let path = root.join(relative);
-    let canonical_path = std::fs::canonicalize(&path).map_err(|error| error.to_string())?;
+    let canonical_path = vee_core::paths::canonicalize(&path).map_err(|error| error.to_string())?;
     if !canonical_path.starts_with(canonical_root) {
         return Err(format!(
             "path escapes repository root through a symlink: {}",

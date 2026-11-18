@@ -330,7 +330,7 @@ pub fn assess_corpus(
     if !manifest_meta.file_type().is_file() || manifest_meta.len() > MAX_CORPUS_BYTES {
         return Err("mutant corpus manifest must be a regular file no larger than 1 MiB".into());
     }
-    let manifest_path = std::fs::canonicalize(manifest_path)
+    let manifest_path = vee_core::paths::canonicalize(manifest_path)
         .map_err(|error| format!("resolving mutant corpus manifest: {error}"))?;
     let corpus_root = manifest_path
         .parent()
@@ -413,7 +413,7 @@ pub fn assess_corpus(
                 entry.id
             ));
         }
-        let patch_path = std::fs::canonicalize(corpus_root.join(&entry.patch))
+        let patch_path = vee_core::paths::canonicalize(corpus_root.join(&entry.patch))
             .map_err(|error| format!("resolving patch for mutant {}: {error}", entry.id))?;
         if !patch_path.starts_with(corpus_root) {
             return Err(format!(

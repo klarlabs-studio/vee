@@ -3938,8 +3938,8 @@ fn run() -> Result<u8> {
                 output,
             } => {
                 let prepared = prepare_effectiveness(&proposal_id, &profile)?;
-                let root_canonical = std::fs::canonicalize(&prepared.root)?;
-                let patch_canonical = std::fs::canonicalize(&mutant_patch)?;
+                let root_canonical = vee_core::paths::canonicalize(&prepared.root)?;
+                let patch_canonical = vee_core::paths::canonicalize(&mutant_patch)?;
                 anyhow::ensure!(!patch_canonical.starts_with(&root_canonical), "mutant patch must be outside the repository so it cannot change the reviewed snapshot");
                 let mutant_meta = std::fs::symlink_metadata(&patch_canonical)?;
                 anyhow::ensure!(
@@ -5087,7 +5087,7 @@ fn run() -> Result<u8> {
                             .filter(|parent| !parent.as_os_str().is_empty())
                             .unwrap_or(std::path::Path::new("."));
                         std::fs::create_dir_all(parent)?;
-                        Ok(std::fs::canonicalize(parent)?.join(name))
+                        Ok(vee_core::paths::canonicalize(parent)?.join(name))
                     };
                     let private_target = resolve_target(&private_key)?;
                     let public_target = resolve_target(&public_key)?;
@@ -7463,7 +7463,7 @@ fn run() -> Result<u8> {
 }
 
 fn install_agent_skills(root: &std::path::Path, force: bool) -> Result<()> {
-    let root = std::fs::canonicalize(root).context("resolve checkout root")?;
+    let root = vee_core::paths::canonicalize(root).context("resolve checkout root")?;
     let agents = root.join(".agents");
     let skills = agents.join("skills");
     for directory in [&agents, &skills] {
