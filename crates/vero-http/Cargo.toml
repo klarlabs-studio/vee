@@ -10,15 +10,15 @@ anyhow.workspace = true
 axum.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml.workspace = true
 vero-core = { path = "../vero-core" }
 vero-store-sqlite = { path = "../vero-store-sqlite" }
 vero-application = { path = "../vero-application" }
-vero-git = { path = "../vero-git" }
 vero-hosting = { path = "../vero-hosting" }
 tokio.workspace = true
-tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }
 
 [dev-dependencies]
+serde_yaml.workspace = true
+tempfile.workspace = true
 jsonschema.workspace = true
+vero-git = { path = "../vero-git" }

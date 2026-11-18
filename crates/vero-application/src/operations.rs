@@ -233,6 +233,142 @@ pub fn get_review(workspace: &Workspace, review_id: &str) -> Result<ReviewResult
     workspace.saved_review(&*store, review_id)
 }
 
+/// Saved reviews, newest first.
+pub fn list_reviews(workspace: &Workspace) -> Result<Vec<vero_core::ReviewSummary>> {
+    workspace
+        .store()?
+        .list_reviews()
+        .map_err(anyhow::Error::msg)
+}
+
+/// A saved review as the dashboard shows it.
+#[derive(Debug, Serialize)]
+pub struct ReviewDetail {
+    pub review: ReviewResult,
+    pub findings: Vec<FindingRecord>,
+    pub impact: crate::ImpactAssessment,
+}
+
+/// A saved review with its latest gate decision applied, its findings, and an
+/// impact assessment recomputed from the current checkout when the checkout
+/// still matches the review's snapshot.
+pub fn review_detail(workspace: &Workspace, review_id: &str) -> Result<ReviewDetail> {
+    let store = workspace.store()?;
+    let mut review = workspace.saved_review(&*store, review_id)?;
+    if let Some(latest_gate) = store
+        .gate_decisions_for_review(review_id)
+        .map_err(anyhow::Error::msg)?
+        .pop()
+    {
+        review.status = match latest_gate.status {
+            vero_core::GateStatus::Pass => "pass",
+            vero_core::GateStatus::Block => "block",
+            vero_core::GateStatus::Incomplete => "incomplete",
+        }
+        .into();
+        review.reasons = latest_gate.reasons.clone();
+        review.gate = latest_gate;
+    }
+    let findings = store
+        .list_findings(None, None, Some(review_id))
+        .map_err(anyhow::Error::msg)?;
+    let impact = current_impact(workspace.root(), &review);
+    Ok(ReviewDetail {
+        review,
+        findings,
+        impact,
+    })
+}
+
+/// Impact for a saved review. Impact is computed from source, so it is only
+/// available while the checkout still matches the reviewed snapshot; otherwise
+/// the assessment is empty and says why.
+fn current_impact(root: &Path, review: &ReviewResult) -> crate::ImpactAssessment {
+    let limitation = match crate::capture_current_change_set(root, &review.change_set) {
+        Ok(current) if current.digest == review.snapshot_id => {
+            match crate::analyze_impact(root, &review.change_set) {
+                Ok(impact) => return impact,
+                Err(error) => {
+                    format!("saved review is available, but impact analysis failed: {error}")
+                }
+            }
+        }
+        Ok(_) => "current checkout differs from saved review snapshot; impact is unavailable for this historical review".into(),
+        Err(error) => format!("saved review is available, but impact could not be recomputed from the current checkout: {error}"),
+    };
+    crate::ImpactAssessment {
+        schema_version: 3,
+        snapshot_id: review.snapshot_id.clone(),
+        coverage_complete: false,
+        analyzers: Vec::new(),
+        changed_paths: review
+            .change_set
+            .files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect(),
+        changed_symbols: Vec::new(),
+        groups: Vec::new(),
+        paths: Vec::new(),
+        limitations: vec![limitation],
+    }
+}
+
+/// `local-review-analytics-v8`
+pub fn local_analytics(workspace: &Workspace) -> Result<crate::local_analytics::LocalAnalytics> {
+    let store = workspace.store()?;
+    crate::local_analytics::build(workspace.root(), &*store).map_err(anyhow::Error::msg)
+}
+
+// ---------------------------------------------------------------------------
+// Repository configuration editor
+
+/// Upper bound on a repository configuration submitted through an editor.
+pub const MAX_REPOSITORY_CONFIG_BYTES: usize = 256 * 1024;
+
+/// The repository-owned `.vero.yaml` and the provider and reviewer ids it can
+/// reference once user-level defaults are merged in.
+#[derive(Debug, Serialize)]
+pub struct RepositoryConfigView {
+    pub config: RepositoryConfig,
+    pub provider_ids: Vec<String>,
+    pub reviewer_ids: Vec<String>,
+}
+
+pub fn repository_config_view(workspace: &Workspace) -> Result<RepositoryConfigView> {
+    let effective =
+        crate::load_repository_config(workspace.root()).map_err(configuration_failure)?;
+    // The editor shows repository-owned YAML only. User-level provider defaults may
+    // satisfy references in this file, so do not validate this partial view alone.
+    let path = workspace.root().join(".vero.yaml");
+    let raw = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let config: RepositoryConfig = serde_yaml::from_str(&raw)
+        .map_err(|error| configuration_failure(format!("parse .vero.yaml: {error}")))?;
+    Ok(RepositoryConfigView {
+        provider_ids: effective.providers.keys().cloned().collect(),
+        reviewer_ids: effective.reviewers.keys().cloned().collect(),
+        config,
+    })
+}
+
+/// Validate a replacement repository configuration and atomically write it to
+/// `.vero.yaml`. Nothing is written unless every cross-reference and protected
+/// requirement holds.
+pub fn replace_repository_config(
+    workspace: &Workspace,
+    config: &serde_json::Value,
+) -> Result<RepositoryConfigView> {
+    let body = serde_json::to_string(config)?;
+    if body.len() > MAX_REPOSITORY_CONFIG_BYTES {
+        return Err(usage_failure("configuration exceeds 256 KiB"));
+    }
+    crate::validate_repository_config_yaml(workspace.root(), &body).map_err(usage_failure)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(workspace.root())?;
+    std::io::Write::write_all(temporary.as_file_mut(), body.as_bytes())?;
+    temporary.persist(workspace.root().join(".vero.yaml"))?;
+    repository_config_view(workspace)
+}
+
 // ---------------------------------------------------------------------------
 // Findings
 
@@ -280,6 +416,18 @@ pub fn list_findings(workspace: &Workspace, query: FindingQuery) -> Result<Findi
         offset,
         total,
     })
+}
+
+/// Every finding matching the filters, unpaged, as the dashboard lists them.
+pub fn all_findings(
+    workspace: &Workspace,
+    severity: Option<Severity>,
+    review_id: Option<&str>,
+) -> Result<Vec<FindingRecord>> {
+    workspace
+        .store()?
+        .list_findings(severity, None, review_id)
+        .map_err(anyhow::Error::msg)
 }
 
 /// `finding-detail-v2`

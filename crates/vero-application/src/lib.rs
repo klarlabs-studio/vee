@@ -6,6 +6,7 @@ pub mod coverage;
 pub mod failure;
 pub mod finding_task;
 pub mod imported_history;
+pub mod local_analytics;
 pub mod operations;
 pub mod ownership;
 pub mod packs;

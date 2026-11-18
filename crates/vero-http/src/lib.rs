@@ -7,15 +7,14 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    net::SocketAddr,
-    path::{Path, PathBuf},
-    sync::Arc,
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use vero_application::local_analytics::LocalAnalytics;
+use vero_application::operations::{
+    self, RepositoryConfigView, ReviewDetail, ScopeRequest, Workspace,
 };
 use vero_application::ReviewResult;
-use vero_core::ports::*;
-use vero_core::{FindingRecord, FindingStatus, RepositoryConfig, ReviewSummary, Severity};
-use vero_store_sqlite::ReviewStore;
+use vero_core::{FindingRecord, FindingStatus, ReviewSummary, Severity};
+use vero_store_sqlite::SqliteRepositoryStores;
 
 const INDEX_HTML: &str = include_str!(concat!(env!("OUT_DIR"), "/index.html"));
 const APP_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/app.js"));
@@ -24,7 +23,7 @@ const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone)]
 struct AppState {
-    root: Arc<PathBuf>,
+    workspace: Workspace,
     origin: String,
     auth_token: Option<Arc<str>>,
     webhook: Option<Arc<WebhookState>>,
@@ -81,20 +80,6 @@ struct Health {
     repository: String,
 }
 
-#[derive(Serialize)]
-struct ReviewDetail {
-    review: ReviewResult,
-    findings: Vec<FindingRecord>,
-    impact: vero_application::ImpactAssessment,
-}
-
-#[derive(Serialize)]
-struct ConfigSummary {
-    config: RepositoryConfig,
-    provider_ids: Vec<String>,
-    reviewer_ids: Vec<String>,
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReviewRequest {
@@ -127,21 +112,26 @@ struct FindingStatusUpdate {
     reason: String,
 }
 
-#[derive(Serialize)]
-struct FindingStatusUpdated {
-    schema_version: u32,
-    finding_id: String,
-    status: String,
-    reason: String,
-    note: String,
-}
-
 fn default_scope() -> String {
     "base".into()
 }
 
-fn open_store(root: &Path) -> Result<ReviewStore, String> {
-    ReviewStore::open(&root.join(".vero/vero.sqlite"))
+/// Run a blocking operation off the async runtime.
+async fn blocking<T, F>(operation: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|error| api_error(format!("worker failed: {error}")))?
+        .map_err(operation_error)
+}
+
+fn operation_error(error: anyhow::Error) -> ApiError {
+    ApiError {
+        error: format!("{error:#}"),
+    }
 }
 
 fn check_origin(
@@ -230,7 +220,7 @@ async fn health(
     check_origin(&headers, &state.origin, state.auth_token.as_deref())?;
     Ok(Json(Health {
         status: "ok",
-        repository: state.root.display().to_string(),
+        repository: state.workspace.root().display().to_string(),
     }))
 }
 
@@ -239,126 +229,10 @@ async fn list_reviews(
     headers: HeaderMap,
 ) -> Result<Json<Vec<ReviewSummary>>, ApiError> {
     check_origin(&headers, &state.origin, state.auth_token.as_deref())?;
-    open_store(&state.root)
-        .map_err(api_error)?
-        .list_reviews()
+    let workspace = state.workspace.clone();
+    blocking(move || operations::list_reviews(&workspace))
+        .await
         .map(Json)
-        .map_err(api_error)
-}
-
-#[derive(Serialize)]
-struct AnalyticsDay {
-    day: String,
-    pass: usize,
-    block: usize,
-    incomplete: usize,
-    ungated: usize,
-}
-
-#[derive(Serialize)]
-struct AnalyticsReviewDimension {
-    review_id: String,
-    day: String,
-    status: String,
-    summary_status: String,
-    reviewer_ids: Vec<String>,
-    provider_ids: Vec<String>,
-    finding_categories: Vec<String>,
-    finding_rule_ids: Vec<String>,
-}
-
-const MAX_ANALYTICS_FINDING_DRILLDOWN: usize = 200;
-const MAX_ANALYTICS_VERIFICATION_RUNS: usize = 500;
-const MAX_ANALYTICS_PROVIDER_REVIEWS: usize = 2_000;
-
-#[derive(Serialize)]
-struct AnalyticsVerificationRun {
-    run_id: String,
-    snapshot_id: String,
-    profile_id: String,
-    status: String,
-    created_at: String,
-}
-
-#[derive(Serialize)]
-struct AnalyticsProviderLatency {
-    provider_id: String,
-    measured_runs: usize,
-    unmeasured_runs: usize,
-    failed_runs: usize,
-    median_duration_ms: Option<u64>,
-    p95_duration_ms: Option<u64>,
-}
-
-#[derive(Serialize)]
-struct AnalyticsProviderLatencyDay {
-    day: String,
-    provider_id: String,
-    measured_runs: usize,
-    median_duration_ms: Option<u64>,
-    p95_duration_ms: Option<u64>,
-}
-
-#[derive(Serialize)]
-struct AnalyticsProviderCost {
-    provider_id: String,
-    estimated_usd: Option<f64>,
-    priced_runs: usize,
-    unpriced_runs: usize,
-}
-
-#[derive(Serialize)]
-struct AnalyticsProviderCostDay {
-    day: String,
-    provider_id: String,
-    estimated_usd: f64,
-    priced_runs: usize,
-    unpriced_runs: usize,
-}
-
-#[derive(Serialize)]
-struct AnalyticsFinding {
-    finding_id: String,
-    category: String,
-    severity: String,
-    rationale: String,
-    path: Option<String>,
-    line: Option<u32>,
-    status: String,
-    last_review_id: Option<String>,
-    last_seen: String,
-    rule_attributions: Vec<vero_core::RuleAttribution>,
-}
-
-#[derive(Serialize)]
-struct LocalAnalytics {
-    schema_version: u32,
-    review_count: usize,
-    history_complete: bool,
-    dimensions_complete: bool,
-    reviews_by_day: Vec<AnalyticsDay>,
-    review_dimensions: Vec<AnalyticsReviewDimension>,
-    findings_by_severity: std::collections::BTreeMap<String, usize>,
-    findings_by_rule: std::collections::BTreeMap<String, usize>,
-    findings_by_rule_complete: bool,
-    finding_drilldown: Vec<AnalyticsFinding>,
-    finding_drilldown_total: usize,
-    finding_drilldown_complete: bool,
-    explicit_feedback_by_label: std::collections::BTreeMap<String, usize>,
-    feedback_note: &'static str,
-    verification_run_count: usize,
-    verification_history_complete: bool,
-    verification_runs: Vec<AnalyticsVerificationRun>,
-    provider_latency: Vec<AnalyticsProviderLatency>,
-    provider_latency_history_complete: bool,
-    provider_latency_note: &'static str,
-    provider_latency_reviews: usize,
-    provider_latency_history: Vec<AnalyticsProviderLatencyDay>,
-    provider_costs: Vec<AnalyticsProviderCost>,
-    provider_cost_history_complete: bool,
-    provider_cost_note: &'static str,
-    provider_cost_reviews: usize,
-    provider_cost_history: Vec<AnalyticsProviderCostDay>,
 }
 
 async fn get_analytics(
@@ -366,387 +240,10 @@ async fn get_analytics(
     headers: HeaderMap,
 ) -> Result<Json<LocalAnalytics>, ApiError> {
     check_origin(&headers, &state.origin, state.auth_token.as_deref())?;
-    let root = (*state.root).clone();
-    let report = tokio::task::spawn_blocking(move || build_analytics(&root))
+    let workspace = state.workspace.clone();
+    blocking(move || operations::local_analytics(&workspace))
         .await
-        .map_err(|error| api_error(format!("analytics worker failed: {error}")))??;
-    Ok(Json(report))
-}
-
-fn build_analytics(root: &std::path::Path) -> Result<LocalAnalytics, ApiError> {
-    let store = open_store(root).map_err(api_error)?;
-    let reviews = store.list_reviews().map_err(api_error)?;
-    let history_complete = reviews.len() <= 500;
-    let mut dimensions_complete = history_complete;
-    let mut provider_latency_history_complete = reviews.len() <= MAX_ANALYTICS_PROVIDER_REVIEWS;
-    // Analytics remain readable while a user edits a temporarily invalid config.
-    // In that state, usage is counted as unpriced until a valid rate is available.
-    let config = vero_application::load_repository_config(root).ok();
-    let mut provider_cost_history_complete = reviews.len() <= MAX_ANALYTICS_PROVIDER_REVIEWS;
-    let mut provider_cost_totals: std::collections::BTreeMap<String, (f64, usize, usize)> =
-        std::collections::BTreeMap::new();
-    let mut provider_costs_by_day: std::collections::BTreeMap<
-        (String, String),
-        (f64, usize, usize),
-    > = std::collections::BTreeMap::new();
-    let mut provider_samples: std::collections::BTreeMap<String, Vec<u64>> =
-        std::collections::BTreeMap::new();
-    let mut provider_unmeasured: std::collections::BTreeMap<String, usize> =
-        std::collections::BTreeMap::new();
-    let mut provider_failures: std::collections::BTreeMap<String, usize> =
-        std::collections::BTreeMap::new();
-    let mut provider_samples_by_day: std::collections::BTreeMap<(String, String), Vec<u64>> =
-        std::collections::BTreeMap::new();
-    for review in reviews.iter().take(MAX_ANALYTICS_PROVIDER_REVIEWS) {
-        let day = review.created_at.get(..10).unwrap_or("unknown").to_owned();
-        let Some(payload) = store.get(&review.review_id).map_err(api_error)? else {
-            provider_latency_history_complete = false;
-            provider_cost_history_complete = false;
-            continue;
-        };
-        let Ok(saved) = vero_application::deserialize_review_result(&payload) else {
-            provider_latency_history_complete = false;
-            provider_cost_history_complete = false;
-            continue;
-        };
-        for outcome in saved.reviewer_outcomes {
-            if outcome.provider_id.is_empty() || outcome.provider_id == "vero" {
-                continue;
-            }
-            let total = provider_cost_totals
-                .entry(outcome.provider_id.clone())
-                .or_default();
-            let daily = provider_costs_by_day
-                .entry((day.clone(), outcome.provider_id.clone()))
-                .or_default();
-            let model = outcome.model.as_deref().or_else(|| {
-                config
-                    .as_ref()
-                    .and_then(|config| config.providers.get(&outcome.provider_id))
-                    .and_then(|provider| provider.model.as_deref())
-            });
-            let pricing = model.and_then(|model| {
-                config
-                    .as_ref()
-                    .and_then(|config| config.providers.get(&outcome.provider_id))
-                    .and_then(|provider| provider.pricing.get(model))
-            });
-            let priced = if let (Some(usage), Some(pricing)) = (&outcome.usage, pricing) {
-                if let (Some(input_tokens), Some(output_tokens)) =
-                    (usage.input_tokens, usage.output_tokens)
-                {
-                    let estimate = (input_tokens as f64 * pricing.input_usd_per_million
-                        + output_tokens as f64 * pricing.output_usd_per_million)
-                        / 1_000_000.0;
-                    total.0 += estimate;
-                    total.1 += 1;
-                    daily.0 += estimate;
-                    daily.1 += 1;
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-            if !priced {
-                total.2 += 1;
-                daily.2 += 1;
-            }
-            if outcome.status == "failed" {
-                *provider_failures
-                    .entry(outcome.provider_id.clone())
-                    .or_default() += 1;
-            }
-            if let Some(duration_ms) = outcome.duration_ms {
-                provider_samples
-                    .entry(outcome.provider_id.clone())
-                    .or_default()
-                    .push(duration_ms);
-                provider_samples_by_day
-                    .entry((day.clone(), outcome.provider_id))
-                    .or_default()
-                    .push(duration_ms);
-            } else {
-                *provider_unmeasured.entry(outcome.provider_id).or_default() += 1;
-            }
-        }
-    }
-    let mut by_day: std::collections::BTreeMap<String, AnalyticsDay> =
-        std::collections::BTreeMap::new();
-    let mut review_dimensions = Vec::new();
-    for review in reviews.iter().take(500).rev() {
-        let day = review.created_at.get(..10).unwrap_or("unknown").to_owned();
-        let entry = by_day.entry(day.clone()).or_insert_with(|| AnalyticsDay {
-            day: day.clone(),
-            pass: 0,
-            block: 0,
-            incomplete: 0,
-            ungated: 0,
-        });
-        let latest_decision = store
-            .gate_decisions_for_review(&review.review_id)
-            .map_err(api_error)?
-            .pop();
-        let status = latest_decision
-            .map(|decision| format!("{:?}", decision.status).to_lowercase())
-            .unwrap_or_else(|| "ungated".to_owned());
-        match status.as_str() {
-            "pass" => entry.pass += 1,
-            "block" => entry.block += 1,
-            "incomplete" => entry.incomplete += 1,
-            _ => entry.ungated += 1,
-        }
-        let payload = store.get(&review.review_id).map_err(api_error)?;
-        let mut reviewer_ids = Vec::new();
-        let mut provider_ids = Vec::new();
-        let mut finding_categories = Vec::new();
-        let mut finding_rule_ids = Vec::new();
-        if let Some(payload) = payload {
-            if let Ok(saved) = vero_application::deserialize_review_result(&payload) {
-                reviewer_ids.extend(
-                    saved
-                        .reviewer_outcomes
-                        .iter()
-                        .map(|outcome| outcome.reviewer_id.clone()),
-                );
-                provider_ids.extend(
-                    saved
-                        .reviewer_outcomes
-                        .iter()
-                        .map(|outcome| outcome.provider_id.clone())
-                        .filter(|id| !id.is_empty()),
-                );
-                finding_categories.extend(
-                    saved
-                        .findings
-                        .iter()
-                        .map(|finding| finding.category.clone()),
-                );
-                finding_rule_ids.extend(saved.findings.iter().flat_map(|finding| {
-                    finding
-                        .rule_attributions
-                        .iter()
-                        .map(|attribution| attribution.rule_id.clone())
-                }));
-            } else {
-                dimensions_complete = false;
-            }
-        } else {
-            dimensions_complete = false;
-        }
-        reviewer_ids.sort();
-        reviewer_ids.dedup();
-        provider_ids.sort();
-        provider_ids.dedup();
-        finding_categories.sort();
-        finding_categories.dedup();
-        finding_rule_ids.sort();
-        finding_rule_ids.dedup();
-        review_dimensions.push(AnalyticsReviewDimension {
-            review_id: review.review_id.clone(),
-            day,
-            status,
-            summary_status: review.status.clone(),
-            reviewer_ids,
-            provider_ids,
-            finding_categories,
-            finding_rule_ids,
-        });
-    }
-    let (finding_records, finding_drilldown_total) = store
-        .list_findings_page(None, None, None, MAX_ANALYTICS_FINDING_DRILLDOWN, 0)
-        .map_err(api_error)?;
-    let (verification_records, verification_run_count) = store
-        .recent_verification_summaries(MAX_ANALYTICS_VERIFICATION_RUNS)
-        .map_err(api_error)?;
-    let mut findings_by_severity = std::collections::BTreeMap::new();
-    for severity in [
-        Severity::Critical,
-        Severity::High,
-        Severity::Medium,
-        Severity::Low,
-        Severity::Info,
-    ] {
-        let key = format!("{severity:?}").to_lowercase();
-        let (_, count) = store
-            .list_findings_page(Some(severity), None, None, 1, 0)
-            .map_err(api_error)?;
-        if count > 0 {
-            findings_by_severity.insert(key, count);
-        }
-    }
-    let all_findings = store.list_findings(None, None, None).map_err(api_error)?;
-    let mut findings_by_rule = std::collections::BTreeMap::new();
-    for record in &all_findings {
-        let rule_ids = record
-            .finding
-            .rule_attributions
-            .iter()
-            .map(|attribution| attribution.rule_id.clone())
-            .collect::<std::collections::BTreeSet<_>>();
-        for rule_id in rule_ids {
-            *findings_by_rule.entry(rule_id).or_insert(0) += 1;
-        }
-    }
-    let finding_drilldown = finding_records
-        .into_iter()
-        .map(|record| {
-            let last_review_id = record
-                .occurrences
-                .iter()
-                .max_by(|left, right| left.observed_at.cmp(&right.observed_at))
-                .map(|occurrence| occurrence.review_id.clone());
-            let mut rule_attributions = record.finding.rule_attributions;
-            rule_attributions.sort();
-            rule_attributions.dedup();
-            AnalyticsFinding {
-                finding_id: record.finding.id,
-                category: record.finding.category,
-                severity: format!("{:?}", record.finding.severity).to_lowercase(),
-                rationale: record.finding.rationale,
-                path: record.finding.path,
-                line: record.finding.line,
-                status: record.status.as_str().to_owned(),
-                last_review_id,
-                last_seen: record.last_seen,
-                rule_attributions,
-            }
-        })
-        .collect();
-    let mut explicit_feedback_by_label = std::collections::BTreeMap::new();
-    for feedback in store.list_finding_feedback().map_err(api_error)? {
-        let label = serde_json::to_value(feedback.label)
-            .ok()
-            .and_then(|value| value.as_str().map(str::to_owned))
-            .unwrap_or_else(|| "unknown".to_owned());
-        *explicit_feedback_by_label.entry(label).or_insert(0) += 1;
-    }
-    Ok(LocalAnalytics {
-        schema_version: 8,
-        review_count: reviews.len(),
-        history_complete,
-        dimensions_complete,
-        reviews_by_day: by_day
-            .into_values()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .take(14)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect(),
-        review_dimensions,
-        findings_by_severity,
-        findings_by_rule,
-        findings_by_rule_complete: true,
-        finding_drilldown,
-        finding_drilldown_total,
-        finding_drilldown_complete: finding_drilldown_total <= MAX_ANALYTICS_FINDING_DRILLDOWN,
-        explicit_feedback_by_label,
-        feedback_note: "Counts reflect explicit human labels only; they are not calibrated acceptance or accuracy rates.",
-        verification_run_count,
-        verification_history_complete: verification_run_count <= MAX_ANALYTICS_VERIFICATION_RUNS,
-        verification_runs: verification_records
-            .into_iter()
-            .map(|run| AnalyticsVerificationRun {
-                run_id: run.run_id,
-                snapshot_id: run.snapshot_id,
-                profile_id: run.profile_id,
-                status: run.status,
-                created_at: run.created_at,
-            })
-            .collect(),
-        provider_latency: {
-            let ids = provider_samples
-                .keys()
-                .chain(provider_unmeasured.keys())
-                .chain(provider_failures.keys())
-                .cloned()
-                .collect::<std::collections::BTreeSet<_>>();
-            ids.into_iter()
-                .map(|provider_id| {
-                    let mut samples = provider_samples.remove(&provider_id).unwrap_or_default();
-                    samples.sort_unstable();
-                    let percentile = |numerator: usize, denominator: usize| {
-                        (!samples.is_empty()).then(|| {
-                            let rank = samples
-                                .len()
-                                .saturating_mul(numerator)
-                                .div_ceil(denominator)
-                                .max(1);
-                            samples[rank.saturating_sub(1).min(samples.len() - 1)]
-                        })
-                    };
-                    AnalyticsProviderLatency {
-                        provider_id: provider_id.clone(),
-                        measured_runs: samples.len(),
-                        unmeasured_runs: provider_unmeasured.remove(&provider_id).unwrap_or(0),
-                        failed_runs: provider_failures.remove(&provider_id).unwrap_or(0),
-                        median_duration_ms: percentile(50, 100),
-                        p95_duration_ms: percentile(95, 100),
-                    }
-                })
-                .collect()
-        },
-        provider_latency_history_complete,
-        provider_latency_note: "Provider adapter wall-clock durations over the latest 2,000 saved reviews; p50/p95 exclude cached and unmeasured outcomes and are not model compute time. Review preparation and policy evaluation are excluded.",
-        provider_latency_reviews: reviews.len().min(MAX_ANALYTICS_PROVIDER_REVIEWS),
-        provider_latency_history: provider_samples_by_day
-            .into_iter()
-            .map(|((day, provider_id), mut samples)| {
-                samples.sort_unstable();
-                let percentile = |numerator: usize, denominator: usize| {
-                    (!samples.is_empty()).then(|| {
-                        let rank = samples
-                            .len()
-                            .saturating_mul(numerator)
-                            .div_ceil(denominator)
-                            .max(1);
-                        samples[rank.saturating_sub(1).min(samples.len() - 1)]
-                    })
-                };
-                AnalyticsProviderLatencyDay {
-                    day,
-                    provider_id,
-                    measured_runs: samples.len(),
-                    median_duration_ms: percentile(50, 100),
-                    p95_duration_ms: percentile(95, 100),
-                }
-            })
-            .collect(),
-        provider_costs: provider_cost_totals
-            .into_iter()
-            .map(
-                |(provider_id, (estimated_usd, priced_runs, unpriced_runs))| {
-                    AnalyticsProviderCost {
-                        provider_id,
-                        estimated_usd: (priced_runs > 0).then_some(estimated_usd),
-                        priced_runs,
-                        unpriced_runs,
-                    }
-                },
-            )
-            .collect(),
-        provider_cost_history_complete,
-        provider_cost_note: "Informational estimates apply currently configured exact model rates to retained provider token usage. Historical rates, cached-token discounts, and provider invoices are not available; estimates do not affect gate decisions.",
-        provider_cost_reviews: reviews.len().min(MAX_ANALYTICS_PROVIDER_REVIEWS),
-        provider_cost_history: provider_costs_by_day
-            .into_iter()
-            .map(
-                |((day, provider_id), (estimated_usd, priced_runs, unpriced_runs))| {
-                    AnalyticsProviderCostDay {
-                        day,
-                        provider_id,
-                        estimated_usd,
-                        priced_runs,
-                        unpriced_runs,
-                    }
-                },
-            )
-            .collect(),
-    })
+        .map(Json)
 }
 
 async fn get_review(
@@ -755,72 +252,10 @@ async fn get_review(
     RoutePath(id): RoutePath<String>,
 ) -> Result<Json<ReviewDetail>, ApiError> {
     check_origin(&headers, &state.origin, state.auth_token.as_deref())?;
-    let store = open_store(&state.root).map_err(api_error)?;
-    let payload = store.get(&id).map_err(api_error)?.ok_or_else(|| ApiError {
-        error: format!("review {id} was not found"),
-    })?;
-    let mut review = vero_application::deserialize_review_result(&payload).map_err(api_error)?;
-    if let Some(latest_gate) = store
-        .gate_decisions_for_review(&id)
-        .map_err(api_error)?
-        .pop()
-    {
-        review.status = match latest_gate.status {
-            vero_core::GateStatus::Pass => "pass",
-            vero_core::GateStatus::Block => "block",
-            vero_core::GateStatus::Incomplete => "incomplete",
-        }
-        .into();
-        review.reasons = latest_gate.reasons.clone();
-        review.gate = latest_gate;
-    }
-    let findings = store
-        .list_findings(None, None, Some(&id))
-        .map_err(api_error)?;
-    let impact = match vero_application::capture_current_change_set(&state.root, &review.change_set) {
-        Ok(current) if current.digest == review.snapshot_id => {
-            vero_application::analyze_impact(&state.root, &review.change_set).unwrap_or_else(|error| {
-                vero_application::ImpactAssessment {
-                    schema_version: 3,
-                    snapshot_id: review.snapshot_id.clone(),
-                    coverage_complete: false,
-                    analyzers: Vec::new(),
-                    changed_paths: review.change_set.files.iter().map(|file| file.path.clone()).collect(),
-                    changed_symbols: Vec::new(),
-                    groups: Vec::new(),
-                    paths: Vec::new(),
-                    limitations: vec![format!("saved review is available, but impact analysis failed: {error}")],
-                }
-            })
-        }
-        Ok(_) => vero_application::ImpactAssessment {
-            schema_version: 3,
-            snapshot_id: review.snapshot_id.clone(),
-            coverage_complete: false,
-            analyzers: Vec::new(),
-            changed_paths: review.change_set.files.iter().map(|file| file.path.clone()).collect(),
-            changed_symbols: Vec::new(),
-            groups: Vec::new(),
-            paths: Vec::new(),
-            limitations: vec!["current checkout differs from saved review snapshot; impact is unavailable for this historical review".into()],
-        },
-        Err(error) => vero_application::ImpactAssessment {
-            schema_version: 3,
-            snapshot_id: review.snapshot_id.clone(),
-            coverage_complete: false,
-            analyzers: Vec::new(),
-            changed_paths: review.change_set.files.iter().map(|file| file.path.clone()).collect(),
-            changed_symbols: Vec::new(),
-            groups: Vec::new(),
-            paths: Vec::new(),
-            limitations: vec![format!("saved review is available, but impact could not be recomputed from the current checkout: {error}")],
-        },
-    };
-    Ok(Json(ReviewDetail {
-        review,
-        findings,
-        impact,
-    }))
+    let workspace = state.workspace.clone();
+    blocking(move || operations::review_detail(&workspace, &id))
+        .await
+        .map(Json)
 }
 
 async fn list_findings(
@@ -842,11 +277,10 @@ async fn list_findings(
             }),
         })
         .transpose()?;
-    open_store(&state.root)
-        .map_err(api_error)?
-        .list_findings(severity, None, query.review_id.as_deref())
+    let workspace = state.workspace.clone();
+    blocking(move || operations::all_findings(&workspace, severity, query.review_id.as_deref()))
+        .await
         .map(Json)
-        .map_err(api_error)
 }
 
 async fn update_finding_status(
@@ -854,62 +288,40 @@ async fn update_finding_status(
     headers: HeaderMap,
     RoutePath(finding_id): RoutePath<String>,
     Json(update): Json<FindingStatusUpdate>,
-) -> Result<Json<FindingStatusUpdated>, ApiError> {
+) -> Result<Json<operations::FindingStatusUpdate>, ApiError> {
     check_origin(&headers, &state.origin, state.auth_token.as_deref())?;
-    let reason = vero_core::Reason::new(&update.reason).map_err(api_error)?;
     let status = FindingStatus::parse(&update.status).map_err(|_| ApiError {
         error: "status must be open, verified, refuted, or resolved".into(),
     })?;
-    let change = vero_core::FindingStatusChange::new(status, reason).map_err(api_error)?;
-    open_store(&state.root)
-        .map_err(api_error)?
-        .set_finding_status(&finding_id, &change)
-        .map_err(api_error)?;
-    Ok(Json(FindingStatusUpdated {
-        schema_version: 1,
-        finding_id,
-        status: update.status,
-        reason: change.reason().as_str().into(),
-        note: "Lifecycle status is audit metadata. Use the waiver workflow for a scoped gate exception.".into(),
-    }))
+    let workspace = state.workspace.clone();
+    blocking(move || {
+        operations::set_finding_status(&workspace, &finding_id, status, &update.reason)
+    })
+    .await
+    .map(Json)
 }
 
 async fn get_config(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<ConfigSummary>, ApiError> {
+) -> Result<Json<RepositoryConfigView>, ApiError> {
     check_origin(&headers, &state.origin, state.auth_token.as_deref())?;
-    let effective = vero_application::load_repository_config(&state.root).map_err(api_error)?;
-    // The editor shows repository-owned YAML only. User-level provider defaults may
-    // satisfy references in this file, so do not validate this partial view alone.
-    let raw = std::fs::read_to_string(state.root.join(".vero.yaml")).map_err(api_error)?;
-    let config: RepositoryConfig = serde_yaml::from_str(&raw).map_err(api_error)?;
-    Ok(Json(ConfigSummary {
-        provider_ids: effective.providers.keys().cloned().collect(),
-        reviewer_ids: effective.reviewers.keys().cloned().collect(),
-        config,
-    }))
+    let workspace = state.workspace.clone();
+    blocking(move || operations::repository_config_view(&workspace))
+        .await
+        .map(Json)
 }
 
 async fn update_config(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(update): Json<ConfigUpdate>,
-) -> Result<Json<ConfigSummary>, ApiError> {
+) -> Result<Json<RepositoryConfigView>, ApiError> {
     check_origin(&headers, &state.origin, state.auth_token.as_deref())?;
-    let body = serde_json::to_string(&update.config).map_err(api_error)?;
-    if body.len() > 256 * 1024 {
-        return Err(ApiError {
-            error: "configuration exceeds 256 KiB".into(),
-        });
-    }
-    // Validate all cross-references and protected requirements before touching disk.
-    vero_application::validate_repository_config_yaml(&state.root, &body).map_err(api_error)?;
-    let destination = state.root.join(".vero.yaml");
-    let mut temporary = tempfile::NamedTempFile::new_in(&*state.root).map_err(api_error)?;
-    std::io::Write::write_all(temporary.as_file_mut(), body.as_bytes()).map_err(api_error)?;
-    temporary.persist(&destination).map_err(api_error)?;
-    get_config(State(state), headers).await
+    let workspace = state.workspace.clone();
+    blocking(move || operations::replace_repository_config(&workspace, &update.config))
+        .await
+        .map(Json)
 }
 
 async fn start_review(
@@ -919,45 +331,34 @@ async fn start_review(
 ) -> Result<Json<ReviewResult>, ApiError> {
     check_origin(&headers, &state.origin, state.auth_token.as_deref())?;
     let scope =
-        match request.scope.as_str() {
-            "base" => vero_git::ChangeScope::BaseAndWorktree {
-                base_oid: request
-                    .base
-                    .as_deref()
-                    .map(|base| vero_git::merge_base(&state.root, base))
-                    .transpose()
-                    .map_err(api_error)?,
-            },
-            "staged" if request.base.is_none() => vero_git::ChangeScope::Staged,
-            "working_tree" if request.base.is_none() => vero_git::ChangeScope::WorkingTree,
+        match (request.scope.as_str(), request.base) {
+            ("base", base) => ScopeRequest::BaseAndWorktree { base },
+            ("staged", None) => ScopeRequest::Staged,
+            ("working_tree", None) => ScopeRequest::WorkingTree,
             _ => return Err(ApiError {
                 error:
                     "scope must be base, staged, or working_tree; base is only valid for base scope"
                         .into(),
             }),
         };
-    let root = (*state.root).clone();
-    let reviewer_ids = request.reviewer_ids;
-    let policy_profile = request.policy_profile;
-    let review = tokio::task::spawn_blocking(move || {
-        let change_set = vero_application::capture_change_set(&root, scope).map_err(api_error)?;
-        let mut config = vero_application::load_repository_config(&root).map_err(api_error)?;
-        config
-            .select_policy_profile(policy_profile.as_deref())
-            .map_err(api_error)?;
-        vero_application::apply_protected_policy(&root, &mut config).map_err(api_error)?;
-        std::fs::create_dir_all(root.join(".vero")).map_err(api_error)?;
-        let mut store = open_store(&root).map_err(api_error)?;
-        let selection = (!reviewer_ids.is_empty()).then_some(reviewer_ids.as_slice());
-        let review = vero_application::run_review_selecting_reviewers(
-            &root, change_set, &config, &mut store, selection,
+    let workspace = state.workspace.clone();
+    blocking(move || {
+        let selection =
+            (!request.reviewer_ids.is_empty()).then_some(request.reviewer_ids.as_slice());
+        operations::review(
+            &workspace,
+            operations::ReviewRequest {
+                scope,
+                reviewer_ids: selection,
+                policy_profile: request.policy_profile.as_deref(),
+                work_item: None,
+                work_item_token_env: None,
+            },
+            None,
         )
-        .map_err(api_error)?;
-        Ok::<_, ApiError>(review)
     })
     .await
-    .map_err(|error| api_error(format!("review worker failed: {error}")))??;
-    Ok(Json(review))
+    .map(Json)
 }
 
 async fn index(
@@ -1041,7 +442,7 @@ fn build_router(
         );
     }
     router.with_state(AppState {
-        root: Arc::new(root),
+        workspace: Workspace::new(root, Arc::new(SqliteRepositoryStores)),
         origin,
         auth_token: auth_token.map(Arc::from),
         webhook,
@@ -1083,34 +484,31 @@ async fn receive_hosting_webhook(
                 .map(|value| (name.as_str().to_owned(), value.to_owned()))
         })
         .collect();
-    let database = state.root.join(".vero/vero.sqlite");
-    if let Some(parent) = database.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| WebhookApiError {
+    let workspace = state.workspace.clone();
+    // The store is not Send; release it before the handler runs.
+    let dispatch = {
+        let mut store = workspace.store().map_err(|error| WebhookApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            error: format!("create Vero storage directory: {error}"),
+            error: format!("open Vero storage: {error:#}"),
         })?;
-    }
-    let mut store = ReviewStore::open(&database).map_err(|error| WebhookApiError {
-        status: StatusCode::INTERNAL_SERVER_ERROR,
-        error: format!("open Vero storage: {error}"),
-    })?;
-    let dispatch = vero_application::verify_and_claim_webhook_delivery(
-        webhook.provider.as_ref(),
-        &mut store,
-        &headers,
-        &body,
-        60,
-    )
-    .map_err(|error| WebhookApiError {
-        status: if error.contains("signature") {
-            StatusCode::UNAUTHORIZED
-        } else if error.contains("different payload digest") {
-            StatusCode::CONFLICT
-        } else {
-            StatusCode::BAD_REQUEST
-        },
-        error,
-    })?;
+        vero_application::verify_and_claim_webhook_delivery(
+            webhook.provider.as_ref(),
+            &mut *store,
+            &headers,
+            &body,
+            60,
+        )
+        .map_err(|error| WebhookApiError {
+            status: if error.contains("signature") {
+                StatusCode::UNAUTHORIZED
+            } else if error.contains("different payload digest") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            },
+            error,
+        })?
+    };
     match dispatch.claim {
         vero_core::WebhookClaim::AlreadyProcessed => Ok((
             StatusCode::OK,
@@ -1142,12 +540,12 @@ async fn receive_hosting_webhook(
                             break result.map_err(|error| format!("webhook handler task failed: {error}"))?;
                         }
                         () = tokio::time::sleep(std::time::Duration::from_secs(if lease_failure.is_some() { 2 } else { 20 })) => {
-                            let database = database.clone();
+                            let workspace = workspace.clone();
                             let provider = provider.clone();
                             let event_id = event_id.clone();
                             let token = lease_token.clone();
                             let renewal = tokio::task::spawn_blocking(move || {
-                                let mut lease_store = ReviewStore::open(&database)?;
+                                let mut lease_store = workspace.store().map_err(|error| format!("{error:#}"))?;
                                 lease_store.renew_webhook_delivery(&provider, &event_id, &token, unix_time(), 60)
                             }).await;
                             match renewal {
@@ -1170,7 +568,8 @@ async fn receive_hosting_webhook(
                         }
                     ));
                 }
-                let mut completion_store = ReviewStore::open(&database)?;
+                let mut completion_store =
+                    workspace.store().map_err(|error| format!("{error:#}"))?;
                 match handled {
                     Ok(()) => completion_store.complete_webhook_delivery(
                         &provider,
@@ -1285,6 +684,13 @@ mod tests {
         http::Request,
     };
     use tower::ServiceExt;
+    use vero_core::ports::*;
+    use vero_core::RepositoryConfig;
+    use vero_store_sqlite::ReviewStore;
+
+    fn open_store(root: &std::path::Path) -> Result<ReviewStore, String> {
+        ReviewStore::open(&root.join(".vero/vero.sqlite"))
+    }
 
     struct WebhookProvider;
     impl vero_hosting::GitHostingProvider for WebhookProvider {
@@ -1665,6 +1071,28 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("not calibrated"));
+    }
+
+    #[tokio::test]
+    async fn dashboard_reads_an_uninitialized_repository_as_empty() {
+        let directory = tempfile::tempdir().unwrap();
+        let address: SocketAddr = "127.0.0.1:7878".parse().unwrap();
+        for uri in ["/api/reviews", "/api/findings"] {
+            let response = router(directory.path().to_owned(), address)
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(header::HOST, "127.0.0.1:7878")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body, serde_json::json!([]), "{uri}");
+        }
     }
 
     #[tokio::test]
