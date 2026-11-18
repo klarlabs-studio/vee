@@ -4163,6 +4163,7 @@ pub fn cross_impact(
         producer_root,
         consumer_roots,
         &BTreeMap::new(),
+        RustSemanticBudget::DEFAULT,
     )
 }
 
@@ -4172,6 +4173,7 @@ fn cross_impact_with_baselines(
     producer_root: &Path,
     consumer_roots: &[PathBuf],
     baseline_contracts: &BTreeMap<String, Vec<u8>>,
+    rust_budget: RustSemanticBudget,
 ) -> Result<CrossRepositoryImpact, String> {
     if consumer_roots.is_empty() {
         return Err("provide at least one consumer repository".into());
@@ -4481,6 +4483,7 @@ fn cross_impact_with_baselines(
         producer_impact,
         producer_root,
         consumer_roots,
+        rust_budget,
     );
     coverage_complete &= rust_coverage_complete;
     limitations.extend(rust_limitations);
@@ -4772,6 +4775,7 @@ pub fn analyze_cross_impact(
         &producer,
         consumers,
         &baseline_contracts,
+        RustSemanticBudget::DEFAULT,
     )
 }
 
@@ -5016,12 +5020,33 @@ fn is_lexical_declaration(prefix: &str, suffix: &str) -> bool {
     after.starts_with('=') && !after.starts_with("==") && !after.starts_with("=>")
 }
 
+/// Time limits for rust-analyzer resolution. Exceeding one is reported as a
+/// limitation and leaves the affected matches syntax-inferred.
+#[derive(Clone, Copy, Debug)]
+struct RustSemanticBudget {
+    /// All consumer repositories together.
+    total: std::time::Duration,
+    /// Starting one rust-analyzer session.
+    initialize: std::time::Duration,
+    /// One definition lookup.
+    request: std::time::Duration,
+}
+
+impl RustSemanticBudget {
+    const DEFAULT: Self = Self {
+        total: std::time::Duration::from_secs(45),
+        initialize: std::time::Duration::from_secs(20),
+        request: std::time::Duration::from_secs(15),
+    };
+}
+
 fn resolve_rust_consumer_references(
     references: &mut Vec<ConsumerSymbolReference>,
     candidate_indices: &[usize],
     producer_impact: &crate::ImpactAssessment,
     producer_root: &Path,
     consumer_roots: &[PathBuf],
+    budget: RustSemanticBudget,
 ) -> (bool, Vec<String>) {
     if candidate_indices.is_empty() || producer_impact.changed_paths.is_empty() {
         return (true, Vec::new());
@@ -5087,13 +5112,17 @@ fn resolve_rust_consumer_references(
     let started = std::time::Instant::now();
     let checked = candidate_indices.len().min(MAX_RUST_SEMANTIC_REFERENCES);
     for (root, indices) in by_root {
-        if started.elapsed() >= std::time::Duration::from_secs(45) {
+        if started.elapsed() >= budget.total {
             complete = false;
-            limitations.push("Rust cross-repository resolution reached its 45 second total time limit; remaining matches are syntax-inferred.".into());
+            limitations.push(format!("Rust cross-repository resolution reached its {} second total time limit; remaining matches are syntax-inferred.", budget.total.as_secs()));
             break;
         }
-        let remaining = std::time::Duration::from_secs(45).saturating_sub(started.elapsed());
-        let mut session = match RustAnalyzerSession::start(&executable, &root, remaining) {
+        let remaining = budget.total.saturating_sub(started.elapsed());
+        let mut session = match RustAnalyzerSession::start(
+            &executable,
+            &root,
+            remaining.min(budget.initialize),
+        ) {
             Ok(session) => session,
             Err(error) => {
                 complete = false;
@@ -5104,7 +5133,7 @@ fn resolve_rust_consumer_references(
                 continue;
             }
         };
-        let total_deadline = started + std::time::Duration::from_secs(45);
+        let total_deadline = started + budget.total;
         if let Err(error) = session.wait_until_quiescent(total_deadline) {
             complete = false;
             limitations.push(format!(
@@ -5118,9 +5147,9 @@ fn resolve_rust_consumer_references(
                 complete = false;
                 continue;
             }
-            if started.elapsed() >= std::time::Duration::from_secs(45) {
+            if started.elapsed() >= budget.total {
                 complete = false;
-                limitations.push("Rust cross-repository resolution reached its 45 second total time limit; remaining matches are syntax-inferred.".into());
+                limitations.push(format!("Rust cross-repository resolution reached its {} second total time limit; remaining matches are syntax-inferred.", budget.total.as_secs()));
                 break;
             }
             let Some(reference) = references.get_mut(index) else {
@@ -5134,9 +5163,10 @@ fn resolve_rust_consumer_references(
                 continue;
             };
             let source = root.join(&reference.path);
-            let budget = std::time::Duration::from_secs(15)
-                .min(std::time::Duration::from_secs(45).saturating_sub(started.elapsed()));
-            match session.definition(&source, reference.line, column, budget) {
+            let request_budget = budget
+                .request
+                .min(budget.total.saturating_sub(started.elapsed()));
+            match session.definition(&source, reference.line, column, request_budget) {
                 Ok(Some(definitions)) => {
                     if definitions
                         .iter()
@@ -5363,8 +5393,7 @@ impl RustAnalyzerSession {
                 }
             }
         }))?;
-        let deadline =
-            std::time::Instant::now() + time_budget.min(std::time::Duration::from_secs(20));
+        let deadline = std::time::Instant::now() + time_budget;
         session.response(initialize_id, deadline)?;
         session.next_id = initialize_id + 1;
         session.send(&serde_json::json!({
@@ -5398,8 +5427,7 @@ impl RustAnalyzerSession {
                 }}
             }))?;
         }
-        let deadline =
-            std::time::Instant::now() + time_budget.min(std::time::Duration::from_secs(15));
+        let deadline = std::time::Instant::now() + time_budget;
         let result = loop {
             let request_id = self.next_id;
             self.next_id += 1;
@@ -7182,6 +7210,7 @@ mod tests {
             &impact,
             &producer,
             std::slice::from_ref(&consumer),
+            super::RustSemanticBudget::DEFAULT,
         );
         if let Some(previous) = previous {
             std::env::set_var("VERO_RUST_ANALYZER", previous);
@@ -9074,6 +9103,14 @@ operations:
         assert_eq!(report.references[0].path, "client.go");
     }
 
+    /// A budget no healthy rust-analyzer run reaches, for tests that assert
+    /// semantic resolution rather than time-limit handling.
+    const UNHURRIED_RUST_BUDGET: RustSemanticBudget = RustSemanticBudget {
+        total: std::time::Duration::from_secs(600),
+        initialize: std::time::Duration::from_secs(300),
+        request: std::time::Duration::from_secs(120),
+    };
+
     #[test]
     fn cross_impact_resolves_rust_consumer_references_with_rust_analyzer() {
         if find_rust_analyzer_executable().is_none() {
@@ -9113,11 +9150,14 @@ operations:
             limitations: Vec::new(),
         };
         let dependency_map = build(&[producer.clone(), consumer.clone()]).unwrap();
-        let report = cross_impact(
+        // Semantic outcomes are asserted, so allow for a loaded machine.
+        let report = cross_impact_with_baselines(
             &producer_impact,
             &dependency_map,
             &producer,
             std::slice::from_ref(&consumer),
+            &BTreeMap::new(),
+            UNHURRIED_RUST_BUDGET,
         )
         .unwrap();
         assert!(report.coverage_complete, "{:?}", report.limitations);
@@ -9173,11 +9213,14 @@ operations:
             limitations: Vec::new(),
         };
         let dependency_map = build(&[producer.clone(), consumer.clone()]).unwrap();
-        let report = cross_impact(
+        // Semantic outcomes are asserted, so allow for a loaded machine.
+        let report = cross_impact_with_baselines(
             &producer_impact,
             &dependency_map,
             &producer,
             std::slice::from_ref(&consumer),
+            &BTreeMap::new(),
+            UNHURRIED_RUST_BUDGET,
         )
         .unwrap();
         assert!(report.coverage_complete, "{:?}", report.limitations);
