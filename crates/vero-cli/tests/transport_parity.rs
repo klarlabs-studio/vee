@@ -9,6 +9,23 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
+/// A `vero` invocation isolated from the developer's machine. Setup detection
+/// probes agent CLIs on PATH, a local Ollama, API keys, and the user config;
+/// the CLI and the MCP server probe separately, so any of those answering
+/// differently between the two calls would make their documents differ.
+fn vero() -> Command {
+    static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let home = HOME.get_or_init(|| tempfile::tempdir().unwrap());
+    let mut command = Command::new(env!("CARGO_BIN_EXE_vero"));
+    command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", home.path())
+        // Port 9 (discard) has no Ollama, so detection reports it unavailable.
+        .env("OLLAMA_HOST", "127.0.0.1:9");
+    command
+}
+
 fn schemas_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas")
 }
@@ -103,7 +120,7 @@ fn seeded_repository() -> tempfile::TempDir {
 }
 
 fn cli_json(root: &Path, args: &[&str]) -> Value {
-    let output = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let output = vero()
         .args(args)
         .args(["--output", "json"])
         .current_dir(root)
@@ -132,7 +149,7 @@ struct McpSession {
 
 impl McpSession {
     fn start(root: &Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_vero"))
+        let mut child = vero()
             .args(["mcp", "serve", "--transport", "stdio"])
             .current_dir(root)
             .stdin(Stdio::piped())
@@ -383,7 +400,7 @@ fn both_transports_reject_waiving_through_a_status_change() {
         .unwrap()
         .to_owned();
 
-    let cli = Command::new(env!("CARGO_BIN_EXE_vero"))
+    let cli = vero()
         .args([
             "findings",
             "set-status",
