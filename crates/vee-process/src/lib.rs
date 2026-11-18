@@ -345,17 +345,16 @@ fn first_executable_candidate(
 
 fn is_executable_file(path: &Path) -> Result<bool, String> {
     let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
-    if !metadata.is_file() {
-        return Ok(false);
-    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        Ok(metadata.permissions().mode() & 0o111 != 0)
+        Ok(metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
     }
+    // Elsewhere any regular file may run; the candidate list already limits
+    // Windows to PATHEXT extensions.
     #[cfg(not(unix))]
     {
-        Ok(true)
+        Ok(metadata.is_file())
     }
 }
 
