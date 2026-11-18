@@ -6235,9 +6235,51 @@ impl<'ast> syn::visit::Visit<'ast> for ConsumerSymbolVisitor<'_> {
         self.record_call_symbol(&call.method, "method_call");
         syn::visit::visit_expr_method_call(self, call);
     }
+
+    /// Macro arguments are unparsed tokens to `syn`, so calls such as
+    /// `assert!(api::changed())` or `format!("{}", value.changed())` would be
+    /// missed. Scan the tokens for call shapes instead; the candidates stay
+    /// syntax-inferred until semantic resolution confirms or discards them.
+    /// `macro_rules!` bodies are templates, not calls, and are skipped.
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        if !mac.path.is_ident("macro_rules") {
+            self.record_token_calls(mac.tokens.clone());
+        }
+        syn::visit::visit_macro(self, mac);
+    }
 }
 
 impl ConsumerSymbolVisitor<'_> {
+    fn record_token_calls(&mut self, tokens: proc_macro2::TokenStream) {
+        let tokens: Vec<proc_macro2::TokenTree> = tokens.into_iter().collect();
+        for (index, token) in tokens.iter().enumerate() {
+            match token {
+                proc_macro2::TokenTree::Ident(identifier) => {
+                    let called = matches!(
+                        tokens.get(index + 1),
+                        Some(proc_macro2::TokenTree::Group(group))
+                            if group.delimiter() == proc_macro2::Delimiter::Parenthesis
+                    );
+                    if called {
+                        let after_dot = index > 0
+                            && matches!(
+                                &tokens[index - 1],
+                                proc_macro2::TokenTree::Punct(punct) if punct.as_char() == '.'
+                            );
+                        let context = if after_dot {
+                            "macro_method_call"
+                        } else {
+                            "macro_function_call"
+                        };
+                        self.record_call_symbol(identifier, context);
+                    }
+                }
+                proc_macro2::TokenTree::Group(group) => self.record_token_calls(group.stream()),
+                proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => {}
+            }
+        }
+    }
+
     fn record_call_symbol(&mut self, identifier: &syn::Ident, context: &str) {
         let symbol = identifier.to_string();
         if self.symbols.contains(&symbol) {
@@ -7152,6 +7194,43 @@ mod tests {
         assert_eq!(references.len(), 1);
         assert_eq!(references[0].path, "src/first.rs");
         assert_eq!(references[0].certainty, "semantic_resolved");
+    }
+
+    #[test]
+    fn rust_consumer_scan_finds_calls_inside_macro_arguments() {
+        let source = "fn f(x: Thing) {\n    assert!(api::changed(1) > 0, \"{}\", x.changed_method());\n    println!(\"{:?}\", vec![api::changed(2)]);\n}\nmacro_rules! m { ($e:expr) => { changed($e) }; }\n";
+        let syntax = syn::parse_file(source).unwrap();
+        let symbols: std::collections::BTreeSet<String> =
+            ["changed".to_owned(), "changed_method".to_owned()].into();
+        let mut visitor = ConsumerSymbolVisitor {
+            symbols: &symbols,
+            file: "src/lib.rs".into(),
+            root: PathBuf::from("/consumer"),
+            source_digest: "sha256:test".into(),
+            source,
+            found: Vec::new(),
+        };
+        syn::visit::Visit::visit_file(&mut visitor, &syntax);
+        let found: Vec<_> = visitor
+            .found
+            .iter()
+            .map(|reference| {
+                (
+                    reference.symbol.as_str(),
+                    reference.line,
+                    reference.column,
+                    reference.match_context.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                ("changed", 2, Some(18), "macro_function_call"),
+                ("changed_method", 2, Some(42), "macro_method_call"),
+                ("changed", 3, Some(32), "macro_function_call"),
+            ]
+        );
     }
 
     #[test]
@@ -9050,6 +9129,66 @@ operations:
         );
         assert_eq!(report.references[0].symbol, "changed_api");
         assert_eq!(report.references[0].path, "src/lib.rs");
+    }
+
+    #[test]
+    fn cross_impact_resolves_rust_calls_inside_standard_macros() {
+        if find_rust_analyzer_executable().is_none() {
+            return;
+        }
+        let workspace = tempfile::tempdir().unwrap();
+        let producer = workspace.path().join("producer");
+        let consumer = workspace.path().join("consumer");
+        std::fs::create_dir_all(producer.join("src")).unwrap();
+        std::fs::create_dir_all(consumer.join("src")).unwrap();
+        std::fs::write(
+            producer.join("Cargo.toml"),
+            "[package]\nname = \"producer\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            producer.join("src/lib.rs"),
+            "pub fn changed_api() -> u8 { 1 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            consumer.join("Cargo.toml"),
+            "[package]\nname = \"consumer\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nproducer = { path = \"../producer\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            consumer.join("src/lib.rs"),
+            "pub fn call() -> String {\n    assert!(producer::changed_api() > 0);\n    format!(\"{}\", producer::changed_api())\n}\n",
+        )
+        .unwrap();
+        let producer_impact = crate::ImpactAssessment {
+            schema_version: 3,
+            snapshot_id: "sha256:producer-rust-macros".into(),
+            coverage_complete: true,
+            analyzers: Vec::new(),
+            changed_paths: vec!["src/lib.rs".into()],
+            changed_symbols: vec!["changed_api".into()],
+            groups: Vec::new(),
+            paths: Vec::new(),
+            limitations: Vec::new(),
+        };
+        let dependency_map = build(&[producer.clone(), consumer.clone()]).unwrap();
+        let report = cross_impact(
+            &producer_impact,
+            &dependency_map,
+            &producer,
+            std::slice::from_ref(&consumer),
+        )
+        .unwrap();
+        assert!(report.coverage_complete, "{:?}", report.limitations);
+        assert_eq!(report.references.len(), 2, "{:?}", report.references);
+        for reference in &report.references {
+            assert_eq!(
+                reference.certainty, "semantic_resolved",
+                "{reference:?} {:?}",
+                report.limitations
+            );
+        }
     }
 
     #[test]
