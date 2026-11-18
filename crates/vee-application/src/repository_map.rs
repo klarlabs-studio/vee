@@ -9091,8 +9091,7 @@ operations:
 
     #[test]
     fn cross_impact_resolves_go_consumer_references_to_local_producer_with_gopls() {
-        if find_gopls_executable().is_none() {
-            eprintln!("skipping Go semantic cross-impact fixture: gopls was not found on PATH");
+        if skip_without_language_server("gopls", find_gopls_executable().is_some()) {
             return;
         }
         let workspace = tempfile::tempdir().unwrap();
@@ -9175,6 +9174,21 @@ operations:
         assert_eq!(report.references[0].path, "client.go");
     }
 
+    /// Whether a language-server fixture is skipped because `tool` is missing.
+    /// CI sets `VEE_TEST_REQUIRE_LANGUAGE_SERVERS` so that a broken install
+    /// fails the run instead of passing it vacuously.
+    fn skip_without_language_server(tool: &str, available: bool) -> bool {
+        if available {
+            return false;
+        }
+        assert!(
+            std::env::var_os("VEE_TEST_REQUIRE_LANGUAGE_SERVERS").is_none(),
+            "{tool} was not found, and VEE_TEST_REQUIRE_LANGUAGE_SERVERS requires it"
+        );
+        eprintln!("skipping language-server fixture: {tool} was not found");
+        true
+    }
+
     /// Budgets no healthy language server reaches, for tests that assert
     /// semantic resolution rather than time-limit handling.
     const UNHURRIED_BUDGETS: SemanticBudgets = SemanticBudgets {
@@ -9192,8 +9206,8 @@ operations:
 
     #[test]
     fn cross_impact_resolves_rust_consumer_references_with_rust_analyzer() {
-        if find_rust_analyzer_executable().is_none() {
-            eprintln!("skipping Rust semantic cross-impact fixture: rust-analyzer was not found");
+        if skip_without_language_server("rust-analyzer", find_rust_analyzer_executable().is_some())
+        {
             return;
         }
         let workspace = tempfile::tempdir().unwrap();
@@ -9252,7 +9266,8 @@ operations:
 
     #[test]
     fn cross_impact_resolves_rust_calls_inside_standard_macros() {
-        if find_rust_analyzer_executable().is_none() {
+        if skip_without_language_server("rust-analyzer", find_rust_analyzer_executable().is_some())
+        {
             return;
         }
         let workspace = tempfile::tempdir().unwrap();
@@ -9315,7 +9330,7 @@ operations:
 
     #[test]
     fn cross_impact_resolves_typescript_consumers_to_changed_producer_files() {
-        if find_typescript_server().is_none() {
+        if skip_without_language_server("tsserver", find_typescript_server().is_some()) {
             return;
         }
         let workspace = tempfile::tempdir().unwrap();
@@ -9399,7 +9414,7 @@ operations:
 
     #[test]
     fn cross_impact_resolves_typescript_project_reference_definitions() {
-        if find_typescript_server().is_none() {
+        if skip_without_language_server("tsserver", find_typescript_server().is_some()) {
             return;
         }
         let workspace = tempfile::tempdir().unwrap();
@@ -9472,7 +9487,7 @@ operations:
 
     #[test]
     fn cross_impact_marks_malformed_typescript_project_configuration_incomplete() {
-        if find_typescript_server().is_none() {
+        if skip_without_language_server("tsserver", find_typescript_server().is_some()) {
             return;
         }
         let workspace = tempfile::tempdir().unwrap();
@@ -9525,7 +9540,7 @@ operations:
 
     #[test]
     fn cross_impact_marks_syntax_malformed_typescript_project_configuration_incomplete() {
-        if find_typescript_server().is_none() {
+        if skip_without_language_server("tsserver", find_typescript_server().is_some()) {
             return;
         }
         let workspace = tempfile::tempdir().unwrap();
@@ -9611,7 +9626,9 @@ operations:
 
     #[test]
     fn cross_impact_resolves_javascript_projects_to_changed_producer_files() {
-        if find_typescript_server().is_none() || find_executable("node").is_none() {
+        if skip_without_language_server("tsserver", find_typescript_server().is_some())
+            || skip_without_language_server("node", find_executable("node").is_some())
+        {
             return;
         }
         let workspace = tempfile::tempdir().unwrap();
