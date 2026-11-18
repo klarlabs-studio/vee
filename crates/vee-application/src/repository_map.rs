@@ -3322,12 +3322,17 @@ fn compare_openapi_contracts(
     let mut issues = Vec::new();
     let mut coverage = Vec::new();
     let mut limitations = Vec::new();
+    // Contract paths are canonicalized before the containment check, so the
+    // root must be too (symlinked roots, `\\?\` prefixes on Windows).
+    let canonical_root = producer_root
+        .canonicalize()
+        .unwrap_or_else(|_| producer_root.to_path_buf());
     for (path, baseline_bytes) in baselines {
         match asyncapi_operations(baseline_bytes) {
             Ok(Some(baseline)) => {
                 let current_path = producer_root.join(path);
                 let current_path = match current_path.canonicalize() {
-                    Ok(current_path) if current_path.starts_with(producer_root) => {
+                    Ok(current_path) if current_path.starts_with(&canonical_root) => {
                         Some(current_path)
                     }
                     Ok(_) => {
@@ -3591,7 +3596,7 @@ fn compare_openapi_contracts(
         ));
         let current_path = producer_root.join(path);
         let current_path = match current_path.canonicalize() {
-            Ok(current_path) if current_path.starts_with(producer_root) => Some(current_path),
+            Ok(current_path) if current_path.starts_with(&canonical_root) => Some(current_path),
             Ok(_) => {
                 limitations.push(format!(
                     "Current OpenAPI contract `{path}` resolves outside the producer repository; compatibility is unknown."
@@ -9172,6 +9177,33 @@ operations:
             exhausted.limitations
         );
         assert_eq!(report.references[0].path, "client.go");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn current_contracts_inside_a_non_canonical_producer_root_are_compared() {
+        let workspace = tempfile::tempdir().unwrap();
+        let producer = workspace.path().join("producer");
+        std::fs::create_dir_all(producer.join("api")).unwrap();
+        let openapi = "openapi: 3.1.0\ninfo: {title: t, version: '1'}\npaths:\n  /users:\n    get:\n      operationId: listUsers\n      responses: {'200': {description: ok}}\n";
+        let asyncapi = "asyncapi: 2.6.0\ninfo: {title: t, version: '1'}\nchannels:\n  user/signedup:\n    publish:\n      operationId: publishSignup\n";
+        std::fs::write(producer.join("api/openapi.yaml"), openapi).unwrap();
+        std::fs::write(producer.join("api/asyncapi.yaml"), asyncapi).unwrap();
+        // Reach the producer through a symlink, as Windows reaches every path
+        // without its canonical `\\?\` prefix.
+        let link = workspace.path().join("link");
+        std::os::unix::fs::symlink(&producer, &link).unwrap();
+        let baselines = BTreeMap::from([
+            ("api/openapi.yaml".to_owned(), openapi.as_bytes().to_vec()),
+            ("api/asyncapi.yaml".to_owned(), asyncapi.as_bytes().to_vec()),
+        ]);
+        let (_, _, limitations) = compare_openapi_contracts(&link, &baselines);
+        assert!(
+            !limitations
+                .iter()
+                .any(|limitation| limitation.contains("resolves outside the producer repository")),
+            "{limitations:#?}"
+        );
     }
 
     /// Whether a language-server fixture is skipped because `tool` is missing.
