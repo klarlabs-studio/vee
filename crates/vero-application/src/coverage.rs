@@ -167,7 +167,7 @@ fn changed_line_coverage(
         return Ok(ChangedLineCoverage::default());
     }
     let Some(changed_lines) =
-        vero_application::changed_line_numbers(baseline_text, current_text, MAX_DIFF_OUTPUT_BYTES)?
+        crate::changed_line_numbers(baseline_text, current_text, MAX_DIFF_OUTPUT_BYTES)?
     else {
         return Ok(ChangedLineCoverage::default());
     };
@@ -263,7 +263,7 @@ fn parse_lcov(text: &str, root: &Path) -> Result<BTreeMap<String, BTreeMap<u64, 
     Ok(records)
 }
 
-pub(crate) fn parse_manifest(manifest: &str, expected: &str) -> Result<ChangeSet, String> {
+pub fn parse_manifest(manifest: &str, expected: &str) -> Result<ChangeSet, String> {
     let (version, base, head, scope, files): (
         u32,
         Option<String>,

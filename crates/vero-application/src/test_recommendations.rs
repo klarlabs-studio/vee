@@ -1,5 +1,5 @@
+use crate::ImpactAssessment;
 use serde::Serialize;
-use vero_application::ImpactAssessment;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct TestRecommendationReport {
@@ -130,7 +130,7 @@ pub fn recommend_with_coverage(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vero_application::{ImpactAnalyzer, ImpactEdge, ImpactGroup};
+    use crate::{ImpactAnalyzer, ImpactEdge, ImpactGroup};
 
     fn recommend(impact: &ImpactAssessment) -> TestRecommendationReport {
         recommend_with_coverage(impact, None)

@@ -1050,7 +1050,7 @@ mod tests {
         .unwrap()
         .trim()
         .to_owned();
-        let snapshot = vero_application::capture_change_set(
+        let snapshot = crate::capture_change_set(
             &root,
             vero_git::commit_scope(&format!("{base}..{head}")).unwrap(),
         )
@@ -1515,7 +1515,7 @@ mod tests {
         .unwrap()
         .trim()
         .to_owned();
-        let snapshot = vero_application::capture_change_set(
+        let snapshot = crate::capture_change_set(
             &root,
             vero_git::commit_scope(&format!("{base}..{head}")).unwrap(),
         )

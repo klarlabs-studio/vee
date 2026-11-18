@@ -105,6 +105,7 @@ pub fn change_package_with_pull_requests(
     pull_requests: &BTreeMap<String, Vec<vero_hosting::PullRequestRef>>,
     discovered_links: &BTreeMap<String, Vec<vero_hosting::PullRequestRef>>,
     remote_states: &BTreeMap<String, Vec<RemotePullRequestState>>,
+    stores: &dyn vero_core::ports::RepositoryStores,
 ) -> Result<ChangePackage, String> {
     if roots.is_empty() || roots.len() > MAX_REPOSITORIES {
         return Err(format!(
@@ -193,7 +194,7 @@ pub fn change_package_with_pull_requests(
             },
         )?;
         let changed_files = snapshot.files.clone();
-        let gate = exact_snapshot_gate(&root, &snapshot.digest)?;
+        let gate = exact_snapshot_gate(&root, &snapshot.digest, stores)?;
         let mut remote_pull_requests = remote_states.get(&entry.id).cloned().unwrap_or_default();
         for remote in &mut remote_pull_requests {
             remote.local_head_matches = remote.head_oid == head_oid;
@@ -433,48 +434,22 @@ struct ExactSnapshotGate {
     policy_digest: Option<String>,
 }
 
-fn exact_snapshot_gate(root: &Path, snapshot_id: &str) -> Result<ExactSnapshotGate, String> {
-    let metadata_dir = root.join(".vero");
-    let metadata = match std::fs::symlink_metadata(&metadata_dir) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(ExactSnapshotGate {
-                review_id: None,
-                saved_gate_status: "not_reviewed".into(),
-                gate_validity: "not_available".into(),
-                gate_decision_id: None,
-                effective_config_digest: None,
-                policy_digest: None,
-            });
-        }
-        Err(error) => return Err(error.to_string()),
+fn exact_snapshot_gate(
+    root: &Path,
+    snapshot_id: &str,
+    stores: &dyn vero_core::ports::RepositoryStores,
+) -> Result<ExactSnapshotGate, String> {
+    let Some(store) = stores.open_existing(root)? else {
+        return Ok(ExactSnapshotGate {
+            review_id: None,
+            saved_gate_status: "not_reviewed".into(),
+            gate_validity: "not_available".into(),
+            gate_decision_id: None,
+            effective_config_digest: None,
+            policy_digest: None,
+        });
     };
-    if !metadata.file_type().is_dir() {
-        return Err(format!(
-            "{} must be a real directory",
-            metadata_dir.display()
-        ));
-    }
-    let database = metadata_dir.join("vero.sqlite");
-    let database_metadata = match std::fs::symlink_metadata(&database) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(ExactSnapshotGate {
-                review_id: None,
-                saved_gate_status: "not_reviewed".into(),
-                gate_validity: "not_available".into(),
-                gate_decision_id: None,
-                effective_config_digest: None,
-                policy_digest: None,
-            });
-        }
-        Err(error) => return Err(error.to_string()),
-    };
-    if !database_metadata.file_type().is_file() {
-        return Err(format!("{} must be a regular file", database.display()));
-    }
-    let store = vero_store_sqlite::ReviewStore::open(&database)?;
-    let store: &dyn vero_core::ports::Repositories = &store;
+    let store: &dyn vero_core::ports::Repositories = store.as_ref();
     let mut matching_review_without_gate = None;
     for review in store.list_reviews()? {
         if review.snapshot_id != snapshot_id {
@@ -491,7 +466,7 @@ fn exact_snapshot_gate(root: &Path, snapshot_id: &str) -> Result<ExactSnapshotGa
         let payload = store
             .get(&review.review_id)?
             .ok_or_else(|| format!("saved review {} has no payload", review.review_id))?;
-        let gate_validity = match vero_application::deserialize_review_result(&payload) {
+        let gate_validity = match crate::deserialize_review_result(&payload) {
             Ok(saved) => current_gate_validity(root, snapshot_id, &saved, store)?,
             Err(_) => "replay_unavailable".into(),
         };
@@ -532,26 +507,26 @@ fn exact_snapshot_gate(root: &Path, snapshot_id: &str) -> Result<ExactSnapshotGa
 fn current_gate_validity(
     root: &Path,
     snapshot_id: &str,
-    saved: &vero_application::ReviewResult,
+    saved: &crate::ReviewResult,
     store: &dyn vero_core::ports::Repositories,
 ) -> Result<String, String> {
     if saved.snapshot_id != snapshot_id {
         return Ok("stale_snapshot".into());
     }
-    let current = vero_application::capture_current_change_set(root, &saved.change_set)
+    let current = crate::capture_current_change_set(root, &saved.change_set)
         .map(|snapshot| snapshot.digest == snapshot_id)
         .unwrap_or(false);
     if !current {
         return Ok("stale_snapshot".into());
     }
-    let mut config = vero_application::load_repository_config(root)?;
+    let mut config = crate::load_repository_config(root)?;
     config.select_policy_profile(saved.policy_profile.as_deref())?;
-    vero_application::apply_protected_policy(root, &mut config)?;
-    let digest = vero_application::effective_review_config_digest_with_work_item(
+    crate::apply_protected_policy(root, &mut config)?;
+    let digest = crate::effective_review_config_digest_with_work_item(
         &config,
         root,
         &saved.selected_reviewers,
-        &vero_application::active_rule_approvals(store)?,
+        &crate::active_rule_approvals(store)?,
         saved.work_item.as_ref(),
     )?;
     if digest != saved.effective_config_digest {
@@ -595,11 +570,8 @@ fn current_gate_validity(
             reviewer_policies: &replay_inputs.reviewer_policies,
         },
     );
-    replayed.blocking_findings = vero_application::visible_blocking_findings(
-        &replayed.blocking_findings,
-        findings,
-        &saved.findings,
-    );
+    replayed.blocking_findings =
+        crate::visible_blocking_findings(&replayed.blocking_findings, findings, &saved.findings);
     if replayed.verification_run_ids != saved.gate.verification_run_ids
         || replayed.evidence_digest != saved.gate.evidence_digest
     {
@@ -4180,7 +4152,7 @@ fn compare_openapi_contracts(
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn cross_impact(
-    producer_impact: &vero_application::ImpactAssessment,
+    producer_impact: &crate::ImpactAssessment,
     dependency_map: &RepositoryMap,
     producer_root: &Path,
     consumer_roots: &[PathBuf],
@@ -4195,7 +4167,7 @@ pub fn cross_impact(
 }
 
 fn cross_impact_with_baselines(
-    producer_impact: &vero_application::ImpactAssessment,
+    producer_impact: &crate::ImpactAssessment,
     dependency_map: &RepositoryMap,
     producer_root: &Path,
     consumer_roots: &[PathBuf],
@@ -4353,7 +4325,7 @@ fn cross_impact_with_baselines(
                     references.extend(visitor.found);
                 }
                 Some("go") => {
-                    let code = vero_application::go_code_without_comments_and_strings(text);
+                    let code = crate::go_code_without_comments_and_strings(text);
                     let first_reference = references.len();
                     collect_lexical_references(
                         &mut references,
@@ -4367,7 +4339,7 @@ fn cross_impact_with_baselines(
                     go_references.extend(first_reference..references.len());
                 }
                 Some("ts" | "tsx" | "js" | "jsx" | "mts" | "cts") => {
-                    let code = vero_application::typescript_code_without_comments_and_strings(text);
+                    let code = crate::typescript_code_without_comments_and_strings(text);
                     let first_reference = references.len();
                     collect_lexical_references(
                         &mut references,
@@ -4387,7 +4359,7 @@ fn cross_impact_with_baselines(
                         .insert(key, (root.clone(), relative_path, source_digest));
                 }
                 Some("java") => {
-                    let code = vero_application::java_code_without_comments_and_strings(text);
+                    let code = crate::java_code_without_comments_and_strings(text);
                     collect_lexical_references(
                         &mut references,
                         &symbols,
@@ -4404,7 +4376,7 @@ fn cross_impact_with_baselines(
     }
     let mut python_ast_used = false;
     if !python_sources.is_empty() && !symbols.is_empty() {
-        match vero_application::python_syntax_references(&python_sources, &symbols) {
+        match crate::python_syntax_references(&python_sources, &symbols) {
             Ok(analysis) => {
                 python_ast_used = true;
                 for found in analysis.references {
@@ -4434,7 +4406,7 @@ fn cross_impact_with_baselines(
                     if let Some((root, path, source_digest)) =
                         python_source_locations.get(invalid_path)
                     {
-                        let code = vero_application::python_code_without_comments_and_strings(
+                        let code = crate::python_code_without_comments_and_strings(
                             &python_sources[invalid_path],
                         );
                         let first = references.len();
@@ -4474,7 +4446,7 @@ fn cross_impact_with_baselines(
     if !python_ast_used {
         for (key, source) in &python_sources {
             if let Some((root, path, source_digest)) = python_source_locations.get(key) {
-                let code = vero_application::python_code_without_comments_and_strings(source);
+                let code = crate::python_code_without_comments_and_strings(source);
                 collect_lexical_references(
                     &mut references,
                     &symbols,
@@ -4765,13 +4737,13 @@ pub fn analyze_cross_impact(
 ) -> Result<CrossRepositoryImpact, String> {
     let producer = vero_git::repository_root(producer)?;
     let base_oid = vero_git::merge_base(&producer, base)?;
-    let snapshot = vero_application::capture_change_set(
+    let snapshot = crate::capture_change_set(
         &producer,
         vero_git::ChangeScope::BaseAndWorktree {
             base_oid: Some(base_oid.clone()),
         },
     )?;
-    let impact = vero_application::analyze_impact(&producer, &snapshot)?;
+    let impact = crate::analyze_impact(&producer, &snapshot)?;
     let mut baseline_contracts = BTreeMap::new();
     for relative in &impact.changed_paths {
         if !matches!(
@@ -4804,7 +4776,7 @@ pub fn analyze_cross_impact(
 }
 
 fn trace_dependency_paths(
-    impact: &vero_application::ImpactAssessment,
+    impact: &crate::ImpactAssessment,
     dependency_map: &RepositoryMap,
     producer_root: &Path,
     consumer_roots: &[PathBuf],
@@ -5047,7 +5019,7 @@ fn is_lexical_declaration(prefix: &str, suffix: &str) -> bool {
 fn resolve_rust_consumer_references(
     references: &mut Vec<ConsumerSymbolReference>,
     candidate_indices: &[usize],
-    producer_impact: &vero_application::ImpactAssessment,
+    producer_impact: &crate::ImpactAssessment,
     producer_root: &Path,
     consumer_roots: &[PathBuf],
 ) -> (bool, Vec<String>) {
@@ -5726,7 +5698,7 @@ fn resolve_go_consumer_references(
 fn resolve_typescript_consumer_references(
     references: &mut Vec<ConsumerSymbolReference>,
     candidate_indices: &[usize],
-    producer_impact: &vero_application::ImpactAssessment,
+    producer_impact: &crate::ImpactAssessment,
     producer_root: &Path,
     consumer_roots: &[PathBuf],
 ) -> (bool, Vec<String>) {
@@ -7151,7 +7123,7 @@ mod tests {
                 dependency_paths: Vec::new(),
             },
         ];
-        let impact = vero_application::ImpactAssessment {
+        let impact = crate::ImpactAssessment {
             schema_version: 1,
             snapshot_id: "snapshot".into(),
             coverage_complete: true,
@@ -8663,7 +8635,7 @@ operations:
             limitations: Vec::new(),
             digest: "sha256:map".into(),
         };
-        let impact = vero_application::ImpactAssessment {
+        let impact = crate::ImpactAssessment {
             schema_version: 3,
             snapshot_id: "sha256:snapshot".into(),
             coverage_complete: true,
@@ -8736,7 +8708,12 @@ operations:
             )
             .unwrap();
 
-        let current = exact_snapshot_gate(directory.path(), "snapshot-current").unwrap();
+        let current = exact_snapshot_gate(
+            directory.path(),
+            "snapshot-current",
+            &vero_store_sqlite::SqliteRepositoryStores,
+        )
+        .unwrap();
         assert_eq!(current.review_id.as_deref(), Some("review-1"));
         assert_eq!(current.saved_gate_status, "pass");
         assert_eq!(current.gate_decision_id.as_deref(), Some("decision-1"));
@@ -8746,7 +8723,12 @@ operations:
         );
         assert_eq!(current.policy_digest.as_deref(), Some("policy-digest"));
 
-        let stale = exact_snapshot_gate(directory.path(), "snapshot-changed").unwrap();
+        let stale = exact_snapshot_gate(
+            directory.path(),
+            "snapshot-changed",
+            &vero_store_sqlite::SqliteRepositoryStores,
+        )
+        .unwrap();
         assert_eq!(stale.review_id, None);
         assert_eq!(stale.saved_gate_status, "not_reviewed");
     }
@@ -8770,7 +8752,7 @@ operations:
             "package client\nfunc use() { changed_api() }\n/* changed_api() */\nvar docs = `\nchanged_api()\n`\n",
         )
         .unwrap();
-        let impact = vero_application::ImpactAssessment {
+        let impact = crate::ImpactAssessment {
             schema_version: 3,
             snapshot_id: "sha256:producer".into(),
             coverage_complete: true,
@@ -8883,7 +8865,7 @@ operations:
         )
         .unwrap();
         std::fs::write(consumer.join("client.ts"), "api.fetchUser();\n").unwrap();
-        let producer_impact = vero_application::ImpactAssessment {
+        let producer_impact = crate::ImpactAssessment {
             schema_version: 3,
             snapshot_id: "sha256:producer-openapi".into(),
             coverage_complete: true,
@@ -8992,7 +8974,7 @@ operations:
             "package client\nimport \"example.com/producer\"\nfunc Changed() {}\nfunc call() { producer.Changed(); Changed() }\n",
         )
         .unwrap();
-        let producer_impact = vero_application::ImpactAssessment {
+        let producer_impact = crate::ImpactAssessment {
             schema_version: 3,
             snapshot_id: "sha256:producer".into(),
             coverage_complete: true,
@@ -9040,7 +9022,7 @@ operations:
             "pub fn call() { producer::changed_api(); }\n",
         )
         .unwrap();
-        let producer_impact = vero_application::ImpactAssessment {
+        let producer_impact = crate::ImpactAssessment {
             schema_version: 3,
             snapshot_id: "sha256:producer-rust".into(),
             coverage_complete: true,
@@ -9100,7 +9082,7 @@ operations:
             "function changed_api() {}\nchanged_api();\n",
         )
         .unwrap();
-        let producer_impact = vero_application::ImpactAssessment {
+        let producer_impact = crate::ImpactAssessment {
             schema_version: 3,
             snapshot_id: "sha256:producer-ts".into(),
             coverage_complete: true,
@@ -9164,7 +9146,7 @@ operations:
             "import { changed_api } from '@producer';\nchanged_api();\n",
         )
         .unwrap();
-        let producer_impact = vero_application::ImpactAssessment {
+        let producer_impact = crate::ImpactAssessment {
             schema_version: 3,
             snapshot_id: "sha256:producer-ts-project-reference".into(),
             coverage_complete: true,
@@ -9214,7 +9196,7 @@ operations:
             "import { changed_api } from '../../producer/src/api';\nchanged_api();\n",
         )
         .unwrap();
-        let producer_impact = vero_application::ImpactAssessment {
+        let producer_impact = crate::ImpactAssessment {
             schema_version: 3,
             snapshot_id: "sha256:producer-ts-config-error".into(),
             coverage_complete: true,
@@ -9267,7 +9249,7 @@ operations:
             "import { changed_api } from '../../producer/src/api';\nchanged_api();\n",
         )
         .unwrap();
-        let producer_impact = vero_application::ImpactAssessment {
+        let producer_impact = crate::ImpactAssessment {
             schema_version: 3,
             snapshot_id: "sha256:producer-ts-syntax-config-error".into(),
             coverage_complete: true,
@@ -9358,7 +9340,7 @@ operations:
             "function changed_api() {}\nchanged_api();\n",
         )
         .unwrap();
-        let producer_impact = vero_application::ImpactAssessment {
+        let producer_impact = crate::ImpactAssessment {
             schema_version: 3,
             snapshot_id: "sha256:producer-js".into(),
             coverage_complete: true,

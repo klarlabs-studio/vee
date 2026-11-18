@@ -81,7 +81,7 @@ pub fn summarize(
     root: &std::path::Path,
     store: &dyn Repositories,
 ) -> Result<QualityAnalytics, String> {
-    let config = vero_application::load_repository_config(root)?;
+    let config = crate::load_repository_config(root)?;
     let reviews = store.list_reviews()?;
     let mut latest_gate_decisions = BTreeMap::new();
     let mut reviews_without_gate_decision = 0;
@@ -199,7 +199,7 @@ pub fn summarize(
             provider_latency_history_complete = false;
             continue;
         };
-        let Ok(review) = vero_application::deserialize_review_result(&payload) else {
+        let Ok(review) = crate::deserialize_review_result(&payload) else {
             provider_latency_history_complete = false;
             continue;
         };

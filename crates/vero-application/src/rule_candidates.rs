@@ -53,7 +53,7 @@ pub struct FeedbackExample {
     pub reason: String,
 }
 
-pub(crate) fn mine(
+pub fn mine(
     records: &[FindingRecord],
     feedback: &[FindingFeedback],
     truncated: bool,
@@ -212,7 +212,7 @@ pub(crate) fn mine(
     }
 }
 
-pub(crate) fn mine_with_external(
+pub fn mine_with_external(
     records: &[FindingRecord],
     feedback: &[FindingFeedback],
     external_feedback: &[super::imported_history::ExternalReviewFeedback],
@@ -367,7 +367,7 @@ pub struct EffectivenessWindow {
     pub disputed_occurrences: usize,
 }
 
-pub(crate) fn effectiveness(
+pub fn effectiveness(
     store: &dyn vero_core::ports::Repositories,
     requested_id: Option<&str>,
     external_feedback: &[super::imported_history::ExternalReviewFeedback],

@@ -11,27 +11,30 @@ use vero_core::{
 };
 use vero_store_sqlite::ReviewStore;
 
-mod acceptance;
-mod analytics;
-mod attestation;
+use vero_application::acceptance;
+use vero_application::analytics;
+use vero_application::attestation;
 mod contracts;
-mod coverage;
-mod finding_task;
-mod imported_history;
+use vero_application::coverage;
+use vero_application::finding_task;
+use vero_application::imported_history;
+use vero_application::imported_history::{
+    imported_reviews_dir, parse_portable_review, store_imported_history, MAX_IMPORTED_REVIEW_BYTES,
+};
 mod mcp;
 mod operations;
-mod ownership;
+use vero_application::ownership;
 mod packs;
-mod patch_sandbox;
-mod pr_description;
-mod repository_map;
-mod rule_candidates;
+use vero_application::patch_sandbox;
+use vero_application::pr_description;
+use vero_application::repository_map;
+use vero_application::rule_candidates;
 mod setup;
-mod standards;
-mod test_effectiveness;
-mod test_generation;
-mod test_recommendations;
-mod verification_diagnosis;
+use vero_application::standards;
+use vero_application::test_effectiveness;
+use vero_application::test_generation;
+use vero_application::test_recommendations;
+use vero_application::verification_diagnosis;
 
 #[derive(Debug)]
 struct ConfigurationFailure(String);
@@ -1397,9 +1400,6 @@ enum ReportFormat {
     VeroJson,
 }
 
-const MAX_IMPORTED_REVIEW_BYTES: u64 = 10 * 1024 * 1024;
-static IMPORT_TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 /// A saved review with its `gate` replaced by the selected persisted decision
 /// (default: the latest), checked to belong to the same snapshot, configuration,
 /// and replay inputs. Shared by evidence bundles and attestations.
@@ -2035,29 +2035,6 @@ fn fetch_work_item(
     get_work_item(provider_id, &api_base, token, &reference)
 }
 
-fn parse_portable_review(bytes: &[u8]) -> Result<vero_application::ReviewResult> {
-    let text = std::str::from_utf8(bytes).context("import file must be UTF-8")?;
-    let payload: serde_json::Value =
-        serde_json::from_str(text).context("import file is not valid JSON")?;
-    anyhow::ensure!(
-        payload
-            .get("schema_version")
-            .and_then(serde_json::Value::as_u64)
-            == Some(2),
-        "only Vero review output schema v2 can be imported"
-    );
-    let review = vero_application::deserialize_review_result(text).map_err(anyhow::Error::msg)?;
-    anyhow::ensure!(
-        review.snapshot_id == review.change_set.digest,
-        "review snapshot ID does not match its change set digest"
-    );
-    anyhow::ensure!(
-        review.gate.snapshot_id == review.snapshot_id,
-        "gate decision is bound to a different snapshot"
-    );
-    Ok(review)
-}
-
 enum ImportedArchive {
     Review(Box<vero_application::ReviewResult>),
     Discussions(vero_hosting::PullRequestReviewIssues),
@@ -2140,90 +2117,10 @@ fn import_review_archive(
     Ok((digest, review))
 }
 
-fn store_imported_history(root: &std::path::Path, bytes: &[u8]) -> Result<String> {
-    anyhow::ensure!(
-        bytes.len() as u64 <= MAX_IMPORTED_REVIEW_BYTES,
-        "import file exceeds 10 MiB limit"
-    );
-    let digest = format!("sha256:{}", hex_digest(&Sha256::digest(bytes)));
-    let archive = imported_reviews_dir(root, true)?;
-    let digest_hex = digest.trim_start_matches("sha256:");
-    let target = archive.join(format!("{digest_hex}.json"));
-    let temporary = archive.join(format!(
-        ".{digest_hex}.{}.{}.tmp",
-        std::process::id(),
-        IMPORT_TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    let result = match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-    {
-        Ok(mut file) => {
-            let result = file
-                .write_all(bytes)
-                .context("could not write imported review archive")
-                .and_then(|()| {
-                    file.sync_all()
-                        .context("could not sync imported review archive")
-                });
-            drop(file);
-            result
-        }
-        Err(error) => {
-            Err(error).context("could not create temporary imported review archive entry")
-        }
-    };
-    if let Err(error) = result {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(error);
-    }
-    match std::fs::rename(&temporary, &target) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let existing = std::fs::read(&target)
-                .context("could not inspect existing imported review archive entry")?;
-            let _ = std::fs::remove_file(&temporary);
-            anyhow::ensure!(
-                existing == bytes,
-                "archive digest collision or corrupted archive entry"
-            );
-        }
-        Err(error) => {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(error).context("could not publish imported review archive entry");
-        }
-    }
-    Ok(digest)
-}
-
 fn hex_digest(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn imported_reviews_dir(root: &std::path::Path, create: bool) -> Result<std::path::PathBuf> {
-    let state = root.join(".vero");
-    if create && !state.exists() {
-        std::fs::create_dir(&state).context("could not create .vero state directory")?;
-    }
-    let state_meta =
-        std::fs::symlink_metadata(&state).context(".vero state directory is missing")?;
-    anyhow::ensure!(
-        state_meta.is_dir() && !state_meta.file_type().is_symlink(),
-        ".vero must be a real directory"
-    );
-    let archive = state.join("imports");
-    if create && !archive.exists() {
-        std::fs::create_dir(&archive).context("could not create imported review archive")?;
-    }
-    let archive_meta =
-        std::fs::symlink_metadata(&archive).context("imported review archive is missing")?;
-    anyhow::ensure!(
-        archive_meta.is_dir() && !archive_meta.file_type().is_symlink(),
-        "import archive must be a real directory"
-    );
-    Ok(archive)
-}
 #[derive(Subcommand)]
 enum GateCommand {
     /// Re-evaluate the gate for a saved review against the current source.
@@ -5836,6 +5733,7 @@ fn run() -> Result<u8> {
                     &links,
                     &discovered_links,
                     &remote_states,
+                    &vero_store_sqlite::SqliteRepositoryStores,
                 )
                 .map_err(|error| {
                     if error.starts_with("pull request link") {

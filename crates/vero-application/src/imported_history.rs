@@ -1,3 +1,4 @@
+use anyhow::Context;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{io::Write, path::Path};
@@ -79,14 +80,13 @@ pub fn record_feedback(
         return Err("archive digest must be a SHA-256 hex digest".into());
     }
     let digest = format!("sha256:{digest_hex}");
-    let archive_dir =
-        super::imported_reviews_dir(root, false).map_err(|error| error.to_string())?;
+    let archive_dir = imported_reviews_dir(root, false).map_err(|error| error.to_string())?;
     let archive_path = archive_dir.join(format!("{digest_hex}.json"));
     let archive_meta = std::fs::symlink_metadata(&archive_path)
         .map_err(|_| "imported review archive entry was not found".to_owned())?;
     if !archive_meta.is_file()
         || archive_meta.file_type().is_symlink()
-        || archive_meta.len() > super::MAX_IMPORTED_REVIEW_BYTES
+        || archive_meta.len() > MAX_IMPORTED_REVIEW_BYTES
     {
         return Err("invalid imported review archive entry".into());
     }
@@ -271,7 +271,7 @@ pub fn search(root: &Path, query: &str, limit: usize) -> Result<Value, String> {
     if !(1..=MAX_RESULTS).contains(&limit) {
         return Err(format!("limit must be between 1 and {MAX_RESULTS}"));
     }
-    let archive = super::imported_reviews_dir(root, false).map_err(|error| error.to_string())?;
+    let archive = imported_reviews_dir(root, false).map_err(|error| error.to_string())?;
     let mut matches = Vec::new();
     for entry in std::fs::read_dir(&archive).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
@@ -280,7 +280,7 @@ pub fn search(root: &Path, query: &str, limit: usize) -> Result<Value, String> {
         }
         let metadata =
             std::fs::symlink_metadata(entry.path()).map_err(|error| error.to_string())?;
-        if !metadata.file_type().is_file() || metadata.len() > super::MAX_IMPORTED_REVIEW_BYTES {
+        if !metadata.file_type().is_file() || metadata.len() > MAX_IMPORTED_REVIEW_BYTES {
             continue;
         }
         let bytes = std::fs::read(entry.path()).map_err(|error| error.to_string())?;
@@ -288,7 +288,7 @@ pub fn search(root: &Path, query: &str, limit: usize) -> Result<Value, String> {
         if entry.file_name().to_string_lossy() != format!("{hash}.json") {
             continue;
         }
-        let review = match super::parse_portable_review(&bytes) {
+        let review = match parse_portable_review(&bytes) {
             Ok(review) => review,
             Err(_) => {
                 let discussion: vero_hosting::PullRequestReviewIssues =
@@ -435,6 +435,123 @@ fn hex_digest(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Upper bound on one imported review archive entry.
+pub const MAX_IMPORTED_REVIEW_BYTES: u64 = 10 * 1024 * 1024;
+static IMPORT_TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Parse and integrity-check a portable Vero review (output schema v2).
+pub fn parse_portable_review(bytes: &[u8]) -> anyhow::Result<crate::ReviewResult> {
+    let text = std::str::from_utf8(bytes).context("import file must be UTF-8")?;
+    let payload: serde_json::Value =
+        serde_json::from_str(text).context("import file is not valid JSON")?;
+    anyhow::ensure!(
+        payload
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            == Some(2),
+        "only Vero review output schema v2 can be imported"
+    );
+    let review = crate::deserialize_review_result(text).map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(
+        review.snapshot_id == review.change_set.digest,
+        "review snapshot ID does not match its change set digest"
+    );
+    anyhow::ensure!(
+        review.gate.snapshot_id == review.snapshot_id,
+        "gate decision is bound to a different snapshot"
+    );
+    Ok(review)
+}
+
+/// Archive an imported review under `.vero/imports` by content digest; returns the digest.
+pub fn store_imported_history(root: &std::path::Path, bytes: &[u8]) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_IMPORTED_REVIEW_BYTES,
+        "import file exceeds 10 MiB limit"
+    );
+    let digest = format!(
+        "sha256:{}",
+        vero_core::digest(bytes).trim_start_matches("sha256:")
+    );
+    let archive = imported_reviews_dir(root, true)?;
+    let digest_hex = digest.trim_start_matches("sha256:");
+    let target = archive.join(format!("{digest_hex}.json"));
+    let temporary = archive.join(format!(
+        ".{digest_hex}.{}.{}.tmp",
+        std::process::id(),
+        IMPORT_TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let result = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+    {
+        Ok(mut file) => {
+            let result = file
+                .write_all(bytes)
+                .context("could not write imported review archive")
+                .and_then(|()| {
+                    file.sync_all()
+                        .context("could not sync imported review archive")
+                });
+            drop(file);
+            result
+        }
+        Err(error) => {
+            Err(error).context("could not create temporary imported review archive entry")
+        }
+    };
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    match std::fs::rename(&temporary, &target) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = std::fs::read(&target)
+                .context("could not inspect existing imported review archive entry")?;
+            let _ = std::fs::remove_file(&temporary);
+            anyhow::ensure!(
+                existing == bytes,
+                "archive digest collision or corrupted archive entry"
+            );
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error).context("could not publish imported review archive entry");
+        }
+    }
+    Ok(digest)
+}
+
+/// The imported review archive directory, which must be a real directory.
+pub fn imported_reviews_dir(
+    root: &std::path::Path,
+    create: bool,
+) -> anyhow::Result<std::path::PathBuf> {
+    let state = root.join(".vero");
+    if create && !state.exists() {
+        std::fs::create_dir(&state).context("could not create .vero state directory")?;
+    }
+    let state_meta =
+        std::fs::symlink_metadata(&state).context(".vero state directory is missing")?;
+    anyhow::ensure!(
+        state_meta.is_dir() && !state_meta.file_type().is_symlink(),
+        ".vero must be a real directory"
+    );
+    let archive = state.join("imports");
+    if create && !archive.exists() {
+        std::fs::create_dir(&archive).context("could not create imported review archive")?;
+    }
+    let archive_meta =
+        std::fs::symlink_metadata(&archive).context("imported review archive is missing")?;
+    anyhow::ensure!(
+        archive_meta.is_dir() && !archive_meta.file_type().is_symlink(),
+        "import archive must be a real directory"
+    );
+    Ok(archive)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,7 +586,7 @@ mod tests {
             }],
         };
         let bytes = serde_json::to_vec(&report).unwrap();
-        super::super::store_imported_history(root.path(), &bytes).unwrap();
+        super::store_imported_history(root.path(), &bytes).unwrap();
 
         let result = search(root.path(), "null response", 10).unwrap();
         assert_eq!(result["matches"][0]["provider"], "github");
@@ -516,7 +633,7 @@ mod tests {
             }],
         };
         let bytes = serde_json::to_vec(&discussion).unwrap();
-        let digest = super::super::store_imported_history(root.path(), &bytes).unwrap();
+        let digest = super::store_imported_history(root.path(), &bytes).unwrap();
         let first = record_feedback(
             root.path(),
             FeedbackRecordInput {

@@ -6,7 +6,7 @@ use vero_core::ChangeSet;
 pub fn context(
     root: &Path,
     change_set: &ChangeSet,
-    impact: &vero_application::ImpactAssessment,
+    impact: &crate::ImpactAssessment,
     max_files: usize,
     max_file_bytes: usize,
     max_total_bytes: usize,

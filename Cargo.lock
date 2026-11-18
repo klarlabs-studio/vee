@@ -2578,10 +2578,17 @@ dependencies = [
 name = "vero-application"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "globset",
  "jsonschema",
  "libc",
  "proc-macro2",
  "reqwest",
+ "ring",
+ "roxmltree",
+ "schemars",
+ "semver",
  "serde",
  "serde_json",
  "serde_yaml",

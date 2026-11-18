@@ -1,6 +1,6 @@
+use crate::{ImpactAnalyzer, ImpactAssessment, ReviewResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use vero_application::{ImpactAnalyzer, ImpactAssessment, ReviewResult};
 use vero_core::VerificationStatus;
 use vero_hosting::WorkItemSnapshot;
 
@@ -944,7 +944,7 @@ mod tests {
             changed_symbols: vec!["format".into()],
             groups: vec![],
             paths: vec![
-                vero_application::ImpactEdge {
+                crate::ImpactEdge {
                     source_path: "src/lib.rs".into(),
                     affected_path: "tests/api_test.rs".into(),
                     relationship: "likely_test_reference".into(),
@@ -952,7 +952,7 @@ mod tests {
                     certainty: "inferred_syntax".into(),
                     evidence_line: 12,
                 },
-                vero_application::ImpactEdge {
+                crate::ImpactEdge {
                     source_path: "src/lib.rs".into(),
                     affected_path: "src/other.rs".into(),
                     relationship: "syntactic_symbol_reference".into(),

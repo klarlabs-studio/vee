@@ -21,7 +21,7 @@ pub struct FindingTask {
     pub finding: FindingRecord,
     pub source_context: Option<SourceContext>,
     pub context_note: Option<String>,
-    pub impact_paths: Vec<vero_application::ImpactEdge>,
+    pub impact_paths: Vec<crate::ImpactEdge>,
     pub impact_coverage_complete: Option<bool>,
     pub evidence: Vec<vero_core::Evidence>,
     pub applicable_standards: Vec<TaskStandard>,
@@ -152,7 +152,7 @@ pub fn build(
     let payload = store
         .get(&review_id)?
         .ok_or_else(|| format!("source review {review_id} for finding was not found"))?;
-    let review = vero_application::deserialize_review_result(&payload)
+    let review = crate::deserialize_review_result(&payload)
         .map_err(|error| format!("stored source review is invalid: {error}"))?;
     if review.snapshot_id != snapshot_id
         || !review
@@ -162,7 +162,7 @@ pub fn build(
     {
         return Err("finding occurrence does not match its stored review snapshot".into());
     }
-    let current = vero_application::capture_current_change_set(root, &review.change_set)
+    let current = crate::capture_current_change_set(root, &review.change_set)
         .map(|change_set| change_set.digest == snapshot_id)
         .unwrap_or(false);
     let (source_context, mut context_note) = source_context(
@@ -297,11 +297,7 @@ fn impact_context(
     root: &Path,
     change_set: &vero_core::ChangeSet,
     finding_path: Option<&str>,
-) -> (
-    Vec<vero_application::ImpactEdge>,
-    Option<bool>,
-    Option<String>,
-) {
+) -> (Vec<crate::ImpactEdge>, Option<bool>, Option<String>) {
     let Some(path) = finding_path else {
         return (
             Vec::new(),
@@ -309,7 +305,7 @@ fn impact_context(
             Some("Finding has no source path for impact lookup.".into()),
         );
     };
-    match vero_application::analyze_impact(root, change_set) {
+    match crate::analyze_impact(root, change_set) {
         Ok(assessment) => {
             let mut paths: Vec<_> = assessment
                 .paths

@@ -1767,6 +1767,36 @@ fn finding_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FindingR
     })
 }
 
+/// Opens `.vero/vero.sqlite` inside a repository checkout. The state
+/// directory must be a real directory and the database a regular file, so a
+/// symlink cannot redirect reads to another repository's state.
+pub struct SqliteRepositoryStores;
+
+impl RepositoryStores for SqliteRepositoryStores {
+    fn open_existing(&self, root: &Path) -> Result<Option<Box<dyn Repositories>>, String> {
+        let metadata_dir = root.join(".vero");
+        match std::fs::symlink_metadata(&metadata_dir) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => {
+                return Err(format!(
+                    "{} must be a real directory",
+                    metadata_dir.display()
+                ))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.to_string()),
+        }
+        let database = metadata_dir.join("vero.sqlite");
+        match std::fs::symlink_metadata(&database) {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Ok(_) => return Err(format!("{} must be a regular file", database.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.to_string()),
+        }
+        Ok(Some(Box::new(ReviewStore::open(&database)?)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

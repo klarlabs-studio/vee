@@ -18,7 +18,7 @@ pub const PAYLOAD_TYPE: &str = "application/vnd.in-toto+json";
 /// Build the in-toto statement for `review` (whose `gate` is the selected decision).
 /// `commit` is the commit whose content equals the reviewed snapshot, if any.
 pub fn statement(
-    review: &vero_application::ReviewResult,
+    review: &crate::ReviewResult,
     bundle_manifest_digest: &str,
     commit: Option<&str>,
 ) -> Result<Value> {
