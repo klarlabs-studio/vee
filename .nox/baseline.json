@@ -164,24 +164,6 @@
       "created_at": "2026-11-17T20:53:07.951791Z"
     },
     {
-      "fingerprint": "5af729052b5f99b8a40b209741fd5cba939d0a86a5db0a879208da59b03001be",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "Accepted risk: provider and verification executables come from trusted repository or user configuration. The HTTP config endpoint is loopback-only with Host/Origin checks, JSON-only bodies, and an optional bearer token (vero-http check_origin).",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.116719Z"
-    },
-    {
-      "fingerprint": "d721350424f767386f2f70827870998bea6fd89059b933285178b4d99b7d066a",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "Accepted risk: provider and verification executables come from trusted repository or user configuration. The HTTP config endpoint is loopback-only with Host/Origin checks, JSON-only bodies, and an optional bearer token (vero-http check_origin).",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.116722Z"
-    },
-    {
       "fingerprint": "1cd60225296dafb161a552431f1c2437562baaa4870fab00a4e7a394dcfa764c",
       "rule_id": "",
       "file_path": "",
@@ -236,15 +218,6 @@
       "created_at": "2026-11-17T20:53:08.172118Z"
     },
     {
-      "fingerprint": "aaa1b57285e842840e4e541db28216729419a65a21b62051c0ad0b4a215f488f",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.17212Z"
-    },
-    {
       "fingerprint": "bbea370cd159fe7803fc131457e9495d2c6837483c42b8f35fd2011879cf8db8",
       "rule_id": "",
       "file_path": "",
@@ -261,42 +234,6 @@
       "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
       "owner": "vero-maintainers",
       "created_at": "2026-11-17T20:53:08.172127Z"
-    },
-    {
-      "fingerprint": "fefbd8bf9ba39b7c2bc37f2847051d35d5e6c68fb2f6fab1e8c270f87509b8f0",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.172135Z"
-    },
-    {
-      "fingerprint": "fefbd8bf9ba39b7c2bc37f2847051d35d5e6c68fb2f6fab1e8c270f87509b8f0",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.172135Z"
-    },
-    {
-      "fingerprint": "5af729052b5f99b8a40b209741fd5cba939d0a86a5db0a879208da59b03001be",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "Accepted risk: provider and verification executables come from trusted repository or user configuration. The HTTP config endpoint is loopback-only with Host/Origin checks, JSON-only bodies, and an optional bearer token (vero-http check_origin).",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.116719Z"
-    },
-    {
-      "fingerprint": "5af729052b5f99b8a40b209741fd5cba939d0a86a5db0a879208da59b03001be",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "Accepted risk: provider and verification executables come from trusted repository or user configuration. The HTTP config endpoint is loopback-only with Host/Origin checks, JSON-only bodies, and an optional bearer token (vero-http check_origin).",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.116719Z"
     },
     {
       "fingerprint": "1cd60225296dafb161a552431f1c2437562baaa4870fab00a4e7a394dcfa764c",
@@ -765,6 +702,33 @@
       "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
       "owner": "vero-maintainers",
       "created_at": "2026-11-18T03:15:46.187490Z"
+    },
+    {
+      "fingerprint": "4fc9838acae81d4efd9aa7c8104271106cc2be55ae85f4bd0f4e39ff74acd4c3",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T06:20:50.806659Z"
+    },
+    {
+      "fingerprint": "6ac94c6474f5f94d177b95e476db70c9780560dbf065ce4f9648d559bc282f17",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T06:20:50.806659Z"
+    },
+    {
+      "fingerprint": "6ac94c6474f5f94d177b95e476db70c9780560dbf065ce4f9648d559bc282f17",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T06:20:50.806659Z"
     }
   ]
 }
