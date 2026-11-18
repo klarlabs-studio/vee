@@ -254,6 +254,28 @@ fn default_verification_search_path() -> std::ffi::OsString {
     }
 }
 
+/// The files that may run as `path`. On Windows a name without an extension
+/// runs only with one of the `PATHEXT` extensions, never as itself, so an
+/// extensionless shell shim beside `cargo.exe` is not chosen.
+fn executable_candidates(path: &Path) -> Vec<PathBuf> {
+    #[cfg(windows)]
+    if path.extension().is_none() {
+        let extensions =
+            std::env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+        return extensions
+            .to_string_lossy()
+            .split(';')
+            .filter(|extension| !extension.is_empty())
+            .map(|extension| {
+                let mut candidate = path.as_os_str().to_owned();
+                candidate.push(extension);
+                PathBuf::from(candidate)
+            })
+            .collect();
+    }
+    vec![path.to_path_buf()]
+}
+
 fn resolve_verification_executable_with_path(
     executable: &str,
     working_directory: &Path,
@@ -268,18 +290,7 @@ fn resolve_verification_executable_with_path(
         } else {
             working_directory.join(requested)
         };
-        candidates.push(explicit_path.clone());
-        #[cfg(windows)]
-        if requested.extension().is_none() {
-            let extensions =
-                std::env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
-            for extension in extensions.to_string_lossy().split(';') {
-                candidates.push(PathBuf::from(format!(
-                    "{}{extension}",
-                    explicit_path.display()
-                )));
-            }
-        }
+        candidates.extend(executable_candidates(&explicit_path));
     } else {
         let search_path = path.unwrap_or_else(default_verification_search_path);
         for directory in std::env::split_paths(&search_path) {
@@ -288,15 +299,7 @@ fn resolve_verification_executable_with_path(
             } else {
                 working_directory.join(directory)
             };
-            candidates.push(directory.join(requested));
-            #[cfg(windows)]
-            if requested.extension().is_none() {
-                let extensions =
-                    std::env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
-                for extension in extensions.to_string_lossy().split(';') {
-                    candidates.push(directory.join(format!("{executable}{extension}")));
-                }
-            }
+            candidates.extend(executable_candidates(&directory.join(requested)));
         }
     }
     if let Some(candidate) = first_executable_candidate(candidates)? {
@@ -612,6 +615,33 @@ fn terminate_process_tree(child: &mut std::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_verification_lookup_ignores_extensionless_shims() {
+        let directory = tempfile::tempdir().unwrap();
+        // A shell shim without an extension, as Git for Windows and some
+        // toolchains install, must not shadow the real executable.
+        std::fs::write(directory.path().join("tool"), "#!/bin/sh\n").unwrap();
+        let system_root = std::env::var_os("SYSTEMROOT").unwrap();
+        std::fs::copy(
+            PathBuf::from(system_root)
+                .join("System32")
+                .join("where.exe"),
+            directory.path().join("tool.exe"),
+        )
+        .unwrap();
+        let resolved = resolve_verification_executable_with_path(
+            "tool",
+            directory.path(),
+            Some(directory.path().as_os_str().to_owned()),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.file_name().unwrap().to_ascii_lowercase(),
+            "tool.exe"
+        );
+    }
 
     #[cfg(windows)]
     #[test]
