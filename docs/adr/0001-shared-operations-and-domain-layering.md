@@ -103,12 +103,23 @@ Restructure toward domain layering, in this order:
    outside its tests. `vero-cli` keeps argument parsing, output rendering,
    the MCP adapter, and composition.
 
-   Remaining: route `vero-http` handlers through `operations` (their response
-   documents differ from the published contracts and the dashboard reads
-   them, so each needs a contract check); split `vero-application/src/lib.rs`
-   into the bounded-context modules above; and decide whether verification
-   and provider subprocesses (`vero-process`) sit behind ports, as Git
-   capture (`vero-git`) does not today.
+   `vero-http` now holds a `Workspace` and calls `operations` for every
+   dashboard route: review listing, review detail (`review_detail`: latest
+   gate applied, findings, impact recomputed while the checkout matches),
+   unpaged findings (`all_findings`), status changes, starting a review,
+   local analytics (`local_analytics`, moved from `vero-http`), and the
+   configuration editor (`repository_config_view`,
+   `replace_repository_config`). Response documents are unchanged, because
+   the dashboard reads them; `vero-http` keeps only origin and token checks,
+   JSON mapping, and the webhook lease loop, and depends on
+   `vero-store-sqlite` only to compose the default stores. Dashboard reads
+   on a repository without `.vero` now return empty results instead of an
+   error, matching the CLI and MCP.
+
+   Remaining: split `vero-application/src/lib.rs` into the bounded-context
+   modules above, and decide whether verification and provider subprocesses
+   (`vero-process`) sit behind ports, as Git capture (`vero-git`) does not
+   today.
 
 ## Consequences
 
