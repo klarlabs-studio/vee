@@ -164,15 +164,6 @@
       "created_at": "2026-11-17T20:53:07.951791Z"
     },
     {
-      "fingerprint": "3737dbba5a43766a944f9c6e3b9d943758951eba1fd660e5935deace6dc4852d",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "Accepted risk: provider and verification executables come from trusted repository or user configuration. The HTTP config endpoint is loopback-only with Host/Origin checks, JSON-only bodies, and an optional bearer token (vero-http check_origin).",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.116717Z"
-    },
-    {
       "fingerprint": "5af729052b5f99b8a40b209741fd5cba939d0a86a5db0a879208da59b03001be",
       "rule_id": "",
       "file_path": "",
@@ -180,24 +171,6 @@
       "reason": "Accepted risk: provider and verification executables come from trusted repository or user configuration. The HTTP config endpoint is loopback-only with Host/Origin checks, JSON-only bodies, and an optional bearer token (vero-http check_origin).",
       "owner": "vero-maintainers",
       "created_at": "2026-11-17T20:53:08.116719Z"
-    },
-    {
-      "fingerprint": "62e8303d5e6799aa30641ac93d6da511ac96790fb4ecbed46648cbff92fa3ac3",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "Accepted risk: provider and verification executables come from trusted repository or user configuration. The HTTP config endpoint is loopback-only with Host/Origin checks, JSON-only bodies, and an optional bearer token (vero-http check_origin).",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.11672Z"
-    },
-    {
-      "fingerprint": "a2ce93af8aec5e3bacd316156f39f4347dfb332aa0328f7b7257657b9dba4a15",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "Accepted risk: provider and verification executables come from trusted repository or user configuration. The HTTP config endpoint is loopback-only with Host/Origin checks, JSON-only bodies, and an optional bearer token (vero-http check_origin).",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.116721Z"
     },
     {
       "fingerprint": "d721350424f767386f2f70827870998bea6fd89059b933285178b4d99b7d066a",
@@ -209,15 +182,6 @@
       "created_at": "2026-11-17T20:53:08.116722Z"
     },
     {
-      "fingerprint": "0379fd0b7d99e301fafbf49288ba4ec5e919c8d945a73e772d7dcb0b27bb0198",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.172084Z"
-    },
-    {
       "fingerprint": "1cd60225296dafb161a552431f1c2437562baaa4870fab00a4e7a394dcfa764c",
       "rule_id": "",
       "file_path": "",
@@ -225,15 +189,6 @@
       "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
       "owner": "vero-maintainers",
       "created_at": "2026-11-17T20:53:08.172086Z"
-    },
-    {
-      "fingerprint": "22079356db80c17c4d05f6b4acf5517bd8de22ce3845358a191a82e054913dc7",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.172088Z"
     },
     {
       "fingerprint": "30aee0fc6c9de7b82f081ee33ed49b23d9cb595e93ad633e11b2d3426feca7be",
@@ -245,51 +200,6 @@
       "created_at": "2026-11-17T20:53:08.172089Z"
     },
     {
-      "fingerprint": "311eebe951fdf19f9d4f26c09d33571a69c5a3bdb9dc0d7e2327a2a731f3a783",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.172091Z"
-    },
-    {
-      "fingerprint": "40bfa4cd81e1741d6d1fe5ddaa91a4e373502b30a1696345166a9a57f854012f",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.172093Z"
-    },
-    {
-      "fingerprint": "41892bc7050904b68d90c14847f356ddd41873ad1b19189e818661791ddfe345",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.172096Z"
-    },
-    {
-      "fingerprint": "427aba70b59d14557a675b081415135ba97491f79725882a53356eb1150f7d21",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.172098Z"
-    },
-    {
-      "fingerprint": "510dfff875c6157175688dc57da1379533cae8293f48ae0517a0d90ac3e45657",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.1721Z"
-    },
-    {
       "fingerprint": "545e545ee863541caa4f084fecb9a0c5870334d134c2af5d2943b4b2cb59d018",
       "rule_id": "",
       "file_path": "",
@@ -299,24 +209,6 @@
       "created_at": "2026-11-17T20:53:08.172102Z"
     },
     {
-      "fingerprint": "5838944ad8931227073b3ed9e02b4c14ec0100c02231f35191119f705d5708a8",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.172104Z"
-    },
-    {
-      "fingerprint": "6ceb723b010e97dbe053606d9a3febf93da67ffd447fe94f708eded678b4761c",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.172106Z"
-    },
-    {
       "fingerprint": "71eb91fa4615ee5fc5a888067eaf2e79280a88102d4595786ec477eefbdb0f06",
       "rule_id": "",
       "file_path": "",
@@ -324,33 +216,6 @@
       "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
       "owner": "vero-maintainers",
       "created_at": "2026-11-17T20:53:08.172107Z"
-    },
-    {
-      "fingerprint": "7c6094cb4167e7ad0b525543aa513ef137ef968118cf2c3d3c12a3f67a2ef5c8",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.172109Z"
-    },
-    {
-      "fingerprint": "8eec677cc92d96e9c1c145f2b597fcf6dbab5cbc62c4c030a4dfe4782309bd4a",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.172111Z"
-    },
-    {
-      "fingerprint": "8f9c762f70b0a5f250aad22cb785130a7c4a7d6d22a2b11187cca2b95dd1ac5e",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.172114Z"
     },
     {
       "fingerprint": "98789366da7c8892150b885189cb6a707b68f13c15bb6abbd7193c8975a7187c",
@@ -380,15 +245,6 @@
       "created_at": "2026-11-17T20:53:08.17212Z"
     },
     {
-      "fingerprint": "bbdf7b870e762aef32b3d47717dcd8107ca53138a49a0c98884e39ecfaa5ab54",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.172122Z"
-    },
-    {
       "fingerprint": "bbea370cd159fe7803fc131457e9495d2c6837483c42b8f35fd2011879cf8db8",
       "rule_id": "",
       "file_path": "",
@@ -407,24 +263,6 @@
       "created_at": "2026-11-17T20:53:08.172127Z"
     },
     {
-      "fingerprint": "ea4910b4470713cc5e574cc7ba197c381ce3a9c969ba2a0d0c3fdc3b8f251f26",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.17213Z"
-    },
-    {
-      "fingerprint": "fdf6bac4100d5d1c12295aadfd749f9d347f67c4da4d6a5b94f041a3902776c2",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.172133Z"
-    },
-    {
       "fingerprint": "fefbd8bf9ba39b7c2bc37f2847051d35d5e6c68fb2f6fab1e8c270f87509b8f0",
       "rule_id": "",
       "file_path": "",
@@ -432,24 +270,6 @@
       "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
       "owner": "vero-maintainers",
       "created_at": "2026-11-17T20:53:08.172135Z"
-    },
-    {
-      "fingerprint": "0a6b5b1eba4ce37e0186d30b1cd93db1b1792ba2eafa3aaacd53057992bc5ae6",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: serde_json into typed Rust structs does not instantiate arbitrary objects (CWE-502 does not apply).",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.225108Z"
-    },
-    {
-      "fingerprint": "77d3b692035be2ddd0cd391bb8143aa4a83b2a830277603ebed5d1db1171bc87",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: serde_json into typed Rust structs does not instantiate arbitrary objects (CWE-502 does not apply).",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.225111Z"
     },
     {
       "fingerprint": "fefbd8bf9ba39b7c2bc37f2847051d35d5e6c68fb2f6fab1e8c270f87509b8f0",
@@ -477,87 +297,6 @@
       "reason": "Accepted risk: provider and verification executables come from trusted repository or user configuration. The HTTP config endpoint is loopback-only with Host/Origin checks, JSON-only bodies, and an optional bearer token (vero-http check_origin).",
       "owner": "vero-maintainers",
       "created_at": "2026-11-17T20:53:08.116719Z"
-    },
-    {
-      "fingerprint": "8eec677cc92d96e9c1c145f2b597fcf6dbab5cbc62c4c030a4dfe4782309bd4a",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.172111Z"
-    },
-    {
-      "fingerprint": "62e8303d5e6799aa30641ac93d6da511ac96790fb4ecbed46648cbff92fa3ac3",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "Accepted risk: provider and verification executables come from trusted repository or user configuration. The HTTP config endpoint is loopback-only with Host/Origin checks, JSON-only bodies, and an optional bearer token (vero-http check_origin).",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.11672Z"
-    },
-    {
-      "fingerprint": "62e8303d5e6799aa30641ac93d6da511ac96790fb4ecbed46648cbff92fa3ac3",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "Accepted risk: provider and verification executables come from trusted repository or user configuration. The HTTP config endpoint is loopback-only with Host/Origin checks, JSON-only bodies, and an optional bearer token (vero-http check_origin).",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.11672Z"
-    },
-    {
-      "fingerprint": "510dfff875c6157175688dc57da1379533cae8293f48ae0517a0d90ac3e45657",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.1721Z"
-    },
-    {
-      "fingerprint": "510dfff875c6157175688dc57da1379533cae8293f48ae0517a0d90ac3e45657",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.1721Z"
-    },
-    {
-      "fingerprint": "510dfff875c6157175688dc57da1379533cae8293f48ae0517a0d90ac3e45657",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.1721Z"
-    },
-    {
-      "fingerprint": "5838944ad8931227073b3ed9e02b4c14ec0100c02231f35191119f705d5708a8",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.172104Z"
-    },
-    {
-      "fingerprint": "311eebe951fdf19f9d4f26c09d33571a69c5a3bdb9dc0d7e2327a2a731f3a783",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.172091Z"
-    },
-    {
-      "fingerprint": "311eebe951fdf19f9d4f26c09d33571a69c5a3bdb9dc0d7e2327a2a731f3a783",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T20:53:08.172091Z"
     },
     {
       "fingerprint": "1cd60225296dafb161a552431f1c2437562baaa4870fab00a4e7a394dcfa764c",
@@ -722,15 +461,6 @@
       "created_at": "2026-11-17T20:53:07.951791Z"
     },
     {
-      "fingerprint": "efa6754e20d437090dd68343c27c512bed390caaf29ee93a130ee43bae12f352",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
-      "owner": "vero-maintainers",
-      "created_at": "2026-11-17T21:18:47.188379Z"
-    },
-    {
       "fingerprint": "67e1f64541d0ef551ba5db17841b0899a9b57592e39f222b939a77bf4ca9ab5f",
       "rule_id": "",
       "file_path": "",
@@ -747,6 +477,294 @@
       "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
       "owner": "vero-maintainers",
       "created_at": "2026-11-17T22:28:20.462667Z"
+    },
+    {
+      "fingerprint": "7fe20af2065fb82671f221d223036c3775860e0bed3ea9a5cb6ce7da267f1765",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "280a5015e3d8ae09f0e91a3f8e43d6e2cc0280677882fdd90fb41b1149e075d2",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "60a4bf2575562ce1204b581fd8cabdbca217e2412b09f513dd1b54c539dd2690",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "f0bbb1b114836fbf86cc2b4bcda669d1e17e4e0dcfa75b6a8acc5efe15a66603",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "46faef1b4e6a1c31708cb0d798392689f416b4d1c50102eab3db4a5336bb6d62",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "46faef1b4e6a1c31708cb0d798392689f416b4d1c50102eab3db4a5336bb6d62",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "05f056ff019929843e2f0c0ef29a1fbc1a2c603cd1e60430f817e182bc49b9a7",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "477a410d4df181267957b15311af31e77d00bff2ed91bf99986b41d0b7a85065",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "03db7f9e077205f901206661a2522997fb4ac01a2f29b923dfd068c2514f39c1",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "c10c6776711b72fdb3790e4ba3d7025c6e8cb430b6f4e6f98f2bb8437c3f79d1",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted risk: provider and verification executables come from trusted repository or user configuration. The HTTP config endpoint is loopback-only with Host/Origin checks, JSON-only bodies, and an optional bearer token (vero-http check_origin).",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "0d3c2f7a5e87442e27063c2f82dad609cfa0ea81515a06427a8d917e6bd1c9de",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted risk: provider and verification executables come from trusted repository or user configuration. The HTTP config endpoint is loopback-only with Host/Origin checks, JSON-only bodies, and an optional bearer token (vero-http check_origin).",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "c10c6776711b72fdb3790e4ba3d7025c6e8cb430b6f4e6f98f2bb8437c3f79d1",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted risk: provider and verification executables come from trusted repository or user configuration. The HTTP config endpoint is loopback-only with Host/Origin checks, JSON-only bodies, and an optional bearer token (vero-http check_origin).",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "c10c6776711b72fdb3790e4ba3d7025c6e8cb430b6f4e6f98f2bb8437c3f79d1",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted risk: provider and verification executables come from trusted repository or user configuration. The HTTP config endpoint is loopback-only with Host/Origin checks, JSON-only bodies, and an optional bearer token (vero-http check_origin).",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "90b98a24ae150b19adeb9c6afcfa7eac04d444accf0ca84d7aa4dbd528850bfb",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted risk: provider and verification executables come from trusted repository or user configuration. The HTTP config endpoint is loopback-only with Host/Origin checks, JSON-only bodies, and an optional bearer token (vero-http check_origin).",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "1df2fda191404999972fd4610b9ea1f689d956ae6e380fc64f98e284d5601b7d",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "ea1c9dd5f1f3806eae1f81f9d3b024f0906693d3680777234419916ad70408de",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "2fba559eb3768f66684330c27e967e35733d17231c5450058000a5a5b1802a42",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "e89871a4936bbc3934c4c8553229b39efb3dcf166142d23a55faefe923a35bd1",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "65a1d6452afca11113af2ee6e1280f39bc49e2e7818e1ee447c753eeff447f35",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "71e0db673a9e858ab566bbceac19a6a2ecfd31e4fc400480c9a92cf7a8b9cb7a",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "3157762ee88dfa54376efede442bcbc739f2abd4637b3519ba5209fa3107ddb5",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "3157762ee88dfa54376efede442bcbc739f2abd4637b3519ba5209fa3107ddb5",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "0f008c0c6cdc10daa21741c956e84859b60a896fa7e09715092435d453665753",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: serde_json into typed Rust structs does not instantiate arbitrary objects (CWE-502 does not apply).",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "b92ad85d2a817e2c9fda5ea17cd76c4428c31f6c1b27cbfa95f379c7cae6b76b",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: serde_json into typed Rust structs does not instantiate arbitrary objects (CWE-502 does not apply).",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "c29a13e454aa8dbd46452d9603d46745e7d37f4b15acf4b327cc051f992fb653",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: serde_json into typed Rust structs does not instantiate arbitrary objects (CWE-502 does not apply).",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:13:02.427366Z"
+    },
+    {
+      "fingerprint": "e89871a4936bbc3934c4c8553229b39efb3dcf166142d23a55faefe923a35bd1",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:14:11.210181Z"
+    },
+    {
+      "fingerprint": "98789366da7c8892150b885189cb6a707b68f13c15bb6abbd7193c8975a7187c",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:14:11.210181Z"
+    },
+    {
+      "fingerprint": "e89871a4936bbc3934c4c8553229b39efb3dcf166142d23a55faefe923a35bd1",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:15:46.187490Z"
+    },
+    {
+      "fingerprint": "e89871a4936bbc3934c4c8553229b39efb3dcf166142d23a55faefe923a35bd1",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:15:46.187490Z"
+    },
+    {
+      "fingerprint": "98789366da7c8892150b885189cb6a707b68f13c15bb6abbd7193c8975a7187c",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:15:46.187490Z"
+    },
+    {
+      "fingerprint": "98789366da7c8892150b885189cb6a707b68f13c15bb6abbd7193c8975a7187c",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:15:46.187490Z"
+    },
+    {
+      "fingerprint": "98789366da7c8892150b885189cb6a707b68f13c15bb6abbd7193c8975a7187c",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: git is invoked with Command::arg (no shell) on the repository root fixed at startup or paths derived from it; caller revisions pass vero_git::validate_revision and paths are separated by --.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-18T03:15:46.187490Z"
     }
   ]
 }
