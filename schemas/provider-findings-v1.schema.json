@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/provider-findings-v1.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/provider-findings-v1.schema.json",
   "title": "Vee provider findings v1",
   "type": "object",
   "required": ["schema_version", "findings"],

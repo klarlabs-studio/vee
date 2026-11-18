@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/doctor-report-v1.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/doctor-report-v1.schema.json",
   "title": "Vee setup diagnosis v1",
   "description": "Whether a repository's configured reviewers can run on this machine. Returned by `vee doctor --output json` and the MCP `check_setup` tool.",
   "type": "object",

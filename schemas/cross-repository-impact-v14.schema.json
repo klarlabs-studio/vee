@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/cross-repository-impact-v14.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/cross-repository-impact-v14.schema.json",
   "title": "Vee cross-repository impact with single-media parameter content coverage",
   "type": "object",
   "additionalProperties": false,

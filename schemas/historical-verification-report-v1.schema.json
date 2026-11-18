@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/historical-verification-report-v1.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/historical-verification-report-v1.schema.json",
   "title": "Vee historical verification benchmark report v1",
   "type": "object",
   "required": ["schema_version", "benchmark", "corpus_id", "manifest_digest", "benchmark_config_digest", "vee_version", "verifier_digest", "case_count", "completed_cases", "incomplete_cases", "cases", "report_path", "limitations"],

@@ -23,7 +23,9 @@ Rename the product to **Vee**, the spoken form of V, everywhere:
 - the binary `vee` and the crates `vee-*` (the CLI package is `vee`);
 - the repository config `.vee.yaml` and the local state directory `.vee/`;
 - the environment variables `VEE_*`;
-- schema `$id`s and the attestation predicate type, under `https://vee.dev/`;
+- schema `$id`s and the attestation predicate type, under
+  `https://vee.klarlabs.de/` (a subdomain of the maintainer's `klarlabs.de`,
+  which also hosts the `go.klarlabs.de` modules);
 - the MCP server name, the bundled skills (`vee-*`), the UI, the docs, and the
   markers Vee writes into hosted review comments.
 
@@ -38,9 +40,10 @@ logos.
   variables to `VEE_*`.
 - Schema `$id`s and the attestation predicate type changed. Nothing was
   published under the old identifiers.
-- `vee.dev` is used as an identifier namespace in schema `$id`s and the
-  attestation predicate type. It needs to be registered before those URLs are
-  expected to resolve.
+- `vee.klarlabs.de` is an identifier namespace for schema `$id`s and the
+  attestation predicate type. The identifiers are stable whether or not the
+  URLs resolve; serving the schemas there is optional. `vee.dev` is not used
+  because it belongs to someone else.
 - Comments that pre-release builds posted on hosted pull requests carry the old
   `vero` marker. Vee will not find them, so it posts new comments next to them
   instead of updating them.

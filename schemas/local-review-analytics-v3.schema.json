@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/local-review-analytics-v3.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/local-review-analytics-v3.schema.json",
   "title": "Vee Local Review Analytics v3",
   "type": "object",
   "additionalProperties": false,

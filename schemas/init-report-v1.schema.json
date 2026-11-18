@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/init-report-v1.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/init-report-v1.schema.json",
   "title": "Vee init report v1",
   "description": "Files written by `vee init --output json`.",
   "type": "object",

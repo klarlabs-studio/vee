@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/gate-history-v1.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/gate-history-v1.schema.json",
   "title": "Vee gate history v1",
   "type": "object",
   "additionalProperties": false,

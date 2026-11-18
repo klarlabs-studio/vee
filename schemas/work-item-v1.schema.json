@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/work-item-v1.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/work-item-v1.schema.json",
   "title": "Vee work item context v1",
   "type": "object",
   "required": ["schema_version", "reference", "provider", "api_base", "title", "url", "state", "updated_at", "labels", "content_digest"],

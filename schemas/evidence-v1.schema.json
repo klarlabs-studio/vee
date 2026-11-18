@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/evidence-v1.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/evidence-v1.schema.json",
   "title": "Vee evidence v1",
   "type": "object",
   "required": ["id", "kind", "provenance", "source_path", "start_line", "end_line", "content_digest", "classification", "verification"],

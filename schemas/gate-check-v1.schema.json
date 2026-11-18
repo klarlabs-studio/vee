@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/gate-check-v1.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/gate-check-v1.schema.json",
   "title": "Vee Gate Check Result v1",
   "type": "object",
   "additionalProperties": false,

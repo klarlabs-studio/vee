@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/finding-work-package-v2.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/finding-work-package-v2.schema.json",
   "title": "Vee finding work package v2",
   "type": "object",
   "required": [

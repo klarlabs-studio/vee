@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/repository-map-v1.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/repository-map-v1.schema.json",
   "title": "Vee local repository dependency map",
   "type": "object",
   "additionalProperties": false,

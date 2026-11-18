@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/pull-request-context-v1.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/pull-request-context-v1.schema.json",
   "title": "Vee pull request context v1",
   "type": "object",
   "required": ["schema_version", "provider", "snapshot", "changed_files", "limitations"],

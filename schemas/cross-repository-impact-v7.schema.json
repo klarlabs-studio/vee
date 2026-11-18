@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/cross-repository-impact-v7.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/cross-repository-impact-v7.schema.json",
   "title": "Vee cross-repository impact with OpenAPI and AsyncAPI contract coverage",
   "type": "object",
   "additionalProperties": false,

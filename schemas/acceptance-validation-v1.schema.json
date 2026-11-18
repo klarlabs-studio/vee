@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/acceptance-validation-v1.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/acceptance-validation-v1.schema.json",
   "title": "Vee Acceptance Validation v1",
   "type": "object",
   "additionalProperties": false,

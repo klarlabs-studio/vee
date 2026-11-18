@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/rule-approvals-v2.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/rule-approvals-v2.schema.json",
   "title": "Vee rule guidance approvals v2",
   "oneOf": [
     { "$ref": "#/$defs/approval" },

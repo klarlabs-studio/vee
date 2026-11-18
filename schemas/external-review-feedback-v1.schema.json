@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/external-review-feedback-v1.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/external-review-feedback-v1.schema.json",
   "title": "Vee External Review Feedback v1",
   "description": "An explicit human label attached to an immutable archived provider comment. This is advisory history and is never gate evidence.",
   "type": "object",

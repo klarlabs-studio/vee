@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/finding-task-v1.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/finding-task-v1.schema.json",
   "title": "Vee finding task v1",
   "type": "object",
   "required": ["schema_version", "task_id", "review_id", "snapshot_id", "snapshot_current", "finding", "source_context", "context_note", "instructions"],

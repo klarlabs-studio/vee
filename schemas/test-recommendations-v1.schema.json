@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/test-recommendations-v1.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/test-recommendations-v1.schema.json",
   "title": "Vee Test Recommendations v1",
   "type": "object",
   "additionalProperties": false,

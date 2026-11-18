@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/review-gate-attestation-v1.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/review-gate-attestation-v1.schema.json",
   "title": "Vee review gate attestation v1",
-  "description": "An in-toto Statement v1 whose predicate (https://vee.dev/attestations/review-gate/v1) records a Vee gate decision. `vee reviews attest --format statement` prints it; `--format dsse` signs it into a DSSE envelope with payloadType application/vnd.in-toto+json.",
+  "description": "An in-toto Statement v1 whose predicate (https://vee.klarlabs.de/attestations/review-gate/v1) records a Vee gate decision. `vee reviews attest --format statement` prints it; `--format dsse` signs it into a DSSE envelope with payloadType application/vnd.in-toto+json.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -48,7 +48,7 @@
       }
     },
     "predicateType": {
-      "const": "https://vee.dev/attestations/review-gate/v1"
+      "const": "https://vee.klarlabs.de/attestations/review-gate/v1"
     },
     "predicate": {
       "type": "object",

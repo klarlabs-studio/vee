@@ -3,7 +3,7 @@
 //!
 //! The statement's subjects are the reviewed Git commit (only when the reviewed
 //! snapshot is exactly a commit's content) and Vee's snapshot digest. The
-//! predicate (`https://vee.dev/attestations/review-gate/v1`) records the gate
+//! predicate (`https://vee.klarlabs.de/attestations/review-gate/v1`) records the gate
 //! decision and what it was based on, and links to the evidence bundle by its
 //! manifest digest, so the full evidence can be verified separately.
 
@@ -12,7 +12,7 @@ use base64::Engine;
 use serde_json::{json, Value};
 
 pub const STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
-pub const PREDICATE_TYPE: &str = "https://vee.dev/attestations/review-gate/v1";
+pub const PREDICATE_TYPE: &str = "https://vee.klarlabs.de/attestations/review-gate/v1";
 pub const PAYLOAD_TYPE: &str = "application/vnd.in-toto+json";
 
 /// Build the in-toto statement for `review` (whose `gate` is the selected decision).
@@ -92,7 +92,7 @@ pub fn statement(
         "subject": subjects,
         "predicateType": PREDICATE_TYPE,
         "predicate": {
-            "verifier": { "id": "https://vee.dev/vee", "version": env!("CARGO_PKG_VERSION") },
+            "verifier": { "id": "https://vee.klarlabs.de/vee", "version": env!("CARGO_PKG_VERSION") },
             "timeVerified": time_verified,
             "review": {
                 "review_id": review.review_id,

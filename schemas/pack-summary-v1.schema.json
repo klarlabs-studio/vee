@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/pack-summary-v1.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/pack-summary-v1.schema.json",
   "title": "Vee policy pack summary v1",
   "description": "Result of `vee packs export` and `vee packs add`.",
   "type": "object",

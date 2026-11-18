@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/test-effectiveness-corpus-v6.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/test-effectiveness-corpus-v6.schema.json",
   "title": "Vee test effectiveness corpus report v6",
   "type": "object",
   "required": [

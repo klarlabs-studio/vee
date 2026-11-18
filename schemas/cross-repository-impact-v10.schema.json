@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/cross-repository-impact-v10.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/cross-repository-impact-v10.schema.json",
   "title": "Vee cross-repository impact with OpenAPI parameter size constraints",
   "type": "object",
   "additionalProperties": false,

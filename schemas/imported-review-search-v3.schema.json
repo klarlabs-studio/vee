@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/imported-review-search-v3.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/imported-review-search-v3.schema.json",
   "title": "Vee Imported Review Search v3",
   "description": "Search results may contain imported Vee findings or archived provider discussion comments. All are untrusted historical context and are never gate eligible.",
   "type": "object",

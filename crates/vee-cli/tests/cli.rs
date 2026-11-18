@@ -5098,7 +5098,7 @@ fn assert_matches_schema(value: &serde_json::Value, schema_json: &str, contract:
         .unwrap_or_else(|error| panic!("{contract} schema is invalid: {error}"));
     let registry = jsonschema::Registry::new()
         .add(
-            "https://vee.dev/schemas/analyzer-report-v1.schema.json",
+            "https://vee.klarlabs.de/schemas/analyzer-report-v1.schema.json",
             serde_json::from_str::<serde_json::Value>(include_str!(
                 "../../../schemas/analyzer-report-v1.schema.json"
             ))
@@ -5106,7 +5106,7 @@ fn assert_matches_schema(value: &serde_json::Value, schema_json: &str, contract:
         )
         .unwrap()
         .add(
-            "https://vee.dev/schemas/verification-run-v1.schema.json",
+            "https://vee.klarlabs.de/schemas/verification-run-v1.schema.json",
             serde_json::from_str::<serde_json::Value>(include_str!(
                 "../../../schemas/verification-run-v1.schema.json"
             ))
@@ -5114,7 +5114,7 @@ fn assert_matches_schema(value: &serde_json::Value, schema_json: &str, contract:
         )
         .unwrap()
         .add(
-            "https://vee.dev/schemas/gate-decision-v1.schema.json",
+            "https://vee.klarlabs.de/schemas/gate-decision-v1.schema.json",
             serde_json::from_str::<serde_json::Value>(include_str!(
                 "../../../schemas/gate-decision-v1.schema.json"
             ))
@@ -5122,7 +5122,7 @@ fn assert_matches_schema(value: &serde_json::Value, schema_json: &str, contract:
         )
         .unwrap()
         .add(
-            "https://vee.dev/schemas/evidence-v1.schema.json",
+            "https://vee.klarlabs.de/schemas/evidence-v1.schema.json",
             serde_json::from_str::<serde_json::Value>(include_str!(
                 "../../../schemas/evidence-v1.schema.json"
             ))
@@ -5130,7 +5130,7 @@ fn assert_matches_schema(value: &serde_json::Value, schema_json: &str, contract:
         )
         .unwrap()
         .add(
-            "https://vee.dev/schemas/waiver-v1.schema.json",
+            "https://vee.klarlabs.de/schemas/waiver-v1.schema.json",
             serde_json::from_str::<serde_json::Value>(include_str!(
                 "../../../schemas/waiver-v1.schema.json"
             ))
@@ -5138,7 +5138,7 @@ fn assert_matches_schema(value: &serde_json::Value, schema_json: &str, contract:
         )
         .unwrap()
         .add(
-            "https://vee.dev/schemas/work-item-v1.schema.json",
+            "https://vee.klarlabs.de/schemas/work-item-v1.schema.json",
             serde_json::from_str::<serde_json::Value>(include_str!(
                 "../../../schemas/work-item-v1.schema.json"
             ))
@@ -5146,7 +5146,7 @@ fn assert_matches_schema(value: &serde_json::Value, schema_json: &str, contract:
         )
         .unwrap()
         .add(
-            "https://vee.dev/schemas/review-output-v2.schema.json",
+            "https://vee.klarlabs.de/schemas/review-output-v2.schema.json",
             serde_json::from_str::<serde_json::Value>(include_str!(
                 "../../../schemas/review-output-v2.schema.json"
             ))
@@ -6520,7 +6520,7 @@ fn gated_review_with_no_reviewer_is_incomplete_and_persisted() {
     .unwrap();
     let registry = jsonschema::Registry::new()
         .add(
-            "https://vee.dev/schemas/analyzer-report-v1.schema.json",
+            "https://vee.klarlabs.de/schemas/analyzer-report-v1.schema.json",
             serde_json::from_str::<serde_json::Value>(include_str!(
                 "../../../schemas/analyzer-report-v1.schema.json"
             ))
@@ -6528,7 +6528,7 @@ fn gated_review_with_no_reviewer_is_incomplete_and_persisted() {
         )
         .unwrap()
         .add(
-            "https://vee.dev/schemas/work-item-v1.schema.json",
+            "https://vee.klarlabs.de/schemas/work-item-v1.schema.json",
             serde_json::from_str::<serde_json::Value>(include_str!(
                 "../../../schemas/work-item-v1.schema.json"
             ))
@@ -6536,22 +6536,22 @@ fn gated_review_with_no_reviewer_is_incomplete_and_persisted() {
         )
         .unwrap()
         .add(
-            "https://vee.dev/schemas/verification-run-v1.schema.json",
+            "https://vee.klarlabs.de/schemas/verification-run-v1.schema.json",
             verification_schema,
         )
         .unwrap()
         .add(
-            "https://vee.dev/schemas/evidence-v1.schema.json",
+            "https://vee.klarlabs.de/schemas/evidence-v1.schema.json",
             evidence_schema,
         )
         .unwrap()
         .add(
-            "https://vee.dev/schemas/gate-decision-v1.schema.json",
+            "https://vee.klarlabs.de/schemas/gate-decision-v1.schema.json",
             gate_schema,
         )
         .unwrap()
         .add(
-            "https://vee.dev/schemas/waiver-v1.schema.json",
+            "https://vee.klarlabs.de/schemas/waiver-v1.schema.json",
             serde_json::from_str::<serde_json::Value>(include_str!(
                 "../../../schemas/waiver-v1.schema.json"
             ))
@@ -9185,7 +9185,7 @@ fn snapshot_waiver_is_auditable_expires_and_only_applies_to_its_review() {
         serde_json::from_str(include_str!("../../../schemas/waivers-list-v1.schema.json")).unwrap();
     let registry = jsonschema::Registry::new()
         .add(
-            "https://vee.dev/schemas/analyzer-report-v1.schema.json",
+            "https://vee.klarlabs.de/schemas/analyzer-report-v1.schema.json",
             serde_json::from_str::<serde_json::Value>(include_str!(
                 "../../../schemas/analyzer-report-v1.schema.json"
             ))
@@ -9193,7 +9193,7 @@ fn snapshot_waiver_is_auditable_expires_and_only_applies_to_its_review() {
         )
         .unwrap()
         .add(
-            "https://vee.dev/schemas/waiver-v1.schema.json",
+            "https://vee.klarlabs.de/schemas/waiver-v1.schema.json",
             waiver_schema,
         )
         .unwrap()

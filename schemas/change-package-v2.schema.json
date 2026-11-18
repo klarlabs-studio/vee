@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/change-package-v2.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/change-package-v2.schema.json",
   "title": "Vee local change package v2",
   "type": "object",
   "additionalProperties": false,

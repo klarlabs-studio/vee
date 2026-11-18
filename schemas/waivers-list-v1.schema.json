@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/waivers-list-v1.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/waivers-list-v1.schema.json",
   "title": "Vee waiver list v1",
   "type": "object",
   "required": ["schema_version", "waivers"],

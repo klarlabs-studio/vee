@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/quality-analytics-v2.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/quality-analytics-v2.schema.json",
   "title": "Vee Local Quality Analytics v2",
   "type": "object",
   "additionalProperties": false,

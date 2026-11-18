@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vee.dev/schemas/test-verification-v1.schema.json",
+  "$id": "https://vee.klarlabs.de/schemas/test-verification-v1.schema.json",
   "title": "Vee generated test proposal verification result",
   "type": "object",
   "additionalProperties": false,

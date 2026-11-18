@@ -15,7 +15,7 @@ Vee has to speak their format.
 ## Decision
 
 1. `vee reviews attest <review-id>` emits an **in-toto Statement v1** with the
-   predicate type `https://vee.dev/attestations/review-gate/v1`. By default it is
+   predicate type `https://vee.klarlabs.de/attestations/review-gate/v1`. By default it is
    signed into a **DSSE envelope** (`application/vnd.in-toto+json`) with the same
    Ed25519 keys as evidence bundles. `--format statement` prints the unsigned
    statement for external signers.
