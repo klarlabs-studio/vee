@@ -96,21 +96,52 @@ pub(crate) fn fence_for(text: &str) -> String {
     "`".repeat(if longest >= 3 { longest + 1 } else { 3 })
 }
 
-/// Resolves a quoted statement to the one changed line it identifies: an exact
-/// trimmed match first, otherwise a unique changed line that contains the quote.
+/// Removes the `+ 12 | ` marker and line number that `numbered_source` renders,
+/// which models often copy along with the statement.
+fn strip_rendered_prefix(line: &str) -> &str {
+    let rest = line.trim_start();
+    let rest = rest.strip_prefix('+').unwrap_or(rest).trim_start();
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digits == 0 {
+        return line;
+    }
+    match rest[digits..].trim_start().strip_prefix('|') {
+        Some(source) => source,
+        None => line,
+    }
+}
+
+/// Resolves a quoted statement to the one changed line it identifies. Each
+/// quoted line is tried in order, ignoring code fences and copied line
+/// prefixes; the first that matches a single changed line wins.
 pub(crate) fn locate_quoted_line(
     text: &str,
     changed_line_ranges: &[(u64, u64)],
     quote: &str,
 ) -> Option<u64> {
-    let quote = quote.trim();
-    if quote.is_empty() {
-        return None;
-    }
-    let changed: Vec<(u64, &str)> = text
+    quote
+        .lines()
+        .map(|line| strip_rendered_prefix(line).trim())
+        .filter(|line| !line.is_empty() && !line.starts_with("```"))
+        .find_map(|line| locate_quoted_statement(text, changed_line_ranges, line))
+}
+
+/// Trims and collapses runs of whitespace to one space.
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn locate_quoted_statement(
+    text: &str,
+    changed_line_ranges: &[(u64, u64)],
+    quote: &str,
+) -> Option<u64> {
+    let quote = collapse_whitespace(quote);
+    let quote = quote.as_str();
+    let changed: Vec<(u64, String)> = text
         .split('\n')
         .enumerate()
-        .map(|(index, line)| (index as u64 + 1, line.trim()))
+        .map(|(index, line)| (index as u64 + 1, collapse_whitespace(line)))
         .filter(|(number, _)| {
             changed_line_ranges
                 .iter()
@@ -120,7 +151,7 @@ pub(crate) fn locate_quoted_line(
     let unique = |matches: Vec<u64>| (matches.len() == 1).then(|| matches[0]);
     let exact: Vec<u64> = changed
         .iter()
-        .filter(|(_, line)| *line == quote)
+        .filter(|(_, line)| line == quote)
         .map(|(number, _)| *number)
         .collect();
     if !exact.is_empty() {
@@ -221,7 +252,7 @@ fn analysis_prompt(target: &FocusedTarget, related: &str) -> String {
 fn structure_prompt(target: &FocusedTarget, analysis: &str) -> String {
     let notes_fence = fence_for(analysis);
     format!(
-        "Convert the review notes below into findings JSON. {UNTRUSTED_NOTE}\n\nInclude only defects the notes identify in `{path}`. Do not add new defects. Merge notes that describe the same defect into one finding. If the notes found no defects, return an empty list.\n\nFor each finding set `quote` to one changed (`+`) line copied exactly from the source below, without its marker and number: the executable statement that performs the faulty operation, not a comment or a signature.\n\nReview notes:\n{notes_fence}\n{analysis}\n{notes_fence}\n\nSource of {path}:\n{block}",
+        "Convert the review notes below into findings JSON. {UNTRUSTED_NOTE}\n\nInclude only defects the notes identify in `{path}`. Do not add new defects. Do not report correct behavior, passing tests, style, or concerns the notes rule out. Merge notes that describe the same defect into one finding. If the notes found no defects, return an empty list.\n\nFor each finding set `quote` to one changed (`+`) line copied exactly from the source below, without its marker and number: the executable statement that performs the faulty operation, not a comment or a signature.\n\nReview notes:\n{notes_fence}\n{analysis}\n{notes_fence}\n\nSource of {path}:\n{block}",
         path = target.path,
         block = source_block(target),
     )

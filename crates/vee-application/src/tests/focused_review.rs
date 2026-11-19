@@ -242,3 +242,45 @@ fn focused_review_with_no_changed_text_returns_no_findings_without_calls() {
     assert_eq!(output.stdout, br#"{"schema_version":1,"findings":[]}"#);
     assert!(output.usage.is_none());
 }
+
+#[test]
+fn quote_copied_with_its_rendered_marker_and_number_still_resolves() {
+    let ranges = [(4, 11)];
+    assert_eq!(
+        locate_quoted_line(LOCKOUT, &ranges, "+  9 | \tsnap.FailureCount++"),
+        Some(9)
+    );
+    assert_eq!(
+        locate_quoted_line(LOCKOUT, &ranges, "9 | snap.FailureCount++"),
+        Some(9)
+    );
+}
+
+#[test]
+fn multi_line_quote_resolves_to_its_first_matching_changed_line() {
+    assert_eq!(
+        locate_quoted_line(
+            LOCKOUT,
+            &[(4, 11)],
+            "snap.FailureCount++\nreturn store.Save(snap)"
+        ),
+        Some(9)
+    );
+    assert_eq!(
+        locate_quoted_line(LOCKOUT, &[(4, 11)], "```go\n\tsnap.FailureCount++\n```"),
+        Some(9)
+    );
+}
+
+#[test]
+fn quote_with_different_internal_spacing_still_resolves() {
+    assert_eq!(
+        locate_quoted_line(LOCKOUT, &[(4, 11)], "snap, err  :=  store.Get( key )"),
+        None,
+        "spacing inside tokens is not normalized"
+    );
+    assert_eq!(
+        locate_quoted_line(LOCKOUT, &[(4, 11)], "snap,   err := store.Get(key)"),
+        Some(5)
+    );
+}
