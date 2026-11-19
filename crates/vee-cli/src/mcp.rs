@@ -10,6 +10,7 @@ use mcp_rs::{transport, Server, ToolError};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, time::Duration};
+use vee_core::paths::CanonicalPath as _;
 use vee_core::{FindingFeedbackLabel, FindingStatus, Severity};
 
 const MAX_REPOSITORY_CONTEXT_BYTES: usize = 32 * 1024;
@@ -525,7 +526,7 @@ fn confined_consumers(workspace: &Workspace, supplied: &[String]) -> anyhow::Res
             "consumer_paths must contain between 1 and {MAX_CROSS_REPOSITORY_CONSUMERS} repository paths"
         )));
     }
-    let root = workspace.root().canonicalize()?;
+    let root = workspace.root().canonical()?;
     supplied
         .iter()
         .map(|path| {
@@ -540,7 +541,7 @@ fn confined_consumers(workspace: &Workspace, supplied: &[String]) -> anyhow::Res
                     "consumer path `{path}` must be a relative path without `.` or `..` components"
                 )));
             }
-            let canonical = root.join(relative).canonicalize().map_err(|error| {
+            let canonical = root.join(relative).canonical().map_err(|error| {
                 crate::usage_failure(format!("cannot resolve consumer path `{path}`: {error}"))
             })?;
             if !canonical.starts_with(&root) {
@@ -554,7 +555,7 @@ fn confined_consumers(workspace: &Workspace, supplied: &[String]) -> anyhow::Res
                 )));
             }
             let git_root = vee_git::repository_root(&canonical).map_err(anyhow::Error::msg)?;
-            if git_root.canonicalize()? != canonical {
+            if git_root.canonical()? != canonical {
                 return Err(crate::usage_failure(format!(
                     "consumer path `{path}` must name a Git checkout root"
                 )));
@@ -750,7 +751,7 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
                     return Err(crate::usage_failure("base_ref must contain 1 to 256 characters"));
                 }
                 let consumers = confined_consumers(&workspace, &input.consumer_paths)?;
-                let producer = workspace.root().canonicalize()?;
+                let producer = workspace.root().canonical()?;
                 crate::repository_map::analyze_cross_impact(&producer, &input.base_ref, &consumers)
                     .map_err(anyhow::Error::msg)
             })

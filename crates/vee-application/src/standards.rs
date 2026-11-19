@@ -49,7 +49,7 @@ struct Candidate {
 }
 
 pub fn resolve(root: &Path, target: Option<&Path>) -> Result<StandardsReport, String> {
-    let root = std::fs::canonicalize(root).map_err(|error| error.to_string())?;
+    let root = vee_core::paths::canonicalize(root).map_err(|error| error.to_string())?;
     let target = target.map(normalize_target).transpose()?;
     let mut candidates = Vec::new();
     let mut discovery_truncated = false;
@@ -379,7 +379,7 @@ pub fn sync_remote(
     {
         return Err("remote standards URL must be HTTPS, have a host, and contain no credentials, query, or fragment".into());
     }
-    let root = std::fs::canonicalize(root).map_err(|error| error.to_string())?;
+    let root = vee_core::paths::canonicalize(root).map_err(|error| error.to_string())?;
     let cache = root.join(".vee/standards-cache");
     if std::fs::symlink_metadata(root.join(".vee"))
         .is_ok_and(|metadata| metadata.file_type().is_symlink())
@@ -460,7 +460,7 @@ pub fn remove_remote(root: &Path, id: &str) -> Result<(), String> {
             "source ID must contain only ASCII letters, digits, '-' or '_' (1–64 chars)".into(),
         );
     }
-    let root = std::fs::canonicalize(root).map_err(|error| error.to_string())?;
+    let root = vee_core::paths::canonicalize(root).map_err(|error| error.to_string())?;
     let vee_dir = root.join(".vee");
     let cache = vee_dir.join("standards-cache");
     for path in [&vee_dir, &cache] {

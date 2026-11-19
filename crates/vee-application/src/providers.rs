@@ -1,6 +1,7 @@
 //! Reviewer providers: CLI agents, OpenAI-compatible APIs, and Ollama, with prompt budgeting and response caching.
 
 use super::*;
+use vee_core::paths::CanonicalPath as _;
 
 /// Application port for executing a configured review provider.
 /// Adapters own process, API, or local-inference details; the review use case owns
@@ -379,13 +380,13 @@ pub(crate) fn provider_executable_path(request: &ProviderRequest) -> Option<std:
         } else {
             request.working_directory.join(configured)
         };
-        path.canonicalize().ok()
+        path.canonical().ok()
     } else {
         std::env::var_os("PATH").and_then(|paths| {
             std::env::split_paths(&paths)
                 .map(|directory| directory.join(configured))
                 .find(|candidate| candidate.is_file())
-                .and_then(|candidate| candidate.canonicalize().ok())
+                .and_then(|candidate| candidate.canonical().ok())
         })
     };
     resolved

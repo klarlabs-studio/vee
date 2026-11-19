@@ -4,6 +4,7 @@
 
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use vee_core::paths::CanonicalPath as _;
 use vee_core::*;
 
 pub fn execute_verification(
@@ -50,6 +51,7 @@ pub fn execute_verification_capture(
     configure_process_group(&mut command);
     let mut child = command
         .env_clear()
+        .envs(platform_environment())
         .envs(environment.iter().cloned())
         .current_dir(working_directory)
         .stdin(Stdio::null())
@@ -252,6 +254,28 @@ fn default_verification_search_path() -> std::ffi::OsString {
     }
 }
 
+/// The files that may run as `path`. On Windows a name without an extension
+/// runs only with one of the `PATHEXT` extensions, never as itself, so an
+/// extensionless shell shim beside `cargo.exe` is not chosen.
+fn executable_candidates(path: &Path) -> Vec<PathBuf> {
+    #[cfg(windows)]
+    if path.extension().is_none() {
+        let extensions =
+            std::env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+        return extensions
+            .to_string_lossy()
+            .split(';')
+            .filter(|extension| !extension.is_empty())
+            .map(|extension| {
+                let mut candidate = path.as_os_str().to_owned();
+                candidate.push(extension);
+                PathBuf::from(candidate)
+            })
+            .collect();
+    }
+    vec![path.to_path_buf()]
+}
+
 fn resolve_verification_executable_with_path(
     executable: &str,
     working_directory: &Path,
@@ -266,18 +290,7 @@ fn resolve_verification_executable_with_path(
         } else {
             working_directory.join(requested)
         };
-        candidates.push(explicit_path.clone());
-        #[cfg(windows)]
-        if requested.extension().is_none() {
-            let extensions =
-                std::env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
-            for extension in extensions.to_string_lossy().split(';') {
-                candidates.push(PathBuf::from(format!(
-                    "{}{extension}",
-                    explicit_path.display()
-                )));
-            }
-        }
+        candidates.extend(executable_candidates(&explicit_path));
     } else {
         let search_path = path.unwrap_or_else(default_verification_search_path);
         for directory in std::env::split_paths(&search_path) {
@@ -286,15 +299,7 @@ fn resolve_verification_executable_with_path(
             } else {
                 working_directory.join(directory)
             };
-            candidates.push(directory.join(requested));
-            #[cfg(windows)]
-            if requested.extension().is_none() {
-                let extensions =
-                    std::env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
-                for extension in extensions.to_string_lossy().split(';') {
-                    candidates.push(directory.join(format!("{executable}{extension}")));
-                }
-            }
+            candidates.extend(executable_candidates(&directory.join(requested)));
         }
     }
     if let Some(candidate) = first_executable_candidate(candidates)? {
@@ -315,7 +320,7 @@ fn resolve_verification_executable_with_path(
             // the link, so executable hashing binds the underlying bytes.
             return Ok(absolute);
         }
-        return absolute.canonicalize().map_err(|error| {
+        return absolute.canonical().map_err(|error| {
             format!(
                 "resolving verification executable {}: {error}",
                 absolute.display()
@@ -340,17 +345,16 @@ fn first_executable_candidate(
 
 fn is_executable_file(path: &Path) -> Result<bool, String> {
     let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
-    if !metadata.is_file() {
-        return Ok(false);
-    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        Ok(metadata.permissions().mode() & 0o111 != 0)
+        Ok(metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
     }
+    // Elsewhere any regular file may run; the candidate list already limits
+    // Windows to PATHEXT extensions.
     #[cfg(not(unix))]
     {
-        Ok(true)
+        Ok(metadata.is_file())
     }
 }
 
@@ -429,7 +433,7 @@ pub fn execute_provider_cancellable(
         } else {
             request.working_directory.join(executable)
         };
-        rooted.canonicalize().map_err(|error| {
+        rooted.canonical().map_err(|error| {
             format!(
                 "resolving provider executable {}: {error}",
                 rooted.display()
@@ -446,6 +450,7 @@ pub fn execute_provider_cancellable(
     configure_process_group(&mut command);
     let mut child = command
         .env_clear()
+        .envs(platform_environment())
         .envs(request.environment.iter().cloned())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -539,6 +544,48 @@ pub fn execute_provider_cancellable(
     }
 }
 
+/// Variables that Windows programs need to start (`SYSTEMROOT`), find
+/// temporary and per-user directories (`TEMP`, `LOCALAPPDATA`, ...), and
+/// resolve executables (`PATHEXT`). None carries credentials. Child processes
+/// that otherwise start from an empty environment receive these, below any
+/// explicitly allowed variables. Empty elsewhere, where `PATH` and `HOME` are
+/// enough and are allowed explicitly.
+pub const PLATFORM_ENVIRONMENT: &[&str] = if cfg!(windows) {
+    &[
+        "SYSTEMROOT",
+        "SYSTEMDRIVE",
+        "WINDIR",
+        "COMSPEC",
+        "PATHEXT",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PROGRAMDATA",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "PROGRAMW6432",
+        "COMMONPROGRAMFILES",
+        "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE",
+    ]
+} else {
+    &[]
+};
+
+/// The [`PLATFORM_ENVIRONMENT`] variables this process has, for
+/// `Command::envs` right after `env_clear` and before explicitly allowed
+/// variables.
+pub fn platform_environment() -> Vec<(&'static str, std::ffi::OsString)> {
+    PLATFORM_ENVIRONMENT
+        .iter()
+        .filter_map(|name| Some((*name, std::env::var_os(name)?)))
+        .collect()
+}
+
 #[cfg(unix)]
 fn configure_process_group(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
@@ -567,6 +614,57 @@ fn terminate_process_tree(child: &mut std::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_verification_lookup_ignores_extensionless_shims() {
+        let directory = tempfile::tempdir().unwrap();
+        // A shell shim without an extension, as Git for Windows and some
+        // toolchains install, must not shadow the real executable.
+        std::fs::write(directory.path().join("tool"), "#!/bin/sh\n").unwrap();
+        let system_root = std::env::var_os("SYSTEMROOT").unwrap();
+        std::fs::copy(
+            PathBuf::from(system_root)
+                .join("System32")
+                .join("where.exe"),
+            directory.path().join("tool.exe"),
+        )
+        .unwrap();
+        let resolved = resolve_verification_executable_with_path(
+            "tool",
+            directory.path(),
+            Some(directory.path().as_os_str().to_owned()),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.file_name().unwrap().to_ascii_lowercase(),
+            "tool.exe"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_children_receive_the_platform_environment() {
+        let mut command = std::process::Command::new("cmd");
+        command
+            .args(["/C", "echo %SYSTEMROOT%"])
+            .env_clear()
+            .envs(platform_environment());
+        let output = command.output().unwrap();
+        let echoed = String::from_utf8_lossy(&output.stdout);
+        assert!(!echoed.contains("%SYSTEMROOT%"), "{echoed}");
+        assert!(echoed.to_ascii_lowercase().contains("windows"), "{echoed}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_children_receive_no_implicit_environment() {
+        let mut command = std::process::Command::new("/usr/bin/env");
+        command.env_clear().envs(platform_environment());
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    }
 
     #[cfg(unix)]
     #[test]

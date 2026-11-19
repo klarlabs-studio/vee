@@ -490,14 +490,14 @@ fn snapshot_worktree_files(
     paths: &[PathBuf],
 ) -> Result<Vec<vee_core::SnapshotFile>, String> {
     let mut files = snapshot_files(root, paths)?;
-    let canonical_root = std::fs::canonicalize(root).map_err(|error| error.to_string())?;
+    let canonical_root = vee_core::paths::canonicalize(root).map_err(|error| error.to_string())?;
     for relative in paths {
         let candidate = root.join(relative);
         match std::fs::symlink_metadata(&candidate) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
             _ => continue,
         }
-        let canonical_candidate = std::fs::canonicalize(&candidate).map_err(|error| {
+        let canonical_candidate = vee_core::paths::canonicalize(&candidate).map_err(|error| {
             format!(
                 "resolving possible submodule {}: {error}",
                 relative.display()
@@ -510,7 +510,7 @@ fn snapshot_worktree_files(
             ));
         }
         let submodule_root = match repository_root(&candidate) {
-            Ok(path) => std::fs::canonicalize(path).map_err(|error| error.to_string())?,
+            Ok(path) => vee_core::paths::canonicalize(path).map_err(|error| error.to_string())?,
             Err(_) => continue,
         };
         if submodule_root != canonical_candidate {
@@ -784,7 +784,8 @@ pub fn read_captured_file(
             Ok(None)
         }
     } else {
-        let canonical_root = std::fs::canonicalize(root).map_err(|error| error.to_string())?;
+        let canonical_root =
+            vee_core::paths::canonicalize(root).map_err(|error| error.to_string())?;
         let path = root.join(relative);
         let metadata = match std::fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
@@ -794,7 +795,7 @@ pub fn read_captured_file(
         if metadata.file_type().is_symlink() {
             let parent = path.parent().unwrap_or(root);
             let canonical_parent =
-                std::fs::canonicalize(parent).map_err(|error| error.to_string())?;
+                vee_core::paths::canonicalize(parent).map_err(|error| error.to_string())?;
             if !canonical_parent.starts_with(&canonical_root) {
                 return Err(format!(
                     "path escapes repository root through a symlink: {}",
@@ -804,7 +805,8 @@ pub fn read_captured_file(
             let target = std::fs::read_link(&path).map_err(|error| error.to_string())?;
             return Ok(Some(target.to_string_lossy().as_bytes().to_vec()));
         }
-        let canonical_path = std::fs::canonicalize(&path).map_err(|error| error.to_string())?;
+        let canonical_path =
+            vee_core::paths::canonicalize(&path).map_err(|error| error.to_string())?;
         if !canonical_path.starts_with(&canonical_root) {
             return Err(format!(
                 "path escapes repository root through a symlink: {}",
@@ -874,7 +876,7 @@ fn git(path: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
 pub fn snapshot_files(root: &Path, paths: &[PathBuf]) -> Result<Vec<SnapshotFile>, String> {
     use std::path::Component;
     let canonical_root =
-        std::fs::canonicalize(root).map_err(|e| format!("{}: {e}", root.display()))?;
+        vee_core::paths::canonicalize(root).map_err(|e| format!("{}: {e}", root.display()))?;
     let mut files = Vec::with_capacity(paths.len());
     for relative in paths {
         if relative.is_absolute()
@@ -894,7 +896,7 @@ pub fn snapshot_files(root: &Path, paths: &[PathBuf]) -> Result<Vec<SnapshotFile
         let path = root.join(relative);
         let mut ancestor = path.parent().unwrap_or(root).to_path_buf();
         let canonical_ancestor = loop {
-            match std::fs::canonicalize(&ancestor) {
+            match vee_core::paths::canonicalize(&ancestor) {
                 Ok(canonical) => break canonical,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     if !ancestor.pop() {

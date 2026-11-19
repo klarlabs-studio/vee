@@ -229,8 +229,8 @@ pub fn add(
     let root = workspace.root();
     let relative = format!("{PACKS_DIRECTORY}/{}", pack.name);
     let installed = root.join(&relative);
-    let same_location =
-        std::fs::canonicalize(source).ok() == std::fs::canonicalize(&installed).ok();
+    let same_location = vee_core::paths::canonicalize(source).ok()
+        == vee_core::paths::canonicalize(&installed).ok();
     if installed.exists() && !same_location {
         let installed_digest = packs::pack_digest(&installed).ok();
         if installed_digest.as_deref() != Some(source_digest.as_str()) {

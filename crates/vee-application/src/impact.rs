@@ -1,6 +1,7 @@
 //! Context & impact: changed symbols and the code that references them, per language analyzer.
 
 use super::*;
+use vee_core::paths::CanonicalPath as _;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImpactEdge {
@@ -855,13 +856,17 @@ pub(crate) fn analyze_go_references(
     }
 }
 
+/// Find the program `name` on PATH, as `name.exe` on Windows.
 pub(crate) fn find_executable(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH")
-        .into_iter()
-        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
-        .map(|directory| directory.join(name))
+    let executable = if cfg!(windows) && !name.ends_with(".exe") {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    };
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|directory| directory.join(&executable))
         .find(|candidate| candidate.is_file())
-        .and_then(|candidate| candidate.canonicalize().ok())
+        .and_then(|candidate| candidate.canonical().ok())
 }
 
 pub(crate) fn analyze_typescript_references(
@@ -1030,11 +1035,63 @@ pub(crate) fn typescript_declaration_positions(
 pub(crate) fn find_typescript_server() -> Option<PathBuf> {
     if let Some(configured) = std::env::var_os("VEE_TSSERVER") {
         return PathBuf::from(configured)
-            .canonicalize()
+            .canonical()
             .ok()
             .filter(|path| path.is_file());
     }
     find_executable("tsserver")
+}
+
+/// Read one `Content-Length`-framed tsserver message; `Ok(None)` at end of
+/// output.
+///
+/// tsserver sets `Content-Length` to the JSON length plus one newline byte but
+/// writes the platform newline after the JSON. On Windows that is `\r\n`, so
+/// one `\n` is left before the next headers. Blank lines before the first
+/// header are therefore skipped rather than read as the end of the headers.
+pub(crate) fn read_tsserver_message(
+    reader: &mut impl std::io::BufRead,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>, String> {
+    let mut content_length = None;
+    let mut saw_header = false;
+    loop {
+        let mut header = Vec::new();
+        if reader
+            .read_until(b'\n', &mut header)
+            .map_err(|error| error.to_string())?
+            == 0
+        {
+            return Ok(None);
+        }
+        if header.len() > 8192 {
+            return Err("tsserver response header exceeded 8 KiB".into());
+        }
+        if header == b"\r\n" || header == b"\n" {
+            if saw_header {
+                break;
+            }
+            continue;
+        }
+        saw_header = true;
+        if let Some(value) = header.strip_prefix(b"Content-Length:") {
+            content_length = std::str::from_utf8(value)
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok());
+        }
+    }
+    let length = content_length.ok_or("tsserver response omitted Content-Length")?;
+    if length > max_bytes {
+        return Err(format!(
+            "tsserver response exceeded {} MiB",
+            max_bytes / (1024 * 1024)
+        ));
+    }
+    let mut body = vec![0; length];
+    reader
+        .read_exact(&mut body)
+        .map_err(|error| error.to_string())?;
+    Ok(Some(body))
 }
 
 pub(crate) fn query_typescript_references(
@@ -1043,7 +1100,7 @@ pub(crate) fn query_typescript_references(
     changed_paths: &[&String],
     source: &std::collections::BTreeMap<String, String>,
 ) -> Result<TypeScriptReferenceQuery, String> {
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::io::{BufReader, Write};
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
 
@@ -1052,7 +1109,7 @@ pub(crate) fn query_typescript_references(
     const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
     const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-    let root = root.canonicalize().map_err(|error| error.to_string())?;
+    let root = root.canonical().map_err(|error| error.to_string())?;
     let mut command = if executable
         .extension()
         .is_some_and(|extension| extension == "js")
@@ -1070,6 +1127,7 @@ pub(crate) fn query_typescript_references(
         .arg("0")
         .current_dir(&root)
         .env_clear()
+        .envs(vee_process::platform_environment())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -1092,45 +1150,17 @@ pub(crate) fn query_typescript_references(
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         loop {
-            let mut content_length = None;
-            loop {
-                let mut header = Vec::new();
-                match reader.read_until(b'\n', &mut header) {
-                    Ok(0) => return,
-                    Ok(_) => {}
-                    Err(error) => {
-                        let _ = sender.send(Err(error.to_string()));
+            match read_tsserver_message(&mut reader, MAX_MESSAGE_BYTES) {
+                Ok(Some(body)) => {
+                    if sender.send(Ok(body)).is_err() {
                         return;
                     }
                 }
-                if header.len() > 8192 {
-                    let _ = sender.send(Err("tsserver response header exceeded 8 KiB".into()));
+                Ok(None) => return,
+                Err(error) => {
+                    let _ = sender.send(Err(error));
                     return;
                 }
-                if header == b"\r\n" || header == b"\n" {
-                    break;
-                }
-                if let Some(value) = header.strip_prefix(b"Content-Length:") {
-                    content_length = std::str::from_utf8(value)
-                        .ok()
-                        .and_then(|value| value.trim().parse::<usize>().ok());
-                }
-            }
-            let Some(length) = content_length else {
-                let _ = sender.send(Err("tsserver response omitted Content-Length".into()));
-                return;
-            };
-            if length > MAX_MESSAGE_BYTES {
-                let _ = sender.send(Err("tsserver response exceeded 2 MiB".into()));
-                return;
-            }
-            let mut body = vec![0; length];
-            if let Err(error) = reader.read_exact(&mut body) {
-                let _ = sender.send(Err(error.to_string()));
-                return;
-            }
-            if sender.send(Ok(body)).is_err() {
-                return;
             }
         }
     });
@@ -1215,7 +1245,7 @@ pub(crate) fn query_typescript_references(
                 failures = true;
                 continue;
             }
-            let Ok(absolute) = absolute.canonicalize() else {
+            let Ok(absolute) = absolute.canonical() else {
                 failures = true;
                 continue;
             };
@@ -1287,7 +1317,7 @@ pub(crate) fn query_typescript_references(
                         continue;
                     };
                     let candidate = Path::new(file_name);
-                    let Ok(candidate) = candidate.canonicalize() else {
+                    let Ok(candidate) = candidate.canonical() else {
                         continue;
                     };
                     let Ok(relative) = candidate.strip_prefix(&root) else {
@@ -1392,7 +1422,7 @@ pub(crate) fn query_gopls_references(
     const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
     const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-    let root = root.canonicalize().map_err(|error| error.to_string())?;
+    let root = root.canonical().map_err(|error| error.to_string())?;
     let root_uri = url::Url::from_directory_path(&root)
         .map_err(|_| "repository root cannot be represented as a file URI")?;
     let mut command = Command::new(executable);
@@ -1400,6 +1430,7 @@ pub(crate) fn query_gopls_references(
         .arg("serve")
         .current_dir(&root)
         .env_clear()
+        .envs(vee_process::platform_environment())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -1646,7 +1677,7 @@ pub(crate) fn query_gopls_references(
                                     let Ok(path) = uri.to_file_path() else {
                                         return false;
                                     };
-                                    let Ok(path) = path.canonicalize() else {
+                                    let Ok(path) = path.canonical() else {
                                         return false;
                                     };
                                     let Ok(relative) = path.strip_prefix(&root) else {
@@ -1681,7 +1712,7 @@ pub(crate) fn query_gopls_references(
                     let Ok(path) = file_uri.to_file_path() else {
                         continue;
                     };
-                    let Ok(path) = path.canonicalize() else {
+                    let Ok(path) = path.canonical() else {
                         continue;
                     };
                     let Ok(relative) = path.strip_prefix(&root) else {
@@ -2333,7 +2364,7 @@ pub(crate) fn find_python_interpreter() -> Option<PathBuf> {
     std::env::split_paths(&path)
         .flat_map(|directory| names.iter().map(move |name| directory.join(name)))
         .find(|candidate| candidate.is_file())
-        .and_then(|candidate| candidate.canonicalize().ok())
+        .and_then(|candidate| candidate.canonical().ok())
 }
 
 pub(crate) fn run_python_ast(
@@ -2377,6 +2408,7 @@ pub(crate) fn run_python_ast(
         .arg(PYTHON_AST_PROGRAM)
         .current_dir(isolated.path())
         .env_clear()
+        .envs(vee_process::platform_environment())
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

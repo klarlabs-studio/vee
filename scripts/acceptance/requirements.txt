@@ -1,0 +1,3 @@
+# Python dependencies of the acceptance scripts. Install into a virtualenv:
+#   python3 -m venv .venv && .venv/bin/pip install -r scripts/acceptance/requirements.txt
+jsonschema==4.26.0

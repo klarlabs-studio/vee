@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use vee_core::paths::CanonicalPath as _;
 
 const MAX_REPOSITORIES: usize = 128;
 const MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
@@ -851,7 +852,7 @@ fn collect_changed_openapi_operations(
     producer_root: &Path,
     changed_paths: &[String],
 ) -> (Vec<ApiContractChange>, Vec<String>, Vec<(PathBuf, String)>) {
-    let Ok(root) = producer_root.canonicalize() else {
+    let Ok(root) = producer_root.canonical() else {
         return (
             Vec::new(),
             vec!["Producer root could not be resolved for OpenAPI contract analysis.".into()],
@@ -869,7 +870,7 @@ fn collect_changed_openapi_operations(
             continue;
         }
         let path = root.join(relative);
-        let Ok(canonical) = path.canonicalize() else {
+        let Ok(canonical) = path.canonical() else {
             continue;
         };
         if !canonical.starts_with(&root) {
@@ -3322,12 +3323,17 @@ fn compare_openapi_contracts(
     let mut issues = Vec::new();
     let mut coverage = Vec::new();
     let mut limitations = Vec::new();
+    // Contract paths are canonicalized before the containment check, so the
+    // root must be too (symlinked roots, `\\?\` prefixes on Windows).
+    let canonical_root = producer_root
+        .canonical()
+        .unwrap_or_else(|_| producer_root.to_path_buf());
     for (path, baseline_bytes) in baselines {
         match asyncapi_operations(baseline_bytes) {
             Ok(Some(baseline)) => {
                 let current_path = producer_root.join(path);
-                let current_path = match current_path.canonicalize() {
-                    Ok(current_path) if current_path.starts_with(producer_root) => {
+                let current_path = match current_path.canonical() {
+                    Ok(current_path) if current_path.starts_with(&canonical_root) => {
                         Some(current_path)
                     }
                     Ok(_) => {
@@ -3590,8 +3596,8 @@ fn compare_openapi_contracts(
             "OpenAPI compatibility for `{path}` compares route/operationId changes, requiredness, removed request/response media types, parameter types/formats/enums/numeric ranges, pattern changes, size bounds, and conservative oneOf/anyOf branch additions/removals. Parameter content media-type changes are reported; content schemas are compared when both revisions use the same single media type and provide a schema. It also compares selected nested property/type/enum/numeric-range constraints and pattern changes, OpenAPI 3.0 nullable changes when both sides use 3.0, local schema references, effective security requirement scheme/scope sets, and structural definitions for referenced security schemes; pattern changes are review signals without proving regular-expression language inclusion. Other request/parameter/response schema constraints, full schema composition semantics, unresolved references, and runtime security protocol behavior are not fully evaluated."
         ));
         let current_path = producer_root.join(path);
-        let current_path = match current_path.canonicalize() {
-            Ok(current_path) if current_path.starts_with(producer_root) => Some(current_path),
+        let current_path = match current_path.canonical() {
+            Ok(current_path) if current_path.starts_with(&canonical_root) => Some(current_path),
             Ok(_) => {
                 limitations.push(format!(
                     "Current OpenAPI contract `{path}` resolves outside the producer repository; compatibility is unknown."
@@ -4163,7 +4169,7 @@ pub fn cross_impact(
         producer_root,
         consumer_roots,
         &BTreeMap::new(),
-        RustSemanticBudget::DEFAULT,
+        SemanticBudgets::DEFAULT,
     )
 }
 
@@ -4173,7 +4179,7 @@ fn cross_impact_with_baselines(
     producer_root: &Path,
     consumer_roots: &[PathBuf],
     baseline_contracts: &BTreeMap<String, Vec<u8>>,
-    rust_budget: RustSemanticBudget,
+    budgets: SemanticBudgets,
 ) -> Result<CrossRepositoryImpact, String> {
     if consumer_roots.is_empty() {
         return Err("provide at least one consumer repository".into());
@@ -4229,7 +4235,7 @@ fn cross_impact_with_baselines(
     let mut seen_roots = std::collections::BTreeSet::new();
     for supplied in consumer_roots {
         let root = supplied
-            .canonicalize()
+            .canonical()
             .map_err(|e| format!("cannot resolve consumer {}: {e}", supplied.display()))?;
         if !root.is_dir() {
             return Err(format!("consumer {} is not a directory", root.display()));
@@ -4466,6 +4472,7 @@ fn cross_impact_with_baselines(
         &go_references,
         producer_root,
         consumer_roots,
+        budgets.go,
     );
     coverage_complete &= go_coverage_complete;
     limitations.extend(go_limitations);
@@ -4483,7 +4490,7 @@ fn cross_impact_with_baselines(
         producer_impact,
         producer_root,
         consumer_roots,
-        rust_budget,
+        budgets.rust,
     );
     coverage_complete &= rust_coverage_complete;
     limitations.extend(rust_limitations);
@@ -4507,6 +4514,7 @@ fn cross_impact_with_baselines(
             producer_impact,
             producer_root,
             consumer_roots,
+            budgets.typescript_total,
         );
     coverage_complete &= typescript_coverage_complete;
     limitations.extend(typescript_limitations);
@@ -4712,7 +4720,7 @@ fn consumer_dependency_fingerprint(
 ) -> Result<String, String> {
     let roots = roots
         .iter()
-        .map(|root| root.canonicalize().map_err(|error| error.to_string()))
+        .map(|root| root.canonical().map_err(|error| error.to_string()))
         .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
     let repositories = map
         .repositories
@@ -4775,7 +4783,7 @@ pub fn analyze_cross_impact(
         &producer,
         consumers,
         &baseline_contracts,
-        RustSemanticBudget::DEFAULT,
+        SemanticBudgets::DEFAULT,
     )
 }
 
@@ -4786,12 +4794,12 @@ fn trace_dependency_paths(
     consumer_roots: &[PathBuf],
 ) -> Result<(Vec<CrossRepositoryDependencyPath>, bool), String> {
     let producer_root = producer_root
-        .canonicalize()
+        .canonical()
         .map_err(|e| format!("cannot resolve producer {}: {e}", producer_root.display()))?;
     let consumers: Vec<_> = consumer_roots
         .iter()
         .map(|root| {
-            root.canonicalize()
+            root.canonical()
                 .map_err(|e| format!("cannot resolve consumer {}: {e}", root.display()))
         })
         .collect::<Result<_, _>>()?;
@@ -4928,7 +4936,7 @@ fn collect_source_files(
                 .is_some_and(|ext| CONSUMER_SOURCE_EXTENSIONS.contains(&ext))
         {
             if !path
-                .canonicalize()
+                .canonical()
                 .map_err(|e| e.to_string())?
                 .starts_with(root)
             {
@@ -5020,8 +5028,41 @@ fn is_lexical_declaration(prefix: &str, suffix: &str) -> bool {
     after.starts_with('=') && !after.starts_with("==") && !after.starts_with("=>")
 }
 
-/// Time limits for rust-analyzer resolution. Exceeding one is reported as a
-/// limitation and leaves the affected matches syntax-inferred.
+/// Time limits for semantic cross-repository resolution. Exceeding one is
+/// reported as a limitation and leaves the affected matches heuristic.
+#[derive(Clone, Copy, Debug)]
+struct SemanticBudgets {
+    rust: RustSemanticBudget,
+    go: GoSemanticBudget,
+    /// All TypeScript server lookups together.
+    typescript_total: std::time::Duration,
+}
+
+impl SemanticBudgets {
+    const DEFAULT: Self = Self {
+        rust: RustSemanticBudget::DEFAULT,
+        go: GoSemanticBudget::DEFAULT,
+        typescript_total: std::time::Duration::from_secs(45),
+    };
+}
+
+/// Time limits for gopls resolution.
+#[derive(Clone, Copy, Debug)]
+struct GoSemanticBudget {
+    /// All consumer repositories together.
+    total: std::time::Duration,
+    /// One `gopls definition` run.
+    request: std::time::Duration,
+}
+
+impl GoSemanticBudget {
+    const DEFAULT: Self = Self {
+        total: std::time::Duration::from_secs(45),
+        request: std::time::Duration::from_secs(15),
+    };
+}
+
+/// Time limits for rust-analyzer resolution.
 #[derive(Clone, Copy, Debug)]
 struct RustSemanticBudget {
     /// All consumer repositories together.
@@ -5063,7 +5104,7 @@ fn resolve_rust_consumer_references(
             ],
         );
     };
-    let producer_root = match producer_root.canonicalize() {
+    let producer_root = match producer_root.canonical() {
         Ok(root) => root,
         Err(error) => {
             return (
@@ -5077,7 +5118,7 @@ fn resolve_rust_consumer_references(
     let mut changed_definitions = std::collections::BTreeSet::new();
     for changed in &producer_impact.changed_paths {
         let path = producer_root.join(changed);
-        if let Ok(path) = path.canonicalize() {
+        if let Ok(path) = path.canonical() {
             if path.starts_with(&producer_root)
                 && path.extension().and_then(|ext| ext.to_str()) == Some("rs")
             {
@@ -5094,7 +5135,7 @@ fn resolve_rust_consumer_references(
 
     let roots: std::collections::BTreeSet<_> = consumer_roots
         .iter()
-        .filter_map(|root| root.canonicalize().ok())
+        .filter_map(|root| root.canonical().ok())
         .collect();
     let mut by_root = BTreeMap::<PathBuf, Vec<usize>>::new();
     for index in candidate_indices {
@@ -5249,7 +5290,7 @@ fn absolute_executable_path(path: &Path) -> Option<PathBuf> {
         // into a plain `rustup` invocation.
         Some(absolute)
     } else {
-        absolute.canonicalize().ok()
+        absolute.canonical().ok()
     }
 }
 
@@ -5279,6 +5320,7 @@ impl RustAnalyzerSession {
         command
             .current_dir(root)
             .env_clear()
+            .envs(vee_process::platform_environment())
             .env("CARGO_NET_OFFLINE", "true")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -5412,7 +5454,7 @@ impl RustAnalyzerSession {
         time_budget: std::time::Duration,
     ) -> Result<Option<Vec<PathBuf>>, String> {
         let source = source
-            .canonicalize()
+            .canonical()
             .map_err(|error| format!("could not resolve Rust source file: {error}"))?;
         let uri = reqwest::Url::from_file_path(&source)
             .map_err(|_| "could not encode Rust source path as a file URI".to_owned())?;
@@ -5472,7 +5514,7 @@ impl RustAnalyzerSession {
                 .to_file_path()
                 .map_err(|_| "rust-analyzer returned a non-file definition URI".to_owned())?;
             let path = path
-                .canonicalize()
+                .canonical()
                 .map_err(|error| format!("could not resolve Rust definition path: {error}"))?;
             paths.insert(path);
         }
@@ -5620,6 +5662,7 @@ fn resolve_go_consumer_references(
     candidate_indices: &[usize],
     producer_root: &Path,
     consumer_roots: &[PathBuf],
+    budget: GoSemanticBudget,
 ) -> (bool, Vec<String>) {
     let _gopls_lock = GO_CROSS_REPO_LOCK
         .lock()
@@ -5633,7 +5676,7 @@ fn resolve_go_consumer_references(
             ],
         );
     };
-    let producer_root = match producer_root.canonicalize() {
+    let producer_root = match producer_root.canonical() {
         Ok(root) => root,
         Err(error) => {
             return (
@@ -5646,7 +5689,7 @@ fn resolve_go_consumer_references(
     };
     let roots: std::collections::BTreeSet<_> = consumer_roots
         .iter()
-        .filter_map(|root| root.canonicalize().ok())
+        .filter_map(|root| root.canonical().ok())
         .collect();
     let mut complete = true;
     let mut limitations = Vec::new();
@@ -5654,10 +5697,10 @@ fn resolve_go_consumer_references(
     let checked_count = candidate_indices.len().min(MAX_GO_SEMANTIC_REFERENCES);
     let analysis_started = std::time::Instant::now();
     for index in candidate_indices.iter().take(checked_count).copied() {
-        if analysis_started.elapsed() >= std::time::Duration::from_secs(45) {
+        if analysis_started.elapsed() >= budget.total {
             complete = false;
             limitations.push(
-                "gopls cross-repository resolution reached its 45 second total time limit; remaining Go matches are lexical heuristics.".into(),
+                format!("gopls cross-repository resolution reached its {} second total time limit; remaining Go matches are lexical heuristics.", budget.total.as_secs()),
             );
             break;
         }
@@ -5673,9 +5716,9 @@ fn resolve_go_consumer_references(
         }
         let source = repository.join(&reference.path);
         let position = format!("{}:{}:{column}", source.display(), reference.line);
-        match run_gopls_definition(&executable, &repository, &position) {
+        match run_gopls_definition(&executable, &repository, &position, budget.request) {
             Ok(Some(definition)) => {
-                let Ok(definition) = definition.canonicalize() else {
+                let Ok(definition) = definition.canonical() else {
                     complete = false;
                     limitations.push(format!(
                         "gopls returned a definition that could not be resolved for {}:{}.",
@@ -5729,6 +5772,7 @@ fn resolve_typescript_consumer_references(
     producer_impact: &crate::ImpactAssessment,
     producer_root: &Path,
     consumer_roots: &[PathBuf],
+    total_budget: std::time::Duration,
 ) -> (bool, Vec<String>) {
     let candidates = candidate_indices
         .iter()
@@ -5755,7 +5799,7 @@ fn resolve_typescript_consumer_references(
             "TypeScript server was not found (set VEE_TSSERVER or add tsserver to PATH); TypeScript/JavaScript consumer matches remain lexical heuristics.".into(),
         ]);
     };
-    let producer_root = match producer_root.canonicalize() {
+    let producer_root = match producer_root.canonical() {
         Ok(root) => root,
         Err(error) => {
             return (
@@ -5769,7 +5813,7 @@ fn resolve_typescript_consumer_references(
     let mut changed_definitions = std::collections::BTreeSet::new();
     for changed in &producer_impact.changed_paths {
         let path = producer_root.join(changed);
-        if let Ok(path) = path.canonicalize() {
+        if let Ok(path) = path.canonical() {
             if path.starts_with(&producer_root)
                 && matches!(
                     path.extension().and_then(|ext| ext.to_str()),
@@ -5785,7 +5829,7 @@ fn resolve_typescript_consumer_references(
     }
     let roots: std::collections::BTreeSet<_> = consumer_roots
         .iter()
-        .filter_map(|root| root.canonicalize().ok())
+        .filter_map(|root| root.canonical().ok())
         .collect();
     let mut complete = true;
     let mut limitations = Vec::new();
@@ -5793,10 +5837,10 @@ fn resolve_typescript_consumer_references(
     let start = std::time::Instant::now();
     let checked = candidates.len().min(MAX_TYPESCRIPT_SEMANTIC_REFERENCES);
     for index in candidates.iter().take(checked).copied() {
-        let remaining = std::time::Duration::from_secs(45).saturating_sub(start.elapsed());
+        let remaining = total_budget.saturating_sub(start.elapsed());
         if remaining.is_zero() {
             complete = false;
-            limitations.push("TypeScript cross-repository resolution reached its 45 second total time limit; remaining matches are lexical heuristics.".into());
+            limitations.push(format!("TypeScript cross-repository resolution reached its {} second total time limit; remaining matches are lexical heuristics.", total_budget.as_secs()));
             break;
         }
         let Some(reference) = references.get_mut(index) else {
@@ -5861,7 +5905,7 @@ fn find_typescript_server() -> Option<PathBuf> {
     if let Some(configured) = std::env::var_os("VEE_TSSERVER") {
         let path = PathBuf::from(configured);
         if path.is_file() {
-            return path.canonicalize().ok();
+            return path.canonical().ok();
         }
     }
     std::env::split_paths(&std::env::var_os("PATH")?)
@@ -5875,7 +5919,7 @@ fn find_typescript_server() -> Option<PathBuf> {
         .find_map(|candidate| {
             candidate
                 .is_file()
-                .then(|| candidate.canonicalize().ok())
+                .then(|| candidate.canonical().ok())
                 .flatten()
         })
 }
@@ -5885,10 +5929,10 @@ fn nearest_typescript_project_config(
     source: &Path,
 ) -> Result<Option<PathBuf>, String> {
     let root = working_directory
-        .canonicalize()
+        .canonical()
         .map_err(|error| format!("could not resolve TypeScript project root: {error}"))?;
     let source = source
-        .canonicalize()
+        .canonical()
         .map_err(|error| format!("could not resolve TypeScript source file: {error}"))?;
     if !source.starts_with(&root) {
         return Err("TypeScript source file is outside its project root".into());
@@ -5917,7 +5961,7 @@ fn run_typescript_definition(
     offset: u32,
     time_budget: std::time::Duration,
 ) -> Result<Option<Vec<PathBuf>>, String> {
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::io::{BufReader, Write};
     use std::process::Stdio;
     use std::sync::mpsc;
     const MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
@@ -5925,7 +5969,8 @@ fn run_typescript_definition(
         .extension()
         .is_some_and(|extension| extension == "js")
     {
-        let node = find_executable("node").ok_or("node not found for configured tsserver")?;
+        let node = crate::impact::find_executable("node")
+            .ok_or("node not found for configured tsserver")?;
         let mut command = std::process::Command::new(node);
         command.arg(executable);
         command
@@ -5938,6 +5983,7 @@ fn run_typescript_definition(
         .arg("0")
         .current_dir(working_directory)
         .env_clear()
+        .envs(vee_process::platform_environment())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -5960,45 +6006,17 @@ fn run_typescript_definition(
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         loop {
-            let mut length = None;
-            loop {
-                let mut header = Vec::new();
-                match reader.read_until(b'\n', &mut header) {
-                    Ok(0) => return,
-                    Ok(_) => {}
-                    Err(error) => {
-                        let _ = tx.send(Err(error.to_string()));
+            match crate::impact::read_tsserver_message(&mut reader, MAX_MESSAGE_BYTES) {
+                Ok(Some(body)) => {
+                    if tx.send(Ok(body)).is_err() {
                         return;
                     }
                 }
-                if header.len() > 8192 {
-                    let _ = tx.send(Err("tsserver response header exceeded 8 KiB".into()));
+                Ok(None) => return,
+                Err(error) => {
+                    let _ = tx.send(Err(error));
                     return;
                 }
-                if header == b"\r\n" || header == b"\n" {
-                    break;
-                }
-                if let Some(value) = header.strip_prefix(b"Content-Length:") {
-                    length = std::str::from_utf8(value)
-                        .ok()
-                        .and_then(|v| v.trim().parse::<usize>().ok());
-                }
-            }
-            let Some(length) = length else {
-                let _ = tx.send(Err("tsserver response omitted Content-Length".into()));
-                return;
-            };
-            if length > MAX_MESSAGE_BYTES {
-                let _ = tx.send(Err("tsserver response exceeded 2 MiB".into()));
-                return;
-            }
-            let mut body = vec![0; length];
-            if let Err(error) = reader.read_exact(&mut body) {
-                let _ = tx.send(Err(error.to_string()));
-                return;
-            }
-            if tx.send(Ok(body)).is_err() {
-                return;
             }
         }
     });
@@ -6093,7 +6111,7 @@ fn run_typescript_definition(
                         .filter_map(|definition| {
                             definition.get("file").and_then(serde_json::Value::as_str)
                         })
-                        .filter_map(|file| PathBuf::from(file).canonicalize().ok())
+                        .filter_map(|file| PathBuf::from(file).canonical().ok())
                         .collect::<Vec<_>>();
                     definitions = Some(result);
                 } else if name == "projectInfo" {
@@ -6144,23 +6162,7 @@ fn find_gopls_executable() -> Option<PathBuf> {
             std::fs::metadata(&candidate)
                 .ok()
                 .filter(|metadata| metadata.is_file())
-                .and_then(|_| candidate.canonicalize().ok())
-        })
-}
-
-fn find_executable(name: &str) -> Option<PathBuf> {
-    let executable = if cfg!(windows) && !name.ends_with(".exe") {
-        format!("{name}.exe")
-    } else {
-        name.to_owned()
-    };
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|directory| directory.join(&executable))
-        .find_map(|candidate| {
-            candidate
-                .is_file()
-                .then(|| candidate.canonicalize().ok())
-                .flatten()
+                .and_then(|_| candidate.canonical().ok())
         })
 }
 
@@ -6168,6 +6170,7 @@ fn run_gopls_definition(
     executable: &Path,
     working_directory: &Path,
     position: &str,
+    time_limit: std::time::Duration,
 ) -> Result<Option<PathBuf>, String> {
     use std::{io::Read, process::Stdio, time::Duration};
 
@@ -6206,7 +6209,7 @@ fn run_gopls_definition(
         {
             break status;
         }
-        if started.elapsed() >= Duration::from_secs(15) {
+        if started.elapsed() >= time_limit {
             let _ = child.kill();
             let _ = child.wait();
             let _ = reader.join();
@@ -6384,7 +6387,7 @@ pub fn build(roots: &[PathBuf]) -> Result<RepositoryMap, String> {
     let mut canonical = std::collections::BTreeSet::new();
     for supplied in roots {
         let root = supplied
-            .canonicalize()
+            .canonical()
             .map_err(|e| format!("cannot resolve {}: {e}", supplied.display()))?;
         if !root.is_dir() {
             return Err(format!("{} is not a directory", root.display()));
@@ -6441,7 +6444,7 @@ pub fn build(roots: &[PathBuf]) -> Result<RepositoryMap, String> {
                 dependency
                     .path
                     .as_ref()
-                    .and_then(|path| package.root.join(path).canonicalize().ok())
+                    .and_then(|path| package.root.join(path).canonical().ok())
             });
             if dependency.path.is_some() && path_target.is_none() {
                 limitations.push(format!(
@@ -6932,7 +6935,7 @@ fn read_package(root: &Path) -> Result<Option<Package>, String> {
             if let Some(replacement) = replacement {
                 if let Some(path) = &replacement.local_path {
                     dependency.path = Some(path.clone());
-                    dependency.resolved_path = root.join(path).canonicalize().ok();
+                    dependency.resolved_path = root.join(path).canonical().ok();
                 } else {
                     dependency.unresolved_go_replacement = true;
                 }
@@ -7034,7 +7037,7 @@ fn read_workspace_members(root: &Path) -> Result<(Vec<Package>, Vec<String>), St
             vec![root.join(pattern)]
         };
         for candidate in candidates {
-            let Ok(canonical) = candidate.canonicalize() else {
+            let Ok(canonical) = candidate.canonical() else {
                 limitations.push(format!(
                     "{}: workspace member `{pattern}` is missing or inaccessible",
                     root.display()
@@ -7083,7 +7086,7 @@ fn read_workspace_members(root: &Path) -> Result<(Vec<Package>, Vec<String>), St
                         dependency.resolved_path = dependency
                             .path
                             .as_ref()
-                            .and_then(|path| root.join(path).canonicalize().ok());
+                            .and_then(|path| root.join(path).canonical().ok());
                         dependency.constraint_source =
                             Some((manifest.clone(), manifest_digest.clone()));
                         dependency.inherited = false;
@@ -7155,8 +7158,8 @@ mod tests {
         let fake_server = workspace.path().join("fake-rust-analyzer.py");
         let script = format!(
             "#!/usr/bin/python3\nimport json,sys\nproducer={:?}\nconsumer={:?}\nseen=set()\ndef read_msg():\n h=b''\n while not h.endswith(b'\\r\\n\\r\\n'):\n  c=sys.stdin.buffer.read(1)\n  if not c: return None\n  h+=c\n n=int(next(x.split(b':',1)[1] for x in h.split(b'\\r\\n') if x.lower().startswith(b'content-length:')))\n return json.loads(sys.stdin.buffer.read(n))\ndef send(x):\n b=json.dumps(x).encode()\n sys.stdout.buffer.write(b'Content-Length: '+str(len(b)).encode()+b'\\r\\n\\r\\n'+b);sys.stdout.buffer.flush()\nwhile True:\n m=read_msg()\n if m is None: break\n if 'id' in m:\n  assert m['id'] not in seen\n  seen.add(m['id'])\n method=m.get('method')\n if method=='initialize': send({{'jsonrpc':'2.0','id':m['id'],'result':{{'capabilities':{{'definitionProvider':True}}}}}})\n elif method=='textDocument/definition':\n  pos=m['params']['position']\n  if pos=={{'line':0,'character':13}}: path=producer\n  elif pos=={{'line':1,'character':14}}: path=consumer\n  else: send({{'jsonrpc':'2.0','id':m['id'],'result':[]}}); continue\n  send({{'jsonrpc':'2.0','id':m['id'],'result':{{'uri':'file://'+path,'range':{{'start':{{'line':0,'character':0}},'end':{{'line':0,'character':1}}}}}}}})\n elif m.get('id') is not None: send({{'jsonrpc':'2.0','id':m['id'],'result':None}})\n",
-            changed.canonicalize().unwrap().to_string_lossy(),
-            second.canonicalize().unwrap().to_string_lossy(),
+            changed.canonical().unwrap().to_string_lossy(),
+            second.canonical().unwrap().to_string_lossy(),
         );
         std::fs::write(&fake_server, script).unwrap();
         let mut permissions = std::fs::metadata(&fake_server).unwrap().permissions();
@@ -7167,7 +7170,7 @@ mod tests {
 
         let mut references = vec![
             super::ConsumerSymbolReference {
-                consumer_repository: consumer.canonicalize().unwrap().display().to_string(),
+                consumer_repository: consumer.canonical().unwrap().display().to_string(),
                 path: "src/first.rs".into(),
                 line: 1,
                 symbol: "changed_api".into(),
@@ -7180,7 +7183,7 @@ mod tests {
                 dependency_paths: Vec::new(),
             },
             super::ConsumerSymbolReference {
-                consumer_repository: consumer.canonicalize().unwrap().display().to_string(),
+                consumer_repository: consumer.canonical().unwrap().display().to_string(),
                 path: "src/second.rs".into(),
                 line: 2,
                 symbol: "changed_api".into(),
@@ -8634,7 +8637,7 @@ operations:
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("client.rs");
         std::fs::write(&source, "fn client() {}\n").unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = directory.path().canonical().unwrap();
         let source = root.join("client.rs");
         let original = std::fs::read(&source).unwrap();
         let digest = format!("sha256:{}", hex(&Sha256::digest(&original)));
@@ -8673,7 +8676,7 @@ operations:
     #[test]
     fn dependency_path_traversal_is_bounded_and_reports_incomplete_coverage() {
         let workspace = tempfile::tempdir().unwrap();
-        let workspace_root = workspace.path().canonicalize().unwrap();
+        let workspace_root = workspace.path().canonical().unwrap();
         let mut repositories = Vec::new();
         let mut roots = Vec::new();
         for level in 0..=16 {
@@ -9041,7 +9044,7 @@ operations:
         )
         .expect_err("stale dependency map must be rejected")
         .contains("manifests changed before"));
-        let contract_path = producer.join("api/openapi.yaml").canonicalize().unwrap();
+        let contract_path = producer.join("api/openapi.yaml").canonical().unwrap();
         verify_producer_contracts(&[(contract_path.clone(), operation.producer_digest.clone())])
             .unwrap();
         std::fs::write(&contract_path, "openapi: changed\n").unwrap();
@@ -9053,8 +9056,7 @@ operations:
 
     #[test]
     fn cross_impact_resolves_go_consumer_references_to_local_producer_with_gopls() {
-        if find_gopls_executable().is_none() {
-            eprintln!("skipping Go semantic cross-impact fixture: gopls was not found on PATH");
+        if skip_without_language_server("gopls", find_gopls_executable().is_some()) {
             return;
         }
         let workspace = tempfile::tempdir().unwrap();
@@ -9094,27 +9096,110 @@ operations:
             limitations: Vec::new(),
         };
         let dependency_map = build(&[producer.clone(), consumer.clone()]).unwrap();
-        let report =
-            cross_impact(&producer_impact, &dependency_map, &producer, &[consumer]).unwrap();
+        let report = cross_impact_with_baselines(
+            &producer_impact,
+            &dependency_map,
+            &producer,
+            std::slice::from_ref(&consumer),
+            &BTreeMap::new(),
+            UNHURRIED_BUDGETS,
+        )
+        .unwrap();
         assert!(report.coverage_complete, "{:?}", report.limitations);
         assert_eq!(report.references.len(), 1);
         assert_eq!(report.references[0].certainty, "semantic_resolved");
         assert_eq!(report.references[0].symbol, "Changed");
+
+        let exhausted = cross_impact_with_baselines(
+            &producer_impact,
+            &dependency_map,
+            &producer,
+            &[consumer],
+            &BTreeMap::new(),
+            SemanticBudgets {
+                go: GoSemanticBudget {
+                    total: std::time::Duration::ZERO,
+                    ..UNHURRIED_BUDGETS.go
+                },
+                ..UNHURRIED_BUDGETS
+            },
+        )
+        .unwrap();
+        assert!(!exhausted.coverage_complete);
+        assert!(
+            exhausted
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains(
+                    "gopls cross-repository resolution reached its 0 second total time limit"
+                )),
+            "{:?}",
+            exhausted.limitations
+        );
         assert_eq!(report.references[0].path, "client.go");
     }
 
-    /// A budget no healthy rust-analyzer run reaches, for tests that assert
+    #[cfg(unix)]
+    #[test]
+    fn current_contracts_inside_a_non_canonical_producer_root_are_compared() {
+        let workspace = tempfile::tempdir().unwrap();
+        let producer = workspace.path().join("producer");
+        std::fs::create_dir_all(producer.join("api")).unwrap();
+        let openapi = "openapi: 3.1.0\ninfo: {title: t, version: '1'}\npaths:\n  /users:\n    get:\n      operationId: listUsers\n      responses: {'200': {description: ok}}\n";
+        let asyncapi = "asyncapi: 2.6.0\ninfo: {title: t, version: '1'}\nchannels:\n  user/signedup:\n    publish:\n      operationId: publishSignup\n";
+        std::fs::write(producer.join("api/openapi.yaml"), openapi).unwrap();
+        std::fs::write(producer.join("api/asyncapi.yaml"), asyncapi).unwrap();
+        // Reach the producer through a symlink, as Windows reaches every path
+        // without its canonical `\\?\` prefix.
+        let link = workspace.path().join("link");
+        std::os::unix::fs::symlink(&producer, &link).unwrap();
+        let baselines = BTreeMap::from([
+            ("api/openapi.yaml".to_owned(), openapi.as_bytes().to_vec()),
+            ("api/asyncapi.yaml".to_owned(), asyncapi.as_bytes().to_vec()),
+        ]);
+        let (_, _, limitations) = compare_openapi_contracts(&link, &baselines);
+        assert!(
+            !limitations
+                .iter()
+                .any(|limitation| limitation.contains("resolves outside the producer repository")),
+            "{limitations:#?}"
+        );
+    }
+
+    /// Whether a language-server fixture is skipped because `tool` is missing.
+    /// CI sets `VEE_TEST_REQUIRE_LANGUAGE_SERVERS` so that a broken install
+    /// fails the run instead of passing it vacuously.
+    fn skip_without_language_server(tool: &str, available: bool) -> bool {
+        if available {
+            return false;
+        }
+        assert!(
+            std::env::var_os("VEE_TEST_REQUIRE_LANGUAGE_SERVERS").is_none(),
+            "{tool} was not found, and VEE_TEST_REQUIRE_LANGUAGE_SERVERS requires it"
+        );
+        eprintln!("skipping language-server fixture: {tool} was not found");
+        true
+    }
+
+    /// Budgets no healthy language server reaches, for tests that assert
     /// semantic resolution rather than time-limit handling.
-    const UNHURRIED_RUST_BUDGET: RustSemanticBudget = RustSemanticBudget {
-        total: std::time::Duration::from_secs(600),
-        initialize: std::time::Duration::from_secs(300),
-        request: std::time::Duration::from_secs(120),
+    const UNHURRIED_BUDGETS: SemanticBudgets = SemanticBudgets {
+        rust: RustSemanticBudget {
+            total: std::time::Duration::from_secs(600),
+            initialize: std::time::Duration::from_secs(300),
+            request: std::time::Duration::from_secs(120),
+        },
+        go: GoSemanticBudget {
+            total: std::time::Duration::from_secs(600),
+            request: std::time::Duration::from_secs(120),
+        },
+        typescript_total: std::time::Duration::from_secs(600),
     };
 
     #[test]
     fn cross_impact_resolves_rust_consumer_references_with_rust_analyzer() {
-        if find_rust_analyzer_executable().is_none() {
-            eprintln!("skipping Rust semantic cross-impact fixture: rust-analyzer was not found");
+        if skip_without_language_server("rust-analyzer", find_rust_analyzer_executable().is_some())
+        {
             return;
         }
         let workspace = tempfile::tempdir().unwrap();
@@ -9157,7 +9242,7 @@ operations:
             &producer,
             std::slice::from_ref(&consumer),
             &BTreeMap::new(),
-            UNHURRIED_RUST_BUDGET,
+            UNHURRIED_BUDGETS,
         )
         .unwrap();
         assert!(report.coverage_complete, "{:?}", report.limitations);
@@ -9173,7 +9258,8 @@ operations:
 
     #[test]
     fn cross_impact_resolves_rust_calls_inside_standard_macros() {
-        if find_rust_analyzer_executable().is_none() {
+        if skip_without_language_server("rust-analyzer", find_rust_analyzer_executable().is_some())
+        {
             return;
         }
         let workspace = tempfile::tempdir().unwrap();
@@ -9220,7 +9306,7 @@ operations:
             &producer,
             std::slice::from_ref(&consumer),
             &BTreeMap::new(),
-            UNHURRIED_RUST_BUDGET,
+            UNHURRIED_BUDGETS,
         )
         .unwrap();
         assert!(report.coverage_complete, "{:?}", report.limitations);
@@ -9236,7 +9322,7 @@ operations:
 
     #[test]
     fn cross_impact_resolves_typescript_consumers_to_changed_producer_files() {
-        if find_typescript_server().is_none() {
+        if skip_without_language_server("tsserver", find_typescript_server().is_some()) {
             return;
         }
         let workspace = tempfile::tempdir().unwrap();
@@ -9276,8 +9362,15 @@ operations:
             limitations: Vec::new(),
         };
         let dependency_map = build(&[producer.clone(), consumer.clone()]).unwrap();
-        let report =
-            cross_impact(&producer_impact, &dependency_map, &producer, &[consumer]).unwrap();
+        let report = cross_impact_with_baselines(
+            &producer_impact,
+            &dependency_map,
+            &producer,
+            std::slice::from_ref(&consumer),
+            &BTreeMap::new(),
+            UNHURRIED_BUDGETS,
+        )
+        .unwrap();
         assert!(report.coverage_complete, "{:?}", report.limitations);
         assert_eq!(report.references.len(), 2, "{:?}", report.references);
         assert!(report
@@ -9285,11 +9378,35 @@ operations:
             .iter()
             .all(|reference| reference.certainty == "semantic_resolved"
                 && reference.path == "src/client.ts"));
+
+        let exhausted = cross_impact_with_baselines(
+            &producer_impact,
+            &dependency_map,
+            &producer,
+            &[consumer],
+            &BTreeMap::new(),
+            SemanticBudgets {
+                typescript_total: std::time::Duration::ZERO,
+                ..UNHURRIED_BUDGETS
+            },
+        )
+        .unwrap();
+        assert!(!exhausted.coverage_complete);
+        assert!(
+            exhausted
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains(
+                    "TypeScript cross-repository resolution reached its 0 second total time limit"
+                )),
+            "{:?}",
+            exhausted.limitations
+        );
     }
 
     #[test]
     fn cross_impact_resolves_typescript_project_reference_definitions() {
-        if find_typescript_server().is_none() {
+        if skip_without_language_server("tsserver", find_typescript_server().is_some()) {
             return;
         }
         let workspace = tempfile::tempdir().unwrap();
@@ -9340,8 +9457,15 @@ operations:
             limitations: Vec::new(),
         };
         let dependency_map = build(&[producer.clone(), consumer.clone()]).unwrap();
-        let report =
-            cross_impact(&producer_impact, &dependency_map, &producer, &[consumer]).unwrap();
+        let report = cross_impact_with_baselines(
+            &producer_impact,
+            &dependency_map,
+            &producer,
+            std::slice::from_ref(&consumer),
+            &BTreeMap::new(),
+            UNHURRIED_BUDGETS,
+        )
+        .unwrap();
         assert!(report.coverage_complete, "{:?}", report.limitations);
         assert_eq!(report.references.len(), 2, "{:?}", report.references);
         assert!(
@@ -9355,7 +9479,7 @@ operations:
 
     #[test]
     fn cross_impact_marks_malformed_typescript_project_configuration_incomplete() {
-        if find_typescript_server().is_none() {
+        if skip_without_language_server("tsserver", find_typescript_server().is_some()) {
             return;
         }
         let workspace = tempfile::tempdir().unwrap();
@@ -9408,7 +9532,7 @@ operations:
 
     #[test]
     fn cross_impact_marks_syntax_malformed_typescript_project_configuration_incomplete() {
-        if find_typescript_server().is_none() {
+        if skip_without_language_server("tsserver", find_typescript_server().is_some()) {
             return;
         }
         let workspace = tempfile::tempdir().unwrap();
@@ -9494,7 +9618,12 @@ operations:
 
     #[test]
     fn cross_impact_resolves_javascript_projects_to_changed_producer_files() {
-        if find_typescript_server().is_none() || find_executable("node").is_none() {
+        if skip_without_language_server("tsserver", find_typescript_server().is_some())
+            || skip_without_language_server(
+                "node",
+                crate::impact::find_executable("node").is_some(),
+            )
+        {
             return;
         }
         let workspace = tempfile::tempdir().unwrap();
@@ -9670,7 +9799,7 @@ operations:
             .iter()
             .any(|item| item.contains("replacement that is not a selected local filesystem path")));
 
-        let local_provider = provider_a.path().canonicalize().unwrap();
+        let local_provider = provider_a.path().canonical().unwrap();
         std::fs::write(
             consumer.path().join("go.mod"),
             format!(
@@ -9748,7 +9877,7 @@ operations:
             Some(
                 workspace
                     .path()
-                    .canonicalize()
+                    .canonical()
                     .unwrap()
                     .join("Cargo.toml")
                     .to_str()

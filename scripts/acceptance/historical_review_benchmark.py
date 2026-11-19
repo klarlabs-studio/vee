@@ -7,10 +7,13 @@ import json
 import os
 import pathlib
 import runpy
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import PurePosixPath
+
+import jsonschema
 
 
 def execute(command: list[str], cwd: pathlib.Path) -> subprocess.CompletedProcess[str]:
@@ -24,8 +27,18 @@ def git(repo: pathlib.Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def resolve_executable(name: str) -> pathlib.Path:
+    """Resolve a path, or a bare command name through PATH, to an absolute path."""
+    if os.sep not in name and (os.altsep is None or os.altsep not in name):
+        found = shutil.which(name)
+        if found is None:
+            raise SystemExit(f"{name} was not found on PATH")
+        name = found
+    return pathlib.Path(name).resolve(strict=True)
+
+
 def main() -> int:
-    vee = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "target/debug/vee").resolve(strict=True)
+    vee = resolve_executable(sys.argv[1] if len(sys.argv) > 1 else "target/debug/vee")
     runner = pathlib.Path(__file__).resolve().parents[1] / "historical-review-benchmark.py"
     with tempfile.TemporaryDirectory(prefix="vee-historical-acceptance-") as temporary:
         root = pathlib.Path(temporary)
@@ -327,12 +340,7 @@ def main() -> int:
         assert not (root / "provider-ran").exists(), "verification-only must not invoke the review provider"
         schema = json.loads((pathlib.Path(__file__).resolve().parents[2] / "schemas/historical-verification-report-v1.schema.json").read_text())
         assert schema["properties"]["benchmark"]["const"] == verification_report["benchmark"]
-        try:
-            import jsonschema
-        except ImportError:
-            pass
-        else:
-            jsonschema.validate(verification_report, schema)
+        jsonschema.validate(verification_report, schema)
         for revision_runs in (verification_case["buggy_runs"], verification_case["fix_runs"]):
             run_record = revision_runs[0]
             assert run_record["command_digest"].startswith("sha256:")

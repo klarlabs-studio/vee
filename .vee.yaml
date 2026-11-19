@@ -40,7 +40,6 @@ reviewers:
     instructions_file: .vee/reviewers/cli.md
     include:
       - crates/vee-cli/tests/cli.rs
-      - docs/competitive-gap-plan.md
   local-ui:
     provider: codex
     instructions_file: .vee/reviewers/ui.md

@@ -2870,9 +2870,24 @@ fn write_completions(shell: clap_complete::Shell, output: &mut dyn std::io::Writ
     clap_complete::generate(shell, &mut command, "vee", output);
 }
 
+/// Stack for the thread that runs the command. Windows gives the main thread
+/// 1 MiB, which an unoptimized build overflows while parsing and dispatching
+/// commands; Linux and macOS default to 8 MiB. Use 8 MiB everywhere.
+const COMMAND_STACK_BYTES: usize = 8 * 1024 * 1024;
+
 fn main() -> ExitCode {
     let json_output = json_output_requested(&std::env::args_os().collect::<Vec<_>>());
-    match run() {
+    let outcome = std::thread::Builder::new()
+        .name("vee".into())
+        .stack_size(COMMAND_STACK_BYTES)
+        .spawn(run)
+        .map_err(anyhow::Error::from)
+        .and_then(|command| {
+            command
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        });
+    match outcome {
         Ok(code) => ExitCode::from(code),
         Err(err) => {
             let (error_code, exit_code) = classify_error(&err);
@@ -3923,8 +3938,8 @@ fn run() -> Result<u8> {
                 output,
             } => {
                 let prepared = prepare_effectiveness(&proposal_id, &profile)?;
-                let root_canonical = std::fs::canonicalize(&prepared.root)?;
-                let patch_canonical = std::fs::canonicalize(&mutant_patch)?;
+                let root_canonical = vee_core::paths::canonicalize(&prepared.root)?;
+                let patch_canonical = vee_core::paths::canonicalize(&mutant_patch)?;
                 anyhow::ensure!(!patch_canonical.starts_with(&root_canonical), "mutant patch must be outside the repository so it cannot change the reviewed snapshot");
                 let mutant_meta = std::fs::symlink_metadata(&patch_canonical)?;
                 anyhow::ensure!(
@@ -5072,7 +5087,7 @@ fn run() -> Result<u8> {
                             .filter(|parent| !parent.as_os_str().is_empty())
                             .unwrap_or(std::path::Path::new("."));
                         std::fs::create_dir_all(parent)?;
-                        Ok(std::fs::canonicalize(parent)?.join(name))
+                        Ok(vee_core::paths::canonicalize(parent)?.join(name))
                     };
                     let private_target = resolve_target(&private_key)?;
                     let public_target = resolve_target(&public_key)?;
@@ -7448,7 +7463,7 @@ fn run() -> Result<u8> {
 }
 
 fn install_agent_skills(root: &std::path::Path, force: bool) -> Result<()> {
-    let root = std::fs::canonicalize(root).context("resolve checkout root")?;
+    let root = vee_core::paths::canonicalize(root).context("resolve checkout root")?;
     let agents = root.join(".agents");
     let skills = agents.join("skills");
     for directory in [&agents, &skills] {

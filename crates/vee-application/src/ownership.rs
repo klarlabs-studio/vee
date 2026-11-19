@@ -2,6 +2,7 @@ use globset::{GlobBuilder, GlobMatcher};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use vee_core::paths::CanonicalPath as _;
 
 const MAX_CODEOWNERS_BYTES: u64 = 256 * 1024;
 const MAX_CODEOWNERS_RULES: usize = 4096;
@@ -44,7 +45,7 @@ pub fn analyze(root: &Path, paths: &[PathBuf]) -> Result<OwnershipReport, String
         return Err(format!("ownership path limit is {MAX_OWNER_PATHS}"));
     }
     let root = root
-        .canonicalize()
+        .canonical()
         .map_err(|error| format!("cannot resolve repository root: {error}"))?;
     if !root.is_dir() {
         return Err("repository root is not a directory".into());
@@ -57,7 +58,7 @@ pub fn analyze(root: &Path, paths: &[PathBuf]) -> Result<OwnershipReport, String
             root.join(path)
         };
         let canonical = candidate
-            .canonicalize()
+            .canonical()
             .map_err(|error| format!("cannot resolve path {}: {error}", path.display()))?;
         let relative = canonical
             .strip_prefix(&root)
@@ -139,7 +140,7 @@ fn find_codeowners(root: &Path) -> Result<Option<(PathBuf, Vec<u8>)>, String> {
             ));
         }
         let canonical = candidate
-            .canonicalize()
+            .canonical()
             .map_err(|error| format!("cannot resolve {}: {error}", candidate.display()))?;
         if !canonical.starts_with(root) {
             return Err(format!(
@@ -311,11 +312,11 @@ mod tests {
         std::fs::write(root.path().join("src/file.rs"), "").unwrap();
         std::fs::write(root.path().join("README.md"), "").unwrap();
         let report = analyze(root.path(), &["src/file.rs".into(), "README.md".into()]).unwrap();
-        assert!(report
-            .codeowners_path
-            .as_deref()
-            .unwrap()
-            .ends_with(".github/CODEOWNERS"));
+        // A native absolute path, so compare components rather than separators.
+        assert!(
+            std::path::Path::new(report.codeowners_path.as_deref().unwrap())
+                .ends_with(".github/CODEOWNERS")
+        );
         assert_eq!(report.results[0].owners, vec!["@first"]);
         assert_eq!(report.results[1].owners, vec!["@first-subteam"]);
     }

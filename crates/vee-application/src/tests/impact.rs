@@ -214,11 +214,16 @@ fn typescript_project_references_resolve_aliases_without_same_name_false_edges()
     assert!(impact.coverage_complete);
     assert!(impact.changed_symbols.contains(&"ChangedAPI".into()));
     assert!(impact.changed_symbols.contains(&"ChangedJSAPI".into()));
-    assert!(impact.analyzers.iter().any(|analyzer| {
-        analyzer.id == "typescript-language-service"
-            && analyzer.status == "used"
-            && analyzer.version.is_some()
-    }));
+    assert!(
+        impact.analyzers.iter().any(|analyzer| {
+            analyzer.id == "typescript-language-service"
+                && analyzer.status == "used"
+                && analyzer.version.is_some()
+        }),
+        "analyzers: {:?}\nlimitations: {:#?}",
+        impact.analyzers,
+        impact.limitations
+    );
     assert!(impact.paths.iter().any(|edge| {
         edge.affected_path == "src/consumer.ts"
             && edge.relationship == "resolved_symbol_reference"
@@ -831,13 +836,17 @@ fn impact_reports_evidenced_rust_and_go_references_with_uncertainty() {
     );
     let mut no_tests_config = config.clone();
     let fake_cargo_directory = tempfile::tempdir().unwrap();
-    let fake_cargo = fake_cargo_directory.path().join("fake-cargo");
+    // Windows runs only executables with a PATHEXT extension, so the fake
+    // there is a batch file rather than a shell script.
+    #[cfg(windows)]
+    let (fake_cargo_name, fake_cargo_script) =
+        ("fake-cargo.cmd", "@echo no tests matched\r\n@exit /b 0\r\n");
+    #[cfg(not(windows))]
+    let (fake_cargo_name, fake_cargo_script) =
+        ("fake-cargo", "#!/bin/sh\necho 'no tests matched'\nexit 0\n");
+    let fake_cargo = fake_cargo_directory.path().join(fake_cargo_name);
     let fake_cargo_source = fake_cargo_directory.path().join("fake-cargo-source");
-    std::fs::write(
-        &fake_cargo_source,
-        "#!/bin/sh\necho 'no tests matched'\nexit 0\n",
-    )
-    .unwrap();
+    std::fs::write(&fake_cargo_source, fake_cargo_script).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1175,4 +1184,37 @@ fn go_impact_links_changed_packages_to_local_packages_sharing_dependencies() {
         ),
         vec![("example.invalid/real".into(), 4)]
     );
+}
+
+#[test]
+fn tsserver_messages_are_read_with_unix_and_windows_newlines() {
+    // Content-Length counts the JSON plus one newline byte.
+    let unix = b"Content-Length: 3\r\n\r\n{}\nContent-Length: 8\r\n\r\n{\"a\":1}\n".to_vec();
+    let windows = b"Content-Length: 3\r\n\r\n{}\r\nContent-Length: 8\r\n\r\n{\"a\":1}\r\n".to_vec();
+    for stream in [unix, windows] {
+        let mut reader = std::io::BufReader::new(stream.as_slice());
+        let first = crate::impact::read_tsserver_message(&mut reader, 1024)
+            .unwrap()
+            .unwrap();
+        let second = crate::impact::read_tsserver_message(&mut reader, 1024)
+            .unwrap()
+            .unwrap();
+        let parse = |body: &[u8]| serde_json::from_slice::<serde_json::Value>(body).unwrap();
+        assert_eq!(parse(&first), serde_json::json!({}));
+        assert_eq!(parse(&second), serde_json::json!({"a": 1}));
+        assert_eq!(
+            crate::impact::read_tsserver_message(&mut reader, 1024).unwrap(),
+            None
+        );
+    }
+}
+
+#[test]
+fn tsserver_messages_without_content_length_or_over_the_limit_are_rejected() {
+    let mut missing = std::io::BufReader::new(&b"X-Other: 1\r\n\r\n{}\n"[..]);
+    assert!(crate::impact::read_tsserver_message(&mut missing, 1024)
+        .unwrap_err()
+        .contains("omitted Content-Length"));
+    let mut large = std::io::BufReader::new(&b"Content-Length: 4096\r\n\r\n"[..]);
+    assert!(crate::impact::read_tsserver_message(&mut large, 1024).is_err());
 }

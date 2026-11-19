@@ -7,3 +7,9 @@ node_modules/
 !.vee/packs/
 *.rlib
 __pycache__/
+.venv/
+
+# Internal competitor analysis; never committed.
+docs/competitive-gap-plan.md
+docs/competitive-gap-review-and-plan.md
+docs/roadmap-beyond-parity.md

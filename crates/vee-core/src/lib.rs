@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 pub mod lifecycle;
 pub mod packs;
+pub mod paths;
 pub mod ports;
 pub use lifecycle::{ActorName, FindingStatusChange, Reason, RuleApprovalStatus};
 pub use packs::{PackReference, PolicyPack};
@@ -662,9 +663,9 @@ where
             }
             *path = parsed.to_string_lossy().replace('\\', "/");
             let absolute = repository_root.join(path.as_str());
-            if let Ok(canonical_root) = std::fs::canonicalize(repository_root) {
+            if let Ok(canonical_root) = crate::paths::canonicalize(repository_root) {
                 if let Ok(canonical_parent) =
-                    std::fs::canonicalize(absolute.parent().unwrap_or(repository_root))
+                    crate::paths::canonicalize(absolute.parent().unwrap_or(repository_root))
                 {
                     if !canonical_parent.starts_with(canonical_root) {
                         return Err(format!(
