@@ -1,0 +1,613 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/historical-review-report-v1.schema.json",
+  "title": "Vero historical review benchmark report v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "benchmark",
+    "corpus_id",
+    "manifest_digest",
+    "benchmark_config_digest",
+    "vero_version",
+    "verifier_digest",
+    "case_count",
+    "completed_cases",
+    "incomplete_cases",
+    "label_count_completed_cases",
+    "matched_labels",
+    "missed_labels",
+    "finding_recall",
+    "report_path",
+    "cases",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "benchmark": {
+      "const": "historical_review"
+    },
+    "corpus_id": {
+      "type": "string"
+    },
+    "source": {
+      "type": "string"
+    },
+    "source_revision": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "license_reference": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "manifest_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "benchmark_config_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "vero_version": {
+      "type": "string"
+    },
+    "verifier_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "provider_egress_mode": {
+      "const": "declared_in_trusted_config; CLI_adapter_egress_not_independently_verified"
+    },
+    "case_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "completed_cases": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "incomplete_cases": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "out_of_scope_cases": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "scope_languages": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "go",
+          "rust",
+          "typescript",
+          "javascript",
+          "python",
+          "java",
+          "ruby"
+        ]
+      }
+    },
+    "interrupted": {
+      "type": "boolean"
+    },
+    "label_count_completed_cases": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "matched_labels": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "missed_labels": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "finding_recall": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "labels_with_localization_candidates": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "report_path": {
+      "type": "string"
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "enum": [
+              "complete",
+              "incomplete",
+              "out_of_scope",
+              "timeout",
+              "interrupted"
+            ]
+          },
+          "incomplete_reason": {
+            "type": "string"
+          },
+          "label_context_coverage": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "label_id",
+                "path",
+                "full_source_reviewer_ids"
+              ],
+              "properties": {
+                "label_id": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "full_source_reviewer_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "uncovered_labels": {
+            "$ref": "#/$defs/label_context_coverage"
+          },
+          "verification_profiles_requested": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "analysis_evidence_comparison": {
+            "$ref": "#/$defs/analysis_evidence_comparison"
+          },
+          "verification_runs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "profile_id",
+                "state"
+              ],
+              "properties": {
+                "profile_id": {
+                  "type": "string"
+                },
+                "revision_role": {
+                  "enum": [
+                    "buggy_commit",
+                    "fix_commit"
+                  ]
+                },
+                "state": {
+                  "enum": [
+                    "passed",
+                    "failed",
+                    "timed_out",
+                    "timeout",
+                    "incomplete",
+                    "invalid_output",
+                    "snapshot_mismatch"
+                  ]
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "snapshot_id": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "exit_code": {
+                  "type": "integer"
+                },
+                "command_digest": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                },
+                "elapsed_seconds": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "stdout_artifact": {
+                  "$ref": "#/$defs/verification_artifact"
+                },
+                "stderr_artifact": {
+                  "$ref": "#/$defs/verification_artifact"
+                },
+                "source_commit": {
+                  "type": "string",
+                  "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+                },
+                "verification_overlay": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "path",
+                      "digest",
+                      "size_bytes"
+                    ],
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      },
+                      "digest": {
+                        "type": "string",
+                        "pattern": "^sha256:[0-9a-f]{64}$"
+                      },
+                      "size_bytes": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1048576
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "verification_overlay_digest": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "fix_verification_runs": {
+            "$ref": "#/$defs/verification_runs"
+          },
+          "localization_candidates": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "label_id",
+                "finding_id",
+                "candidate_type",
+                "path",
+                "line",
+                "target_start_line",
+                "target_end_line",
+                "category"
+              ],
+              "properties": {
+                "label_id": {
+                  "type": "string"
+                },
+                "finding_id": {
+                  "type": "string"
+                },
+                "candidate_type": {
+                  "enum": [
+                    "wrong_line",
+                    "missing_line"
+                  ]
+                },
+                "path": {
+                  "type": "string"
+                },
+                "line": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "target_start_line": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "target_end_line": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "category": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "verification_runs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "profile_id",
+          "state"
+        ],
+        "properties": {
+          "profile_id": {
+            "type": "string"
+          },
+          "revision_role": {
+            "enum": [
+              "buggy_commit",
+              "fix_commit"
+            ]
+          },
+          "state": {
+            "enum": [
+              "passed",
+              "failed",
+              "timed_out",
+              "timeout",
+              "incomplete",
+              "invalid_output",
+              "snapshot_mismatch"
+            ]
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "exit_code": {
+            "type": "integer"
+          },
+          "command_digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "elapsed_seconds": {
+            "type": "number",
+            "minimum": 0
+          },
+          "stdout_artifact": {
+            "$ref": "#/$defs/verification_artifact"
+          },
+          "stderr_artifact": {
+            "$ref": "#/$defs/verification_artifact"
+          },
+          "source_commit": {
+            "type": "string",
+            "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+          },
+          "verification_overlay": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "path",
+                "digest",
+                "size_bytes"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                },
+                "size_bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1048576
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "verification_overlay_digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "label_context_coverage": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "label_id",
+          "path",
+          "full_source_reviewer_ids"
+        ],
+        "properties": {
+          "label_id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "full_source_reviewer_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "verification_artifact": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "required": [
+            "digest",
+            "size_bytes",
+            "path"
+          ],
+          "properties": {
+            "digest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "size_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10485760
+            },
+            "path": {
+              "type": "string",
+              "pattern": "^cases/[^/]+/verification/(buggy_commit|fix_commit)/[^/]+/(stdout|stderr)-[0-9a-f]{64}\\.bin$"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "analysis_evidence_comparison": {
+      "type": "object",
+      "required": [
+        "ai_review",
+        "trusted_verification",
+        "interpretation"
+      ],
+      "properties": {
+        "ai_review": {
+          "type": "object",
+          "required": [
+            "matched_label_ids",
+            "missed_label_ids"
+          ],
+          "properties": {
+            "matched_label_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "missed_label_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "trusted_verification": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "profile_id",
+              "buggy_state",
+              "buggy_run_id",
+              "buggy_command_digest",
+              "fix_state",
+              "fix_run_id",
+              "fix_command_digest",
+              "same_command",
+              "comparison",
+              "same_verification_overlay"
+            ],
+            "properties": {
+              "profile_id": {
+                "type": "string"
+              },
+              "buggy_state": {
+                "type": "string"
+              },
+              "buggy_run_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "buggy_command_digest": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^sha256:[0-9a-f]{64}$"
+              },
+              "fix_state": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "fix_run_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "fix_command_digest": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^sha256:[0-9a-f]{64}$"
+              },
+              "same_command": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "comparison": {
+                "enum": [
+                  "missing_fix_run",
+                  "incomplete",
+                  "command_mismatch",
+                  "verification_overlay_mismatch",
+                  "buggy_failed_fix_passed",
+                  "passed_both",
+                  "failed_both",
+                  "buggy_passed_fix_failed"
+                ]
+              },
+              "same_verification_overlay": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "interpretation": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

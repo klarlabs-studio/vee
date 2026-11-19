@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/rule-effectiveness-v1.schema.json",
+  "title": "Vero Rule Effectiveness Report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "approvals", "limitations"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "limitations": { "type": "array", "items": { "type": "string" } },
+    "approvals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["approval_id", "version", "status", "source_feedback_ids", "evidence_digest", "baseline", "after_activation"],
+        "properties": {
+          "approval_id": { "type": "string" },
+          "version": { "type": "integer", "minimum": 1 },
+          "status": { "type": "string" },
+          "source_feedback_ids": { "type": "array", "items": { "type": "string" } },
+          "evidence_digest": { "type": "string" },
+          "baseline": { "$ref": "#/$defs/window" },
+          "after_activation": { "$ref": "#/$defs/window" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["accuracy_denominator", "false_positive_count", "false_positive_rate", "actionability_denominator", "not_actionable_count", "not_actionable_rate", "disputed_occurrences"],
+      "properties": {
+        "accuracy_denominator": { "type": "integer", "minimum": 0 },
+        "false_positive_count": { "type": "integer", "minimum": 0 },
+        "false_positive_rate": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "actionability_denominator": { "type": "integer", "minimum": 0 },
+        "not_actionable_count": { "type": "integer", "minimum": 0 },
+        "not_actionable_rate": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "disputed_occurrences": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

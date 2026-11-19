@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/evidence-bundle-v1.schema.json",
+  "title": "Vero Evidence Bundle v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "manifest", "manifest_digest", "review", "limitations"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "manifest_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "review_id", "snapshot_id", "effective_config_digest", "policy_digest", "decision_id", "gate_status", "review_digest", "finding_count", "evidence_count", "verification_count"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "review_id": { "type": "string", "minLength": 1 },
+        "snapshot_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "effective_config_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "policy_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "decision_id": { "type": "string", "minLength": 1 },
+        "gate_status": { "enum": ["pass", "block", "incomplete"] },
+        "review_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "finding_count": { "type": "integer", "minimum": 0 },
+        "evidence_count": { "type": "integer", "minimum": 0 },
+        "verification_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "review": { "$ref": "https://vero.dev/schemas/review-output-v2.schema.json" },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "key_id", "signature"],
+      "properties": {
+        "algorithm": { "const": "ed25519" },
+        "key_id": { "type": "string", "minLength": 1 },
+        "signature": { "type": "string", "contentEncoding": "base64" }
+      }
+    },
+    "limitations": { "type": "array", "items": { "type": "string" } }
+  }
+}

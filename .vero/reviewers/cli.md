@@ -1,0 +1,1 @@
+Review the changed CLI and MCP behavior for concrete correctness defects, contract mismatches, unsafe output, and regressions in the acceptance tests. Consider the accompanying schemas and documentation. Report only actionable defects supported by changed-code evidence. Do not edit files or run commands.

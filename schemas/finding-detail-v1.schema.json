@@ -6,7 +6,8 @@
   "additionalProperties": false,
   "required": [
     "schema_version",
-    "finding"
+    "finding",
+    "verification_runs"
   ],
   "properties": {
     "schema_version": {
@@ -138,6 +139,13 @@
             }
           }
         }
+      }
+    },
+    "verification_runs": {
+      "type": "array",
+      "description": "Explicit local verification runs attached to this finding; each run is bound to its recorded snapshot.",
+      "items": {
+        "$ref": "verification-run-v1.schema.json"
       }
     }
   },

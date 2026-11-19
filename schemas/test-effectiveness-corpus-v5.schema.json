@@ -1,0 +1,289 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/test-effectiveness-corpus-v5.schema.json",
+  "title": "Vero test effectiveness corpus report v5",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "proposal_id",
+    "snapshot_id",
+    "profile_id",
+    "baseline_verification_run_id",
+    "verification_command_digest",
+    "corpus_id",
+    "corpus_digest",
+    "sample_size",
+    "killed",
+    "survived",
+    "inconclusive",
+    "results",
+    "limitations",
+    "coverage_run",
+    "provenance"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 5
+    },
+    "proposal_id": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "snapshot_id": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "profile_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "baseline_verification_run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "corpus_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "corpus_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "sample_size": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 50
+    },
+    "killed": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "survived": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "inconclusive": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "patch_digest",
+          "outcome",
+          "baseline_status",
+          "mutated_status",
+          "mutant_failure_signal",
+          "mutant_snapshot_id",
+          "mutant_paths",
+          "mutated_stdout_digest",
+          "mutated_stderr_digest",
+          "changed_line_coverage"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "patch_digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "outcome": {
+            "enum": [
+              "killed",
+              "survived",
+              "inconclusive"
+            ]
+          },
+          "baseline_status": {
+            "enum": [
+              "passed",
+              "failed",
+              "timed_out"
+            ]
+          },
+          "mutated_status": {
+            "enum": [
+              "passed",
+              "failed",
+              "timed_out",
+              "not_run"
+            ]
+          },
+          "mutant_failure_signal": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mutant_snapshot_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "mutant_paths": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "mutated_stdout_digest": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "mutated_stderr_digest": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "changed_line_coverage": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "path",
+                "changed_line_count",
+                "changed_executable_lines",
+                "changed_covered_lines",
+                "changed_percent"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "changed_line_count": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "changed_executable_lines": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "changed_covered_lines": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "changed_percent": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 100
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "verification_command_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "coverage_run": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "run_id",
+        "snapshot_id",
+        "profile_id",
+        "stream"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "profile_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stream": {
+          "enum": [
+            "stdout",
+            "stderr"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "provenance": {
+      "type": "object",
+      "required": [
+        "dataset_kind",
+        "source",
+        "source_revision",
+        "license"
+      ],
+      "properties": {
+        "dataset_kind": {
+          "enum": [
+            "seeded",
+            "historical",
+            "unclassified"
+          ]
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 2048
+        },
+        "source_revision": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        },
+        "license": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

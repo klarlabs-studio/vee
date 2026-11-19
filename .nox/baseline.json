@@ -1,0 +1,230 @@
+{
+  "schema_version": "1.0.0",
+  "entries": [
+    {
+      "fingerprint": "05a1f8af5bdade621c6792363db5fd018ad3890346552c3c0dca6ff70b9b9bf3",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: TLS keys generated for the vendored MCP library mTLS tests (vendor/klarlabs-mcp/tests/fixtures/tls); they protect nothing.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.899495Z"
+    },
+    {
+      "fingerprint": "1f3f2d627da261233250f1c37efe6de0d5995483e381260261e7a06acea66a3b",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: TLS keys generated for the vendored MCP library mTLS tests (vendor/klarlabs-mcp/tests/fixtures/tls); they protect nothing.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.899496Z"
+    },
+    {
+      "fingerprint": "21cdfc1c8f52cd824f28b9feef30bdb6026bd6732a683dfc0b130b9b4a2b10da",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: TLS keys generated for the vendored MCP library mTLS tests (vendor/klarlabs-mcp/tests/fixtures/tls); they protect nothing.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.899498Z"
+    },
+    {
+      "fingerprint": "8396de3f17807253cbe328ad5c7d12e3cb43e34b1ef72b929d1d28daa5d7affb",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: TLS keys generated for the vendored MCP library mTLS tests (vendor/klarlabs-mcp/tests/fixtures/tls); they protect nothing.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.899498Z"
+    },
+    {
+      "fingerprint": "9577225908e43f61e3dfd0a88b0f58629a06872f1cf0703b2b560e9b1cbb2a9c",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: TLS keys generated for the vendored MCP library mTLS tests (vendor/klarlabs-mcp/tests/fixtures/tls); they protect nothing.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.899499Z"
+    },
+    {
+      "fingerprint": "9f08aace72d37d5f8cb404618e2a8592220f877886fab7a5a26a50d20d30dff3",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: TLS keys generated for the vendored MCP library mTLS tests (vendor/klarlabs-mcp/tests/fixtures/tls); they protect nothing.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.8995Z"
+    },
+    {
+      "fingerprint": "1612e6e8fab878af64f2cb5ef4891a0fab048c32dba59832bee739eb281b7532",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.95178Z"
+    },
+    {
+      "fingerprint": "344af28406c8bd03786114b6d2813d29e5a8d1517ffdfce80d7c91c12158b116",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.951781Z"
+    },
+    {
+      "fingerprint": "63007c27537cc5253ba055f197954b75a155838b1a7c67fe3f59d0218a69841d",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.951781Z"
+    },
+    {
+      "fingerprint": "8b4710c88bee4386b2a197198bb5a577a28bf3d120dfb0a3c0f04534768869e7",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.951783Z"
+    },
+    {
+      "fingerprint": "a0f41ae1f8cab880d7f2fac7e9ec8632eabd22c0e03b3dfd87ca1cfe68bb5192",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.951783Z"
+    },
+    {
+      "fingerprint": "a1bf35f4fb528a69520de2d777417f18a44e34406882fe7f2985b2dd05a5e8ae",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.951784Z"
+    },
+    {
+      "fingerprint": "b89f46552a794679f93550db1558cde5b0c0aa9342a6fd3ef5e8ae6003ffad46",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.951785Z"
+    },
+    {
+      "fingerprint": "ba3a8a670984ffb05137881fb8651d590993d7e399932e22b39a6db5eaa3aa8d",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.951786Z"
+    },
+    {
+      "fingerprint": "c30613be90f8dd0a063510977161c6b8a8f986d8efd27994b037f977b707ad47",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.951787Z"
+    },
+    {
+      "fingerprint": "c71a78c69907779f588bcc634ace51b11a9e1dbe5874a509179e2f8a637c6587",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.951789Z"
+    },
+    {
+      "fingerprint": "d0cabb40e4b0248394c778529ff038c6977f2643980a5ba7b5e54f361d3fc12b",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.95179Z"
+    },
+    {
+      "fingerprint": "e92cd087cbe288594dbaebd3efbd2f181b75386d657a5f9b503cc6ac442c6a7d",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.951791Z"
+    },
+    {
+      "fingerprint": "1612e6e8fab878af64f2cb5ef4891a0fab048c32dba59832bee739eb281b7532",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.95178Z"
+    },
+    {
+      "fingerprint": "1612e6e8fab878af64f2cb5ef4891a0fab048c32dba59832bee739eb281b7532",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.95178Z"
+    },
+    {
+      "fingerprint": "1612e6e8fab878af64f2cb5ef4891a0fab048c32dba59832bee739eb281b7532",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.95178Z"
+    },
+    {
+      "fingerprint": "8b4710c88bee4386b2a197198bb5a577a28bf3d120dfb0a3c0f04534768869e7",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.951783Z"
+    },
+    {
+      "fingerprint": "e92cd087cbe288594dbaebd3efbd2f181b75386d657a5f9b503cc6ac442c6a7d",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.951791Z"
+    },
+    {
+      "fingerprint": "e92cd087cbe288594dbaebd3efbd2f181b75386d657a5f9b503cc6ac442c6a7d",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.951791Z"
+    },
+    {
+      "fingerprint": "e92cd087cbe288594dbaebd3efbd2f181b75386d657a5f9b503cc6ac442c6a7d",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
+      "owner": "vero-maintainers",
+      "created_at": "2026-11-17T20:53:07.951791Z"
+    }
+  ]
+}

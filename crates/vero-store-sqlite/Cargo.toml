@@ -1,0 +1,16 @@
+[package]
+name = "vero-store-sqlite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+rusqlite.workspace = true
+vero-core = { path = "../vero-core" }
+
+[dev-dependencies]
+vero-process = { path = "../vero-process" }
+tempfile.workspace = true

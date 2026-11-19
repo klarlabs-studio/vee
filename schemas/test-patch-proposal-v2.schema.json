@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/test-patch-proposal-v2.schema.json",
+  "title": "Vero generated test patch proposal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "proposal_id", "snapshot_id", "source_scope", "base_oid",
+    "reviewer_id", "provider_id", "provider_kind", "model", "provider_output_digest",
+    "patch_digest", "patch_path", "validated_in_isolated_sandbox", "sandbox_input_digest",
+    "sandbox_result_digest", "application", "tests_executed", "verification_runs",
+    "approval_instruction"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "proposal_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "snapshot_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "source_scope": { "enum": ["staged", "working_tree", "base_and_worktree", "commit", "commit_range"] },
+    "base_oid": { "type": ["string", "null"] },
+    "reviewer_id": { "type": "string", "minLength": 1 },
+    "provider_id": { "type": "string", "minLength": 1 },
+    "provider_kind": { "enum": ["cli", "codex_cli", "gemini_cli", "claude_cli", "openai_compatible"] },
+    "model": { "type": ["string", "null"] },
+    "provider_output_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "context_summary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["context_digest", "context_complete", "context_budget", "omitted_paths", "file_manifest"],
+      "properties": {
+        "context_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "context_complete": { "type": "boolean" },
+        "context_budget": {
+          "type": "object", "additionalProperties": false,
+          "required": ["method", "max_context_tokens", "estimated_prompt_tokens", "reserved_tokens", "budget_metadata_reserve_tokens", "within_budget", "omitted_content_file_count", "omitted_impact_context_count"],
+          "properties": {
+            "method": { "type": "string" },
+            "max_context_tokens": { "type": "integer", "minimum": 1 },
+            "estimated_prompt_tokens": { "type": "integer", "minimum": 1 },
+            "reserved_tokens": { "type": "integer", "minimum": 0 },
+            "budget_metadata_reserve_tokens": { "type": "integer", "minimum": 0 },
+            "within_budget": { "type": "boolean" },
+            "omitted_content_file_count": { "type": "integer", "minimum": 0 },
+            "omitted_impact_context_count": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "omitted_paths": { "type": ["array", "null"], "items": { "type": "string" } },
+        "file_manifest": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["path", "content_digest", "context_role", "content_omitted", "omission_reason"],
+            "properties": {
+              "path": { "type": ["string", "null"] },
+              "content_digest": { "type": ["string", "null"] },
+              "context_role": { "type": ["string", "null"] },
+              "content_omitted": { "type": ["boolean", "null"] },
+              "omission_reason": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "patch_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "patch_path": { "type": "string", "minLength": 1 },
+    "validated_in_isolated_sandbox": { "const": true },
+    "sandbox_input_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "sandbox_result_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "application": { "enum": ["not_applied", "applied"] },
+    "approval_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "applied_at_unix": { "type": "integer", "minimum": 0 },
+    "concurrent_mutation_detected": { "type": "boolean" },
+    "post_application_snapshot_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "tests_executed": { "type": "boolean" },
+    "last_verification_run_id": { "type": "string", "minLength": 1 },
+    "refinement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parent_proposal_id", "failed_run_id", "attempt"],
+      "properties": {
+        "parent_proposal_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "failed_run_id": { "type": "string", "minLength": 1 },
+        "attempt": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "verification_runs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["run_id", "snapshot_id", "profile_id", "status"],
+        "properties": {
+          "run_id": { "type": "string", "minLength": 1 },
+          "snapshot_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "profile_id": { "type": "string", "minLength": 1 },
+          "status": { "enum": ["passed", "failed", "timed_out"] }
+        }
+      }
+    },
+    "approval_instruction": { "type": "string", "minLength": 1 }
+  }
+}

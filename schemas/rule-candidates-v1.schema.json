@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/rule-candidates-v1.schema.json",
+  "title": "Vero Review Rule Candidates v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "candidates", "truncated", "limitations"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "truncated": { "type": "boolean" },
+    "limitations": { "type": "array", "items": { "type": "string" } },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["candidate_id", "category", "feedback_count", "suggestion", "feedback", "approval_status"],
+        "properties": {
+          "candidate_id": { "type": "string", "pattern": "^rule-candidate:[0-9a-f]{32}$" },
+          "category": { "type": "string", "minLength": 1 },
+          "feedback_count": { "type": "integer", "minimum": 3 },
+          "suggestion": { "type": "string" },
+          "approval_status": { "const": "requires_human_review" },
+          "feedback": {
+            "type": "array",
+            "maxItems": 5,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["finding_id", "status", "reason"],
+              "properties": {
+                "finding_id": { "type": "string" },
+                "status": { "enum": ["refuted", "waived"] },
+                "reason": { "type": "string", "maxLength": 501 }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

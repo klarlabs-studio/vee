@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/acceptance-mapping-v1.schema.json",
+  "title": "Vero Acceptance Mapping v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "review_id", "snapshot_id", "work_item_digest", "author", "recorded_at", "assessments"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "review_id": { "type": "string", "minLength": 1 },
+    "snapshot_id": { "type": "string", "minLength": 1 },
+    "work_item_digest": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" },
+    "author": { "type": "string", "minLength": 1 },
+    "recorded_at": { "type": "string", "minLength": 1 },
+    "assessments": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["criterion_id", "assessment", "rationale", "changed_paths", "verification_run_ids"], "properties": {
+      "criterion_id": { "type": "string", "pattern": "^AC-[a-f0-9]{12}$" },
+      "assessment": { "enum": ["met", "not_met", "uncertain"] },
+      "rationale": { "type": "string", "minLength": 1 },
+      "changed_paths": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+      "verification_run_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+    } } }
+  }
+}

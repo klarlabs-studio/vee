@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/pack-summary-v1.schema.json",
+  "title": "Vero policy pack summary v1",
+  "description": "Result of `vero packs export` and `vero packs add`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "name",
+    "version",
+    "path",
+    "digest",
+    "reviewers",
+    "verification_profiles",
+    "policy_profiles",
+    "rules",
+    "includes_policy",
+    "pinned",
+    "warnings"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "name": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "path": {
+      "type": "string"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "reviewers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "verification_profiles": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "policy_profiles": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "rules": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "includes_policy": {
+      "type": "boolean"
+    },
+    "pinned": {
+      "type": "boolean"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

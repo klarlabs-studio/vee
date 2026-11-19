@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/imported-review-search-v1.schema.json",
+  "title": "Vero Imported Review Search v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "query", "matches", "trust", "gate_eligible"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "query": { "type": "string", "minLength": 1 },
+    "trust": { "const": "untrusted_external" },
+    "gate_eligible": { "const": false },
+    "matches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["archive_digest", "review_id", "snapshot_id", "finding", "trust", "gate_eligible"],
+        "properties": {
+          "archive_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "review_id": { "type": "string", "minLength": 1 },
+          "snapshot_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "finding": { "type": "object" },
+          "trust": { "const": "untrusted_external" },
+          "gate_eligible": { "const": false }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/imported-review-search-v3.schema.json",
+  "title": "Vero Imported Review Search v3",
+  "description": "Search results may contain imported Vero findings or archived provider discussion comments. All are untrusted historical context and are never gate eligible.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "query", "matches", "trust", "gate_eligible"],
+  "properties": {
+    "schema_version": { "const": 3 },
+    "query": { "type": "string", "minLength": 1 },
+    "trust": { "const": "untrusted_external" },
+    "gate_eligible": { "const": false },
+    "matches": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["archive_digest", "review_id", "snapshot_id", "finding", "relevance_score", "matched_fields", "trust", "gate_eligible"],
+            "properties": {
+              "archive_digest": { "$ref": "#/$defs/digest" },
+              "review_id": { "type": "string", "minLength": 1 },
+              "snapshot_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+              "finding": { "type": "object" },
+              "relevance_score": { "type": "integer", "minimum": 1 },
+              "matched_fields": { "type": "array", "uniqueItems": true, "items": { "enum": ["category", "path", "provenance", "rationale", "severity"] } },
+              "trust": { "const": "untrusted_external" },
+              "gate_eligible": { "const": false }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["archive_digest", "provider", "pull_request", "revision", "issue", "relevance_score", "matched_fields", "trust", "gate_eligible"],
+            "properties": {
+              "archive_digest": { "$ref": "#/$defs/digest" },
+              "provider": { "type": "string", "minLength": 1 },
+              "pull_request": { "type": "object" },
+              "revision": { "type": "string", "minLength": 1 },
+              "issue": { "type": "object" },
+              "relevance_score": { "type": "integer", "minimum": 1 },
+              "matched_fields": { "type": "array", "uniqueItems": true, "items": { "enum": ["author", "body", "classification", "path"] } },
+              "trust": { "const": "untrusted_external" },
+              "gate_eligible": { "const": false }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  }
+}

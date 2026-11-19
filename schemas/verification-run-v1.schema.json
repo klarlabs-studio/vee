@@ -42,7 +42,8 @@
       "enum": [
         "passed",
         "failed",
-        "timed_out"
+        "timed_out",
+        "incomplete"
       ]
     },
     "exit_code": {
@@ -59,28 +60,55 @@
       "type": "string",
       "pattern": "^sha256:[a-f0-9]{64}$"
     },
-    "stdout_artifact": { "$ref": "#/$defs/artifact_reference" },
-    "stderr_artifact": { "$ref": "#/$defs/artifact_reference" },
+    "stdout_artifact": {
+      "$ref": "#/$defs/artifact_reference"
+    },
+    "stderr_artifact": {
+      "$ref": "#/$defs/artifact_reference"
+    },
     "finding_id": {
       "type": [
         "string",
         "null"
       ],
       "minLength": 1
+    },
+    "targets": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
     }
   },
   "$defs": {
     "artifact_reference": {
       "oneOf": [
-        { "type": "null" },
+        {
+          "type": "null"
+        },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["digest", "path", "size_bytes"],
+          "required": [
+            "digest",
+            "path",
+            "size_bytes"
+          ],
           "properties": {
-            "digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
-            "path": { "type": "string", "pattern": "^\\.vero/artifacts/sha256/[a-f0-9]{64}$" },
-            "size_bytes": { "type": "integer", "minimum": 0 }
+            "digest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "path": {
+              "type": "string",
+              "pattern": "^\\.vero/artifacts/sha256/[a-f0-9]{64}$"
+            },
+            "size_bytes": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         }
       ]

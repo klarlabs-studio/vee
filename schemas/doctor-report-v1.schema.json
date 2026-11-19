@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/doctor-report-v1.schema.json",
+  "title": "Vero setup diagnosis v1",
+  "description": "Whether a repository's configured reviewers can run on this machine. Returned by `vero doctor --output json` and the MCP `check_setup` tool.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "repository_config",
+    "config_valid",
+    "config_error",
+    "user_config",
+    "user_config_exists",
+    "offline",
+    "reviewers",
+    "detection",
+    "ready",
+    "next_steps"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "repository_config": {
+      "type": "string"
+    },
+    "config_valid": {
+      "type": "boolean"
+    },
+    "config_error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "user_config": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "user_config_exists": {
+      "type": "boolean"
+    },
+    "offline": {
+      "type": "boolean"
+    },
+    "reviewers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reviewer_id",
+          "provider_id",
+          "kind",
+          "egress",
+          "enabled",
+          "required",
+          "usable",
+          "detail",
+          "problem"
+        ],
+        "properties": {
+          "reviewer_id": {
+            "type": "string"
+          },
+          "provider_id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "cli",
+              "codex_cli",
+              "gemini_cli",
+              "claude_cli",
+              "openai_compatible",
+              "ollama_native"
+            ]
+          },
+          "egress": {
+            "enum": [
+              "local",
+              "network"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "usable": {
+            "type": "boolean"
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "problem": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "detection": {
+      "$ref": "provider-detection-v1.schema.json"
+    },
+    "ready": {
+      "type": "boolean",
+      "description": "The configuration is valid and every required reviewer can run."
+    },
+    "next_steps": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

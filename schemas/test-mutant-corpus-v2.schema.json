@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/test-mutant-corpus-v2.schema.json",
+  "title": "Vero test mutant corpus v2",
+  "type": "object",
+  "required": ["schema_version", "corpus_id", "dataset_kind", "source", "mutants"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "corpus_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$" },
+    "dataset_kind": { "enum": ["seeded", "historical"] },
+    "source": { "type": "string", "minLength": 1, "maxLength": 2048 },
+    "source_revision": { "type": "string", "maxLength": 256 },
+    "license": { "type": "string", "maxLength": 256 },
+    "mutants": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "required": ["id", "patch", "patch_digest"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$" },
+          "patch": { "type": "string", "minLength": 1 },
+          "patch_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

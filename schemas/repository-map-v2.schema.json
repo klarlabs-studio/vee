@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/repository-map-v2.schema.json",
+  "title": "Vero local repository dependency map v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "repositories",
+    "dependencies",
+    "limitations",
+    "digest"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "repositories": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "root",
+          "ecosystem",
+          "manifest",
+          "manifest_digest"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "root": {
+            "type": "string",
+            "minLength": 1
+          },
+          "ecosystem": {
+            "enum": [
+              "cargo",
+              "npm",
+              "go"
+            ]
+          },
+          "manifest": {
+            "enum": [
+              "Cargo.toml",
+              "package.json",
+              "go.mod"
+            ]
+          },
+          "manifest_digest": {
+            "$ref": "#/$defs/digest"
+          }
+        }
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "from",
+          "to",
+          "package",
+          "declared_alias",
+          "kind",
+          "declared_requirement",
+          "declared_path",
+          "match_basis",
+          "evidence_path",
+          "evidence_digest",
+          "constraint_source_path",
+          "constraint_source_digest",
+          "version_compatibility"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "minLength": 1
+          },
+          "to": {
+            "type": "string",
+            "minLength": 1
+          },
+          "package": {
+            "type": "string",
+            "minLength": 1
+          },
+          "declared_alias": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "minLength": 1
+          },
+          "declared_requirement": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "declared_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "match_basis": {
+            "enum": [
+              "resolved_path",
+              "package_name",
+              "npm_alias"
+            ]
+          },
+          "evidence_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_digest": {
+            "$ref": "#/$defs/digest"
+          },
+          "constraint_source_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "constraint_source_digest": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/digest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "version_compatibility": {
+            "enum": [
+              "satisfied",
+              "mismatch",
+              "unknown",
+              "invalid_requirement",
+              "invalid_package_version",
+              "not_specified",
+              "not_evaluated"
+            ]
+          }
+        }
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "digest": {
+      "$ref": "#/$defs/digest"
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

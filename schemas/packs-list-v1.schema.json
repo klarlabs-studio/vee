@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/packs-list-v1.schema.json",
+  "title": "Vero pinned policy packs v1",
+  "description": "Packs pinned in .vero.yaml and whether their content matches the pin. Returned by `vero packs list` and the MCP `list_packs` tool.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "packs"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "packs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "pinned_digest",
+          "provider",
+          "status",
+          "name",
+          "version",
+          "problem"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "pinned_digest": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "changed",
+              "invalid"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "problem": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

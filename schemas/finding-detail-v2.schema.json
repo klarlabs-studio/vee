@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/finding-detail-v2.schema.json",
+  "title": "Vero finding detail v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "finding",
+    "evidence",
+    "verification_runs"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "finding": {
+      "type": "object",
+      "required": [
+        "finding",
+        "status",
+        "status_reason",
+        "occurrence_count",
+        "first_seen",
+        "last_seen",
+        "occurrences"
+      ],
+      "properties": {
+        "finding": {
+          "type": "object",
+          "required": [
+            "id",
+            "fingerprint",
+            "category",
+            "severity",
+            "confidence",
+            "rationale",
+            "path",
+            "line",
+            "provenance",
+            "evidence_ids"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "fingerprint": {
+              "type": "string"
+            },
+            "category": {
+              "type": "string"
+            },
+            "severity": {
+              "enum": [
+                "critical",
+                "high",
+                "medium",
+                "low",
+                "info"
+              ]
+            },
+            "confidence": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 100
+            },
+            "rationale": {
+              "type": "string"
+            },
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "line": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "provenance": {
+              "type": "string"
+            },
+            "evidence_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "status": {
+          "enum": [
+            "open",
+            "verified",
+            "refuted",
+            "resolved",
+            "waived"
+          ]
+        },
+        "status_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "occurrence_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "first_seen": {
+          "type": "string"
+        },
+        "last_seen": {
+          "type": "string"
+        },
+        "occurrences": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "review_id",
+              "snapshot_id",
+              "observed_at"
+            ],
+            "properties": {
+              "review_id": {
+                "type": "string"
+              },
+              "snapshot_id": {
+                "type": "string"
+              },
+              "observed_at": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "description": "Evidence records referenced by the finding, newest occurrence first.",
+      "items": {
+        "$ref": "evidence-v1.schema.json"
+      }
+    },
+    "verification_runs": {
+      "type": "array",
+      "description": "Explicit local verification runs attached to this finding; each run is bound to its recorded snapshot.",
+      "items": {
+        "$ref": "verification-run-v1.schema.json"
+      }
+    }
+  },
+  "$defs": {},
+  "description": "A finding with its lifecycle, referenced evidence, and finding-scoped verification runs. Returned identically by `vero findings show --output json` and the MCP `get_finding` tool."
+}

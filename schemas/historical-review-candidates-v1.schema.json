@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/historical-review-candidates-v1.schema.json",
+  "title": "Vero historical review curation candidates v1",
+  "type": "object",
+  "required": ["schema_version", "artifact", "candidate_only", "case_id", "project", "repository_name", "buggy_commit", "buggy_parent_commit", "fix_commit", "changed_files", "candidate_locations", "curation_requirements", "limitations"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "artifact": { "const": "historical_review_curation_candidates" },
+    "candidate_only": { "const": true },
+    "case_id": { "type": "string", "minLength": 1 },
+    "project": { "type": "string", "minLength": 1 },
+    "project_license_reference": { "type": ["string", "null"] },
+    "defect_reference": { "type": ["string", "null"] },
+    "repository_name": { "type": "string", "minLength": 1 },
+    "buggy_commit": { "$ref": "#/$defs/oid" },
+    "buggy_parent_commit": { "$ref": "#/$defs/oid" },
+    "fix_commit": { "anyOf": [{ "$ref": "#/$defs/oid" }, { "type": "null" }] },
+    "changed_files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "buggy_commit_changed_ranges", "fix_touched_buggy_ranges", "candidate_overlap_ranges", "line_ranges_available"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "buggy_commit_changed_ranges": { "$ref": "#/$defs/ranges" },
+          "fix_touched_buggy_ranges": { "$ref": "#/$defs/ranges" },
+          "candidate_overlap_ranges": { "$ref": "#/$defs/ranges" },
+          "line_ranges_available": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "candidate_locations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["candidate_id", "path", "start_line", "end_line", "category", "rationale", "source", "review_required"],
+        "properties": {
+          "candidate_id": { "type": "string", "pattern": "^candidate-[0-9a-f]{12}$" },
+          "path": { "type": "string", "minLength": 1 },
+          "start_line": { "type": "integer", "minimum": 1 },
+          "end_line": { "type": "integer", "minimum": 1 },
+          "category": { "type": "null" },
+          "rationale": { "type": "null" },
+          "source": { "const": "overlap_between_buggy_change_and_fix_diff" },
+          "review_required": { "const": true }
+        },
+        "additionalProperties": false
+      }
+    },
+    "curation_requirements": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+    "limitations": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+  },
+  "$defs": {
+    "oid": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "ranges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["start_line", "end_line"],
+        "properties": {
+          "start_line": { "type": "integer", "minimum": 1 },
+          "end_line": { "type": "integer", "minimum": 1 }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

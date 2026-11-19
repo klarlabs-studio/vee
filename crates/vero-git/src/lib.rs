@@ -2,7 +2,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
-use vero_core::{snapshot_files, snapshot_index_files, ChangeSet};
+use vero_core::{digest, is_lfs_pointer, ChangeSet, SnapshotFile};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChangeScope {
@@ -29,11 +29,34 @@ impl ChangeScope {
     }
 }
 
+/// Reject a caller-supplied revision that git could parse as an option (leading
+/// `-`), or that is empty or contains whitespace or control characters. Callers pass
+/// revisions from the CLI, MCP, and HTTP API, so this is the injection boundary.
+pub fn validate_revision(revision: &str) -> Result<(), String> {
+    if revision.is_empty() {
+        return Err("revision cannot be empty".into());
+    }
+    if revision.starts_with('-') {
+        return Err(format!("revision {revision:?} must not start with '-'"));
+    }
+    if revision
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err(format!(
+            "revision {revision:?} must not contain whitespace or control characters"
+        ));
+    }
+    Ok(())
+}
+
 pub fn commit_scope(specification: &str) -> Result<ChangeScope, String> {
     if let Some((from, to)) = specification.split_once("..") {
         if from.trim().is_empty() || to.trim().is_empty() || to.contains("..") {
             return Err("commit range must be FROM..TO with both refs specified".into());
         }
+        validate_revision(from)?;
+        validate_revision(to)?;
         Ok(ChangeScope::CommitRange {
             from: from.to_string(),
             to: to.to_string(),
@@ -41,6 +64,7 @@ pub fn commit_scope(specification: &str) -> Result<ChangeScope, String> {
     } else if specification.trim().is_empty() {
         Err("commit ref cannot be empty".into())
     } else {
+        validate_revision(specification)?;
         Ok(ChangeScope::Commit {
             oid: specification.to_string(),
         })
@@ -48,12 +72,19 @@ pub fn commit_scope(specification: &str) -> Result<ChangeScope, String> {
 }
 
 pub fn repository_root(path: &Path) -> Result<PathBuf, String> {
-    let output = git(path, &["rev-parse", "--show-toplevel"])?;
+    let output = git(path, &["rev-parse", "--show-toplevel"]).map_err(|error| {
+        if error.starts_with("git command failed") {
+            format!("{} is not inside a Git repository", path.display())
+        } else {
+            error
+        }
+    })?;
     let root = String::from_utf8(output).map_err(|error| error.to_string())?;
     Ok(PathBuf::from(root.trim()))
 }
 
 pub fn merge_base(path: &Path, base_ref: &str) -> Result<String, String> {
+    validate_revision(base_ref)?;
     let output = git(path, &["merge-base", base_ref, "HEAD"])?;
     String::from_utf8(output)
         .map(|value| value.trim().to_string())
@@ -101,7 +132,7 @@ pub fn read_tree_file(
         .arg(root)
         .args(["show", spec.as_str()])
         .output()
-        .map_err(|error| error.to_string())?;
+        .map_err(git_spawn_error)?;
     if output.status.success() {
         Ok(Some(output.stdout))
     } else {
@@ -194,6 +225,105 @@ pub fn read_snapshot_file(
     } else {
         Ok(None)
     }
+}
+
+/// Read many snapshot files at once: changed paths exactly as
+/// [`read_snapshot_file`] does, and unchanged paths from the snapshot's head tree
+/// through a single `git cat-file --batch` process instead of one `git show` per
+/// path. Results are in input order.
+pub fn read_snapshot_files(
+    root: &Path,
+    change_set: &ChangeSet,
+    relatives: &[PathBuf],
+) -> Result<Vec<Option<Vec<u8>>>, String> {
+    let mut results: Vec<Option<Option<Vec<u8>>>> = vec![None; relatives.len()];
+    let mut batched = Vec::new();
+    for (index, relative) in relatives.iter().enumerate() {
+        validate_relative_path(relative)?;
+        let normalized = relative.to_string_lossy().replace('\\', "/");
+        let changed = change_set.files.iter().any(|file| file.path == normalized);
+        if changed || change_set.head_oid.is_none() || normalized.contains('\n') {
+            results[index] = Some(read_snapshot_file(root, change_set, relative)?);
+        } else {
+            batched.push((index, normalized));
+        }
+    }
+    if let (Some(head), false) = (change_set.head_oid.as_deref(), batched.is_empty()) {
+        let specs: Vec<String> = batched
+            .iter()
+            .map(|(_, path)| format!("{head}:{path}"))
+            .collect();
+        for ((index, _), bytes) in batched.iter().zip(cat_file_batch(root, &specs)?) {
+            results[*index] = Some(bytes);
+        }
+    }
+    Ok(results.into_iter().map(Option::unwrap_or_default).collect())
+}
+
+/// Resolve `specs` (`<treeish>:<path>`, no newlines) with one `git cat-file
+/// --batch`. Each result is the blob's bytes, or `None` when the object is
+/// missing or not a blob.
+fn cat_file_batch(root: &Path, specs: &[String]) -> Result<Vec<Option<Vec<u8>>>, String> {
+    use std::io::{BufRead, Read, Write};
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["cat-file", "--batch"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(git_spawn_error)?;
+    let mut stdin = child.stdin.take().ok_or("git cat-file stdin unavailable")?;
+    let input: Vec<u8> = specs
+        .iter()
+        .flat_map(|spec| spec.bytes().chain(std::iter::once(b'\n')))
+        .collect();
+    // Write from another thread so a large response cannot deadlock the pipes.
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let mut reader = std::io::BufReader::new(
+        child
+            .stdout
+            .take()
+            .ok_or("git cat-file stdout unavailable")?,
+    );
+    let mut results = Vec::with_capacity(specs.len());
+    let mut header = String::new();
+    for spec in specs {
+        header.clear();
+        if reader
+            .read_line(&mut header)
+            .map_err(|error| error.to_string())?
+            == 0
+        {
+            return Err(format!("git cat-file ended before answering {spec}"));
+        }
+        let fields: Vec<&str> = header.trim_end_matches('\n').split(' ').collect();
+        match fields.as_slice() {
+            [_, kind, size] => {
+                let size: usize = size
+                    .parse()
+                    .map_err(|_| format!("git cat-file returned an invalid size for {spec}"))?;
+                let mut bytes = vec![0; size + 1];
+                reader
+                    .read_exact(&mut bytes)
+                    .map_err(|error| error.to_string())?;
+                bytes.pop(); // trailing newline after the object
+                results.push((*kind == "blob").then_some(bytes));
+            }
+            // `<spec> missing` or `<spec> ambiguous`
+            _ => results.push(None),
+        }
+    }
+    writer
+        .join()
+        .map_err(|_| "git cat-file writer panicked".to_owned())?
+        .map_err(|error| error.to_string())?;
+    let status = child.wait().map_err(|error| error.to_string())?;
+    if !status.success() {
+        return Err(format!("git cat-file --batch failed: {status}"));
+    }
+    Ok(results)
 }
 
 /// Read the comparison-side bytes for a changed path from the snapshot's Git base.
@@ -634,7 +764,7 @@ pub fn read_captured_file(
             .arg(root)
             .args(["show", spec.as_str()])
             .output()
-            .map_err(|error| error.to_string())?;
+            .map_err(git_spawn_error)?;
         if output.status.success() {
             Ok(Some(output.stdout))
         } else {
@@ -647,7 +777,7 @@ pub fn read_captured_file(
             .arg(root)
             .args(["show", path.as_str()])
             .output()
-            .map_err(|error| error.to_string())?;
+            .map_err(git_spawn_error)?;
         if output.status.success() {
             Ok(Some(output.stdout))
         } else {
@@ -718,21 +848,324 @@ fn add_paths(paths: &mut Vec<PathBuf>, bytes: Vec<u8>) -> Result<(), String> {
     Ok(())
 }
 
+fn git_spawn_error(error: std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        "git is not installed or not on PATH".into()
+    } else {
+        format!("could not run git: {error}")
+    }
+}
+
 fn git(path: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(path)
         .args(args)
         .output()
-        .map_err(|error| error.to_string())?;
+        .map_err(git_spawn_error)?;
     if !output.status.success() {
         return Err(format!("git command failed: {}", args.join(" ")));
     }
     Ok(output.stdout)
 }
 
+/// Hash the current tree's tracked changes against an optional git base diff manifest.
+/// Git CLI is kept outside this domain helper; callers supply the paths selected by Git.
+pub fn snapshot_files(root: &Path, paths: &[PathBuf]) -> Result<Vec<SnapshotFile>, String> {
+    use std::path::Component;
+    let canonical_root =
+        std::fs::canonicalize(root).map_err(|e| format!("{}: {e}", root.display()))?;
+    let mut files = Vec::with_capacity(paths.len());
+    for relative in paths {
+        if relative.is_absolute()
+            || relative.components().any(|c| {
+                matches!(
+                    c,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            return Err(format!(
+                "path escapes repository root: {}",
+                relative.display()
+            ));
+        }
+        let normalized = relative.to_string_lossy().replace('\\', "/");
+        let path = root.join(relative);
+        let mut ancestor = path.parent().unwrap_or(root).to_path_buf();
+        let canonical_ancestor = loop {
+            match std::fs::canonicalize(&ancestor) {
+                Ok(canonical) => break canonical,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if !ancestor.pop() {
+                        return Err(format!(
+                            "could not resolve parent for {}",
+                            relative.display()
+                        ));
+                    }
+                }
+                Err(error) => return Err(format!("{}: {error}", ancestor.display())),
+            }
+        };
+        if !canonical_ancestor.starts_with(&canonical_root) {
+            return Err(format!(
+                "path escapes repository root through a symlink: {}",
+                relative.display()
+            ));
+        }
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                files.push(SnapshotFile {
+                    path: normalized,
+                    mode: 0,
+                    content_digest: "deleted".into(),
+                    status: "deleted".into(),
+                });
+                continue;
+            }
+            Err(error) => return Err(format!("{}: {error}", path.display())),
+        };
+        if metadata.file_type().is_symlink() {
+            let target =
+                std::fs::read_link(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            files.push(SnapshotFile {
+                path: normalized,
+                mode: 0o120000,
+                content_digest: digest(target.to_string_lossy().as_bytes()),
+                status: "symlink".into(),
+            });
+        } else if metadata.is_file() {
+            let content = read_consistent_file(&path)?;
+            let after =
+                std::fs::symlink_metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            if metadata.len() != after.len() || metadata.modified().ok() != after.modified().ok() {
+                return Err(format!(
+                    "file changed while snapshot was being captured: {}",
+                    path.display()
+                ));
+            }
+            #[cfg(unix)]
+            let mode = {
+                use std::os::unix::fs::PermissionsExt;
+                metadata.permissions().mode() & 0o777
+            };
+            #[cfg(not(unix))]
+            let mode = 0o644;
+            files.push(SnapshotFile {
+                path: normalized,
+                mode,
+                content_digest: digest(&content),
+                status: if is_lfs_pointer(&content) {
+                    "lfs_pointer".into()
+                } else {
+                    "present".into()
+                },
+            });
+        }
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(files)
+}
+
+fn read_consistent_file(path: &Path) -> Result<Vec<u8>, String> {
+    read_consistent_file_with(path, || {})
+}
+
+fn read_consistent_file_with(path: &Path, between_reads: impl FnOnce()) -> Result<Vec<u8>, String> {
+    let before =
+        std::fs::symlink_metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let content = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    between_reads();
+    let second = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let after =
+        std::fs::symlink_metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    if before.len() != after.len()
+        || before.modified().ok() != after.modified().ok()
+        || content.len() as u64 != after.len()
+        || digest(&content) != digest(&second)
+    {
+        return Err(format!(
+            "file changed while snapshot was being captured: {}",
+            path.display()
+        ));
+    }
+    Ok(content)
+}
+
+/// Capture the selected paths from Git's index. Worktree bytes and permissions are ignored.
+pub fn snapshot_index_files(root: &Path, paths: &[PathBuf]) -> Result<Vec<SnapshotFile>, String> {
+    use std::path::Component;
+    let index_tree_before = git_index_tree(root)?;
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "--stage", "-z"])
+        .output()
+        .map_err(|error| format!("running git ls-files: {error}"))?;
+    if !output.status.success() {
+        return Err("git ls-files --stage failed".into());
+    }
+    let mut entries = std::collections::BTreeMap::<String, (u32, String, u8)>::new();
+    for raw in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        let Some(tab) = raw.iter().position(|byte| *byte == b'\t') else {
+            return Err("malformed git index entry".into());
+        };
+        let metadata =
+            std::str::from_utf8(&raw[..tab]).map_err(|_| "non-UTF8 git index metadata")?;
+        let mut fields = metadata.split_whitespace();
+        let mode = u32::from_str_radix(fields.next().ok_or("missing index mode")?, 8)
+            .map_err(|_| "invalid git index mode")?;
+        let oid = fields.next().ok_or("missing index object ID")?.to_string();
+        let stage = fields
+            .next()
+            .ok_or("missing index stage")?
+            .parse::<u8>()
+            .map_err(|_| "invalid git index stage")?;
+        let path = std::str::from_utf8(&raw[tab + 1..])
+            .map_err(|_| "non-UTF8 path in Git index; this platform cannot represent it safely")?
+            .replace('\\', "/");
+        entries.insert(path, (mode, oid, stage));
+    }
+    let mut files = Vec::with_capacity(paths.len());
+    for relative in paths {
+        if relative.is_absolute()
+            || relative.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            return Err(format!(
+                "path escapes repository root: {}",
+                relative.display()
+            ));
+        }
+        let path = relative.to_string_lossy().replace('\\', "/");
+        match entries.get(&path) {
+            None => files.push(SnapshotFile {
+                path,
+                mode: 0,
+                content_digest: "deleted".into(),
+                status: "deleted".into(),
+            }),
+            Some((_, _, stage)) if *stage != 0 => {
+                return Err(format!(
+                    "unmerged index entry cannot be snapshotted: {path}"
+                ))
+            }
+            Some((mode, oid, _)) if *mode == 0o160000 => files.push(SnapshotFile {
+                path,
+                mode: *mode,
+                content_digest: digest(oid.as_bytes()),
+                status: "submodule".into(),
+            }),
+            Some((mode, oid, _)) => {
+                let blob = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(root)
+                    .args(["cat-file", "blob", oid])
+                    .output()
+                    .map_err(|error| format!("reading index blob: {error}"))?;
+                if !blob.status.success() {
+                    return Err(format!("could not read index blob for {path}"));
+                }
+                let status = if *mode == 0o120000 {
+                    "symlink"
+                } else if is_lfs_pointer(&blob.stdout) {
+                    "lfs_pointer"
+                } else {
+                    "present"
+                };
+                files.push(SnapshotFile {
+                    path,
+                    mode: *mode,
+                    content_digest: digest(&blob.stdout),
+                    status: status.into(),
+                });
+            }
+        }
+    }
+    let index_tree_after = git_index_tree(root)?;
+    if index_tree_before != index_tree_after {
+        return Err("Git index changed while staged snapshot was being captured".into());
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(files)
+}
+
+fn git_index_tree(root: &Path) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["write-tree"])
+        .output()
+        .map_err(|error| format!("running git write-tree: {error}"))?;
+    if !output.status.success() {
+        return Err("could not create a stable tree from the Git index".into());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn batched_snapshot_reads_match_single_reads() {
+        let repo = Repo::new();
+        let root = repo.0.path();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/a.rs"), "fn a() {}\n").unwrap();
+        fs::write(root.join("src/b.rs"), vec![b'x'; 200_000]).unwrap();
+        fs::write(root.join("src/c.rs"), "fn c() {}\n").unwrap();
+        repo.git(&["add", "."]);
+        repo.git(&["commit", "-qm", "base"]);
+        fs::write(root.join("src/c.rs"), "fn c() { 1 }\n").unwrap();
+        let change_set = capture(root, ChangeScope::WorkingTree).unwrap();
+        let paths: Vec<PathBuf> = ["src/a.rs", "src/b.rs", "src/c.rs", "src/missing.rs", "src"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        let batched = read_snapshot_files(root, &change_set, &paths).unwrap();
+        for (path, batched) in paths.iter().zip(&batched) {
+            let single = read_snapshot_file(root, &change_set, path).unwrap();
+            if path == Path::new("src") {
+                // `git show` lists a tree; cat-file reports it is not a blob.
+                assert!(batched.is_none());
+                continue;
+            }
+            assert_eq!(batched, &single, "{}", path.display());
+        }
+        assert_eq!(batched[1].as_ref().unwrap().len(), 200_000);
+        assert_eq!(batched[2].as_deref(), Some(&b"fn c() { 1 }\n"[..]));
+        assert!(batched[3].is_none());
+    }
+
+    #[test]
+    fn revisions_that_git_would_parse_as_options_are_rejected() {
+        for revision in ["--output=/tmp/x", "-h", "", " ", "main\0x", "a\nb"] {
+            assert!(
+                validate_revision(revision).is_err(),
+                "{revision:?} must be rejected"
+            );
+            assert!(commit_scope(&format!("{revision}..HEAD")).is_err());
+            assert!(commit_scope(&format!("HEAD..{revision}")).is_err());
+        }
+        assert!(commit_scope("--all").is_err());
+        assert!(merge_base(std::path::Path::new("."), "--is-ancestor").is_err());
+        for revision in ["main", "origin/main", "HEAD~2", "v1.0.0", "a1b2c3d"] {
+            assert!(
+                validate_revision(revision).is_ok(),
+                "{revision:?} is a valid revision"
+            );
+        }
+    }
+
     use super::*;
     use std::fs;
 
@@ -975,11 +1408,12 @@ mod tests {
     #[test]
     fn worktree_scope_records_changed_submodule_commit_oid() {
         let repo = Repo::new();
-        let dependency = tempfile::tempdir().unwrap();
+        let checked_out_submodule = repo.path().join("modules/dep");
+        fs::create_dir_all(&checked_out_submodule).unwrap();
         assert!(Command::new("git")
             .arg("init")
             .arg("-q")
-            .arg(dependency.path())
+            .arg(&checked_out_submodule)
             .status()
             .unwrap()
             .success());
@@ -989,17 +1423,17 @@ mod tests {
         ] {
             assert!(Command::new("git")
                 .arg("-C")
-                .arg(dependency.path())
+                .arg(&checked_out_submodule)
                 .args(["config", key, value])
                 .status()
                 .unwrap()
                 .success());
         }
-        fs::write(dependency.path().join("dep.rs"), "fn first() {}\n").unwrap();
+        fs::write(checked_out_submodule.join("dep.rs"), "fn first() {}\n").unwrap();
         let nested_git = |args: &[&str]| {
             assert!(Command::new("git")
                 .arg("-C")
-                .arg(dependency.path())
+                .arg(&checked_out_submodule)
                 .args(args)
                 .status()
                 .unwrap()
@@ -1007,17 +1441,28 @@ mod tests {
         };
         nested_git(&["add", "."]);
         nested_git(&["commit", "-qm", "first"]);
-        repo.git(&[
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            dependency.path().to_str().unwrap(),
-            "modules/dep",
-        ]);
+        let initial_oid = String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(&checked_out_submodule)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        fs::write(
+            repo.path().join(".gitmodules"),
+            "[submodule \"modules/dep\"]\n\tpath = modules/dep\n\turl = ../dep\n",
+        )
+        .unwrap();
+        repo.git(&["add", ".gitmodules"]);
+        let gitlink = format!("160000,{initial_oid},modules/dep");
+        repo.git(&["update-index", "--add", "--cacheinfo", &gitlink]);
         repo.git(&["commit", "-qam", "add submodule"]);
 
-        let checked_out_submodule = repo.path().join("modules/dep");
         fs::write(checked_out_submodule.join("dep.rs"), "fn second() {}\n").unwrap();
         let submodule_git = |args: &[&str]| {
             assert!(Command::new("git")
@@ -1181,5 +1626,52 @@ mod tests {
         assert!(!String::from_utf8(bytes)
             .unwrap()
             .contains("secret contents"));
+    }
+
+    #[test]
+    fn manifest_is_order_independent_and_hashes_current_file_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/a.rs"), "one").unwrap();
+        std::fs::write(dir.path().join("src/b.rs"), "two").unwrap();
+        let first = snapshot_files(dir.path(), &["src/b.rs".into(), "src/a.rs".into()]).unwrap();
+        let second = snapshot_files(dir.path(), &["src/a.rs".into(), "src/b.rs".into()]).unwrap();
+        let original_digest = ChangeSet::from_entries(None, None, "working_tree", first).digest;
+        assert_eq!(
+            original_digest,
+            ChangeSet::from_entries(None, None, "working_tree", second).digest
+        );
+        std::fs::write(dir.path().join("src/a.rs"), "changed").unwrap();
+        let changed = snapshot_files(dir.path(), &["src/a.rs".into(), "src/b.rs".into()]).unwrap();
+        assert_ne!(
+            original_digest,
+            ChangeSet::from_entries(None, None, "working_tree", changed).digest
+        );
+    }
+
+    #[test]
+    fn consistent_file_reader_rejects_content_change_during_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.rs");
+        std::fs::write(&path, "fn source() {}\n").unwrap();
+        let result = read_consistent_file_with(&path, || {
+            std::fs::write(&path, "fn changed() {}\n").unwrap();
+        });
+        assert!(result.unwrap_err().contains("changed while snapshot"));
+    }
+
+    #[test]
+    fn snapshot_rejects_paths_outside_repository_root() {
+        let dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let outside = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).unwrap();
+            assert!(snapshot_files(dir.path(), &[PathBuf::from("../secret")]).is_err());
+            assert!(snapshot_files(dir.path(), &[PathBuf::from("escape/secret")]).is_err());
+        }
+        #[cfg(not(unix))]
+        assert!(snapshot_files(dir.path(), &[PathBuf::from("../secret")]).is_err());
     }
 }

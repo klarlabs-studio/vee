@@ -1,0 +1,407 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/local-review-analytics-v6.schema.json",
+  "title": "Vero Local Review Analytics v6",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "review_count",
+    "history_complete",
+    "dimensions_complete",
+    "reviews_by_day",
+    "review_dimensions",
+    "findings_by_severity",
+    "finding_drilldown",
+    "finding_drilldown_total",
+    "finding_drilldown_complete",
+    "explicit_feedback_by_label",
+    "feedback_note",
+    "verification_run_count",
+    "verification_history_complete",
+    "verification_runs",
+    "findings_by_rule",
+    "findings_by_rule_complete",
+    "provider_latency",
+    "provider_latency_history_complete",
+    "provider_latency_note",
+    "provider_latency_reviews",
+    "provider_latency_history"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 6
+    },
+    "review_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "history_complete": {
+      "type": "boolean"
+    },
+    "dimensions_complete": {
+      "type": "boolean"
+    },
+    "reviews_by_day": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "day",
+          "pass",
+          "block",
+          "incomplete",
+          "ungated"
+        ],
+        "properties": {
+          "day": {
+            "type": "string"
+          },
+          "pass": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "block": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "incomplete": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "ungated": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "review_dimensions": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "review_id",
+          "day",
+          "status",
+          "reviewer_ids",
+          "provider_ids",
+          "finding_categories",
+          "finding_rule_ids"
+        ],
+        "properties": {
+          "review_id": {
+            "type": "string"
+          },
+          "day": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pass",
+              "block",
+              "incomplete",
+              "ungated"
+            ]
+          },
+          "reviewer_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "provider_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "finding_categories": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "finding_rule_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "findings_by_severity": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "finding_drilldown": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "finding_id",
+          "category",
+          "severity",
+          "rationale",
+          "status",
+          "last_seen",
+          "rule_attributions"
+        ],
+        "properties": {
+          "finding_id": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low",
+              "info"
+            ]
+          },
+          "rationale": {
+            "type": "string"
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "line": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "status": {
+            "enum": [
+              "open",
+              "verified",
+              "refuted",
+              "resolved",
+              "waived"
+            ]
+          },
+          "last_review_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_seen": {
+            "type": "string"
+          },
+          "rule_attributions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "rule_id",
+                "approval_id",
+                "reviewer_id"
+              ],
+              "properties": {
+                "rule_id": {
+                  "type": "string"
+                },
+                "approval_id": {
+                  "type": "string"
+                },
+                "reviewer_id": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "finding_drilldown_total": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "finding_drilldown_complete": {
+      "type": "boolean"
+    },
+    "explicit_feedback_by_label": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "feedback_note": {
+      "type": "string"
+    },
+    "verification_run_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "verification_history_complete": {
+      "type": "boolean"
+    },
+    "verification_runs": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "run_id",
+          "snapshot_id",
+          "profile_id",
+          "status",
+          "created_at"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "type": "string"
+          },
+          "profile_id": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "passed",
+              "failed",
+              "timed_out"
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "findings_by_rule": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "findings_by_rule_complete": {
+      "type": "boolean"
+    },
+    "provider_latency": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "provider_id",
+          "measured_runs",
+          "unmeasured_runs",
+          "failed_runs",
+          "median_duration_ms",
+          "p95_duration_ms"
+        ],
+        "properties": {
+          "provider_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "measured_runs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "unmeasured_runs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "failed_runs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "median_duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "p95_duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "provider_latency_history_complete": {
+      "type": "boolean"
+    },
+    "provider_latency_note": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider_latency_reviews": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2000
+    },
+    "provider_latency_history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "day",
+          "provider_id",
+          "measured_runs",
+          "median_duration_ms",
+          "p95_duration_ms"
+        ],
+        "properties": {
+          "day": {
+            "type": "string"
+          },
+          "provider_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "measured_runs": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "median_duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "p95_duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        }
+      }
+    }
+  }
+}

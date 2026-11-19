@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/quality-analytics-v5.schema.json",
+  "title": "Vero Local Quality Analytics v5",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "review_count", "latest_gate_decisions", "reviews_without_gate_decision", "findings_by_status", "findings_by_severity", "verification_runs_by_profile", "test_diagnostics_by_profile", "test_diagnostics_limitations", "reviewed_feedback_by_label", "reviewed_feedback_metrics"],
+  "properties": {
+    "schema_version": { "const": 5 },
+    "review_count": { "type": "integer", "minimum": 0 },
+    "latest_gate_decisions": { "$ref": "#/$defs/counts" },
+    "reviews_without_gate_decision": { "type": "integer", "minimum": 0 },
+    "findings_by_status": { "$ref": "#/$defs/counts" },
+    "findings_by_severity": { "$ref": "#/$defs/counts" },
+    "verification_runs_by_profile": { "type": "object", "additionalProperties": { "$ref": "#/$defs/verificationOutcomes" } },
+    "test_diagnostics_by_profile": { "type": "object", "additionalProperties": { "$ref": "#/$defs/testDiagnostics" } },
+    "test_diagnostics_limitations": { "type": "array", "items": { "type": "string" } },
+    "reviewed_feedback_by_label": { "$ref": "#/$defs/counts" },
+    "reviewed_feedback_metrics": { "$ref": "#/$defs/feedbackMetrics" }
+  },
+  "$defs": {
+    "counts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+    "verificationOutcomes": {
+      "type": "object", "additionalProperties": false, "required": ["passed", "failed", "timed_out"],
+      "properties": { "passed": { "type": "integer", "minimum": 0 }, "failed": { "type": "integer", "minimum": 0 }, "timed_out": { "type": "integer", "minimum": 0 } }
+    },
+    "testDiagnostics": {
+      "type": "object", "additionalProperties": false, "required": ["test_failure", "test_flaky", "test_retry_failure"],
+      "properties": { "test_failure": { "type": "integer", "minimum": 0 }, "test_flaky": { "type": "integer", "minimum": 0 }, "test_retry_failure": { "type": "integer", "minimum": 0 } }
+    },
+    "feedbackMetrics": {
+      "type": "object", "additionalProperties": false, "required": ["finding_accuracy", "actionability"],
+      "properties": { "finding_accuracy": { "$ref": "#/$defs/feedbackRate" }, "actionability": { "$ref": "#/$defs/feedbackRate" } }
+    },
+    "feedbackRate": {
+      "type": "object", "additionalProperties": false, "required": ["positive_occurrences", "negative_occurrences", "disputed_occurrences", "denominator", "observed_rate"],
+      "properties": { "positive_occurrences": { "type": "integer", "minimum": 0 }, "negative_occurrences": { "type": "integer", "minimum": 0 }, "disputed_occurrences": { "type": "integer", "minimum": 0 }, "denominator": { "type": "integer", "minimum": 0 }, "observed_rate": { "type": ["number", "null"], "minimum": 0, "maximum": 1 } }
+    }
+  }
+}

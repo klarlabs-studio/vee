@@ -17,15 +17,186 @@
     "reasons"
   ],
   "properties": {
-    "schema_version": { "const": 1 },
-    "decision_id": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
-    "snapshot_id": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
-    "effective_config_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
-    "policy_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
-    "status": { "enum": ["pass", "block", "incomplete"] },
-    "blocking_findings": { "type": "array", "items": { "type": "string" } },
-    "verification_run_ids": { "type": "array", "items": { "type": "string" } },
-    "evidence_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
-    "reasons": { "type": "array", "items": { "type": "string" } }
+    "schema_version": {
+      "const": 1
+    },
+    "decision_id": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "snapshot_id": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "effective_config_digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "policy_digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "status": {
+      "enum": [
+        "pass",
+        "block",
+        "incomplete"
+      ]
+    },
+    "blocking_findings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "verification_run_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence_digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "reasons": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "replay_inputs": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "schema_version",
+        "policy",
+        "reviewer_policies",
+        "complete",
+        "verification_runs",
+        "waivers",
+        "evaluation_time_unix"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "policy": {
+          "type": "object",
+          "required": [
+            "block_severities",
+            "minimum_confidence",
+            "required_review_complete",
+            "required_verifications"
+          ],
+          "properties": {
+            "block_severities": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "critical",
+                  "high",
+                  "medium",
+                  "low",
+                  "info"
+                ]
+              }
+            },
+            "minimum_confidence": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "required_review_complete": {
+              "type": "boolean"
+            },
+            "required_verifications": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "analyzer_block_levels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "error",
+                    "warning",
+                    "note",
+                    "none"
+                  ]
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "reviewer_policies": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "block_severities",
+              "minimum_confidence"
+            ],
+            "properties": {
+              "block_severities": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "critical",
+                    "high",
+                    "medium",
+                    "low",
+                    "info"
+                  ]
+                }
+              },
+              "minimum_confidence": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "verification_runs": {
+          "type": "array",
+          "items": {
+            "$ref": "verification-run-v1.schema.json"
+          }
+        },
+        "waivers": {
+          "type": "array",
+          "items": {
+            "$ref": "waiver-v1.schema.json"
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "evidence-v1.schema.json"
+          }
+        },
+        "evaluation_time_unix": {
+          "type": "integer"
+        },
+        "analyzer_reports": {
+          "type": "array",
+          "items": {
+            "$ref": "analyzer-report-v1.schema.json"
+          }
+        }
+      },
+      "additionalProperties": false
+    }
   }
 }

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/impacted-test-plan-v1.schema.json",
+  "title": "Vero Impacted Test Plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "snapshot_id", "profile_id", "profile_digest", "executable", "targets", "invocations", "impact_coverage_complete", "limitations", "execution_performed"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "snapshot_id": { "type": "string", "minLength": 1 },
+    "profile_id": { "type": "string", "minLength": 1 },
+    "profile_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "executable": { "type": "string", "minLength": 1 },
+    "targets": { "type": "array", "items": { "type": "string" } },
+    "invocations": { "type": "array", "items": { "type": "array", "items": { "type": "string" } } },
+    "impact_coverage_complete": { "type": "boolean" },
+    "limitations": { "type": "array", "items": { "type": "string" } },
+    "execution_performed": { "const": false }
+  }
+}

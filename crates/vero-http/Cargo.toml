@@ -1,0 +1,24 @@
+[package]
+name = "vero-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+vero-core = { path = "../vero-core" }
+vero-store-sqlite = { path = "../vero-store-sqlite" }
+vero-application = { path = "../vero-application" }
+vero-hosting = { path = "../vero-hosting" }
+tokio.workspace = true
+tower = { version = "0.5", features = ["util"] }
+
+[dev-dependencies]
+serde_yaml.workspace = true
+tempfile.workspace = true
+jsonschema.workspace = true
+vero-git = { path = "../vero-git" }

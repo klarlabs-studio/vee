@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vero.dev/schemas/acceptance-traceability-v1.schema.json",
+  "title": "Vero Acceptance Traceability v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "review_id", "snapshot_id", "work_item", "criteria", "changed_paths", "impact_snapshot_id", "impact_coverage_complete", "impact_analyzers", "verification_runs", "limitations"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "review_id": { "type": "string", "minLength": 1 },
+    "snapshot_id": { "type": "string", "minLength": 1 },
+    "work_item": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "object", "additionalProperties": false, "required": ["url", "content_digest"], "properties": { "url": { "type": "string", "format": "uri" }, "content_digest": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" } } }
+      ]
+    },
+    "criteria": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["id", "source_line", "text", "candidate_changed_paths", "candidate_test_references", "status"], "properties": { "id": { "type": "string", "pattern": "^AC-[a-f0-9]{12}$" }, "source_id": { "type": "string", "minLength": 1 }, "source_line": { "type": "integer", "minimum": 1 }, "text": { "type": "string", "minLength": 1 }, "candidate_changed_paths": { "type": "array", "items": { "type": "string" } }, "candidate_test_references": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["changed_path", "test_path", "symbol", "evidence_line", "certainty"], "properties": { "changed_path": { "type": "string" }, "test_path": { "type": "string" }, "symbol": { "type": "string" }, "evidence_line": { "type": "integer", "minimum": 1 }, "certainty": { "type": "string" } } } }, "status": { "const": "needs_human_review" } } } },
+    "changed_paths": { "type": "array", "items": { "type": "string" } },
+    "impact_snapshot_id": { "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }] },
+    "impact_coverage_complete": { "oneOf": [{ "type": "null" }, { "type": "boolean" }] },
+    "impact_analyzers": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["id", "version", "status"], "properties": { "id": { "type": "string" }, "version": { "oneOf": [{ "type": "null" }, { "type": "string" }] }, "status": { "type": "string" } } } },
+    "verification_runs": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["run_id", "profile_id", "status", "targets"], "properties": { "run_id": { "type": "string" }, "profile_id": { "type": "string" }, "status": { "enum": ["passed", "failed", "timed_out"] }, "targets": { "type": "array", "items": { "type": "string" } } } } },
+    "limitations": { "type": "array", "items": { "type": "string" } }
+  }
+}
