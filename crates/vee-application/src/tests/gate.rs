@@ -1,5 +1,7 @@
 use super::*;
+#[cfg(unix)]
 use std::process::Command;
+#[cfg(unix)]
 use vee_core::ports::*;
 use vee_store_sqlite::ReviewStore;
 

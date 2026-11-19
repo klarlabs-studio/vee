@@ -1,6 +1,10 @@
 use super::*;
+// Used only by the Unix-only tests below.
+#[cfg(unix)]
 use std::process::Command;
+#[cfg(unix)]
 use vee_core::ports::*;
+#[cfg(unix)]
 use vee_store_sqlite::ReviewStore;
 
 #[test]

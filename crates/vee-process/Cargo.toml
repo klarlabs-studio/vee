@@ -9,8 +9,10 @@ repository.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio-util.workspace = true
-libc.workspace = true
 tempfile.workspace = true
 vee-core = { path = "../vee-core" }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
