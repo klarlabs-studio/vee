@@ -242,6 +242,9 @@ pub(crate) fn estimate_provider_input_tokens(
     Ok(serialized_bytes.div_ceil(3).saturating_add(256))
 }
 
+/// Ollama `num_predict` when a provider sets no `max_output_tokens`.
+pub(crate) const OLLAMA_DEFAULT_MAX_OUTPUT_TOKENS: usize = 2048;
+
 pub(crate) fn fit_review_payload_to_provider_budget(
     payload: &mut serde_json::Value,
     instructions: &str,
@@ -682,7 +685,9 @@ pub(crate) fn execute_ollama_native(
         )
         .build()
         .map_err(|_| "could not initialize Ollama provider client".to_string())?;
-    let max_output_tokens = request.max_output_tokens.unwrap_or(2048);
+    let max_output_tokens = request
+        .max_output_tokens
+        .unwrap_or(OLLAMA_DEFAULT_MAX_OUTPUT_TOKENS);
     let mut chat = |messages: &Vec<serde_json::Value>,
                     format: Option<&serde_json::Value>|
      -> Result<(String, Option<vee_core::ProviderUsage>), String> {

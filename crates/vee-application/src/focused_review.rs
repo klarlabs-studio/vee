@@ -167,7 +167,38 @@ fn locate_quoted_statement(
 }
 
 /// The provider findings schema with a required `quote` per finding.
-pub(crate) fn structure_schema(findings_schema: &serde_json::Value) -> serde_json::Value {
+/// Approved rule guidance a finding may cite, with the path scope it covers.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub(crate) struct RuleGuidance {
+    pub rule_id: String,
+    pub approval_id: String,
+    pub scope: String,
+}
+
+impl RuleGuidance {
+    /// Mirrors the scope check Vee applies when it validates attributions.
+    pub(crate) fn applies_to(&self, path: &str) -> bool {
+        let scope = self.scope.trim().trim_end_matches('/');
+        scope == "." || path == scope || path.starts_with(&format!("{scope}/"))
+    }
+}
+
+fn rule_guidance(input: &serde_json::Value) -> Result<Vec<RuleGuidance>, String> {
+    input
+        .get("rule_guidance")
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()
+        .map(Option::unwrap_or_default)
+        .map_err(|error| format!("focused review rule guidance is invalid: {error}"))
+}
+
+/// The findings schema plus a required `quote`, with rule attributions limited
+/// to `allowed` pairs, or removed when no guidance applies, so a constrained
+/// model cannot invent an attribution Vee would reject.
+pub(crate) fn structure_schema(
+    findings_schema: &serde_json::Value,
+    allowed: &[RuleGuidance],
+) -> serde_json::Value {
     let mut schema = findings_schema.clone();
     if let Some(item) = schema.pointer_mut("/properties/findings/items") {
         item["properties"]["quote"] = serde_json::json!({"type":"string","minLength":1});
@@ -176,6 +207,21 @@ pub(crate) fn structure_schema(findings_schema: &serde_json::Value) -> serde_jso
             .and_then(serde_json::Value::as_array_mut)
         {
             required.push(serde_json::json!("quote"));
+        }
+        if let Some(properties) = item
+            .get_mut("properties")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            if allowed.is_empty() {
+                properties.remove("rule_attributions");
+            } else if let Some(attributions) = properties.get_mut("rule_attributions") {
+                attributions["items"] = serde_json::json!({
+                    "enum": allowed
+                        .iter()
+                        .map(|rule| serde_json::json!({"rule_id": rule.rule_id, "approval_id": rule.approval_id}))
+                        .collect::<Vec<_>>()
+                });
+            }
         }
     }
     schema
@@ -274,6 +320,38 @@ fn add_usage(total: &mut Option<ProviderUsage>, usage: Option<ProviderUsage>) {
     });
 }
 
+/// Estimated input tokens of the largest single request the focused strategy
+/// sends: the analysis of one changed file, or its structuring request with
+/// notes up to `max_output_tokens`. Related files are fitted into each request
+/// separately, so they do not count here.
+pub(crate) fn largest_request_tokens(
+    input: &serde_json::Value,
+    max_output_tokens: usize,
+) -> Result<usize, String> {
+    let instructions = input
+        .get("instructions")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let schema = input
+        .get("output_schema")
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default();
+    let system = estimated_tokens(instructions) + estimated_tokens(UNTRUSTED_NOTE);
+    Ok(focused_targets(input)?
+        .iter()
+        .map(|target| {
+            let analysis = system + estimated_tokens(&analysis_prompt(target, ""));
+            let structure = estimated_tokens(&structure_prompt(target, ""))
+                + max_output_tokens
+                + estimated_tokens(&schema);
+            analysis.max(structure)
+        })
+        .max()
+        .unwrap_or(0))
+}
+
 /// Runs the focused strategy over every changed file in a review request and
 /// returns provider-findings-v1 JSON.
 pub(crate) fn run_focused_review(
@@ -290,14 +368,20 @@ pub(crate) fn run_focused_review(
     let findings_schema = input
         .get("output_schema")
         .ok_or_else(|| "focused review request is missing output_schema".to_string())?;
-    let schema = structure_schema(findings_schema);
-    let validator = jsonschema::validator_for(&schema)
-        .map_err(|_| "focused review output schema is invalid".to_string())?;
+    let guidance = rule_guidance(input)?;
     let system = format!("{instructions}\n\n{UNTRUSTED_NOTE}");
     let targets = focused_targets(input)?;
     let mut findings = Vec::new();
     let mut usage = None;
     for target in &targets {
+        let allowed: Vec<RuleGuidance> = guidance
+            .iter()
+            .filter(|rule| rule.applies_to(&target.path))
+            .cloned()
+            .collect();
+        let schema = structure_schema(findings_schema, &allowed);
+        let validator = jsonschema::validator_for(&schema)
+            .map_err(|_| "focused review output schema is invalid".to_string())?;
         let base = analysis_prompt(target, "");
         let mut remaining = context_window_tokens
             .saturating_sub(max_output_tokens)

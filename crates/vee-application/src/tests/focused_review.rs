@@ -82,7 +82,7 @@ fn partial_quote_matches_a_unique_changed_line_containing_it() {
 #[test]
 fn structure_schema_requires_a_quote_without_changing_the_provider_schema() {
     let original = findings_schema();
-    let schema = structure_schema(&original);
+    let schema = structure_schema(&original, &[]);
     let item = &schema["properties"]["findings"]["items"];
     assert_eq!(item["properties"]["quote"]["type"], "string");
     assert!(item["required"]
@@ -283,4 +283,91 @@ fn quote_with_different_internal_spacing_still_resolves() {
         locate_quoted_line(LOCKOUT, &[(4, 11)], "snap,   err := store.Get(key)"),
         Some(5)
     );
+}
+
+#[test]
+fn structure_schema_without_guidance_cannot_express_rule_attributions() {
+    let schema = structure_schema(&findings_schema(), &[]);
+    let item = &schema["properties"]["findings"]["items"];
+    assert!(item["properties"].get("rule_attributions").is_none());
+}
+
+#[test]
+fn structure_schema_limits_rule_attributions_to_the_allowed_pairs() {
+    let allowed = [RuleGuidance {
+        rule_id: "rule-1".into(),
+        approval_id: "approval-1".into(),
+        scope: "domain".into(),
+    }];
+    let schema = structure_schema(&findings_schema(), &allowed);
+    let items =
+        &schema["properties"]["findings"]["items"]["properties"]["rule_attributions"]["items"];
+    assert_eq!(
+        items["enum"],
+        serde_json::json!([{"rule_id":"rule-1","approval_id":"approval-1"}])
+    );
+}
+
+#[test]
+fn rule_guidance_applies_only_to_files_inside_its_scope() {
+    let guidance = |scope: &str| RuleGuidance {
+        rule_id: "r".into(),
+        approval_id: "a".into(),
+        scope: scope.into(),
+    };
+    assert!(guidance(".").applies_to("domain/lockout.go"));
+    assert!(guidance("domain/").applies_to("domain/lockout.go"));
+    assert!(guidance("domain").applies_to("domain"));
+    assert!(!guidance("dom").applies_to("domain/lockout.go"));
+    assert!(!guidance("adapters").applies_to("domain/lockout.go"));
+}
+
+#[test]
+fn focused_review_offers_only_in_scope_guidance_to_each_file() {
+    let mut input = review_input(serde_json::json!([
+        {"path":"domain/lockout.go","content":LOCKOUT,"changed_line_ranges":[[4,11]]},
+    ]));
+    input["rule_guidance"] = serde_json::json!([
+        {"rule_id":"in","approval_id":"a1","scope":"domain"},
+        {"rule_id":"out","approval_id":"a2","scope":"adapters"},
+    ]);
+    let mut schemas = Vec::new();
+    run_focused_review(&input, 32_768, 2_048, &mut |_, format| {
+        if let Some(format) = format {
+            schemas.push(format.clone());
+            return Ok((r#"{"schema_version":1,"findings":[]}"#.into(), None));
+        }
+        Ok(("No defects.".into(), None))
+    })
+    .unwrap();
+    assert_eq!(
+        schemas[0]["properties"]["findings"]["items"]["properties"]["rule_attributions"]["items"]
+            ["enum"],
+        serde_json::json!([{"rule_id":"in","approval_id":"a1"}])
+    );
+}
+
+#[test]
+fn largest_request_measures_one_file_not_the_whole_change() {
+    let large = "x := 1\n".repeat(3_000);
+    let small_input = review_input(serde_json::json!([
+        {"path":"a.go","content":"package a\n","changed_line_ranges":[[1,1]]},
+    ]));
+    let two_large = review_input(serde_json::json!([
+        {"path":"a.go","content":large,"changed_line_ranges":[[1,1]]},
+        {"path":"b.go","content":large,"changed_line_ranges":[[1,1]]},
+        {"path":"ref.go","content":large,"changed_line_ranges":[],"context_role":"snapshot_impact_reference"},
+    ]));
+    let one_large = review_input(serde_json::json!([
+        {"path":"a.go","content":large,"changed_line_ranges":[[1,1]]},
+    ]));
+    let small = largest_request_tokens(&small_input, 1_024).unwrap();
+    let largest = largest_request_tokens(&two_large, 1_024).unwrap();
+    assert!(small < 2_000, "{small}");
+    assert_eq!(
+        largest,
+        largest_request_tokens(&one_large, 1_024).unwrap(),
+        "related files and impact references are fitted per request, so only the largest file counts"
+    );
+    assert!(largest > 1_024 + estimated_tokens(&large), "{largest}");
 }

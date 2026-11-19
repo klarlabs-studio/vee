@@ -854,17 +854,45 @@ pub fn run_review_with_provider_and_selection_context(
             "context_files":context_files,
             "work_item_context":work_item_context,
         });
-        if reviewer.strategy == vee_core::ReviewStrategy::Focused {
+        let focused = reviewer.strategy == vee_core::ReviewStrategy::Focused;
+        if focused {
             request_payload["review_strategy"] = serde_json::json!("focused");
+            request_payload["rule_guidance"] = applicable_rule_guidance
+                .iter()
+                .map(|approval| {
+                    serde_json::json!({
+                        "rule_id": approval.candidate_id,
+                        "approval_id": approval.approval_id,
+                        "scope": approval.scope,
+                    })
+                })
+                .collect();
         }
         if let Some(max_input_tokens) = provider.max_input_tokens {
-            let (estimated_tokens, omitted_by_token_budget, over_budget) =
+            let (estimated_tokens, omitted_by_token_budget, over_budget) = if focused {
+                // Focused review sends one changed file per request and fits
+                // related files into each request, so only the largest
+                // single request has to fit the budget.
+                let estimated = crate::focused_review::largest_request_tokens(
+                    &request_payload,
+                    provider
+                        .max_output_tokens
+                        .unwrap_or(crate::providers::OLLAMA_DEFAULT_MAX_OUTPUT_TOKENS),
+                )?;
+                request_payload["context_budget"] = serde_json::json!({
+                    "max_input_tokens": max_input_tokens,
+                    "estimated_prompt_tokens": estimated,
+                    "estimator": "largest single focused request: UTF-8 bytes divided by 3 plus the output limit for structuring; approximate",
+                });
+                (estimated, 0, estimated > max_input_tokens)
+            } else {
                 fit_review_payload_to_provider_budget(
                     &mut request_payload,
                     &instructions,
                     provider.kind,
                     max_input_tokens,
-                )?;
+                )?
+            };
             if omitted_by_token_budget > 0 {
                 impact_context_count = impact_context_count.saturating_sub(omitted_by_token_budget);
                 omitted_impact_context_count += omitted_by_token_budget;
