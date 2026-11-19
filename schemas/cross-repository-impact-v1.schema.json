@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/cross-repository-impact-v1.schema.json",
-  "title": "Vero cross-repository symbol impact",
+  "$id": "https://vee.klarlabs.de/schemas/cross-repository-impact-v1.schema.json",
+  "title": "Vee cross-repository symbol impact",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "producer_snapshot_id", "changed_symbols", "dependency_paths", "references", "coverage_complete", "limitations", "digest"],

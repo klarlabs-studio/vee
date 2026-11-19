@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/quality-analytics-v4.schema.json",
-  "title": "Vero Local Quality Analytics v4",
+  "$id": "https://vee.klarlabs.de/schemas/quality-analytics-v4.schema.json",
+  "title": "Vee Local Quality Analytics v4",
   "type": "object",
   "additionalProperties": false,
   "required": [

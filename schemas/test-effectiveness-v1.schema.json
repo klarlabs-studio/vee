@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/test-effectiveness-v1.schema.json",
-  "title": "Vero seeded mutant effectiveness assessment",
+  "$id": "https://vee.klarlabs.de/schemas/test-effectiveness-v1.schema.json",
+  "title": "Vee seeded mutant effectiveness assessment",
   "type": "object",
   "additionalProperties": false,
   "required": [

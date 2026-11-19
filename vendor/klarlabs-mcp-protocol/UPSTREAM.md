@@ -7,10 +7,10 @@
 
 This independent Rust implementation ports modern application concepts using
 Rust generics, Serde, Schemars, and the repository-owned protocol engine. Its
-default application policy is MCP 2026-07-28 with discovery only. Vero adds an
+default application policy is MCP 2026-07-28 with discovery only. Vee adds an
 opt-in stdio path for session-based protocol revisions before 2026-07-28; the
 default stdio and HTTP adapters remain modern-only. The compatibility path is
-covered by a Vero CLI integration test and is intended for ordinary tool
+covered by a Vee CLI integration test and is intended for ordinary tool
 listing/calls, not legacy task APIs.
 
 `tests/build_go_reference.py` requires the exact clean checkout above. Reference
@@ -21,7 +21,7 @@ fixtures use actual upstream handlers/transports and modern request metadata.
 under MIT. `src/transport/grpc_proto.rs` is generated with tonic-prost-build
 0.14.6. Normal builds require no protoc. Transport envelope types are retained
 for modern WebSocket/gRPC interoperability. Legacy negotiation is exposed only
-through Vero's explicit stdio compatibility entry point.
+through Vee's explicit stdio compatibility entry point.
 
 Modern subscriptions follow pinned `server/subscriptions.go` and
 `server/resource_subscriptions.go`. Go and SDK negotiation shapes differ;

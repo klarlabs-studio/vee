@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/acceptance-validation-v1.schema.json",
-  "title": "Vero Acceptance Validation v1",
+  "$id": "https://vee.klarlabs.de/schemas/acceptance-validation-v1.schema.json",
+  "title": "Vee Acceptance Validation v1",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "review_id", "snapshot_id", "work_item_digest", "policy_digest", "gate_status", "author", "recorded_at", "result", "assessment_complete", "criteria", "limitations"],

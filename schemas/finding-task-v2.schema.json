@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/finding-task-v2.schema.json",
-  "title": "Vero finding task v2",
+  "$id": "https://vee.klarlabs.de/schemas/finding-task-v2.schema.json",
+  "title": "Vee finding task v2",
   "type": "object",
   "required": ["schema_version", "task_id", "review_id", "snapshot_id", "snapshot_current", "finding", "source_context", "context_note", "impact_paths", "impact_coverage_complete", "evidence", "applicable_standards", "standards_note", "instructions"],
   "properties": {

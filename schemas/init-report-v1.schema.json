@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/init-report-v1.schema.json",
-  "title": "Vero init report v1",
-  "description": "Files written by `vero init --output json`.",
+  "$id": "https://vee.klarlabs.de/schemas/init-report-v1.schema.json",
+  "title": "Vee init report v1",
+  "description": "Files written by `vee init --output json`.",
   "type": "object",
   "additionalProperties": false,
   "required": [

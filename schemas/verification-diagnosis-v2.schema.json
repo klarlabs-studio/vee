@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/verification-diagnosis-v2.schema.json",
-  "title": "Vero Verification Diagnosis v2",
+  "$id": "https://vee.klarlabs.de/schemas/verification-diagnosis-v2.schema.json",
+  "title": "Vee Verification Diagnosis v2",
   "type": "object",
   "additionalProperties": false,
   "required": [

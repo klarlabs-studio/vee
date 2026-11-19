@@ -13,7 +13,7 @@ This is a tested core parity milestone, **not full mcp-go feature parity**.
 **Default protocol policy: MCP 2026-07-28 using `server/discover`.**
 The default `serve_stdio` and HTTP adapters remain modern-only. Applications
 that need older stdio clients can explicitly use `serve_stdio_compatible`;
-handlers must negotiate a supported pre-2026 version. Vero uses this opt-in
+handlers must negotiate a supported pre-2026 version. Vee uses this opt-in
 path so older coding clients can call its ordinary tools. Legacy task APIs,
 split HTTP/SSE, roots, and sampling are outside this compatibility path.
 

@@ -40,7 +40,7 @@ const detail = (summary = latest) => ({
 const config = {
   version: 1,
   providers: { codex: { kind: 'codex_cli', executable: 'codex' } },
-  reviewers: { correctness: { provider: 'codex', instructions_file: '.vero/reviewers/correctness.md' } },
+  reviewers: { correctness: { provider: 'codex', instructions_file: '.vee/reviewers/correctness.md' } },
   policy: { required_reviewers: ['correctness'], block_severities: ['high'], on_incomplete: 'block' },
 }
 
@@ -302,7 +302,7 @@ test('analytics export preserves the visible trend window and explicit count den
   const downloadEvent = page.waitForEvent('download')
   await page.getByRole('button', { name: 'Export JSON' }).click()
   const download = await downloadEvent
-  expect(download.suggestedFilename()).toBe('vero-local-analytics.json')
+  expect(download.suggestedFilename()).toBe('vee-local-analytics.json')
   const path = await download.path()
   const report = JSON.parse(await readFile(path, 'utf8'))
   expect(report).toMatchObject({
@@ -322,7 +322,7 @@ test('analytics export preserves the visible trend window and explicit count den
   const csvDownloadEvent = page.waitForEvent('download')
   await page.getByRole('button', { name: 'Export CSV' }).click()
   const csvDownload = await csvDownloadEvent
-  expect(csvDownload.suggestedFilename()).toBe('vero-local-analytics.csv')
+  expect(csvDownload.suggestedFilename()).toBe('vee-local-analytics.csv')
   const csvPath = await csvDownload.path()
   const csv = await readFile(csvPath, 'utf8')
   expect(csv).toContain('metric,period,label,count,metric_scope,reviewer_filter,provider_filter,category_filter,rule_filter,verification_profile_filter,date_from,date_to')
@@ -487,7 +487,7 @@ test('queue view save reports browser storage failure instead of claiming succes
   await page.addInitScript(() => {
     const originalSetItem = Storage.prototype.setItem
     Storage.prototype.setItem = function (key, value) {
-      if (key.startsWith('vero.review-queue.views.v1:')) throw new DOMException('storage full', 'QuotaExceededError')
+      if (key.startsWith('vee.review-queue.views.v1:')) throw new DOMException('storage full', 'QuotaExceededError')
       return originalSetItem.call(this, key, value)
     }
   })
@@ -503,7 +503,7 @@ test('queue view delete restores the view when browser storage fails', async ({ 
   await page.addInitScript(() => {
     const originalSetItem = Storage.prototype.setItem
     Storage.prototype.setItem = function (key, value) {
-      if (key.startsWith('vero.review-queue.views.v1:')) throw new DOMException('storage full', 'QuotaExceededError')
+      if (key.startsWith('vee.review-queue.views.v1:')) throw new DOMException('storage full', 'QuotaExceededError')
       return originalSetItem.call(this, key, value)
     }
   })
@@ -532,7 +532,7 @@ test('Insights saved view deletion restores the view when browser storage fails'
   await page.addInitScript(() => {
     const originalSetItem = Storage.prototype.setItem
     Storage.prototype.setItem = function (key, value) {
-      if (key.startsWith('vero.analytics.views.v1:')) throw new DOMException('storage full', 'QuotaExceededError')
+      if (key.startsWith('vee.analytics.views.v1:')) throw new DOMException('storage full', 'QuotaExceededError')
       return originalSetItem.call(this, key, value)
     }
   })
@@ -553,7 +553,7 @@ test('saved queue view keys include the active repository identity', async ({ pa
   await page.getByLabel('New queue view name').fill('Repo one only')
   await page.getByRole('button', { name: 'Save view' }).click()
   const keys = await page.evaluate(() => Object.keys(localStorage))
-  expect(keys).toContain('vero.review-queue.views.v1:/repo')
+  expect(keys).toContain('vee.review-queue.views.v1:/repo')
 })
 
 
@@ -604,7 +604,7 @@ test('configuration editor saves validated JSON configuration', async ({ page })
   await page.goto('/')
   await page.getByRole('button', { name: /Configuration/ }).click()
   const editor = page.getByRole('textbox', { name: 'Repository config JSON' })
-  const edited = { ...config, reviewers: { correctness: config.reviewers.correctness, security: { provider: 'codex', instructions_file: '.vero/reviewers/security.md' } } }
+  const edited = { ...config, reviewers: { correctness: config.reviewers.correctness, security: { provider: 'codex', instructions_file: '.vee/reviewers/security.md' } } }
   await editor.fill(JSON.stringify(edited, null, 2))
   await page.getByRole('button', { name: 'Save configuration' }).click()
   await expect(page.getByText('correctness, security')).toBeVisible()

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/repository-map-v1.schema.json",
-  "title": "Vero local repository dependency map",
+  "$id": "https://vee.klarlabs.de/schemas/repository-map-v1.schema.json",
+  "title": "Vee local repository dependency map",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "repositories", "dependencies", "limitations", "digest"],

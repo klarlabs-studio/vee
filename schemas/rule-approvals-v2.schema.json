@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/rule-approvals-v2.schema.json",
-  "title": "Vero rule guidance approvals v2",
+  "$id": "https://vee.klarlabs.de/schemas/rule-approvals-v2.schema.json",
+  "title": "Vee rule guidance approvals v2",
   "oneOf": [
     { "$ref": "#/$defs/approval" },
     { "type": "array", "items": { "$ref": "#/$defs/approval" } }

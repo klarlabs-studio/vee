@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/pack-summary-v1.schema.json",
-  "title": "Vero policy pack summary v1",
-  "description": "Result of `vero packs export` and `vero packs add`.",
+  "$id": "https://vee.klarlabs.de/schemas/pack-summary-v1.schema.json",
+  "title": "Vee policy pack summary v1",
+  "description": "Result of `vee packs export` and `vee packs add`.",
   "type": "object",
   "additionalProperties": false,
   "required": [

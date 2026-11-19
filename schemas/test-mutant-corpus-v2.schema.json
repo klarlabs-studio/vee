@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/test-mutant-corpus-v2.schema.json",
-  "title": "Vero test mutant corpus v2",
+  "$id": "https://vee.klarlabs.de/schemas/test-mutant-corpus-v2.schema.json",
+  "title": "Vee test mutant corpus v2",
   "type": "object",
   "required": ["schema_version", "corpus_id", "dataset_kind", "source", "mutants"],
   "properties": {

@@ -2538,7 +2538,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
-name = "vero"
+name = "vee"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2565,17 +2565,17 @@ dependencies = [
  "tokio-util",
  "toml",
  "url",
- "vero-application",
- "vero-core",
- "vero-git",
- "vero-hosting",
- "vero-http",
- "vero-process",
- "vero-store-sqlite",
+ "vee-application",
+ "vee-core",
+ "vee-git",
+ "vee-hosting",
+ "vee-http",
+ "vee-process",
+ "vee-store-sqlite",
 ]
 
 [[package]]
-name = "vero-application"
+name = "vee-application"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2599,15 +2599,15 @@ dependencies = [
  "tokio-util",
  "toml",
  "url",
- "vero-core",
- "vero-git",
- "vero-hosting",
- "vero-process",
- "vero-store-sqlite",
+ "vee-core",
+ "vee-git",
+ "vee-hosting",
+ "vee-process",
+ "vee-store-sqlite",
 ]
 
 [[package]]
-name = "vero-core"
+name = "vee-core"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -2619,15 +2619,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "vero-git"
+name = "vee-git"
 version = "0.1.0"
 dependencies = [
  "tempfile",
- "vero-core",
+ "vee-core",
 ]
 
 [[package]]
-name = "vero-hosting"
+name = "vee-hosting"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
@@ -2639,7 +2639,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "vero-http"
+name = "vee-http"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2651,15 +2651,15 @@ dependencies = [
  "tempfile",
  "tokio",
  "tower",
- "vero-application",
- "vero-core",
- "vero-git",
- "vero-hosting",
- "vero-store-sqlite",
+ "vee-application",
+ "vee-core",
+ "vee-git",
+ "vee-hosting",
+ "vee-store-sqlite",
 ]
 
 [[package]]
-name = "vero-process"
+name = "vee-process"
 version = "0.1.0"
 dependencies = [
  "libc",
@@ -2667,11 +2667,11 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio-util",
- "vero-core",
+ "vee-core",
 ]
 
 [[package]]
-name = "vero-store-sqlite"
+name = "vee-store-sqlite"
 version = "0.1.0"
 dependencies = [
  "rusqlite",
@@ -2679,8 +2679,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
- "vero-core",
- "vero-process",
+ "vee-core",
+ "vee-process",
 ]
 
 [[package]]

@@ -5,11 +5,11 @@
 
 ## Context
 
-Vero exposes the same capabilities through the CLI, an MCP server, and the local
+Vee exposes the same capabilities through the CLI, an MCP server, and the local
 HTTP dashboard. Until now each transport implemented its own handler around the
 application services, and they drifted:
 
-- `gate check` resolved the work-item token from `.vero.yaml` on the CLI, but not over MCP.
+- `gate check` resolved the work-item token from `.vee.yaml` on the CLI, but not over MCP.
 - The same operation returned different documents: `findings list` was unpaged on
   the CLI and paged over MCP; `findings show` omitted evidence on the CLI; MCP
   wrapped tasks, gate, impact, verification, review, and search results in ad hoc
@@ -23,21 +23,21 @@ Separately, the layering only partly follows domain-driven design:
 
 - The domain language is consistent (snapshot, finding, gate decision, waiver,
   evidence, verification run). Ports exist for reviewer providers
-  (`ReviewProvider`), Git hosting (`GitHostingProvider`), and Git capture (`vero-git`).
-- `vero-core` mixes the domain model with infrastructure: the SQLite `ReviewStore`
+  (`ReviewProvider`), Git hosting (`GitHostingProvider`), and Git capture (`vee-git`).
+- `vee-core` mixes the domain model with infrastructure: the SQLite `ReviewStore`
   (`rusqlite`) and reviewer subprocess execution (`libc`, `tempfile`).
 - Application services depend on the concrete SQLite store; there is no repository port.
 - Invariants live in transports instead of the model (the waiver guard, input
   bounds). Some lifecycle state is stringly typed (`RuleApproval.status`).
 - Use cases live in the CLI crate (`finding_task`, `rule_candidates`, `acceptance`,
   `analytics`, `standards`, `repository_map`), so the HTTP transport cannot reuse
-  them. `vero-application` is a single 13k-line module without bounded contexts.
+  them. `vee-application` is a single 13k-line module without bounded contexts.
 
 ## Decision
 
 ### Step 1 (implemented)
 
-1. `crates/vero-cli/src/operations.rs` is the single implementation of every
+1. `crates/vee-cli/src/operations.rs` is the single implementation of every
    operation shared by the CLI and MCP. Each operation validates input once, calls
    the application services, and returns the published result document. Errors use
    the existing usage/configuration markers, so the CLI keeps its exit codes and MCP
@@ -57,28 +57,28 @@ Separately, the layering only partly follows domain-driven design:
 Restructure toward domain layering, in this order:
 
 1. **Repository port.** Define review, finding, verification, and rule-approval
-   repository traits in the domain; move `ReviewStore` into a `vero-store-sqlite`
+   repository traits in the domain; move `ReviewStore` into a `vee-store-sqlite`
    adapter crate. Keep subprocess provider execution in an adapter crate.
 
-   *Implemented (2026-11-18):* `vero_core::ports` defines one trait per bounded
+   *Implemented (2026-11-18):* `vee_core::ports` defines one trait per bounded
    context (`ReviewRepository`, `FindingRepository`, `GateRepository`,
    `VerificationRepository`, `RuleApprovalRepository`, `ProviderResponseCache`,
    `HostedDeliveryRepository`) and `Repositories` for all of them.
-   `vero-store-sqlite` implements them; `vero-core` no longer depends on
-   `rusqlite`, and `vero-application` uses the store only in tests. Active rule
+   `vee-store-sqlite` implements them; `vee-core` no longer depends on
+   `rusqlite`, and `vee-application` uses the store only in tests. Active rule
    approvals, which the effective config digest binds, are now read through
    `RuleApprovalRepository` and passed in explicitly instead of the digest
-   function opening `.vero/vero.sqlite` itself. Reviewer provider and
-   verification subprocess execution moved to the `vero-process` adapter, so
-   `vero-core` no longer depends on `libc`, `tempfile`, or `tokio-util`.
+   function opening `.vee/vee.sqlite` itself. Reviewer provider and
+   verification subprocess execution moved to the `vee-process` adapter, so
+   `vee-core` no longer depends on `libc`, `tempfile`, or `tokio-util`.
    Working-tree and index snapshot capture (`snapshot_files`,
-   `snapshot_index_files`) moved to `vero-git`, so `vero-core` no longer runs
+   `snapshot_index_files`) moved to `vee-git`, so `vee-core` no longer runs
    processes or reads the working tree.
 2. **Invariants in the model.** Finding status transitions (no waiving through a
    status change), typed approval status, and bounded value types for reasons and
    actor names.
 
-   *Implemented (2026-11-18):* `vero_core::lifecycle` defines `Reason` (1–4,000
+   *Implemented (2026-11-18):* `vee_core::lifecycle` defines `Reason` (1–4,000
    characters) and `ActorName` (1–200 characters), both trimmed;
    `FindingStatusChange`, which cannot be built with `waived`; and
    `RuleApprovalStatus`, derived by `RuleApproval::status_at` from the
@@ -86,37 +86,37 @@ Restructure toward domain layering, in this order:
    values, so the CLI, MCP, and HTTP transports, and the SQLite store, no
    longer carry their own copies of these checks. Waiver reasons and authors
    now have the same bounds (they previously only had to be non-empty).
-3. **Use cases in `vero-application`, by bounded context:** Review (capture,
+3. **Use cases in `vee-application`, by bounded context:** Review (capture,
    reviewers, findings), Gate & Policy (decisions, waivers, evidence), Verification,
    Learning (feedback, rule candidates and approvals), and Context & Impact.
-   Move `operations.rs` and the use-case modules out of `vero-cli`, so `vero-http`
+   Move `operations.rs` and the use-case modules out of `vee-cli`, so `vee-http`
    uses the same operations as the CLI and MCP.
 
    *Partly implemented (2026-11-18):* `operations`, onboarding (`setup`),
    `packs`, and the use-case modules (acceptance, analytics, attestation,
    coverage, finding tasks, imported history, ownership, patch sandbox, PR
    description, repository map, rule candidates, standards, test generation,
-   effectiveness, and recommendations) are now modules of `vero-application`,
+   effectiveness, and recommendations) are now modules of `vee-application`,
    with the error markers (`failure`), proposal files (`proposals`), and
    work-item fetching (`work_items`) they use. `Workspace` takes a
-   `RepositoryStores` factory, so `vero-application` has no SQLite dependency
-   outside its tests. `vero-cli` keeps argument parsing, output rendering,
+   `RepositoryStores` factory, so `vee-application` has no SQLite dependency
+   outside its tests. `vee-cli` keeps argument parsing, output rendering,
    the MCP adapter, and composition.
 
-   `vero-http` now holds a `Workspace` and calls `operations` for every
+   `vee-http` now holds a `Workspace` and calls `operations` for every
    dashboard route: review listing, review detail (`review_detail`: latest
    gate applied, findings, impact recomputed while the checkout matches),
    unpaged findings (`all_findings`), status changes, starting a review,
-   local analytics (`local_analytics`, moved from `vero-http`), and the
+   local analytics (`local_analytics`, moved from `vee-http`), and the
    configuration editor (`repository_config_view`,
    `replace_repository_config`). Response documents are unchanged, because
-   the dashboard reads them; `vero-http` keeps only origin and token checks,
+   the dashboard reads them; `vee-http` keeps only origin and token checks,
    JSON mapping, and the webhook lease loop, and depends on
-   `vero-store-sqlite` only to compose the default stores. Dashboard reads
-   on a repository without `.vero` now return empty results instead of an
+   `vee-store-sqlite` only to compose the default stores. Dashboard reads
+   on a repository without `.vee` now return empty results instead of an
    error, matching the CLI and MCP.
 
-   `vero-application/src/lib.rs` is split into context modules: `config`,
+   `vee-application/src/lib.rs` is split into context modules: `config`,
    `review`, `providers`, `verification`, `impact`, `gate`, `learning`, and
    `source`, with the unit tests in `tests`. `lib.rs` re-exports them, so
    the public API is unchanged.
@@ -126,7 +126,7 @@ Restructure toward domain layering, in this order:
    Verification commands and Git capture have one runner each, local
    processes, and their tests run real processes, as the engineering
    preferences ask for data and infrastructure tests. A port for
-   `vero-process` or `vero-git` waits for a second runner, such as a remote
+   `vee-process` or `vee-git` waits for a second runner, such as a remote
    or sandboxed one.
 
    Unit tests live next to their context, in `src/tests/<context>.rs`.

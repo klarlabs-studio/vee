@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/impact-assessment-v1.schema.json",
-  "title": "Vero Impact Assessment v1",
+  "$id": "https://vee.klarlabs.de/schemas/impact-assessment-v1.schema.json",
+  "title": "Vee Impact Assessment v1",
   "type": "object",
   "additionalProperties": false,
   "required": [

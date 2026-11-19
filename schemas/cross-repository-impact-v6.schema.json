@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/cross-repository-impact-v6.schema.json",
-  "title": "Vero cross-repository impact with OpenAPI and AsyncAPI contract coverage",
+  "$id": "https://vee.klarlabs.de/schemas/cross-repository-impact-v6.schema.json",
+  "title": "Vee cross-repository impact with OpenAPI and AsyncAPI contract coverage",
   "type": "object",
   "additionalProperties": false,
   "required": [

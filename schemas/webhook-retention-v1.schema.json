@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/webhook-retention-v1.schema.json",
-  "title": "Vero webhook retention result",
+  "$id": "https://vee.klarlabs.de/schemas/webhook-retention-v1.schema.json",
+  "title": "Vee webhook retention result",
   "type": "object",
   "additionalProperties": false,
   "required": [

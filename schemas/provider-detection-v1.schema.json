@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/provider-detection-v1.schema.json",
-  "title": "Vero provider detection v1",
-  "description": "AI backends available on this machine in preference order: local model, agent CLIs, API keys. Returned by `vero providers detect --output json` and embedded in doctor and init reports.",
+  "$id": "https://vee.klarlabs.de/schemas/provider-detection-v1.schema.json",
+  "title": "Vee provider detection v1",
+  "description": "AI backends available on this machine in preference order: local model, agent CLIs, API keys. Returned by `vee providers detect --output json` and embedded in doctor and init reports.",
   "type": "object",
   "additionalProperties": false,
   "required": [

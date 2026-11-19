@@ -25,9 +25,9 @@ def git(repo: pathlib.Path, *args: str) -> str:
 
 
 def main() -> int:
-    vero = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "target/debug/vero").resolve(strict=True)
+    vee = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "target/debug/vee").resolve(strict=True)
     runner = pathlib.Path(__file__).resolve().parents[1] / "historical-review-benchmark.py"
-    with tempfile.TemporaryDirectory(prefix="vero-historical-acceptance-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="vee-historical-acceptance-") as temporary:
         root = pathlib.Path(temporary)
         repo = root / "subject"
         repo.mkdir()
@@ -63,14 +63,14 @@ def main() -> int:
 
         git(repo, "init", "-q")
         git(repo, "config", "user.email", "acceptance@example.invalid")
-        git(repo, "config", "user.name", "Vero acceptance")
+        git(repo, "config", "user.name", "Vee acceptance")
         (repo / "src").mkdir()
         baseline_source = "pub fn divide(a: i32, b: i32) -> i32 { a }\n// stable context line\n"
         (repo / "src/bug.rs").write_text(baseline_source, encoding="utf-8")
         (repo / "reviewer.md").write_text(
             "Review changed code for concrete defects.\n", encoding="utf-8"
         )
-        (repo / ".vero.yaml").symlink_to(external_config)
+        (repo / ".vee.yaml").symlink_to(external_config)
         (repo / ".gitattributes").write_text("*.rs filter=evil\n", encoding="utf-8")
         git(
             repo,
@@ -131,7 +131,7 @@ def main() -> int:
             (root / label_filename).write_bytes(label_bytes)
             out_of_scope_label_bytes[language] = (label_filename, label_bytes)
 
-        config = root / "benchmark.vero.yaml"
+        config = root / "benchmark.vee.yaml"
         config.write_text(
             "version: 1\noffline: true\nreview:\n  include: [\"**/*.rs\"]\n"
             "  exclude: [\"src/unreviewed.rs\"]\n"
@@ -269,8 +269,8 @@ def main() -> int:
                 f"reviewer.md={trusted_instructions}",
                 "--verification-file",
                 f"tests/local_regression.py={trusted_verification}",
-                "--vero",
-                str(vero),
+                "--vee",
+                str(vee),
                 "--output-dir",
                 str(output),
                 "--reviewer",
@@ -309,7 +309,7 @@ def main() -> int:
         verification_output = root / "verification-only-results"
         verification_command = [
             sys.executable, str(runner), "--manifest", str(verification_manifest),
-            "--corpus-root", str(root), "--config", str(config), "--vero", str(vero),
+            "--corpus-root", str(root), "--config", str(config), "--vee", str(vee),
             "--output-dir", str(verification_output), "--verification-only",
             "--verify-profile", "unit", "--verification-file", f"tests/local_regression.py={trusted_verification}",
         ]
@@ -416,7 +416,7 @@ def main() -> int:
         conflict_output = root / "conflict-results"
         conflict_command = list(benchmark_command)
         conflict_command[conflict_command.index("--output-dir") + 1] = str(conflict_output)
-        overlay_arg = conflict_command.index("--vero")
+        overlay_arg = conflict_command.index("--vee")
         conflict_command[overlay_arg:overlay_arg] = [
             "--verification-file",
             f"src/bug.rs={conflicting_file}",
@@ -439,7 +439,7 @@ def main() -> int:
         assert report["benchmark_config_digest"] == "sha256:" + hashlib.sha256(config.read_bytes()).hexdigest()
         assert external_config.read_text(encoding="utf-8") == "preserve me"
         assert not hook_marker.exists() and not filter_marker.exists()
-        assert not (repo / ".vero/vero.sqlite").exists()
+        assert not (repo / ".vee/vee.sqlite").exists()
         assert not list((repo / ".git" / "worktrees").glob("*"))
         runner_api = runpy.run_path(str(runner))
         try:

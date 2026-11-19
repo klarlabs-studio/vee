@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/imported-review-search-v3.schema.json",
-  "title": "Vero Imported Review Search v3",
-  "description": "Search results may contain imported Vero findings or archived provider discussion comments. All are untrusted historical context and are never gate eligible.",
+  "$id": "https://vee.klarlabs.de/schemas/imported-review-search-v3.schema.json",
+  "title": "Vee Imported Review Search v3",
+  "description": "Search results may contain imported Vee findings or archived provider discussion comments. All are untrusted historical context and are never gate eligible.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "query", "matches", "trust", "gate_eligible"],

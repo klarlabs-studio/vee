@@ -194,7 +194,7 @@ def main() -> int:
         output = safe_output_path(args.repository.expanduser().resolve(strict=True), args.output)
         report = prepare(args)
         data = (json.dumps(report, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
-        with tempfile.NamedTemporaryFile(dir=output.parent, prefix=".vero-candidate-", delete=False) as stream:
+        with tempfile.NamedTemporaryFile(dir=output.parent, prefix=".vee-candidate-", delete=False) as stream:
             temporary = Path(stream.name)
             stream.write(data)
             stream.flush()

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/test-recommendations-v1.schema.json",
-  "title": "Vero Test Recommendations v1",
+  "$id": "https://vee.klarlabs.de/schemas/test-recommendations-v1.schema.json",
+  "title": "Vee Test Recommendations v1",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "snapshot_id", "coverage_complete", "recommendations", "limitations"],

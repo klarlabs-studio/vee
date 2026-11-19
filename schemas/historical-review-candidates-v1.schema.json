@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/historical-review-candidates-v1.schema.json",
-  "title": "Vero historical review curation candidates v1",
+  "$id": "https://vee.klarlabs.de/schemas/historical-review-candidates-v1.schema.json",
+  "title": "Vee historical review curation candidates v1",
   "type": "object",
   "required": ["schema_version", "artifact", "candidate_only", "case_id", "project", "repository_name", "buggy_commit", "buggy_parent_commit", "fix_commit", "changed_files", "candidate_locations", "curation_requirements", "limitations"],
   "properties": {

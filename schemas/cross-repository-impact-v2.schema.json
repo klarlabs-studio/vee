@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/cross-repository-impact-v2.schema.json",
-  "title": "Vero cross-repository symbol and API contract impact",
+  "$id": "https://vee.klarlabs.de/schemas/cross-repository-impact-v2.schema.json",
+  "title": "Vee cross-repository symbol and API contract impact",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "producer_snapshot_id", "changed_symbols", "api_contract_changes", "dependency_paths", "references", "coverage_complete", "limitations", "digest"],

@@ -85,7 +85,7 @@ jobs:
       - name: Install gopls for Go impact acceptance
         shell: bash
         env:
-          GOBIN: ${{ runner.temp }}/vero-tools
+          GOBIN: ${{ runner.temp }}/vee-tools
         run: |
           mkdir -p "$GOBIN"
           go install golang.org/x/tools/gopls@v0.18.1
@@ -104,7 +104,7 @@ jobs:
         shell: bash
         run: |
           npm install --global typescript@6.0.3
-          echo "VERO_TSSERVER=$(npm root --global)/typescript/lib/tsserver.js" >> "$GITHUB_ENV"
+          echo "VEE_TSSERVER=$(npm root --global)/typescript/lib/tsserver.js" >> "$GITHUB_ENV"
           test -f "$(npm root --global)/typescript/lib/tsserver.js"
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
@@ -122,21 +122,21 @@ jobs:
         # impact results time out nondeterministically.
         run: cargo test --workspace --locked -- --test-threads=1
       - name: Verify cross-repository Go impact with gopls
-        run: cargo test -p vero cross_impact_resolves_go_consumer_references_to_local_producer_with_gopls --locked
+        run: cargo test -p vee cross_impact_resolves_go_consumer_references_to_local_producer_with_gopls --locked
       - name: Verify cross-repository Rust impact with rust-analyzer
-        run: cargo test -p vero cross_impact_resolves_rust_consumer_references_with_rust_analyzer --locked
+        run: cargo test -p vee cross_impact_resolves_rust_consumer_references_with_rust_analyzer --locked
       - name: Verify project-aware TypeScript impact
-        run: cargo test -p vero-application typescript_project_references_resolve_aliases_without_same_name_false_edges --locked
+        run: cargo test -p vee-application typescript_project_references_resolve_aliases_without_same_name_false_edges --locked
       - name: Install CLI from workspace
-        run: cargo install --path crates/vero-cli --locked --force
+        run: cargo install --path crates/vee-cli --locked --force
       - name: Check installed CLI
-        run: vero --version
+        run: vee --version
       - name: Exercise installed CLI with local-only review
-        run: python scripts/acceptance/installed_cli_smoke.py vero
+        run: python scripts/acceptance/installed_cli_smoke.py vee
       - name: Compare saved local-review reports
         run: python scripts/acceptance/compare_historical_reviews.py
       - name: Run local historical-review acceptance
         if: runner.os != 'Windows'
-        run: python scripts/acceptance/historical_review_benchmark.py vero
+        run: python scripts/acceptance/historical_review_benchmark.py vee
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings

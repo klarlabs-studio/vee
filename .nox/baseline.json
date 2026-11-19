@@ -7,7 +7,7 @@
       "file_path": "",
       "severity": "",
       "reason": "False positive: TLS keys generated for the vendored MCP library mTLS tests (vendor/klarlabs-mcp/tests/fixtures/tls); they protect nothing.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.899495Z"
     },
     {
@@ -16,7 +16,7 @@
       "file_path": "",
       "severity": "",
       "reason": "False positive: TLS keys generated for the vendored MCP library mTLS tests (vendor/klarlabs-mcp/tests/fixtures/tls); they protect nothing.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.899496Z"
     },
     {
@@ -25,7 +25,7 @@
       "file_path": "",
       "severity": "",
       "reason": "False positive: TLS keys generated for the vendored MCP library mTLS tests (vendor/klarlabs-mcp/tests/fixtures/tls); they protect nothing.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.899498Z"
     },
     {
@@ -34,7 +34,7 @@
       "file_path": "",
       "severity": "",
       "reason": "False positive: TLS keys generated for the vendored MCP library mTLS tests (vendor/klarlabs-mcp/tests/fixtures/tls); they protect nothing.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.899498Z"
     },
     {
@@ -43,7 +43,7 @@
       "file_path": "",
       "severity": "",
       "reason": "False positive: TLS keys generated for the vendored MCP library mTLS tests (vendor/klarlabs-mcp/tests/fixtures/tls); they protect nothing.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.899499Z"
     },
     {
@@ -52,7 +52,7 @@
       "file_path": "",
       "severity": "",
       "reason": "False positive: TLS keys generated for the vendored MCP library mTLS tests (vendor/klarlabs-mcp/tests/fixtures/tls); they protect nothing.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.8995Z"
     },
     {
@@ -61,7 +61,7 @@
       "file_path": "",
       "severity": "",
       "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.95178Z"
     },
     {
@@ -70,7 +70,7 @@
       "file_path": "",
       "severity": "",
       "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.951781Z"
     },
     {
@@ -79,7 +79,7 @@
       "file_path": "",
       "severity": "",
       "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.951781Z"
     },
     {
@@ -88,7 +88,7 @@
       "file_path": "",
       "severity": "",
       "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.951783Z"
     },
     {
@@ -97,7 +97,7 @@
       "file_path": "",
       "severity": "",
       "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.951783Z"
     },
     {
@@ -106,7 +106,7 @@
       "file_path": "",
       "severity": "",
       "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.951784Z"
     },
     {
@@ -115,7 +115,7 @@
       "file_path": "",
       "severity": "",
       "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.951785Z"
     },
     {
@@ -124,7 +124,7 @@
       "file_path": "",
       "severity": "",
       "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.951786Z"
     },
     {
@@ -133,7 +133,7 @@
       "file_path": "",
       "severity": "",
       "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.951787Z"
     },
     {
@@ -142,7 +142,7 @@
       "file_path": "",
       "severity": "",
       "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.951789Z"
     },
     {
@@ -151,7 +151,7 @@
       "file_path": "",
       "severity": "",
       "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.95179Z"
     },
     {
@@ -160,7 +160,7 @@
       "file_path": "",
       "severity": "",
       "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.951791Z"
     },
     {
@@ -169,7 +169,7 @@
       "file_path": "",
       "severity": "",
       "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.95178Z"
     },
     {
@@ -178,7 +178,7 @@
       "file_path": "",
       "severity": "",
       "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.95178Z"
     },
     {
@@ -187,7 +187,7 @@
       "file_path": "",
       "severity": "",
       "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.95178Z"
     },
     {
@@ -196,7 +196,7 @@
       "file_path": "",
       "severity": "",
       "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.951783Z"
     },
     {
@@ -205,7 +205,7 @@
       "file_path": "",
       "severity": "",
       "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.951791Z"
     },
     {
@@ -214,7 +214,7 @@
       "file_path": "",
       "severity": "",
       "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.951791Z"
     },
     {
@@ -223,7 +223,7 @@
       "file_path": "",
       "severity": "",
       "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
-      "owner": "vero-maintainers",
+      "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.951791Z"
     }
   ]

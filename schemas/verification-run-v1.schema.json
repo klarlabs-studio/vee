@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/verification-run-v1.schema.json",
-  "title": "Vero verification run v1",
+  "$id": "https://vee.klarlabs.de/schemas/verification-run-v1.schema.json",
+  "title": "Vee verification run v1",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -103,7 +103,7 @@
             },
             "path": {
               "type": "string",
-              "pattern": "^\\.vero/artifacts/sha256/[a-f0-9]{64}$"
+              "pattern": "^\\.vee/artifacts/sha256/[a-f0-9]{64}$"
             },
             "size_bytes": {
               "type": "integer",

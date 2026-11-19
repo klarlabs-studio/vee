@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/evidence-bundle-v1.schema.json",
-  "title": "Vero Evidence Bundle v1",
+  "$id": "https://vee.klarlabs.de/schemas/evidence-bundle-v1.schema.json",
+  "title": "Vee Evidence Bundle v1",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "manifest", "manifest_digest", "review", "limitations"],
@@ -26,7 +26,7 @@
         "verification_count": { "type": "integer", "minimum": 0 }
       }
     },
-    "review": { "$ref": "https://vero.dev/schemas/review-output-v2.schema.json" },
+    "review": { "$ref": "https://vee.klarlabs.de/schemas/review-output-v2.schema.json" },
     "signature": {
       "type": "object",
       "additionalProperties": false,

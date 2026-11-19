@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/policy-pack-v1.schema.json",
-  "title": "Vero policy pack manifest v1",
-  "description": "pack.yaml at the root of a policy pack directory. Reviewer files are relative to the pack directory. Repositories pin a pack by content digest under `packs` in .vero.yaml.",
+  "$id": "https://vee.klarlabs.de/schemas/policy-pack-v1.schema.json",
+  "title": "Vee policy pack manifest v1",
+  "description": "pack.yaml at the root of a policy pack directory. Reviewer files are relative to the pack directory. Repositories pin a pack by content digest under `packs` in .vee.yaml.",
   "type": "object",
   "additionalProperties": false,
   "required": [

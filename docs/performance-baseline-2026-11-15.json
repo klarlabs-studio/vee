@@ -121,8 +121,8 @@
       }
     }
   },
-  "vero": {
+  "vee": {
     "binary_sha256": "701dd3e075a9aee7aba57a778ff4ee8eeee0d2ef47b94690d87fd3ccc281fe06",
-    "version": "vero 0.1.0"
+    "version": "vee 0.1.0"
   }
 }

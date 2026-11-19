@@ -1,9 +1,9 @@
 target/
 node_modules/
-.vero/*
-!.vero/reviewers/
-.vero/reviewers/*
-!.vero/reviewers/*.md
-!.vero/packs/
+.vee/*
+!.vee/reviewers/
+.vee/reviewers/*
+!.vee/reviewers/*.md
+!.vee/packs/
 *.rlib
 __pycache__/

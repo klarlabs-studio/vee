@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/cli-error-v1.schema.json",
-  "title": "Vero CLI error v1",
+  "$id": "https://vee.klarlabs.de/schemas/cli-error-v1.schema.json",
+  "title": "Vee CLI error v1",
   "type": "object",
   "required": ["schema_version", "error"],
   "properties": {

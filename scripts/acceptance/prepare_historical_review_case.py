@@ -23,7 +23,7 @@ def git(repo: pathlib.Path, *args: str) -> str:
 
 def main() -> int:
     helper = pathlib.Path(__file__).resolve().parents[1] / "prepare-historical-review-case.py"
-    with tempfile.TemporaryDirectory(prefix="vero-local-curation-acceptance-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="vee-local-curation-acceptance-") as temporary:
         root = pathlib.Path(temporary)
         repo = root / "subject"
         repo.mkdir()
@@ -32,7 +32,7 @@ def main() -> int:
         git(unrelated_repo, "init", "-q")
         git(repo, "init", "-q")
         git(repo, "config", "user.email", "fixture@example.invalid")
-        git(repo, "config", "user.name", "Vero fixture")
+        git(repo, "config", "user.name", "Vee fixture")
         textconv_marker = root / "textconv-ran"
         textconv = f"{sys.executable} -c \"open({str(textconv_marker)!r}, 'w').write('ran')\""
         git(repo, "config", "diff.evil.textconv", textconv)

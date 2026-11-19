@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/finding-feedback-v1.schema.json",
-  "title": "Vero Finding Feedback v1",
+  "$id": "https://vee.klarlabs.de/schemas/finding-feedback-v1.schema.json",
+  "title": "Vee Finding Feedback v1",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "feedback_id", "finding_id", "snapshot_id", "label", "reason", "reviewer", "created_at"],

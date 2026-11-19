@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/cross-repository-impact-v12.schema.json",
-  "title": "Vero cross-repository impact with parameter composition coverage",
+  "$id": "https://vee.klarlabs.de/schemas/cross-repository-impact-v12.schema.json",
+  "title": "Vee cross-repository impact with parameter composition coverage",
   "type": "object",
   "additionalProperties": false,
   "required": [

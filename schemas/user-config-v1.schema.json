@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/user-config-v1.schema.json",
-  "title": "Vero user provider configuration",
+  "$id": "https://vee.klarlabs.de/schemas/user-config-v1.schema.json",
+  "title": "Vee user provider configuration",
   "type": "object",
   "additionalProperties": false,
   "required": ["version"],

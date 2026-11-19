@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/packs-list-v1.schema.json",
-  "title": "Vero pinned policy packs v1",
-  "description": "Packs pinned in .vero.yaml and whether their content matches the pin. Returned by `vero packs list` and the MCP `list_packs` tool.",
+  "$id": "https://vee.klarlabs.de/schemas/packs-list-v1.schema.json",
+  "title": "Vee pinned policy packs v1",
+  "description": "Packs pinned in .vee.yaml and whether their content matches the pin. Returned by `vee packs list` and the MCP `list_packs` tool.",
   "type": "object",
   "additionalProperties": false,
   "required": [

@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/attestation-verification-v1.schema.json",
-  "title": "Vero attestation verification v1",
-  "description": "Result of `vero reviews verify-attestation --output json`. The statement is present only when a signature verifies with the supplied key.",
+  "$id": "https://vee.klarlabs.de/schemas/attestation-verification-v1.schema.json",
+  "title": "Vee attestation verification v1",
+  "description": "Result of `vee reviews verify-attestation --output json`. The statement is present only when a signature verifies with the supplied key.",
   "type": "object",
   "required": [
     "schema_version",

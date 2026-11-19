@@ -5,7 +5,7 @@ The runner never fetches repositories or uploads reports. It does not execute
 project verification commands unless the operator explicitly selects trusted
 profiles with --verify-profile; those commands run locally in disposable
 checkouts. --verification-only compares those profiles on pinned buggy/fix
-revisions and does not invoke review providers. Configured Vero providers retain
+revisions and does not invoke review providers. Configured Vee providers retain
 their own network/egress behavior in ordinary review mode.
 """
 from __future__ import annotations
@@ -62,7 +62,7 @@ def atomic_write(path: Path, data: bytes) -> None:
         path.unlink()
     elif path.exists() and not path.is_file():
         raise ValueError(f"refusing non-regular output file: {path}")
-    descriptor, temporary = tempfile.mkstemp(prefix=".vero-write-", dir=path.parent)
+    descriptor, temporary = tempfile.mkstemp(prefix=".vee-write-", dir=path.parent)
     try:
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(data)
@@ -119,12 +119,12 @@ def install_trusted_files(worktree: Path, files: list[tuple[PurePosixPath, Path]
 
 def install_trusted_config(worktree: Path, config_bytes: bytes, trusted_files: list[tuple[PurePosixPath, Path]]) -> None:
     """Replace untrusted repository config and apply explicit trusted overlays."""
-    config_target = worktree / ".vero.yaml"
+    config_target = worktree / ".vee.yaml"
     if config_target.is_symlink():
         config_target.unlink()
     elif config_target.exists():
         if not config_target.is_file():
-            raise ValueError("checked-out .vero.yaml is not a regular file")
+            raise ValueError("checked-out .vee.yaml is not a regular file")
         config_target.unlink()
     descriptor = os.open(config_target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     with os.fdopen(descriptor, "wb") as trusted_config:
@@ -305,16 +305,16 @@ def archive_verification_artifact(worktree: Path, artifact: Any, artifacts: Path
     if not isinstance(artifact, dict) or set(artifact) != {"digest", "path", "size_bytes"}:
         raise ValueError(f"{revision_role}/{profile_id}: malformed {stream} artifact reference")
     digest = artifact.get("digest")
-    expected_path = f".vero/artifacts/sha256/{digest.removeprefix('sha256:')}" if isinstance(digest, str) else ""
+    expected_path = f".vee/artifacts/sha256/{digest.removeprefix('sha256:')}" if isinstance(digest, str) else ""
     if (not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
             or artifact.get("path") != expected_path
             or not isinstance(artifact.get("size_bytes"), int)
             or isinstance(artifact.get("size_bytes"), bool)
             or not 0 <= artifact["size_bytes"] <= MAX_VERIFICATION_ARTIFACT_BYTES):
         raise ValueError(f"{revision_role}/{profile_id}: invalid {stream} artifact metadata")
-    source = worktree / ".vero" / "artifacts" / "sha256" / digest.removeprefix("sha256:")
+    source = worktree / ".vee" / "artifacts" / "sha256" / digest.removeprefix("sha256:")
     current = worktree
-    for component in (".vero", "artifacts", "sha256", digest.removeprefix("sha256:")):
+    for component in (".vee", "artifacts", "sha256", digest.removeprefix("sha256:")):
         current = current / component
         try:
             mode = current.lstat().st_mode
@@ -384,7 +384,7 @@ def run_verification_profiles(args: argparse.Namespace, worktree: Path, commit_o
             else:
                 scope_args = ["--commit", commit_oid]
             completed = run(
-                [args.vero, "verify", "--profile", profile_id, *scope_args, "--output", "json"],
+                [args.vee, "verify", "--profile", profile_id, *scope_args, "--output", "json"],
                 worktree,
                 args.verification_timeout,
             )
@@ -492,7 +492,7 @@ def compare_verification_profiles(buggy_runs: list[dict[str, Any]], fix_runs: li
 def assess_case(args: argparse.Namespace, case: dict[str, Any], repo: Path, label_bytes: bytes, labels: list[dict[str, Any]], aliases: dict[str, list[str]], config_bytes: bytes, trusted_files: list[tuple[PurePosixPath, Path]], artifacts: Path) -> dict[str, Any]:
     case_id, oid = case["id"], case["commit"]
     item: dict[str, Any] = {"case_id": case_id, "repository": case["repository"], "commit": oid, "labels_digest": sha256(label_bytes), "state": "incomplete", "defect_reference": case.get("defect_reference"), "fix_commit": case.get("fix_commit"), "fix_reference": case.get("fix_reference"), "project_license": case.get("project_license")}
-    temp_parent = Path(tempfile.mkdtemp(prefix="vero-historical-"))
+    temp_parent = Path(tempfile.mkdtemp(prefix="vee-historical-"))
     worktree = temp_parent / "checkout"
     fix_worktree: Path | None = None
     hook_dir = temp_parent / "empty-hooks"
@@ -532,17 +532,17 @@ def assess_case(args: argparse.Namespace, case: dict[str, Any], repo: Path, labe
         for key in filter_keys.splitlines():
             filter_overrides.extend(["-c", f"{key}="])
         git(repo, *filter_overrides, "-c", f"core.hooksPath={hook_dir}", "-c", "core.fsmonitor=false", "worktree", "add", "--detach", str(worktree), oid, timeout=180)
-        # Historical source is untrusted. Never follow a committed .vero.yaml symlink.
+        # Historical source is untrusted. Never follow a committed .vee.yaml symlink.
         install_trusted_config(worktree, config_bytes, trusted_files)
         started = time.monotonic()
         try:
-            command = [args.vero, "review", "--commit", oid, "--output", "json"]
+            command = [args.vee, "review", "--commit", oid, "--output", "json"]
             for reviewer in args.reviewers:
                 command.extend(["--reviewer", reviewer])
             result = run(command, worktree, args.timeout)
         except subprocess.TimeoutExpired as error:
             elapsed = round(time.monotonic() - started, 3)
-            item.update({"state": "timeout", "error": f"Vero review exceeded {args.timeout}s", "elapsed_seconds": elapsed})
+            item.update({"state": "timeout", "error": f"Vee review exceeded {args.timeout}s", "elapsed_seconds": elapsed})
             # Keep any bounded JSON emitted before the timeout for diagnosis.
             # Provider output and stderr are deliberately excluded.
             partial = error.stdout
@@ -565,7 +565,7 @@ def assess_case(args: argparse.Namespace, case: dict[str, Any], repo: Path, labe
         try:
             report = json.loads(result.stdout)
         except json.JSONDecodeError:
-            item["error"] = f"Vero exited with code {result.returncode} without one JSON review document"
+            item["error"] = f"Vee exited with code {result.returncode} without one JSON review document"
             return item
         if (not isinstance(report, dict) or report.get("schema_version") != 2
                 or report.get("status") not in {"pass", "block", "incomplete"}
@@ -585,7 +585,7 @@ def assess_case(args: argparse.Namespace, case: dict[str, Any], repo: Path, labe
             }
             invalid_fields = [key for key, valid in contract_fields.items() if not valid]
             item["error"] = (
-                "Vero output does not satisfy the supported review-output-v2 contract "
+                "Vee output does not satisfy the supported review-output-v2 contract "
                 f"(schema_version={report.get('schema_version')!r}, "
                 f"status={report.get('status')!r}, "
                 f"keys={sorted(report) if isinstance(report, dict) else type(report).__name__!r}, "
@@ -597,14 +597,14 @@ def assess_case(args: argparse.Namespace, case: dict[str, Any], repo: Path, labe
         # review. Preserve their valid structured reports; only unexpected
         # process failures make an otherwise parseable result unusable.
         if result.returncode not in (0, 1, 2):
-            item["error"] = f"Vero exited with unexpected code {result.returncode}"
+            item["error"] = f"Vee exited with unexpected code {result.returncode}"
             return item
         for finding in report["findings"]:
             if (not isinstance(finding, dict) or not isinstance(finding.get("id"), str)
                     or not isinstance(finding.get("category"), str)
                     or finding.get("path") is not None and not isinstance(finding.get("path"), str)
                     or finding.get("line") is not None and (not isinstance(finding.get("line"), int) or isinstance(finding.get("line"), bool))):
-                item["error"] = "Vero output contains a malformed finding"
+                item["error"] = "Vee output contains a malformed finding"
                 return item
         case_artifacts = artifacts / case_id
         ensure_real_directory(case_artifacts)
@@ -635,7 +635,7 @@ def assess_case(args: argparse.Namespace, case: dict[str, Any], repo: Path, labe
                 ):
                     received_by.append(reviewer_id)
             label_coverage.append({"label_id": label["id"], "path": label["path"], "full_source_reviewer_ids": sorted(received_by)})
-        item.update({"state": "complete" if report.get("analysis_complete") is True and report.get("status") != "incomplete" else "incomplete", "vero_exit_code": result.returncode, "review_id": report.get("review_id"), "snapshot_id": report.get("snapshot_id"), "effective_config_digest": report.get("effective_config_digest"), "selected_reviewers": report.get("selected_reviewers", []), "reviewer_outcomes": outcomes, "review_json_digest": sha256(report_bytes), "review_json_path": f"cases/{case_id}/review.json", "finding_count": len(report["findings"]), "provider_egress_mode": "declared_in_trusted_config; CLI_adapter_egress_not_independently_verified", "label_context_coverage": label_coverage})
+        item.update({"state": "complete" if report.get("analysis_complete") is True and report.get("status") != "incomplete" else "incomplete", "vee_exit_code": result.returncode, "review_id": report.get("review_id"), "snapshot_id": report.get("snapshot_id"), "effective_config_digest": report.get("effective_config_digest"), "selected_reviewers": report.get("selected_reviewers", []), "reviewer_outcomes": outcomes, "review_json_digest": sha256(report_bytes), "review_json_path": f"cases/{case_id}/review.json", "finding_count": len(report["findings"]), "provider_egress_mode": "declared_in_trusted_config; CLI_adapter_egress_not_independently_verified", "label_context_coverage": label_coverage})
         if args.verify_profiles:
             item["verification_runs"] = run_verification_profiles(args, worktree, oid, report["snapshot_id"], "buggy_commit", case_artifacts, case_id)
             item["verification_profiles_requested"] = list(args.verify_profiles)
@@ -647,7 +647,7 @@ def assess_case(args: argparse.Namespace, case: dict[str, Any], repo: Path, labe
         if not isinstance(manifests, list) or not manifests:
             item["state"] = "incomplete"
             item["incomplete_reason"] = "reviewer_context_manifest_unavailable"
-            item["error"] = "Vero output does not include per-reviewer context provenance"
+            item["error"] = "Vee output does not include per-reviewer context provenance"
             return item
         uncovered_labels = [entry for entry in label_coverage if not entry["full_source_reviewer_ids"]]
         if uncovered_labels:
@@ -696,7 +696,7 @@ def build_report(corpus: dict[str, Any], config_bytes: bytes, version: str, exec
     total_labels = sum(case.get("label_count", 0) for case in complete)
     matched_labels = sum(len(case.get("matched_labels", [])) for case in complete)
     localization_candidates = sum(len(case.get("localization_candidates", [])) for case in complete)
-    return {"schema_version": 1, "benchmark": "historical_review", "corpus_id": corpus["document"]["corpus_id"], "source": corpus["document"]["source"], "source_revision": corpus["document"].get("source_revision"), "license_reference": corpus["document"].get("license_reference"), "manifest_digest": corpus["manifest_digest"], "benchmark_config_digest": sha256(config_bytes), "vero_version": version, "verifier_digest": sha256(Path(executable).read_bytes()), "provider_egress_mode": "declared_in_trusted_config; CLI_adapter_egress_not_independently_verified", "case_count": len(cases), "completed_cases": len(complete), "incomplete_cases": len(cases) - len(complete) - len(out_of_scope), "out_of_scope_cases": len(out_of_scope), "scope_languages": sorted(set(scope_languages)), "label_count_completed_cases": total_labels, "matched_labels": matched_labels, "missed_labels": total_labels - matched_labels, "finding_recall": matched_labels / total_labels if total_labels else None, "labels_with_localization_candidates": localization_candidates, "interrupted": interrupted, "cases": cases, "report_path": str(report_path), "limitations": ["Labels and license references are curator-supplied and are not authenticated by Vero.", "Strict matches require exact repository-relative file and overlapping line range plus category or a curator-defined alias. Same-file/category localization candidates are diagnostic only and do not increase recall.", "The configured provider may use a network; local CLI execution does not imply local inference.", "Completed cases require every labeled path to be supplied in full to at least one completed reviewer, based on Vero's local context manifest.", "Recall is specific to this corpus, Vero/provider versions, reviewer configuration, and matching policy."]}
+    return {"schema_version": 1, "benchmark": "historical_review", "corpus_id": corpus["document"]["corpus_id"], "source": corpus["document"]["source"], "source_revision": corpus["document"].get("source_revision"), "license_reference": corpus["document"].get("license_reference"), "manifest_digest": corpus["manifest_digest"], "benchmark_config_digest": sha256(config_bytes), "vee_version": version, "verifier_digest": sha256(Path(executable).read_bytes()), "provider_egress_mode": "declared_in_trusted_config; CLI_adapter_egress_not_independently_verified", "case_count": len(cases), "completed_cases": len(complete), "incomplete_cases": len(cases) - len(complete) - len(out_of_scope), "out_of_scope_cases": len(out_of_scope), "scope_languages": sorted(set(scope_languages)), "label_count_completed_cases": total_labels, "matched_labels": matched_labels, "missed_labels": total_labels - matched_labels, "finding_recall": matched_labels / total_labels if total_labels else None, "labels_with_localization_candidates": localization_candidates, "interrupted": interrupted, "cases": cases, "report_path": str(report_path), "limitations": ["Labels and license references are curator-supplied and are not authenticated by Vee.", "Strict matches require exact repository-relative file and overlapping line range plus category or a curator-defined alias. Same-file/category localization candidates are diagnostic only and do not increase recall.", "The configured provider may use a network; local CLI execution does not imply local inference.", "Completed cases require every labeled path to be supplied in full to at least one completed reviewer, based on Vee's local context manifest.", "Recall is specific to this corpus, Vee/provider versions, reviewer configuration, and matching policy."]}
 
 
 def assess_verification_case(args: argparse.Namespace, case: dict[str, Any], repo: Path, config_bytes: bytes, trusted_files: list[tuple[PurePosixPath, Path]], artifacts: Path) -> dict[str, Any]:
@@ -704,7 +704,7 @@ def assess_verification_case(args: argparse.Namespace, case: dict[str, Any], rep
     if not case.get("fix_commit"):
         item["error"] = "case has no pinned fix_commit"
         return item
-    temp_parent = Path(tempfile.mkdtemp(prefix="vero-historical-verification-"))
+    temp_parent = Path(tempfile.mkdtemp(prefix="vee-historical-verification-"))
     hook_dir = temp_parent / "empty-hooks"
     hook_dir.mkdir()
     outcomes: dict[str, list[dict[str, Any]]] = {}
@@ -744,15 +744,15 @@ def assess_verification_case(args: argparse.Namespace, case: dict[str, Any], rep
 
 def build_verification_report(corpus: dict[str, Any], config_bytes: bytes, version: str, executable: str, cases: list[dict[str, Any]], report_path: Path) -> dict[str, Any]:
     completed = sum(case["state"] == "complete" for case in cases)
-    return {"schema_version": 1, "benchmark": "historical_verification", "corpus_id": corpus["document"]["corpus_id"], "manifest_digest": corpus["manifest_digest"], "benchmark_config_digest": sha256(config_bytes), "vero_version": version, "verifier_digest": sha256(Path(executable).read_bytes()), "case_count": len(cases), "completed_cases": completed, "incomplete_cases": len(cases) - completed, "cases": cases, "report_path": str(report_path), "limitations": ["This report records trusted local verification outcomes only; it contains no AI review findings, recall, or quality claim.", "A matching failed-on-buggy/passed-on-fix result is evidence for that configured check, not proof of defect causality or program correctness.", "Selected verification profiles are explicit operator-authorized local commands; Vero does not independently provide OS-level isolation."]}
+    return {"schema_version": 1, "benchmark": "historical_verification", "corpus_id": corpus["document"]["corpus_id"], "manifest_digest": corpus["manifest_digest"], "benchmark_config_digest": sha256(config_bytes), "vee_version": version, "verifier_digest": sha256(Path(executable).read_bytes()), "case_count": len(cases), "completed_cases": completed, "incomplete_cases": len(cases) - completed, "cases": cases, "report_path": str(report_path), "limitations": ["This report records trusted local verification outcomes only; it contains no AI review findings, recall, or quality claim.", "A matching failed-on-buggy/passed-on-fix result is evidence for that configured check, not proof of defect causality or program correctness.", "Selected verification profiles are explicit operator-authorized local commands; Vee does not independently provide OS-level isolation."]}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--corpus-root", type=Path, required=True, help="all repository and label paths must resolve beneath this directory")
-    parser.add_argument("--vero", default="vero", help="Vero executable")
-    parser.add_argument("--config", type=Path, required=True, help="trusted Vero repository configuration copied into each temporary worktree")
+    parser.add_argument("--vee", default="vee", help="Vee executable")
+    parser.add_argument("--config", type=Path, required=True, help="trusted Vee repository configuration copied into each temporary worktree")
     parser.add_argument("--trusted-file", action="append", default=[], metavar="TARGET=SOURCE", help="overlay a trusted local file at a relative path in each disposable worktree; repeatable")
     parser.add_argument("--verification-file", dest="verification_files", action="append", default=[], metavar="TARGET=SOURCE", help="overlay a trusted local test/fixture only for explicitly selected verification profiles; repeatable")
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -781,10 +781,10 @@ def main() -> int:
         manifest_path = args.manifest.resolve(strict=True)
         if not manifest_path.is_relative_to(root):
             raise ValueError("manifest must be beneath corpus root")
-        args.vero = str(Path(shutil.which(args.vero) or args.vero).resolve(strict=True))
-        version = run([args.vero, "--version"], Path.cwd(), 30)
+        args.vee = str(Path(shutil.which(args.vee) or args.vee).resolve(strict=True))
+        version = run([args.vee, "--version"], Path.cwd(), 30)
         if version.returncode:
-            raise RuntimeError("could not read Vero version")
+            raise RuntimeError("could not read Vee version")
         corpus = load_corpus(manifest_path, root)
         config_path = args.config.resolve(strict=True)
         if not config_path.is_file() or config_path.stat().st_size > MAX_CONFIG_BYTES:
@@ -808,7 +808,7 @@ def main() -> int:
             cases = []
             for case, repo, _labels_path, _label_bytes, _labels, _aliases in corpus["cases"]:
                 cases.append(assess_verification_case(args, case, repo, config_bytes, [], artifacts))
-            report = build_verification_report(corpus, config_bytes, version.stdout.strip(), args.vero, cases, report_path)
+            report = build_verification_report(corpus, config_bytes, version.stdout.strip(), args.vee, cases, report_path)
             atomic_write(report_path, (json.dumps(report, indent=2, sort_keys=True) + "\n").encode("utf-8"))
             print(json.dumps({k: report[k] for k in ("benchmark", "corpus_id", "case_count", "completed_cases", "incomplete_cases", "report_path")}, indent=2))
             return 0 if report["incomplete_cases"] == 0 else 2
@@ -818,11 +818,11 @@ def main() -> int:
                 cases.append(assess_case(args, case, repo, label_bytes, labels, aliases, config_bytes, trusted_files, artifacts))
         except KeyboardInterrupt:
             cases.append({"case_id": case["id"], "repository": case["repository"], "commit": case["commit"], "state": "interrupted", "error": "Benchmark interrupted by operator"})
-            report = build_report(corpus, config_bytes, version.stdout.strip(), args.vero, cases, report_path, args.scope_languages, interrupted=True)
+            report = build_report(corpus, config_bytes, version.stdout.strip(), args.vee, cases, report_path, args.scope_languages, interrupted=True)
             atomic_write(report_path, (json.dumps(report, indent=2, sort_keys=True) + "\n").encode("utf-8"))
             print(f"historical-review-benchmark: interrupted; partial report saved to {report_path}", file=sys.stderr)
             return 130
-        report = build_report(corpus, config_bytes, version.stdout.strip(), args.vero, cases, report_path, args.scope_languages)
+        report = build_report(corpus, config_bytes, version.stdout.strip(), args.vee, cases, report_path, args.scope_languages)
         atomic_write(report_path, (json.dumps(report, indent=2, sort_keys=True) + "\n").encode("utf-8"))
         print(json.dumps({k: report[k] for k in ("benchmark", "corpus_id", "case_count", "completed_cases", "incomplete_cases", "out_of_scope_cases", "label_count_completed_cases", "matched_labels", "missed_labels", "finding_recall", "labels_with_localization_candidates", "interrupted", "report_path")}, indent=2))
         return 0 if not report["incomplete_cases"] and not report["out_of_scope_cases"] else 2

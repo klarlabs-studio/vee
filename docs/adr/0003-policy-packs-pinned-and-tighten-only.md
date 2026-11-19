@@ -8,7 +8,7 @@
 Teams want one review policy across many repositories: the same reviewers and
 instructions, the same gate thresholds and required checks, and the reviewer
 guidance they approved from feedback. Until now each repository kept its own
-`.vero.yaml`, reviewer files, and a local-only SQLite record of approved rules,
+`.vee.yaml`, reviewer files, and a local-only SQLite record of approved rules,
 so nothing was shareable and an approved rule never left the machine that
 approved it.
 
@@ -18,13 +18,13 @@ approved it.
    reviewer instruction and context files it names. It may define a baseline
    policy, policy profiles, reviewers, verification profiles, and approved rules
    (with their original approval provenance).
-2. Repositories commit packs (`vero packs add` installs them under
-   `.vero/packs/<name>/`) and **pin each by content digest** in `.vero.yaml`.
+2. Repositories commit packs (`vee packs add` installs them under
+   `.vee/packs/<name>/`) and **pin each by content digest** in `.vee.yaml`.
    Loading recomputes the digest; any difference fails configuration loading
    (exit 3) until a human re-pins. The pin is part of the effective configuration
    digest, so changing a pack makes earlier reviews stale.
 3. Pack reviewers have no provider; the pin names one (default `default`, which
-   `vero init` configures per machine), so packs are portable across machines.
+   `vee init` configures per machine), so packs are portable across machines.
 4. Reviewers, verification profiles, and policy profiles from packs are added;
    **repository definitions win on ID collisions**, and two packs defining the same
    ID is an error.

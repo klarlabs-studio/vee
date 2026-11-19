@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/vero-core", "crates/vero-store-sqlite", "crates/vero-process", "crates/vero-application", "crates/vero-git", "crates/vero-hosting", "crates/vero-http", "crates/vero-cli"]
+members = ["crates/vee-core", "crates/vee-store-sqlite", "crates/vee-process", "crates/vee-application", "crates/vee-git", "crates/vee-hosting", "crates/vee-http", "crates/vee-cli"]
 
 [workspace.package]
 version = "0.1.0"

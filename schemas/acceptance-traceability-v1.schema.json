@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/acceptance-traceability-v1.schema.json",
-  "title": "Vero Acceptance Traceability v1",
+  "$id": "https://vee.klarlabs.de/schemas/acceptance-traceability-v1.schema.json",
+  "title": "Vee Acceptance Traceability v1",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "review_id", "snapshot_id", "work_item", "criteria", "changed_paths", "impact_snapshot_id", "impact_coverage_complete", "impact_analyzers", "verification_runs", "limitations"],

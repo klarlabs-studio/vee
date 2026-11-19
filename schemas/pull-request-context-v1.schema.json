@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/pull-request-context-v1.schema.json",
-  "title": "Vero pull request context v1",
+  "$id": "https://vee.klarlabs.de/schemas/pull-request-context-v1.schema.json",
+  "title": "Vee pull request context v1",
   "type": "object",
   "required": ["schema_version", "provider", "snapshot", "changed_files", "limitations"],
   "properties": {

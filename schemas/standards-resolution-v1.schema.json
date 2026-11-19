@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/standards-resolution-v1.schema.json",
-  "title": "Vero standards resolution v1",
+  "$id": "https://vee.klarlabs.de/schemas/standards-resolution-v1.schema.json",
+  "title": "Vee standards resolution v1",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "target_path", "sources", "potential_conflicts", "limitations"],

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vero.dev/schemas/repository-config-v1.schema.json",
-  "title": "Vero repository configuration",
+  "$id": "https://vee.klarlabs.de/schemas/repository-config-v1.schema.json",
+  "title": "Vee repository configuration",
   "type": "object",
   "additionalProperties": false,
   "required": [
