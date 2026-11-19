@@ -599,6 +599,8 @@ fn ollama_native_adapter_sets_context_window_schema_and_extracts_usage() {
         assert_eq!(body["model"], "gemma3:12b");
         assert_eq!(body["options"]["num_ctx"], 32768);
         assert_eq!(body["options"]["num_predict"], 4096);
+        assert_eq!(body["options"]["temperature"], 0);
+        assert_eq!(body["options"]["seed"], OLLAMA_SEED);
         assert_eq!(body["format"]["type"], "object");
         assert_eq!(body["stream"], false);
         let response_body = br#"{"message":{"content":"{\"schema_version\":1,\"findings\":[]}"},"prompt_eval_count":12401,"eval_count":33,"done":true}"#;
@@ -968,6 +970,13 @@ fn ollama_native_focused_strategy_reasons_then_structures_each_changed_file() {
         "string"
     );
     assert_eq!(bodies[1]["options"]["num_ctx"], 32768);
+    for body in &bodies {
+        assert_eq!(
+            body["options"]["temperature"], 0,
+            "reviews are reproducible"
+        );
+        assert_eq!(body["options"]["seed"], OLLAMA_SEED);
+    }
     let findings: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(findings["findings"][0]["path"], "src/counter.py");
     assert_eq!(findings["findings"][0]["line"], 2);

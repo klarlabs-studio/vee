@@ -245,6 +245,11 @@ pub(crate) fn estimate_provider_input_tokens(
 /// Ollama `num_predict` when a provider sets no `max_output_tokens`.
 pub(crate) const OLLAMA_DEFAULT_MAX_OUTPUT_TOKENS: usize = 2048;
 
+/// Fixed sampling seed. With temperature 0 it makes a local review of the same
+/// request repeatable, so a finding does not appear on one run and vanish on
+/// the next.
+pub(crate) const OLLAMA_SEED: u64 = 7;
+
 pub(crate) fn fit_review_payload_to_provider_budget(
     payload: &mut serde_json::Value,
     instructions: &str,
@@ -695,7 +700,12 @@ pub(crate) fn execute_ollama_native(
             "model": model,
             "messages": messages,
             "stream": false,
-            "options": {"num_ctx": context_window, "num_predict": max_output_tokens}
+            "options": {
+                "num_ctx": context_window,
+                "num_predict": max_output_tokens,
+                "temperature": 0,
+                "seed": OLLAMA_SEED,
+            }
         });
         if let Some(format) = format {
             payload["format"] = format.clone();
