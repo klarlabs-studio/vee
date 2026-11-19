@@ -341,6 +341,12 @@ case is marked `timeout` with elapsed time; a valid partial review document, if
 available, is stored separately from a complete review. Valid structured Vee
 reports are retained when the review command exits with its documented block or
 incomplete status codes.
+To continue a run that was stopped, rerun the same command with `--resume` and
+the same output folder. A case's saved review is reused only when the digest of
+the Vee binary, the pinned commit, the trusted config and files, the selected
+reviewers, and the timeout match the `review-input-key.json` saved beside it,
+and `review.json` still matches its recorded digest; otherwise the case is
+reviewed again. Reused cases are marked `resumed` in the aggregate report.
 When `--verify-profile` is explicitly selected, bounded stdout and stderr
 artifacts for the buggy and optional fixed revisions are copied into the local
 results folder. The runner verifies each declared size and SHA-256 before

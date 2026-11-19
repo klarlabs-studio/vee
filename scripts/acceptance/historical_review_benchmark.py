@@ -449,6 +449,23 @@ def main() -> int:
         assert not hook_marker.exists() and not filter_marker.exists()
         assert not (repo / ".vee/vee.sqlite").exists()
         assert not list((repo / ".git" / "worktrees").glob("*"))
+        (root / "provider-ran").unlink(missing_ok=True)
+        resume_result = execute([*benchmark_command, "--resume"], pathlib.Path.cwd())
+        assert resume_result.returncode == 2, resume_result.stdout + resume_result.stderr
+        assert not (root / "provider-ran").exists(), "resume must reuse saved reviews from the same inputs"
+        resumed_report = json.loads((output / "historical-review-report-v1.json").read_text())
+        assert resumed_report["matched_labels"] == 1 and resumed_report["finding_recall"] == 0.5
+        resumed_case = next(item for item in resumed_report["cases"] if item["case_id"] == case["case_id"])
+        assert resumed_case["resumed"] is True
+        assert resumed_case["review_json_digest"] == case["review_json_digest"]
+        original_instructions = trusted_instructions.read_text(encoding="utf-8")
+        trusted_instructions.write_text(original_instructions + "Changed guidance.\n", encoding="utf-8")
+        changed_result = execute([*benchmark_command, "--resume"], pathlib.Path.cwd())
+        assert changed_result.returncode == 2, changed_result.stdout + changed_result.stderr
+        assert (root / "provider-ran").exists(), "changed trusted inputs must invalidate saved reviews"
+        changed_case = next(item for item in json.loads((output / "historical-review-report-v1.json").read_text())["cases"] if item["case_id"] == case["case_id"])
+        assert "resumed" not in changed_case
+        trusted_instructions.write_text(original_instructions, encoding="utf-8")
         runner_api = runpy.run_path(str(runner))
         try:
             runner_api["parse_trusted_files"]([f"../escaped={trusted_instructions}"])
@@ -474,7 +491,7 @@ def main() -> int:
             raise AssertionError("verification-file symlink target was accepted")
         except ValueError:
             pass
-        print("historical review benchmark acceptance passed: strict recall preserved, digest-recorded trusted verification overlays distinguished from source snapshots, buggy/fix verification profiles compared, conflicting overlays marked incomplete, wrong-location diagnostics reported, trusted instructions overlaid, and hostile config, hooks, filters, traversal, and symlink targets rejected")
+        print("historical review benchmark acceptance passed: strict recall preserved, digest-recorded trusted verification overlays distinguished from source snapshots, buggy/fix verification profiles compared, conflicting overlays marked incomplete, resumed runs reuse only reviews from identical inputs, wrong-location diagnostics reported, trusted instructions overlaid, and hostile config, hooks, filters, traversal, and symlink targets rejected")
     return 0
 
 
