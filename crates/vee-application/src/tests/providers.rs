@@ -887,3 +887,91 @@ fn codex_version_probe_is_bounded_and_rejects_failure_or_multiline_output() {
     std::fs::set_permissions(&executable, permissions).unwrap();
     assert!(probe_provider_version(&provider(&executable), directory.path(), &[], None).is_err());
 }
+
+#[test]
+fn ollama_native_focused_strategy_reasons_then_structures_each_changed_file() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    fn read_request(stream: &mut std::net::TcpStream) -> serde_json::Value {
+        let mut request = Vec::new();
+        let mut buffer = [0; 4096];
+        loop {
+            let count = stream.read(&mut buffer).unwrap();
+            request.extend_from_slice(&buffer[..count]);
+            if let Some(split) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                let length = String::from_utf8_lossy(&request[..split])
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .and_then(|value| value.parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                if request.len() >= split + 4 + length {
+                    return serde_json::from_slice(&request[split + 4..]).unwrap();
+                }
+            }
+            assert!(count > 0, "connection closed before the request body");
+        }
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let mut bodies = Vec::new();
+        for content in [
+            "Concurrent failures race on `count += 1`.".to_owned(),
+            serde_json::json!({"schema_version":1,"findings":[{"category":"concurrency","severity":"high","rationale":"Lost update.","confidence":60,"path":null,"line":null,"quote":"count += 1"}]}).to_string(),
+        ] {
+            let (mut stream, _) = listener.accept().unwrap();
+            bodies.push(read_request(&mut stream));
+            let response = serde_json::json!({"message":{"content":content},"prompt_eval_count":50,"eval_count":5,"done":true}).to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                response.len()
+            )
+            .unwrap();
+        }
+        bodies
+    });
+    let input = serde_json::json!({
+        "instructions": "review safely",
+        "review_strategy": "focused",
+        "output_schema": serde_json::from_str::<serde_json::Value>(include_str!("../../../../schemas/provider-findings-v1.schema.json")).unwrap(),
+        "context_files": [{"path":"src/counter.py","content":"def bump():\n    count += 1\n","changed_line_ranges":[[1,2]]}],
+    });
+    let result = execute_ollama_native(
+        &ProviderRequest {
+            kind: vee_core::ProviderKind::OllamaNative,
+            executable: format!("http://127.0.0.1:{}/api/chat", address.port()),
+            args: vec![],
+            model: Some("gemma3:12b".into()),
+            working_directory: PathBuf::from("."),
+            stdin: serde_json::to_vec(&input).unwrap(),
+            timeout_seconds: 5,
+            output_limit_bytes: 65_536,
+            context_window_tokens: Some(32768),
+            max_output_tokens: Some(4096),
+            environment: vec![],
+        },
+        None,
+    )
+    .unwrap();
+    let bodies = server.join().unwrap();
+    assert!(bodies[0].get("format").is_none());
+    assert!(bodies[0]["messages"][1]["content"]
+        .as_str()
+        .unwrap()
+        .contains("+ 2 |     count += 1"));
+    assert_eq!(
+        bodies[1]["format"]["properties"]["findings"]["items"]["properties"]["quote"]["type"],
+        "string"
+    );
+    assert_eq!(bodies[1]["options"]["num_ctx"], 32768);
+    let findings: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(findings["findings"][0]["path"], "src/counter.py");
+    assert_eq!(findings["findings"][0]["line"], 2);
+    let usage = result.usage.unwrap();
+    assert_eq!(usage.input_tokens, Some(100));
+    assert_eq!(usage.output_tokens, Some(10));
+}

@@ -1456,6 +1456,7 @@ fn reviewer_scope_globs_match_and_exclude_paths() {
         include: vec!["src/**/*.rs".into()],
         exclude: vec!["src/generated/**".into()],
         policy: vee_core::ReviewerPolicyConfig::default(),
+        strategy: vee_core::ReviewStrategy::default(),
     };
 
     assert!(reviewer_path_is_included("src/lib.rs", &reviewer));
@@ -1502,6 +1503,7 @@ fn reviewer_context_manifest_distinguishes_supplied_filtered_and_omitted_paths()
         include: vec!["src/**/*.rs".into()],
         exclude: vec!["src/reviewer-excluded.rs".into()],
         policy: vee_core::ReviewerPolicyConfig::default(),
+        strategy: vee_core::ReviewStrategy::default(),
     };
     let context_files = vec![
         serde_json::json!({"path":"src/full.rs","content":"source", "base_content":"base", "truncated":false}),

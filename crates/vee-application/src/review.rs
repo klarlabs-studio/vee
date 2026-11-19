@@ -854,6 +854,9 @@ pub fn run_review_with_provider_and_selection_context(
             "context_files":context_files,
             "work_item_context":work_item_context,
         });
+        if reviewer.strategy == vee_core::ReviewStrategy::Focused {
+            request_payload["review_strategy"] = serde_json::json!("focused");
+        }
         if let Some(max_input_tokens) = provider.max_input_tokens {
             let (estimated_tokens, omitted_by_token_budget, over_budget) =
                 fit_review_payload_to_provider_budget(
