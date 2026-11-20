@@ -867,16 +867,39 @@ pub(crate) fn openai_http_diagnostic(status: reqwest::StatusCode) -> String {
     format!("OpenAI-compatible provider returned HTTP {code} ({explanation})")
 }
 
+/// Variables a vendor CLI needs to find its own login: `HOME` for its
+/// configuration directory and `USER` for the macOS keychain entry. Provider
+/// processes otherwise start with a cleared environment.
+const CLI_LOGIN_ENVIRONMENT: [&str; 2] = ["HOME", "USER"];
+
+fn with_cli_login_environment(environment: &[(String, String)]) -> Vec<(String, String)> {
+    let mut combined = environment.to_vec();
+    for name in CLI_LOGIN_ENVIRONMENT {
+        if combined.iter().all(|(existing, _)| existing != name) {
+            if let Ok(value) = std::env::var(name) {
+                combined.push((name.to_owned(), value));
+            }
+        }
+    }
+    combined
+}
+
 pub(crate) fn execute_claude_cli(
     request: &ProviderRequest,
     cancellation: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<ProviderResult, String> {
     let input: serde_json::Value = serde_json::from_slice(&request.stdin)
         .map_err(|error| format!("parsing Claude provider request: {error}"))?;
-    let schema = input
+    let mut schema = input
         .get("output_schema")
         .cloned()
         .ok_or_else(|| "Claude provider request is missing output_schema".to_string())?;
+    // Claude CLI rejects schemas whose `$schema` meta-schema it cannot resolve
+    // (draft 2020-12), so pass only the constraints.
+    if let Some(object) = schema.as_object_mut() {
+        object.remove("$schema");
+        object.remove("$id");
+    }
     let schema = serde_json::to_string(&schema).map_err(|error| error.to_string())?;
     let prompt = provider_request_prompt(
         &input,
@@ -912,7 +935,7 @@ pub(crate) fn execute_claude_cli(
         output_limit_bytes: request.output_limit_bytes,
         context_window_tokens: request.context_window_tokens,
         max_output_tokens: request.max_output_tokens,
-        environment: request.environment.clone(),
+        environment: with_cli_login_environment(&request.environment),
     };
     let mut result = vee_process::execute_provider_cancellable(&claude_request, cancellation)?;
     if result.exit_code != Some(0) {

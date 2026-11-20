@@ -391,6 +391,7 @@ fn claude_cli_adapter_uses_restricted_schema_validated_json_contract() {
     let directory = tempfile::tempdir().unwrap();
     let executable = directory.path().join("fake-claude");
     let args_log = directory.path().join("args.json");
+    let env_log = directory.path().join("env.txt");
     let structured = serde_json::json!({"schema_version": 1, "findings": []});
     let envelope = serde_json::json!({
         "type": "result",
@@ -407,8 +408,9 @@ fn claude_cli_adapter_uses_restricted_schema_validated_json_contract() {
     std::fs::write(
         &executable,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s' '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nenv > '{}'\nprintf '%s' '{}'\n",
             args_log.display(),
+            env_log.display(),
             envelope
         ),
     )
@@ -423,7 +425,11 @@ fn claude_cli_adapter_uses_restricted_schema_validated_json_contract() {
         model: Some("test-model".into()),
         working_directory: directory.path().to_path_buf(),
         stdin: serde_json::to_vec(&serde_json::json!({
-            "output_schema": {"title": "provider findings"},
+            "output_schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$id": "https://example.invalid/provider-findings.json",
+                "title": "provider findings"
+            },
             "snapshot_id": "snapshot-test"
         }))
         .unwrap(),
@@ -465,6 +471,24 @@ fn claude_cli_adapter_uses_restricted_schema_validated_json_contract() {
     assert!(args
         .windows(2)
         .any(|pair| pair == ["--model", "test-model"]));
+    let schema_at = args.iter().position(|arg| arg == "--json-schema").unwrap();
+    let schema: serde_json::Value = serde_json::from_str(&args[schema_at + 1]).unwrap();
+    assert_eq!(
+        schema,
+        serde_json::json!({"title": "provider findings"}),
+        "Claude CLI cannot resolve the draft meta-schema reference"
+    );
+    let environment = std::fs::read_to_string(env_log).unwrap();
+    for name in ["HOME", "USER"] {
+        if let Ok(value) = std::env::var(name) {
+            assert!(
+                environment
+                    .lines()
+                    .any(|line| line == format!("{name}={value}")),
+                "Claude CLI needs {name} to find its login"
+            );
+        }
+    }
 }
 
 #[test]
