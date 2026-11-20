@@ -228,7 +228,8 @@ fn resolve_verification_executable(
     executable: &str,
     working_directory: &Path,
 ) -> Result<PathBuf, String> {
-    resolve_verification_executable_with_path(
+    resolve_executable_with_path(
+        "verification",
         executable,
         working_directory,
         std::env::var_os("PATH"),
@@ -276,7 +277,13 @@ fn executable_candidates(path: &Path) -> Vec<PathBuf> {
     vec![path.to_path_buf()]
 }
 
-fn resolve_verification_executable_with_path(
+/// Resolves `executable` to an absolute path: relative to `working_directory`
+/// when it has a path component, otherwise on `path` (the system default when
+/// unset). Child processes start with a cleared environment, so bare names must
+/// be resolved against this process's search path before spawning. `role`
+/// names the executable in errors.
+fn resolve_executable_with_path(
+    role: &str,
     executable: &str,
     working_directory: &Path,
     path: Option<std::ffi::OsString>,
@@ -322,13 +329,13 @@ fn resolve_verification_executable_with_path(
         }
         return absolute.canonical().map_err(|error| {
             format!(
-                "resolving verification executable {}: {error}",
+                "resolving {role} executable {}: {error}",
                 absolute.display()
             )
         });
     }
     Err(format!(
-        "verification executable {executable:?} was not found as an executable file"
+        "{role} executable {executable:?} was not found as an executable file"
     ))
 }
 
@@ -426,22 +433,12 @@ pub fn execute_provider_cancellable(
     if request.kind != ProviderKind::Cli {
         return Err("provider-specific requests must use their adapter".into());
     }
-    let executable = Path::new(&request.executable);
-    let executable = if executable.is_absolute() || executable.components().count() > 1 {
-        let rooted = if executable.is_absolute() {
-            executable.to_path_buf()
-        } else {
-            request.working_directory.join(executable)
-        };
-        rooted.canonical().map_err(|error| {
-            format!(
-                "resolving provider executable {}: {error}",
-                rooted.display()
-            )
-        })?
-    } else {
-        executable.to_path_buf()
-    };
+    let executable = resolve_executable_with_path(
+        "provider",
+        &request.executable,
+        &request.working_directory,
+        std::env::var_os("PATH"),
+    )?;
     let isolated_directory = tempfile::tempdir()
         .map_err(|error| format!("creating provider working directory: {error}"))?;
     let mut command = Command::new(executable);
@@ -630,7 +627,8 @@ mod tests {
             directory.path().join("tool.exe"),
         )
         .unwrap();
-        let resolved = resolve_verification_executable_with_path(
+        let resolved = resolve_executable_with_path(
+            "verification",
             "tool",
             directory.path(),
             Some(directory.path().as_os_str().to_owned()),
@@ -694,7 +692,7 @@ mod tests {
     fn verification_executable_uses_platform_default_when_path_is_unset() {
         let directory = tempfile::tempdir().unwrap();
         let resolved =
-            resolve_verification_executable_with_path("sh", directory.path(), None).unwrap();
+            resolve_executable_with_path("verification", "sh", directory.path(), None).unwrap();
         assert!(resolved.ends_with("sh"), "resolved {resolved:?}");
         assert!(resolved.is_absolute());
     }
@@ -1074,6 +1072,37 @@ mod tests {
         assert_ne!(first, second);
         assert!(first.starts_with("sha256:"));
         assert!(second.starts_with("sha256:"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bare_provider_name_resolves_on_the_parent_path_despite_the_cleared_child_environment() {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = tempfile::tempdir().unwrap();
+        let provider = bin.path().join("fake-reviewer");
+        std::fs::write(&provider, "#!/bin/sh\necho 1.2.3\n").unwrap();
+        std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let working = tempfile::tempdir().unwrap();
+        let search_path = std::env::join_paths([Path::new("/nonexistent"), bin.path()]).unwrap();
+        let resolved = resolve_executable_with_path(
+            "provider",
+            "fake-reviewer",
+            working.path(),
+            Some(search_path.clone()),
+        )
+        .unwrap();
+        assert_eq!(resolved, provider.canonical().unwrap());
+        let missing = resolve_executable_with_path(
+            "provider",
+            "absent-reviewer",
+            working.path(),
+            Some(search_path),
+        )
+        .unwrap_err();
+        assert!(
+            missing.contains("provider executable \"absent-reviewer\" was not found"),
+            "{missing}"
+        );
     }
 
     #[cfg(unix)]
