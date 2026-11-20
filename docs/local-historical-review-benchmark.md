@@ -1,7 +1,68 @@
 # Local historical review benchmark
 
-**Status:** Local runner available; six initial debugging cases plus an independently reproduced lockout case across local MIT repositories; representative corpus remains open  
-**Date:** 2026-11-16
+**Status:** Local runner available; 16-case local corpus across 11 local MIT repositories (12 Go, 2 Rust, 1 TypeScript, 1 Python); a broader representative corpus remains open  
+**Date:** 2026-11-16 (provider comparison added 2026-11-21)
+
+### Provider comparison on the 16-case corpus (2026-11-21)
+
+Each case is a historical commit that introduced a later-fixed defect, with
+a human-written label for the defect's path, line range, and category. The
+same trusted reviewer instructions, include/exclude globs, and test-file
+exclusions were used for every run. Strict recall counts a label only when a
+finding has the label's path, a line inside the labeled range, and the
+labeled category or one of its declared aliases.
+
+| Reviewer | Strategy | Completed cases | Strict recall | Time |
+|---|---|---|---|---|
+| Claude Code CLI, `claude-sonnet-5-5` | `whole_change` | 16 / 16 | 9 / 17 labels (53%) | 5.5 min total, 12–31 s per case |
+| Ollama `gemma3:12b`, 32k window | `focused` | 7 / 16 at writing (run in progress) | 1 / 7 labels on those cases; Claude matched 3 / 7 on the same cases | 81 min for the 7 cases, 4.6–25.7 min each |
+| Ollama `gemma3:12b`, 64k window | `whole_change` | see the earlier sections | 0 recalled; on the lockout case it returned no findings (13 output tokens) | — |
+
+**How to read the Claude result.** Strict scoring understates it. Three of
+the eight misses describe the labeled defect but fail the match: a
+lost-increment race inside the labeled range reported as `security`
+(brute-force through the race) rather than `concurrency`; an ignored
+authenticator clone warning, at a line inside the label range, reported as
+`correctness` rather than `security`; and a lock-ordering deadlock anchored
+in the function that holds the lock rather than the labeled function that
+takes it. Counting those by manual adjudication gives 12 / 17 (71%). The
+matching rules were not changed after seeing results; both numbers are
+reported. Genuine misses were a non-atomic SQLite consume, a re-read after
+`await`, a dropped context value, and the PostgreSQL untyped-parameter case.
+That last one was found by an earlier single-case run with the same
+configuration, so hosted-model results vary between runs. Findings per case
+were 0–5, with little of the noise the local model produced.
+
+**How to read the local result.** Whole-change requests to a 12B local model
+mostly return nothing. The `focused` strategy (ADR 0007) makes it produce
+findings, and it reports some real defects (the lockout race, a
+send/receive deadlock), but most output is speculative, localization is
+weak, and a case takes minutes rather than seconds. On this corpus and this
+machine, a small local model is not a substitute for a strong reviewer.
+
+**Defects found and fixed while running the comparison:**
+
+- Focused reviews were budgeted against the whole-change payload, so five
+  cases were rejected as `context_budget_exceeded`; the budget now applies
+  to the largest single focused request.
+- The focused structuring step could cite rules the model had never been
+  shown (`invalid_rule_attribution`); its schema now allows only in-scope
+  approved guidance.
+- Ollama sampled at the model's default temperature, so the same case found
+  a race on one run and missed it on the next; requests now use temperature
+  0 and a fixed seed.
+- A bare provider executable such as `claude` was not found, because child
+  processes start with an empty environment; bare names are now resolved on
+  Vee's own `PATH`.
+- The Claude CLI adapter had only been tested against a fake executable. The
+  real CLI rejected the draft 2020-12 `$schema` reference and, without `HOME`
+  and `USER`, could not find its login.
+- The runner restarted from the first case after every interruption; it now
+  supports `--resume`.
+
+Token counts are not comparable across providers: the Claude CLI reports
+uncached input only (cache subtotals are not retained), while Ollama reports
+every prompt token.
 
 ### Local Gemma 3 rerun (2026-11-17)
 
