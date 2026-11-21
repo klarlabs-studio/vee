@@ -842,3 +842,16 @@ test('a slow response for an earlier finding never fills the drawer of a later o
   const copied = JSON.parse(await page.evaluate(() => navigator.clipboard.readText()))
   expect(copied.task_id).toBe('task_find001')
 })
+
+test('a review lists changed files no reviewer received', async ({ page }) => {
+  await page.route('**/api/reviews/rev_latest', async route => {
+    const body = detail(latest)
+    body.review.unreviewed_paths = ['crates/core/lib.rs', 'schemas/new.json']
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
+  })
+  await page.goto('/')
+  const note = page.getByRole('note', { name: 'Not reviewed' })
+  await expect(note).toContainText('No reviewer received 2 changed files')
+  await expect(note.getByText('crates/core/lib.rs')).toBeVisible()
+  await expect(note.getByText('schemas/new.json')).toBeVisible()
+})

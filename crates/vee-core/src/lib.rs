@@ -2949,6 +2949,11 @@ pub struct PolicyConfig {
     pub minimum_confidence: u8,
     #[serde(default = "default_incomplete")]
     pub on_incomplete: String,
+    /// `block` (default): a changed file inside the review filter that no
+    /// reviewer received leaves the analysis incomplete. `allow`: such files
+    /// are only reported.
+    #[serde(default = "default_unreviewed")]
+    pub on_unreviewed: String,
     #[serde(default)]
     pub acceptance: AcceptancePolicyConfig,
 }
@@ -2970,6 +2975,7 @@ impl Default for PolicyConfig {
             block_severities: default_severities(),
             minimum_confidence: default_confidence(),
             on_incomplete: default_incomplete(),
+            on_unreviewed: default_unreviewed(),
             acceptance: AcceptancePolicyConfig::default(),
         }
     }
@@ -3027,6 +3033,10 @@ fn default_confidence() -> u8 {
     80
 }
 fn default_incomplete() -> String {
+    "block".into()
+}
+
+fn default_unreviewed() -> String {
     "block".into()
 }
 
@@ -3233,6 +3243,9 @@ impl RepositoryConfig {
         }
         if config.policy.on_incomplete != "block" && config.policy.on_incomplete != "allow" {
             return Err("policy.on_incomplete must be 'block' or 'allow'".into());
+        }
+        if config.policy.on_unreviewed != "block" && config.policy.on_unreviewed != "allow" {
+            return Err("policy.on_unreviewed must be 'block' or 'allow'".into());
         }
         for severity in &config.policy.block_severities {
             if !matches!(

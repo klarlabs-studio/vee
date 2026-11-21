@@ -10607,3 +10607,124 @@ fn advisory_reviewer_findings_show_but_block_only_when_a_blocking_reviewer_agree
         serde_json::json!(["architecture", "correctness"])
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn changed_files_no_reviewer_received_leave_the_gate_incomplete() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    fs::create_dir_all(root.join("api")).unwrap();
+    fs::create_dir_all(root.join("core")).unwrap();
+    fs::write(
+        root.join(".gitignore"),
+        "/.vee/\n/provider\n/reviewer.md\n/.vee.yaml\n",
+    )
+    .unwrap();
+    fs::write(root.join("api/handler.rs"), "fn h() {}\n").unwrap();
+    fs::write(root.join("core/lib.rs"), "fn c() {}\n").unwrap();
+    fs::write(root.join("notes.txt"), "outside the review filter\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "baseline"]);
+    fs::write(root.join("api/handler.rs"), "fn h() { 1 }\n").unwrap();
+    fs::write(root.join("core/lib.rs"), "fn c() { 2 }\n").unwrap();
+    fs::write(root.join("notes.txt"), "still outside\n").unwrap();
+    fs::write(root.join("reviewer.md"), "Review the changed code.\n").unwrap();
+    let provider = root.join("provider");
+    fs::write(
+        &provider,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s' '{\"schema_version\":1,\"findings\":[]}'\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&provider).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&provider, permissions).unwrap();
+    let configure = |extra_policy: &str| {
+        fs::write(
+            root.join(".vee.yaml"),
+            format!(
+                "version: 1\nreview:\n  include: ['**/*.rs']\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  api: {{ provider: fake, instructions_file: reviewer.md, include: ['api/**'] }}\npolicy:\n  required_reviewers: [api]\n{extra_policy}",
+                provider.display()
+            ),
+        )
+        .unwrap();
+    };
+    let review = || {
+        vee()
+            .args(["review", "--working-tree", "--gate", "--output", "json"])
+            .current_dir(root)
+            .output()
+            .unwrap()
+    };
+
+    configure("");
+    let output = review();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["status"], "incomplete");
+    assert_eq!(result["analysis_complete"], false);
+    assert_eq!(
+        result["unreviewed_paths"],
+        serde_json::json!(["core/lib.rs"])
+    );
+    assert_eq!(result["reviewer_outcomes"][0]["status"], "completed");
+    assert_matches_schema(
+        &result,
+        include_str!("../../../schemas/review-output-v2.schema.json"),
+        "review output with unreviewed paths",
+    );
+
+    let text = vee()
+        .args(["review", "--working-tree"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(text.contains("Not reviewed: core/lib.rs"), "{text}");
+
+    configure("  on_unreviewed: allow\n");
+    let output = review();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["status"], "pass");
+    assert_eq!(
+        result["unreviewed_paths"],
+        serde_json::json!(["core/lib.rs"]),
+        "allow still reports what no reviewer saw"
+    );
+
+    configure("  on_unreviewed: sometimes\n");
+    let rejected = review();
+    assert!(!rejected.status.success());
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(reported.contains("on_unreviewed"), "{reported}");
+}

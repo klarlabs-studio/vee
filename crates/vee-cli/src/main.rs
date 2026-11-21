@@ -3465,12 +3465,19 @@ fn run() -> Result<u8> {
                     eprintln!("Review {}", out.review_id);
                     eprintln!("Status: {}", out.status);
                     eprintln!("Snapshot: {}", out.snapshot_id);
+                    if !out.unreviewed_paths.is_empty() {
+                        eprintln!("Not reviewed: {}", out.unreviewed_paths.join(", "));
+                    }
                 }
                 Output::Text => {
                     println!("Review snapshot: {}", out.snapshot_id);
                     println!("Status: {}", out.status);
                     for reason in &out.reasons {
                         println!("- {reason}");
+                    }
+                    if !out.unreviewed_paths.is_empty() {
+                        println!("Not reviewed: {}", out.unreviewed_paths.join(", "));
+                        println!("  No reviewer's include rules matched these changed files; add or widen a reviewer, or set policy.on_unreviewed: allow.");
                     }
                 }
             }

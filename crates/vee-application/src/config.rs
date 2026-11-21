@@ -127,6 +127,9 @@ pub fn apply_protected_policy(root: &Path, config: &mut RepositoryConfig) -> Res
     if protected.on_incomplete != "block" && protected.on_incomplete != "allow" {
         return Err("protected policy on_incomplete must be 'block' or 'allow'".into());
     }
+    if protected.on_unreviewed != "block" && protected.on_unreviewed != "allow" {
+        return Err("protected policy on_unreviewed must be 'block' or 'allow'".into());
+    }
     for reviewer in &protected.required_reviewers {
         if !config.reviewers.contains_key(reviewer) {
             return Err(format!(
@@ -172,6 +175,9 @@ pub fn apply_protected_policy(root: &Path, config: &mut RepositoryConfig) -> Res
         .max(protected.minimum_confidence);
     if protected.on_incomplete == "block" {
         config.policy.on_incomplete = "block".into();
+    }
+    if protected.on_unreviewed == "block" {
+        config.policy.on_unreviewed = "block".into();
     }
     config.policy.acceptance.require_passing_verification |=
         protected.acceptance.require_passing_verification;

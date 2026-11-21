@@ -156,6 +156,7 @@
                   "none",
                   "run_gate",
                   "rerun_reviewers",
+                  "cover_unreviewed",
                   "fix_findings",
                   "resolve_gate_reason"
                 ]

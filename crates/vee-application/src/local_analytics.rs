@@ -34,8 +34,8 @@ pub struct AnalyticsReviewDimension {
 /// about merging.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct NextAction {
-    /// `none`, `run_gate`, `rerun_reviewers`, `fix_findings` or
-    /// `resolve_gate_reason`.
+    /// `none`, `run_gate`, `rerun_reviewers`, `cover_unreviewed`,
+    /// `fix_findings` or `resolve_gate_reason`.
     pub kind: &'static str,
     pub summary: String,
 }
@@ -46,6 +46,7 @@ const MAX_NAMED_REVIEWERS: usize = 3;
 pub fn next_action(
     decision: Option<&vee_core::GateDecision>,
     outcomes: &[crate::ReviewerOutcome],
+    unreviewed_paths: usize,
 ) -> NextAction {
     let Some(decision) = decision else {
         return NextAction {
@@ -78,6 +79,15 @@ pub fn next_action(
         return NextAction {
             kind: "rerun_reviewers",
             summary: format!("Rerun reviewers: {named}."),
+        };
+    }
+    if unreviewed_paths > 0 && decision.status == vee_core::GateStatus::Incomplete {
+        return NextAction {
+            kind: "cover_unreviewed",
+            summary: format!(
+                "No reviewer received {unreviewed_paths} changed file{}: add or widen a reviewer.",
+                if unreviewed_paths == 1 { "" } else { "s" }
+            ),
         };
     }
     if !decision.blocking_findings.is_empty() {
@@ -322,9 +332,11 @@ pub fn build(root: &Path, store: &dyn Repositories) -> Result<LocalAnalytics, St
         let mut finding_categories = Vec::new();
         let mut finding_rule_ids = Vec::new();
         let mut outcomes = Vec::new();
+        let mut unreviewed = 0;
         if let Some(payload) = payload {
             if let Ok(saved) = crate::deserialize_review_result(&payload) {
                 outcomes.clone_from(&saved.reviewer_outcomes);
+                unreviewed = saved.unreviewed_paths.len();
                 reviewer_ids.extend(
                     saved
                         .reviewer_outcomes
@@ -373,7 +385,7 @@ pub fn build(root: &Path, store: &dyn Repositories) -> Result<LocalAnalytics, St
             provider_ids,
             finding_categories,
             finding_rule_ids,
-            next_action: next_action(latest_decision.as_ref(), &outcomes),
+            next_action: next_action(latest_decision.as_ref(), &outcomes, unreviewed),
         });
     }
     let (finding_records, finding_drilldown_total) =
@@ -604,11 +616,12 @@ mod next_action_tests {
     #[test]
     fn next_action_follows_the_gate_and_reviewer_outcomes() {
         use vee_core::GateStatus::{Block, Incomplete, Pass};
-        // (name, latest decision, reviewer outcomes, expected kind, expected summary)
+        // (name, latest decision, reviewer outcomes, unreviewed paths, expected kind, expected summary)
         type Case = (
             &'static str,
             Option<GateDecision>,
             Vec<crate::ReviewerOutcome>,
+            usize,
             &'static str,
             &'static str,
         );
@@ -617,6 +630,7 @@ mod next_action_tests {
                 "no decision",
                 None,
                 vec![],
+                0,
                 "run_gate",
                 "No gate decision yet: run vee gate.",
             ),
@@ -624,6 +638,7 @@ mod next_action_tests {
                 "passed",
                 Some(decision(Pass, &[], &[])),
                 vec![outcome("correctness", "completed")],
+                0,
                 "none",
                 "Gate passed.",
             ),
@@ -639,13 +654,31 @@ mod next_action_tests {
                     outcome("security", "context_budget_exceeded"),
                     outcome("style", "completed"),
                 ],
+                0,
                 "rerun_reviewers",
                 "Rerun reviewers: correctness (failed), security (context budget exceeded).",
+            ),
+            (
+                "unreviewed files leave the gate incomplete",
+                Some(decision(Incomplete, &[], &["review did not complete"])),
+                vec![outcome("api", "completed")],
+                2,
+                "cover_unreviewed",
+                "No reviewer received 2 changed files: add or widen a reviewer.",
+            ),
+            (
+                "unreviewed files allowed by policy do not hide findings",
+                Some(decision(Block, &["f1"], &[])),
+                vec![outcome("api", "completed")],
+                1,
+                "fix_findings",
+                "Fix 1 blocking finding.",
             ),
             (
                 "blocking findings",
                 Some(decision(Block, &["f1", "f2"], &["2 blocking findings"])),
                 vec![outcome("correctness", "completed")],
+                0,
                 "fix_findings",
                 "Fix 2 blocking findings.",
             ),
@@ -653,6 +686,7 @@ mod next_action_tests {
                 "one blocking finding",
                 Some(decision(Block, &["f1"], &[])),
                 vec![],
+                0,
                 "fix_findings",
                 "Fix 1 blocking finding.",
             ),
@@ -660,6 +694,7 @@ mod next_action_tests {
                 "blocked by policy without findings",
                 Some(decision(Block, &[], &["verification profile unit failed"])),
                 vec![outcome("correctness", "completed")],
+                0,
                 "resolve_gate_reason",
                 "verification profile unit failed",
             ),
@@ -667,12 +702,13 @@ mod next_action_tests {
                 "incomplete without a reason",
                 Some(decision(Incomplete, &[], &[])),
                 vec![],
+                0,
                 "resolve_gate_reason",
                 "Gate incomplete; open the review for details.",
             ),
         ];
-        for (name, decision, outcomes, kind, summary) in cases {
-            let action = next_action(decision.as_ref(), &outcomes);
+        for (name, decision, outcomes, unreviewed, kind, summary) in cases {
+            let action = next_action(decision.as_ref(), &outcomes, unreviewed);
             assert_eq!(action.kind, kind, "{name}");
             assert_eq!(action.summary, summary, "{name}");
         }
