@@ -3150,11 +3150,15 @@ fn finding_task_exports_bounded_snapshot_context_and_reports_staleness() {
     );
     let stale: serde_json::Value = serde_json::from_slice(&stale.stdout).unwrap();
     assert_eq!(stale["snapshot_current"], false);
-    assert!(stale["source_context"].is_null());
+    // The reviewed source stays available from the copy kept at review time,
+    // never the edited file.
+    let content = stale["source_context"]["content"].as_str().unwrap();
+    assert!(content.contains("risky_value()"), "{stale}");
+    assert!(!content.contains("let count = 0"), "{stale}");
     assert!(stale["context_note"]
         .as_str()
         .unwrap()
-        .contains("changed after capture"));
+        .contains("kept when the review ran"));
 }
 
 #[test]
@@ -10727,4 +10731,105 @@ fn changed_files_no_reviewer_received_leave_the_gate_incomplete() {
         String::from_utf8_lossy(&rejected.stderr)
     );
     assert!(reported.contains("on_unreviewed"), "{reported}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_finding_task_shows_the_reviewed_source_after_the_file_changes() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    fs::write(
+        root.join(".gitignore"),
+        "/.vee/\n/provider\n/reviewer.md\n/.vee.yaml\n",
+    )
+    .unwrap();
+    fs::write(root.join("src.rs"), "fn a() {}\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "baseline"]);
+    fs::write(
+        root.join("src.rs"),
+        "fn a() {}\nfn b() { panic!(\"reviewed\") }\n",
+    )
+    .unwrap();
+    fs::write(root.join("reviewer.md"), "Review the changed code.\n").unwrap();
+    let provider = root.join("provider");
+    fs::write(
+        &provider,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s' '{\"schema_version\":1,\"findings\":[{\"category\":\"correctness\",\"severity\":\"high\",\"confidence\":95,\"rationale\":\"b panics.\",\"path\":\"src.rs\",\"line\":2}]}'\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&provider).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&provider, permissions).unwrap();
+    fs::write(
+        root.join(".vee.yaml"),
+        format!(
+            "version: 1\nreview:\n  include: ['*.rs']\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\n",
+            provider.display()
+        ),
+    )
+    .unwrap();
+    let output = vee()
+        .args(["review", "--working-tree", "--output", "json"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let review: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let finding_id = review["findings"][0]["id"].as_str().unwrap().to_owned();
+
+    // The developer fixes the code; the review's snapshot no longer matches.
+    fs::write(
+        root.join("src.rs"),
+        "fn a() {}\nfn b() -> Result<(), ()> { Err(()) }\n",
+    )
+    .unwrap();
+    let output = vee()
+        .args(["findings", "task", &finding_id, "--output", "json"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let task: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(task["snapshot_current"], false);
+    let content = task["source_context"]["content"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(content.contains("panic!(\"reviewed\")"), "{task}");
+    assert!(
+        !content.contains("Err(())"),
+        "the reviewed source, not the current file: {task}"
+    );
+    assert!(
+        task["context_note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("kept when the review ran"),
+        "{task}"
+    );
 }

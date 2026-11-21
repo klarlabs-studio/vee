@@ -422,21 +422,31 @@ fn source_context(
             Some("Finding path is not a repository-relative source path.".into()),
         );
     }
-    let bytes = match vee_git::read_snapshot_tree_file(root, change_set, &relative) {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => {
-            return (
-                None,
-                Some("Finding source file is absent from its snapshot.".into()),
-            )
-        }
-        Err(error) => {
-            return (
-                None,
-                Some(format!("Snapshot source could not be read: {error}")),
-            )
-        }
-    };
+    let mut kept_copy = false;
+    let bytes =
+        match vee_git::read_snapshot_tree_file(root, change_set, &relative).or_else(|error| {
+            match kept_snapshot_source(root, change_set, &relative) {
+                Some(bytes) => {
+                    kept_copy = true;
+                    Ok(Some(bytes))
+                }
+                None => Err(error),
+            }
+        }) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
+                return (
+                    None,
+                    Some("Finding source file is absent from its snapshot.".into()),
+                )
+            }
+            Err(error) => {
+                return (
+                    None,
+                    Some(format!("Snapshot source could not be read: {error}")),
+                )
+            }
+        };
     if bytes.len() > MAX_CONTEXT_BYTES * 8 {
         return (
             None,
@@ -477,6 +487,34 @@ fn source_context(
             content,
             classification: "untrusted_repository_source",
         }),
-        None,
+        kept_copy.then(|| {
+            "The file changed after the review; this is the reviewed snapshot's source, kept when the review ran."
+                .to_owned()
+        }),
     )
+}
+
+/// The snapshot bytes of a changed file as kept at review time, verified
+/// against the snapshot's content digest.
+fn kept_snapshot_source(
+    root: &Path,
+    change_set: &vee_core::ChangeSet,
+    relative: &Path,
+) -> Option<Vec<u8>> {
+    let normalized = relative.to_string_lossy().replace('\\', "/");
+    let entry = change_set
+        .files
+        .iter()
+        .find(|file| file.path == normalized && file.status != "deleted")?;
+    let hex = entry.content_digest.strip_prefix("sha256:")?;
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let path = root.join(".vee/artifacts/sha256").join(hex);
+    let metadata = std::fs::symlink_metadata(&path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    (vee_core::digest(&bytes) == entry.content_digest).then_some(bytes)
 }

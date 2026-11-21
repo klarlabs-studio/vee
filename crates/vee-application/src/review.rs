@@ -1366,6 +1366,7 @@ pub fn run_review_with_provider_and_selection_context(
             });
         }
     }
+    keep_snapshot_sources_of_findings(root, &change_set, &findings);
     let unreviewed_paths = unreviewed_paths(&change_set, &config.review, &reviewer_context);
     if !unreviewed_paths.is_empty() && config.policy.on_unreviewed == "block" {
         complete = false;
@@ -1485,6 +1486,35 @@ pub(crate) fn reviewer_path_is_included(path: &str, reviewer: &vee_core::Reviewe
 /// Changed paths inside the repository review filter that no reviewer
 /// received as full source or as a diff. Paths the repository filter excludes
 /// are out of scope by configuration and are not listed.
+/// Keep the snapshot bytes of each changed file with a located finding in the
+/// content-addressed artifact store, so the finding's source can be shown
+/// after the working tree moves on. Best effort: a file that cannot be kept
+/// only loses that fallback.
+fn keep_snapshot_sources_of_findings(
+    root: &Path,
+    change_set: &ChangeSet,
+    findings: &[vee_core::Finding],
+) {
+    let paths: std::collections::BTreeSet<&str> = findings
+        .iter()
+        .filter(|finding| finding.line.is_some())
+        .filter_map(|finding| finding.path.as_deref())
+        .collect();
+    for path in paths {
+        let Some(entry) = change_set
+            .files
+            .iter()
+            .find(|file| file.path == path && file.status != "deleted")
+        else {
+            continue;
+        };
+        if let Ok(Some(bytes)) = vee_git::read_snapshot_tree_file(root, change_set, Path::new(path))
+        {
+            let _ = crate::verification::persist_artifact(root, &bytes, &entry.content_digest);
+        }
+    }
+}
+
 pub(crate) fn unreviewed_paths(
     change_set: &ChangeSet,
     review: &vee_core::ReviewConfig,

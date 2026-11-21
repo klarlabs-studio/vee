@@ -541,7 +541,7 @@ enum Command {
     },
     /// Serve the local web dashboard on a loopback address.
     Ui {
-        /// Hosting server host name (for self-hosted instances).
+        /// Loopback address to listen on (127.0.0.1 or ::1).
         #[arg(long, default_value = "127.0.0.1")]
         host: std::net::IpAddr,
         /// Loopback port to listen on.
