@@ -124,6 +124,35 @@ Every case in this corpus contains a defect, so the corpus cannot tell
 whether the extra blocked cases are true or false blocks. Measuring false
 blocks needs clean changes in the corpus.
 
+### Review effort levels and control cases (2026-11-21)
+
+Effort presets (ADR 0008) map `low`, `medium` and `high` to 1, 3 and 5
+samples. To measure false blocks, the corpus gained 22 control cases:
+`feat`, `refactor` and `perf` commits of 20–300 changed source lines, two per
+repository, each at least 30 commits old, with at least 90% of its changed
+lines unchanged at HEAD despite later edits to the same files.
+
+One control case was blocked at `low` and `medium` with the same finding,
+reported by all three `medium` samples: an option that silently replaced
+the default middleware chain. A later commit fixed exactly that, so the
+case was relabeled as a defect. The label was written after the result,
+so the table below leaves it out; the selection rule missed it because the
+fix changed a different file from the defect's lines.
+
+| Effort | Runs | Strict recall (16 defect cases) | False blocks (21 controls) | Findings on controls | Defect-case time per run |
+|---|---|---|---|---|---|
+| `low` | 3 | 30 / 51 (59%): 10, 11, 9 of 17 | 0 / 21 | 20 | 4.9–5.2 min |
+| `medium` | 2 | 26 / 34 (76%): 14, 12 of 17 | 0 / 21 | 39 | 6.0–6.4 min |
+| `high` | 2 | 28 / 34 (82%): 14, 14 of 17 | 0 / 21 | 50 | 11.0–11.1 min |
+
+Controls were run once per effort level. `high` was also the most stable
+level: both runs found the same count. Its wall-clock time roughly doubles
+over `medium` because five samples exceed the default concurrency. Findings
+on control changes grow with effort, but almost all of the extra ones fall
+below the quorum and stay advisory, which is why false blocks stay at zero.
+With 21 controls, "zero" bounds the false-block rate only loosely (the 95%
+upper bound is about 13%).
+
 Token counts are not comparable across providers: the Claude CLI reports
 uncached input only (cache subtotals are not retained), while Ollama reports
 every prompt token.
