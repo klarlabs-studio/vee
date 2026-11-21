@@ -3,30 +3,175 @@
   "$id": "https://vee.klarlabs.de/schemas/historical-review-corpus-v1.schema.json",
   "title": "Vee local historical review corpus v1",
   "type": "object",
-  "required": ["schema_version", "corpus_id", "source", "cases"],
+  "required": [
+    "schema_version",
+    "corpus_id",
+    "source",
+    "cases"
+  ],
   "properties": {
-    "schema_version": { "const": 1 },
-    "corpus_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$" },
-    "source": { "type": "string", "minLength": 1, "maxLength": 2048 },
-    "source_revision": { "type": "string", "maxLength": 256 },
-    "license_reference": { "type": "string", "maxLength": 2048 },
+    "schema_version": {
+      "const": 1
+    },
+    "corpus_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "source_revision": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "license_reference": {
+      "type": "string",
+      "maxLength": 2048
+    },
     "cases": {
-      "type": "array", "minItems": 1, "maxItems": 500,
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 500,
       "items": {
-        "type": "object", "required": ["id", "repository", "commit", "labels", "labels_digest"],
+        "type": "object",
+        "required": [
+          "id",
+          "repository",
+          "commit"
+        ],
         "properties": {
-          "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$" },
-          "repository": { "type": "string", "minLength": 1 },
-          "commit": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
-          "labels": { "type": "string", "minLength": 1 },
-          "labels_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-          "defect_reference": { "type": "string", "maxLength": 2048 },
-          "fix_commit": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
-          "fix_reference": { "type": "string", "maxLength": 2048 },
-          "project_license": { "type": "string", "maxLength": 2048 },
-          "category_aliases": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "string", "minLength": 1 } } }
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._-]+$"
+          },
+          "kind": {
+            "enum": [
+              "defect",
+              "control"
+            ],
+            "default": "defect",
+            "description": "defect cases carry labels for a known defect; control cases are curator-presumed clean changes used to measure false blocks and noise."
+          },
+          "repository": {
+            "type": "string",
+            "minLength": 1
+          },
+          "commit": {
+            "type": "string",
+            "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+          },
+          "labels": {
+            "type": "string",
+            "minLength": 1
+          },
+          "labels_digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "defect_reference": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "fix_commit": {
+            "type": "string",
+            "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+          },
+          "fix_reference": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "project_license": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "category_aliases": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "control_rationale": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "description": "Why the curator presumes this control change is clean."
+          }
         },
-        "additionalProperties": false
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "control"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            "then": {
+              "required": [
+                "control_rationale"
+              ],
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "labels"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "labels_digest"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "category_aliases"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "defect_reference"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "fix_commit"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "fix_reference"
+                    ]
+                  }
+                ]
+              }
+            },
+            "else": {
+              "required": [
+                "labels",
+                "labels_digest"
+              ],
+              "not": {
+                "required": [
+                  "control_rationale"
+                ]
+              }
+            }
+          }
+        ]
       }
     }
   },

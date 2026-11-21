@@ -326,6 +326,32 @@
               },
               "additionalProperties": false
             }
+          },
+          "kind": {
+            "enum": [
+              "defect",
+              "control"
+            ]
+          },
+          "control_rationale": {
+            "type": "string"
+          },
+          "gate_status": {
+            "enum": [
+              "pass",
+              "block",
+              "incomplete"
+            ],
+            "description": "Control cases only."
+          },
+          "blocking_finding_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "advisory_finding_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Sampled findings below their quorum."
           }
         },
         "additionalProperties": true
@@ -336,6 +362,26 @@
       "items": {
         "type": "string"
       }
+    },
+    "control_cases": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Completed control cases (presumed-clean changes)."
+    },
+    "false_block_cases": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Completed control cases whose gate blocked."
+    },
+    "control_findings": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Findings reported on completed control cases."
+    },
+    "control_blocking_findings": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Blocking findings on completed control cases."
     }
   },
   "$defs": {

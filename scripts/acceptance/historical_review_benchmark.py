@@ -491,7 +491,58 @@ def main() -> int:
             raise AssertionError("verification-file symlink target was accepted")
         except ValueError:
             pass
-        print("historical review benchmark acceptance passed: strict recall preserved, digest-recorded trusted verification overlays distinguished from source snapshots, buggy/fix verification profiles compared, conflicting overlays marked incomplete, resumed runs reuse only reviews from identical inputs, wrong-location diagnostics reported, trusted instructions overlaid, and hostile config, hooks, filters, traversal, and symlink targets rejected")
+        control_manifest = root / "control-manifest.json"
+        control_case = {
+            "id": "fix-as-control",
+            "kind": "control",
+            "repository": "subject",
+            "commit": fix_commit,
+            "control_rationale": "The fix commit is presumed clean; the fixture provider still reports a high finding, so the gate blocks.",
+            "project_license": "MIT test fixture",
+        }
+        control_manifest.write_text(json.dumps({
+            "schema_version": 1,
+            "corpus_id": "local-control-acceptance",
+            "source": "synthetic local acceptance fixture",
+            "cases": [control_case, json.loads(manifest.read_text())["cases"][0]],
+        }), encoding="utf-8")
+        control_output = root / "control-results"
+        control_command = [
+            sys.executable, str(runner), "--manifest", str(control_manifest),
+            "--corpus-root", str(root), "--config", str(config), "--vee", str(vee),
+            "--trusted-file", f"reviewer.md={trusted_instructions}",
+            "--output-dir", str(control_output), "--reviewer", "correctness",
+            "--scope-language", "rust",
+        ]
+        control_result = execute(control_command, pathlib.Path.cwd())
+        assert control_result.returncode == 0, control_result.stdout + control_result.stderr
+        control_report = json.loads((control_output / "historical-review-report-v1.json").read_text())
+        report_schema = json.loads((pathlib.Path(__file__).resolve().parents[2] / "schemas/historical-review-report-v1.schema.json").read_text())
+        jsonschema.validate(control_report, report_schema)
+        corpus_schema = json.loads((pathlib.Path(__file__).resolve().parents[2] / "schemas/historical-review-corpus-v1.schema.json").read_text())
+        jsonschema.validate(json.loads(control_manifest.read_text()), corpus_schema)
+        assert control_report["control_cases"] == 1
+        assert control_report["false_block_cases"] == 1
+        assert control_report["control_findings"] == 1
+        assert control_report["matched_labels"] == 1 and control_report["finding_recall"] == 1.0, "control cases do not count toward recall"
+        control_item = next(item for item in control_report["cases"] if item["case_id"] == "fix-as-control")
+        assert control_item["kind"] == "control" and control_item["state"] == "complete"
+        assert control_item["gate_status"] == "block" and control_item["blocking_finding_count"] == 1
+        assert "label_count" not in control_item and "labels_digest" not in control_item
+        defect_item = next(item for item in control_report["cases"] if item["case_id"] == "division-by-zero")
+        assert defect_item["kind"] == "defect"
+        for invalid in (
+            {**control_case, "labels": "labels.json", "labels_digest": "sha256:" + hashlib.sha256(label_bytes).hexdigest()},
+            {**control_case, "fix_commit": fix_commit},
+            {key: value for key, value in control_case.items() if key != "control_rationale"},
+        ):
+            control_manifest.write_text(json.dumps({
+                "schema_version": 1, "corpus_id": "local-control-acceptance",
+                "source": "synthetic local acceptance fixture", "cases": [invalid],
+            }), encoding="utf-8")
+            rejected = execute(control_command, pathlib.Path.cwd())
+            assert rejected.returncode == 2 and "control" in rejected.stderr, rejected.stderr
+        print("historical review benchmark acceptance passed: strict recall preserved, digest-recorded trusted verification overlays distinguished from source snapshots, buggy/fix verification profiles compared, conflicting overlays marked incomplete, resumed runs reuse only reviews from identical inputs, control cases count false blocks without affecting recall, wrong-location diagnostics reported, trusted instructions overlaid, and hostile config, hooks, filters, traversal, and symlink targets rejected")
     return 0
 
 
