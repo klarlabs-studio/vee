@@ -42,7 +42,8 @@ pub struct NextAction {
 
 /// Outcome statuses of a reviewer whose provider returned valid findings: a
 /// fresh run, a provider-cache hit, or a run on budget-limited context.
-const SUCCESSFUL_REVIEWER_STATUSES: [&str; 3] = ["completed", "cached", "context_limited"];
+pub(crate) const SUCCESSFUL_REVIEWER_STATUSES: [&str; 3] =
+    ["completed", "cached", "context_limited"];
 
 /// Reviewers named in a rerun summary before it is shortened.
 const MAX_NAMED_REVIEWERS: usize = 3;
@@ -51,6 +52,7 @@ pub fn next_action(
     decision: Option<&vee_core::GateDecision>,
     outcomes: &[crate::ReviewerOutcome],
     unreviewed_paths: usize,
+    analysis_complete: bool,
 ) -> NextAction {
     let Some(decision) = decision else {
         return NextAction {
@@ -85,7 +87,12 @@ pub fn next_action(
             summary: format!("Rerun reviewers: {named}."),
         };
     }
-    if unreviewed_paths > 0 && decision.status == vee_core::GateStatus::Incomplete {
+    // Unreviewed files explain an incomplete gate only when they left the
+    // analysis incomplete (`on_unreviewed: block`).
+    if unreviewed_paths > 0
+        && !analysis_complete
+        && decision.status == vee_core::GateStatus::Incomplete
+    {
         return NextAction {
             kind: "cover_unreviewed",
             summary: format!(
@@ -337,10 +344,12 @@ pub fn build(root: &Path, store: &dyn Repositories) -> Result<LocalAnalytics, St
         let mut finding_rule_ids = Vec::new();
         let mut outcomes = Vec::new();
         let mut unreviewed = 0;
+        let mut analysis_complete = true;
         if let Some(payload) = payload {
             if let Ok(saved) = crate::deserialize_review_result(&payload) {
                 outcomes.clone_from(&saved.reviewer_outcomes);
                 unreviewed = saved.unreviewed_paths.len();
+                analysis_complete = saved.analysis_complete;
                 reviewer_ids.extend(
                     saved
                         .reviewer_outcomes
@@ -389,7 +398,12 @@ pub fn build(root: &Path, store: &dyn Repositories) -> Result<LocalAnalytics, St
             provider_ids,
             finding_categories,
             finding_rule_ids,
-            next_action: next_action(latest_decision.as_ref(), &outcomes, unreviewed),
+            next_action: next_action(
+                latest_decision.as_ref(),
+                &outcomes,
+                unreviewed,
+                analysis_complete,
+            ),
         });
     }
     let (finding_records, finding_drilldown_total) =
@@ -620,12 +634,14 @@ mod next_action_tests {
     #[test]
     fn next_action_follows_the_gate_and_reviewer_outcomes() {
         use vee_core::GateStatus::{Block, Incomplete, Pass};
-        // (name, latest decision, reviewer outcomes, unreviewed paths, expected kind, expected summary)
+        // (name, latest decision, reviewer outcomes, unreviewed paths,
+        //  analysis complete, expected kind, expected summary)
         type Case = (
             &'static str,
             Option<GateDecision>,
             Vec<crate::ReviewerOutcome>,
             usize,
+            bool,
             &'static str,
             &'static str,
         );
@@ -635,6 +651,7 @@ mod next_action_tests {
                 None,
                 vec![],
                 0,
+                true,
                 "run_gate",
                 "No gate decision yet: run vee gate.",
             ),
@@ -643,6 +660,7 @@ mod next_action_tests {
                 Some(decision(Pass, &[], &[])),
                 vec![outcome("correctness", "completed")],
                 0,
+                true,
                 "none",
                 "Gate passed.",
             ),
@@ -659,6 +677,7 @@ mod next_action_tests {
                     outcome("style", "completed"),
                 ],
                 0,
+                true,
                 "rerun_reviewers",
                 "Rerun reviewers: correctness (failed), security (context budget exceeded).",
             ),
@@ -670,6 +689,7 @@ mod next_action_tests {
                     outcome("security", "context_limited"),
                 ],
                 0,
+                true,
                 "fix_findings",
                 "Fix 1 blocking finding.",
             ),
@@ -678,14 +698,29 @@ mod next_action_tests {
                 Some(decision(Incomplete, &[], &["review did not complete"])),
                 vec![outcome("api", "completed")],
                 2,
+                false,
                 "cover_unreviewed",
                 "No reviewer received 2 changed files: add or widen a reviewer.",
+            ),
+            (
+                "allowed unreviewed files do not explain another incomplete reason",
+                Some(decision(
+                    Incomplete,
+                    &[],
+                    &["required verification profiles incomplete for snapshot: security"],
+                )),
+                vec![outcome("api", "completed")],
+                3,
+                true,
+                "resolve_gate_reason",
+                "required verification profiles incomplete for snapshot: security",
             ),
             (
                 "unreviewed files allowed by policy do not hide findings",
                 Some(decision(Block, &["f1"], &[])),
                 vec![outcome("api", "completed")],
                 1,
+                true,
                 "fix_findings",
                 "Fix 1 blocking finding.",
             ),
@@ -694,6 +729,7 @@ mod next_action_tests {
                 Some(decision(Block, &["f1", "f2"], &["2 blocking findings"])),
                 vec![outcome("correctness", "completed")],
                 0,
+                true,
                 "fix_findings",
                 "Fix 2 blocking findings.",
             ),
@@ -702,6 +738,7 @@ mod next_action_tests {
                 Some(decision(Block, &["f1"], &[])),
                 vec![],
                 0,
+                true,
                 "fix_findings",
                 "Fix 1 blocking finding.",
             ),
@@ -710,6 +747,7 @@ mod next_action_tests {
                 Some(decision(Block, &[], &["verification profile unit failed"])),
                 vec![outcome("correctness", "completed")],
                 0,
+                true,
                 "resolve_gate_reason",
                 "verification profile unit failed",
             ),
@@ -718,12 +756,13 @@ mod next_action_tests {
                 Some(decision(Incomplete, &[], &[])),
                 vec![],
                 0,
+                true,
                 "resolve_gate_reason",
                 "Gate incomplete; open the review for details.",
             ),
         ];
-        for (name, decision, outcomes, unreviewed, kind, summary) in cases {
-            let action = next_action(decision.as_ref(), &outcomes, unreviewed);
+        for (name, decision, outcomes, unreviewed, analysis_complete, kind, summary) in cases {
+            let action = next_action(decision.as_ref(), &outcomes, unreviewed, analysis_complete);
             assert_eq!(action.kind, kind, "{name}");
             assert_eq!(action.summary, summary, "{name}");
         }

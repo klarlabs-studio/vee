@@ -257,7 +257,8 @@ pub struct ReviewDetail {
     pub superseded_by: Option<Supersession>,
 }
 
-/// A later complete review of the same scope and base commit, and which of this
+/// A later complete review of the same scope and base commit that ran every
+/// reviewer this review ran, and which of this
 /// review's findings it no longer reported. Display only: it does not change
 /// gates, dispositions or waivers.
 #[derive(Debug, Serialize)]
@@ -283,6 +284,18 @@ fn later_review_of_same_base(
     else {
         return Ok(None);
     };
+    let successful = |review: &ReviewResult| -> std::collections::BTreeSet<String> {
+        review
+            .reviewer_outcomes
+            .iter()
+            .filter(|outcome| {
+                crate::local_analytics::SUCCESSFUL_REVIEWER_STATUSES
+                    .contains(&outcome.status.as_str())
+            })
+            .map(|outcome| outcome.reviewer_id.clone())
+            .collect()
+    };
+    let ran_here = successful(review);
     // Summaries are newest first, so everything before this review is later.
     for summary in summaries[..position]
         .iter()
@@ -293,9 +306,12 @@ fn later_review_of_same_base(
         };
         // An incomplete review may have missed findings, so its silence about
         // a finding says nothing.
+        // It must also have run every reviewer that ran here: a review limited
+        // to other reviewers could not have reported these findings again.
         if !candidate.analysis_complete
             || candidate.change_set.scope != review.change_set.scope
             || candidate.change_set.base_oid != review.change_set.base_oid
+            || !ran_here.is_subset(&successful(&candidate))
         {
             continue;
         }

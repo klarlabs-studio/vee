@@ -1685,6 +1685,32 @@ mod tests {
         }
     }
 
+    /// Outcomes for the reviewers that reported `findings`, or a single
+    /// `correctness` outcome when there are none.
+    fn fixture_outcomes(findings: &[vee_core::Finding]) -> Vec<vee_application::ReviewerOutcome> {
+        let mut ids: Vec<String> = findings
+            .iter()
+            .flat_map(|finding| finding.reviewer_ids.clone())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        if ids.is_empty() {
+            ids.push("correctness".into());
+        }
+        ids.into_iter()
+            .map(|reviewer_id| vee_application::ReviewerOutcome {
+                reviewer_id,
+                provider_id: "fake".into(),
+                provider_kind: Default::default(),
+                model: None,
+                provider_version: None,
+                status: "completed".into(),
+                duration_ms: None,
+                usage: None,
+            })
+            .collect()
+    }
+
     fn saved_fixture_review(
         root: &std::path::Path,
         review_id: &str,
@@ -1702,7 +1728,7 @@ mod tests {
             policy_findings: None,
             evidence: Vec::new(),
             verification_runs: Vec::new(),
-            reviewer_outcomes: Vec::new(),
+            reviewer_outcomes: fixture_outcomes(&findings),
             reviewer_arbitration: Vec::new(),
             analysis_complete,
             reasons: Vec::new(),
@@ -1773,7 +1799,7 @@ mod tests {
             path: Some("src.rs".into()),
             line: Some(1),
             provenance: "model_inference".into(),
-            reviewer_ids: Vec::new(),
+            reviewer_ids: vec!["correctness".into()],
             evidence_ids: Vec::new(),
             rule_attributions: Vec::new(),
             sample_agreement: None,
@@ -1789,6 +1815,11 @@ mod tests {
             true,
         );
         saved_fixture_review(root, "rev_b", vec![finding("find_kept", "fp-kept")], true);
+        // A later complete review that ran only another reviewer could not
+        // have re-reported these findings.
+        let mut subset = finding("find_other", "fp-other");
+        subset.reviewer_ids = vec!["security".into()];
+        saved_fixture_review(root, "rev_d", vec![subset], true);
         // A later review that did not complete reports nothing; it must not
         // mark the earlier review's findings outdated.
         saved_fixture_review(root, "rev_c", Vec::new(), false);
