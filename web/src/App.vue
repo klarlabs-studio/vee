@@ -629,19 +629,24 @@ const findingTitle = finding => {
 const drawerSourceLines = computed(() => {
   const context = drawerView.value?.task?.source_context
   if (!context) return []
-  return context.content.split('\n').map((text, index) => ({
-    number: context.start_line + index,
-    text,
-    flagged: context.start_line + index === drawerRecord.value?.finding?.line,
-  }))
+  // The backend renders each line as `{n:>6} | {text}`; keep its numbers.
+  return context.content.split('\n').filter(line => line !== '').map((line, index) => {
+    const match = line.match(/^\s*(\d+) \| ?(.*)$/)
+    const number = match ? Number(match[1]) : context.start_line + index
+    return { number, text: match ? match[2] : line, flagged: number === drawerRecord.value?.finding?.line }
+  })
 })
+// Identifies the latest drawer request, so a slower earlier response is dropped.
+let drawerRequest = 0
 async function openFinding(record) {
+  const request = ++drawerRequest
   drawerRecord.value = record; drawerView.value = null; drawerError.value = ''; drawerMessage.value = ''
   try {
-    drawerView.value = await api(`/api/findings/${encodeURIComponent(record.finding.id)}/task`)
-  } catch (e) { drawerError.value = e.message }
+    const view = await api(`/api/findings/${encodeURIComponent(record.finding.id)}/task`)
+    if (request === drawerRequest) drawerView.value = view
+  } catch (e) { if (request === drawerRequest) drawerError.value = e.message }
 }
-function closeFinding() { drawerRecord.value = null; drawerView.value = null }
+function closeFinding() { drawerRequest += 1; drawerRecord.value = null; drawerView.value = null }
 async function copyWorkPackage() {
   try {
     await navigator.clipboard.writeText(JSON.stringify(drawerView.value.task, null, 2))

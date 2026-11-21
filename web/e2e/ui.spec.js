@@ -50,7 +50,8 @@ const findingTask = {
     schema_version: 2, task_id: 'task_find001', review_id: 'rev_latest', snapshot_id: 'sha256:latest',
     snapshot_current: false, finding: findingRecord,
     source_context: { path: 'src/lib.rs', start_line: 40, end_line: 44, classification: 'untrusted_repository_source',
-      content: 'fn handle(input: &str) {\n    if input.is_empty() {\n        return process(input);\n    }\n}' },
+      // The backend numbers each line itself: `{n:>6} | {text}\n` (finding_task.rs).
+      content: '    40 | fn handle(input: &str) {\n    41 |     if input.is_empty() {\n    42 |         return process(input);\n    43 |     }\n    44 | }\n' },
     context_note: null, impact_paths: [], impact_coverage_complete: true,
     evidence: [{ id: 'ev_1', kind: 'source', classification: 'observed', provenance: 'source_snapshot', source_path: 'src/lib.rs', start_line: 42, end_line: 42, verification: 'unverified', content_digest: 'sha256:abc' }],
     applicable_standards: [], standards_note: null, ownership: null, ownership_note: null,
@@ -765,6 +766,9 @@ test('finding drawer shows title, snapshot source, evidence, verification, and c
   await expect(highlighted).toHaveCount(1)
   await expect(highlighted).toContainText('42')
   await expect(highlighted).toContainText('return process(input);')
+  await expect(drawer.locator('.source-line')).toHaveCount(5)
+  await expect(highlighted.locator('.line-number')).toHaveText('42')
+  await expect(highlighted).not.toContainText('| ')
   await expect(drawer.getByText(/This snapshot no longer matches the working tree/)).toBeVisible()
   await expect(drawer.getByText('src/lib.rs[42–42]')).toBeVisible()
   await expect(drawer.getByText(/observed · source_snapshot/)).toBeVisible()
@@ -803,4 +807,38 @@ test('queue cards show each review\'s next action from its gate', async ({ page 
   await expect(latest.locator('.next-action')).toHaveAttribute('data-kind', 'fix_findings')
   const prior = page.locator('.queue-card').filter({ hasText: 'rev_prior' })
   await expect(prior.locator('.next-action')).toHaveText('Next: Rerun reviewers: correctness (failed).')
+})
+
+test('a slow response for an earlier finding never fills the drawer of a later one', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+  let calls = 0
+  let releaseFirst
+  const firstHeld = new Promise(resolve => { releaseFirst = resolve })
+  let firstSent
+  const firstDone = new Promise(resolve => { firstSent = resolve })
+  await page.route('**/api/findings/FIND-001/task', async route => {
+    calls += 1
+    if (calls === 1) {
+      await firstHeld
+      const stale = { ...findingTask, task: { ...findingTask.task, task_id: 'task_stale' } }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(stale) })
+      firstSent()
+    } else {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(findingTask) })
+    }
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: /Findings/ }).click()
+  const open = page.getByRole('button', { name: 'Open details for FIND-001' })
+  const drawer = page.getByRole('dialog', { name: 'Finding details' })
+  await open.click()
+  await drawer.getByRole('button', { name: 'Close finding details' }).click()
+  await open.click()
+  await expect(drawer.getByRole('button', { name: 'Copy work package' })).toBeVisible()
+  releaseFirst()
+  await firstDone
+  await page.waitForTimeout(200)
+  await drawer.getByRole('button', { name: 'Copy work package' }).click()
+  const copied = JSON.parse(await page.evaluate(() => navigator.clipboard.readText()))
+  expect(copied.task_id).toBe('task_find001')
 })
