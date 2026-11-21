@@ -184,6 +184,30 @@ guard, and duplicated approval code that had already drifted. The tenth is a
 defensible convention choice. That judgment is by the author of the
 reviewer instructions, so it is not an independent rating.
 
+### Public multi-language cases (2026-11-21)
+
+Nine cases from public, permissively licensed projects were added to make the
+corpus less Go-heavy: three Python (click, httpx, starlette), two TypeScript
+(date-fns, zod), one JavaScript (axios) and three Rust (ripgrep, regex,
+clap), with 11 labels in total. Each case is the single-parent commit that
+introduced a defect a later commit fixed. Every label lies on lines that
+commit added or changed, and three cases were checked by hand against the
+fix.
+
+| Effort | Strict recall (9 public cases) |
+|---|---|
+| `low` | 7 / 11 |
+| `medium` | 7 / 10, with the clap case not yet rerun |
+
+The clap case first came back incomplete: the Claude CLI adapter passed the
+review payload as a command-line argument, and the 300 KB change exceeded
+the operating system's argument limit, so the reviewer failed before it
+ran. With the prompt on stdin, the reviewer found the defect. Misses were
+the httpx case, whose defect needs a type definition from a file outside the
+change, and the axios case, where the finding was in the right file at the
+wrong line. Recall on public cases is close to the private cases (59% at
+`low` and 76% at `medium`), but nine cases are too few to separate the two.
+
 Token counts are not comparable across providers: the Claude CLI reports
 uncached input only (cache subtotals are not retained), while Ollama reports
 every prompt token.
