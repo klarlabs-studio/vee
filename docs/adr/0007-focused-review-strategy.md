@@ -49,12 +49,15 @@ structured findings second, found the race.
 ## Consequences
 
 - Small local models produce findings where they produced none, and some are
-  real defects. On the 7 corpus cases finished at writing, strict recall was
-  1 / 7, against 3 / 7 for a strong hosted reviewer on the same cases. Output
-  is noisier and localization is weaker.
-- Focused reviews are slow: two requests per changed file, 4.6–25.7 minutes
+  real defects. On the 14 completed corpus cases, strict recall was 1 / 14,
+  against 7 / 14 for a strong hosted reviewer on the same cases. Output is
+  noisier (123 findings against 30) and localization is weaker.
+- Focused reviews are slow: two requests per changed file, 3.8–82 minutes
   per case on a 24 GB laptop, against 12–31 seconds per case for the hosted
   reviewer.
+- A single changed file larger than `max_input_tokens` cannot be reviewed in
+  focused mode; the reviewer reports `context_budget_exceeded`. Splitting a
+  file is not implemented.
 - `whole_change` stays the default. Documentation must not present a small
   local model as equivalent to a strong reviewer. Local inference is a privacy
   and offline option with lower review quality.

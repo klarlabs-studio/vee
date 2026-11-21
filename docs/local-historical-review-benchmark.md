@@ -15,7 +15,7 @@ labeled category or one of its declared aliases.
 | Reviewer | Strategy | Completed cases | Strict recall | Time |
 |---|---|---|---|---|
 | Claude Code CLI, `claude-sonnet-5-5` | `whole_change` | 16 / 16 | 9 / 17 labels (53%) | 5.5 min total, 12–31 s per case |
-| Ollama `gemma3:12b`, 32k window | `focused` | 7 / 16 at writing (run in progress) | 1 / 7 labels on those cases; Claude matched 3 / 7 on the same cases | 81 min for the 7 cases, 4.6–25.7 min each |
+| Ollama `gemma3:12b`, 32k window | `focused` | 14 / 16 | 1 / 14 labels (7%); Claude matched 7 / 14 on the same cases | 314 min total, 3.8–82 min per case |
 | Ollama `gemma3:12b`, 64k window | `whole_change` | see the earlier sections | 0 recalled; on the lockout case it returned no findings (13 output tokens) | — |
 
 **How to read the Claude result.** Strict scoring understates it. Three of
@@ -39,6 +39,23 @@ findings, and it reports some real defects (the lockout race, a
 send/receive deadlock), but most output is speculative, localization is
 weak, and a case takes minutes rather than seconds. On this corpus and this
 machine, a small local model is not a substitute for a strong reviewer.
+It produced 123 findings across the 16 cases against Claude's 30, and used
+1.25 million input tokens. Its one strict match was the send/receive
+deadlock. It described the lockout race in the right function, but its quote
+did not resolve to a changed line, so the finding has no line and does not
+count. Four further findings had the right file and category at the wrong
+line.
+
+Two cases were incomplete and are excluded from recall:
+
+- In the PostgreSQL column-shift case, the single changed file is too large
+  for one focused request (about 39,600 estimated tokens against a 28,000
+  limit), so the reviewer stopped with `context_budget_exceeded`. Focused
+  mode does not split a file.
+- In the dropped-context case, the review finished, but the gate was
+  incomplete. A blocking finding in the labeled file, describing a different
+  defect, had no line, and Vee will not pass a gate on an unlocated blocking
+  finding.
 
 **Defects found and fixed while running the comparison:**
 
