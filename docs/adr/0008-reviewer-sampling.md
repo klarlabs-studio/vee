@@ -44,9 +44,16 @@ the category and the anchor line between runs.
    sampled finding blocks the gate only when at least `sample_quorum` samples
    reported it. Findings below the quorum are kept and shown, but are
    advisory.
-4. With `samples: 1` nothing changes: no `sample_agreement` is recorded, and
+4. `effort: low | medium | high` is the user-facing preset for 1, 3 or 5
+   samples; `samples` remains an exact override and cannot be combined with
+   `effort`. `vee review --effort` (and the MCP and local HTTP review
+   inputs) applies one effort to every reviewer for that review, replacing
+   configured `effort`, `samples` and `sample_quorum`. The override is part
+   of the effective configuration, so the review's config digest records
+   the effort used.
+5. With `samples: 1` nothing changes: no `sample_agreement` is recorded, and
    saved reviews, digests and gate decisions are unaffected.
-5. If any sample fails, the reviewer's outcome is the failure and the review
+6. If any sample fails, the reviewer's outcome is the failure and the review
    is incomplete, as for a single failed run.
 
 ## Consequences
