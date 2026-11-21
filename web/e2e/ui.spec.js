@@ -872,3 +872,15 @@ test('the finding drawer follows disposition saves and closes when another revie
   await expect(page.getByText('sha256:prior', { exact: true })).toBeVisible()
   await expect(drawer).toBeHidden()
 })
+
+test('opening a finding moves focus into the drawer and Escape closes it', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: /Findings/ }).click()
+  const opener = page.getByRole('button', { name: 'Open details for FIND-001' })
+  await opener.click()
+  const drawer = page.getByRole('dialog', { name: 'Finding details' })
+  await expect(drawer.getByRole('button', { name: 'Close finding details' })).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(drawer).toBeHidden()
+  await expect(opener).toBeFocused()
+})

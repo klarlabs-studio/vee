@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 
 const reviews = ref([])
 const analytics = ref(null)
@@ -644,15 +644,26 @@ const drawerSourceLines = computed(() => {
 })
 // Identifies the latest drawer request, so a slower earlier response is dropped.
 let drawerRequest = 0
+const drawerCloseButton = ref(null)
+let drawerOpener = null
 async function openFinding(record) {
   const request = ++drawerRequest
+  drawerOpener = document.activeElement
   drawerRecord.value = record; drawerView.value = null; drawerError.value = ''; drawerMessage.value = ''
+  // After the state change, so the callback runs once the drawer is rendered.
+  nextTick(() => drawerCloseButton.value?.focus())
   try {
     const view = await api(`/api/findings/${encodeURIComponent(record.finding.id)}/task`)
     if (request === drawerRequest) drawerView.value = view
   } catch (e) { if (request === drawerRequest) drawerError.value = e.message }
 }
-function closeFinding() { drawerRequest += 1; drawerRecord.value = null; drawerView.value = null }
+function closeFinding() {
+  const wasOpen = Boolean(drawerRecord.value)
+  drawerRequest += 1; drawerRecord.value = null; drawerView.value = null
+  // Return focus to the control that opened the drawer, if it is still on the page.
+  if (wasOpen && drawerOpener?.isConnected) drawerOpener.focus()
+  drawerOpener = null
+}
 async function copyWorkPackage() {
   try {
     await navigator.clipboard.writeText(JSON.stringify(drawerView.value.task, null, 2))
@@ -857,7 +868,7 @@ onMounted(async () => {
           <h3>{{ findingTitle(drawerRecord.finding) }}</h3>
           <small>{{ drawerRecord.finding.category }} · {{ drawerRecord.status }} · confidence {{ drawerRecord.finding.confidence ?? 'unknown' }} · {{ drawerRecord.finding.id }}</small>
         </div>
-        <button class="text-button" aria-label="Close finding details" @click="closeFinding">✕</button>
+        <button ref="drawerCloseButton" class="text-button" aria-label="Close finding details" @click="closeFinding">✕</button>
       </div>
       <p v-if="String(drawerRecord.finding.rationale || '').trim() !== findingTitle(drawerRecord.finding)" class="drawer-rationale">{{ drawerRecord.finding.rationale }}</p>
       <p v-if="drawerError" class="alert">{{ drawerError }}</p>
