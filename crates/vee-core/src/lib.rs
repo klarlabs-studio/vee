@@ -2058,6 +2058,32 @@ mod tests {
             .contains("on_incomplete"));
         std::fs::write(
             &file,
+            "version: 1\npolicy_profiles:\n  strict:\n    on_unreviewed: alow\n",
+        )
+        .unwrap();
+        let error = RepositoryConfig::load(&file).unwrap_err();
+        assert!(
+            error.contains("policy profile strict on_unreviewed"),
+            "{error}"
+        );
+        std::fs::write(&file, "version: 1\npolicy:\n  minimum_confidence: 80\n").unwrap();
+        let config = RepositoryConfig::load(&file).unwrap();
+        assert_eq!(config.policy.on_unreviewed, "block");
+        assert!(
+            serde_json::to_value(&config.policy)
+                .unwrap()
+                .get("on_unreviewed")
+                .is_none(),
+            "the default on_unreviewed leaves existing configuration digests unchanged"
+        );
+        std::fs::write(&file, "version: 1\npolicy:\n  on_unreviewed: allow\n").unwrap();
+        let config = RepositoryConfig::load(&file).unwrap();
+        assert_eq!(
+            serde_json::to_value(&config.policy).unwrap()["on_unreviewed"],
+            "allow"
+        );
+        std::fs::write(
+            &file,
             "version: 1\npolicy:\n  required_reviewers: [missing]\n",
         )
         .unwrap();
@@ -2952,7 +2978,10 @@ pub struct PolicyConfig {
     /// `block` (default): a changed file inside the review filter that no
     /// reviewer received leaves the analysis incomplete. `allow`: such files
     /// are only reported.
-    #[serde(default = "default_unreviewed")]
+    #[serde(
+        default = "default_unreviewed",
+        skip_serializing_if = "is_default_unreviewed"
+    )]
     pub on_unreviewed: String,
     #[serde(default)]
     pub acceptance: AcceptancePolicyConfig,
@@ -3038,6 +3067,12 @@ fn default_incomplete() -> String {
 
 fn default_unreviewed() -> String {
     "block".into()
+}
+
+/// The default is omitted when serializing, so configurations that do not set
+/// `on_unreviewed` keep the digest they had before the field existed.
+fn is_default_unreviewed(value: &String) -> bool {
+    *value == default_unreviewed()
 }
 
 impl RepositoryConfig {
@@ -3580,6 +3615,11 @@ impl RepositoryConfig {
             if profile.on_incomplete != "block" && profile.on_incomplete != "allow" {
                 return Err(format!(
                     "policy profile {profile_id} on_incomplete must be 'block' or 'allow'"
+                ));
+            }
+            if profile.on_unreviewed != "block" && profile.on_unreviewed != "allow" {
+                return Err(format!(
+                    "policy profile {profile_id} on_unreviewed must be 'block' or 'allow'"
                 ));
             }
             for severity in &profile.block_severities {

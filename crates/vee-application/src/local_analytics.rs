@@ -40,6 +40,10 @@ pub struct NextAction {
     pub summary: String,
 }
 
+/// Outcome statuses of a reviewer whose provider returned valid findings: a
+/// fresh run, a provider-cache hit, or a run on budget-limited context.
+const SUCCESSFUL_REVIEWER_STATUSES: [&str; 3] = ["completed", "cached", "context_limited"];
+
 /// Reviewers named in a rerun summary before it is shortened.
 const MAX_NAMED_REVIEWERS: usize = 3;
 
@@ -62,7 +66,7 @@ pub fn next_action(
     }
     let failed: Vec<String> = outcomes
         .iter()
-        .filter(|outcome| outcome.status != "completed")
+        .filter(|outcome| !SUCCESSFUL_REVIEWER_STATUSES.contains(&outcome.status.as_str()))
         .map(|outcome| {
             format!(
                 "{} ({})",
@@ -657,6 +661,17 @@ mod next_action_tests {
                 0,
                 "rerun_reviewers",
                 "Rerun reviewers: correctness (failed), security (context budget exceeded).",
+            ),
+            (
+                "cached and context-limited reviewers succeeded",
+                Some(decision(Block, &["f1"], &[])),
+                vec![
+                    outcome("correctness", "cached"),
+                    outcome("security", "context_limited"),
+                ],
+                0,
+                "fix_findings",
+                "Fix 1 blocking finding.",
             ),
             (
                 "unreviewed files leave the gate incomplete",

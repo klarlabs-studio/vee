@@ -252,12 +252,12 @@ pub struct ReviewDetail {
     pub review: ReviewResult,
     pub findings: Vec<FindingRecord>,
     pub impact: crate::ImpactAssessment,
-    /// The newest later review of the same scope and base, when one exists.
+    /// The newest later complete review of the same scope and base, when one exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<Supersession>,
 }
 
-/// A later review of the same scope and base commit, and which of this
+/// A later complete review of the same scope and base commit, and which of this
 /// review's findings it no longer reported. Display only: it does not change
 /// gates, dispositions or waivers.
 #[derive(Debug, Serialize)]
@@ -291,7 +291,10 @@ fn later_review_of_same_base(
         let Ok(candidate) = workspace.saved_review(store, &summary.review_id) else {
             continue;
         };
-        if candidate.change_set.scope != review.change_set.scope
+        // An incomplete review may have missed findings, so its silence about
+        // a finding says nothing.
+        if !candidate.analysis_complete
+            || candidate.change_set.scope != review.change_set.scope
             || candidate.change_set.base_oid != review.change_set.base_oid
         {
             continue;

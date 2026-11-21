@@ -1689,6 +1689,7 @@ mod tests {
         root: &std::path::Path,
         review_id: &str,
         findings: Vec<vee_core::Finding>,
+        analysis_complete: bool,
     ) -> ReviewResult {
         let change_set =
             vee_application::capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
@@ -1703,7 +1704,7 @@ mod tests {
             verification_runs: Vec::new(),
             reviewer_outcomes: Vec::new(),
             reviewer_arbitration: Vec::new(),
-            analysis_complete: true,
+            analysis_complete,
             reasons: Vec::new(),
             gate: vee_core::GateDecision {
                 schema_version: 1,
@@ -1785,8 +1786,12 @@ mod tests {
                 finding("find_fixed", "fp-fixed"),
                 finding("find_kept", "fp-kept"),
             ],
+            true,
         );
-        saved_fixture_review(root, "rev_b", vec![finding("find_kept", "fp-kept")]);
+        saved_fixture_review(root, "rev_b", vec![finding("find_kept", "fp-kept")], true);
+        // A later review that did not complete reports nothing; it must not
+        // mark the earlier review's findings outdated.
+        saved_fixture_review(root, "rev_c", Vec::new(), false);
         let app = router(root.to_owned(), "127.0.0.1:7878".parse().unwrap());
         let detail = |uri: &'static str| {
             let app = app.clone();
