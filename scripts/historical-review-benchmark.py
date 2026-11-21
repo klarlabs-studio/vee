@@ -57,6 +57,22 @@ def ensure_real_directory(path: Path) -> None:
         raise ValueError(f"output path is not a directory: {path}")
 
 
+def review_input_key(args: argparse.Namespace, case_commit: str, config_bytes: bytes, trusted_files: list[tuple[PurePosixPath, Path]]) -> str:
+    """Digest of every input that shapes one case's Vee review, for --resume."""
+    executable = shutil.which(args.vee)
+    if executable is None:
+        raise ValueError(f"Vee executable not found: {args.vee}")
+    material = {
+        "vee": sha256(Path(executable).read_bytes()),
+        "commit": case_commit,
+        "config": sha256(config_bytes),
+        "trusted_files": sorted((str(target), sha256(source.read_bytes())) for target, source in trusted_files),
+        "reviewers": list(args.reviewers),
+        "timeout": args.timeout,
+    }
+    return sha256(json.dumps(material, sort_keys=True).encode())
+
+
 def atomic_write(path: Path, data: bytes) -> None:
     if path.is_symlink():
         path.unlink()
@@ -489,6 +505,21 @@ def compare_verification_profiles(buggy_runs: list[dict[str, Any]], fix_runs: li
     return comparisons
 
 
+def load_resumable_review(case_artifacts: Path, input_key: str) -> dict[str, Any] | None:
+    """A saved review usable for --resume: same inputs, intact review.json."""
+    try:
+        key = json.loads((case_artifacts / "review-input-key.json").read_text(encoding="utf-8"))
+        review_bytes = (case_artifacts / "review.json").read_bytes()
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (not isinstance(key, dict) or key.get("input_key") != input_key
+            or key.get("review_json_digest") != sha256(review_bytes)
+            or not isinstance(key.get("vee_exit_code"), int)
+            or not isinstance(key.get("elapsed_seconds"), (int, float))):
+        return None
+    return {"stdout": review_bytes.decode("utf-8"), "vee_exit_code": key["vee_exit_code"], "elapsed_seconds": key["elapsed_seconds"]}
+
+
 def assess_case(args: argparse.Namespace, case: dict[str, Any], repo: Path, label_bytes: bytes, labels: list[dict[str, Any]], aliases: dict[str, list[str]], config_bytes: bytes, trusted_files: list[tuple[PurePosixPath, Path]], artifacts: Path) -> dict[str, Any]:
     case_id, oid = case["id"], case["commit"]
     item: dict[str, Any] = {"case_id": case_id, "repository": case["repository"], "commit": oid, "labels_digest": sha256(label_bytes), "state": "incomplete", "defect_reference": case.get("defect_reference"), "fix_commit": case.get("fix_commit"), "fix_reference": case.get("fix_reference"), "project_license": case.get("project_license")}
@@ -535,11 +566,17 @@ def assess_case(args: argparse.Namespace, case: dict[str, Any], repo: Path, labe
         # Historical source is untrusted. Never follow a committed .vee.yaml symlink.
         install_trusted_config(worktree, config_bytes, trusted_files)
         started = time.monotonic()
+        input_key = review_input_key(args, oid, config_bytes, trusted_files)
+        saved = load_resumable_review(artifacts / case_id, input_key) if args.resume else None
         try:
-            command = [args.vee, "review", "--commit", oid, "--output", "json"]
-            for reviewer in args.reviewers:
-                command.extend(["--reviewer", reviewer])
-            result = run(command, worktree, args.timeout)
+            if saved is not None:
+                result = subprocess.CompletedProcess([], saved["vee_exit_code"], saved["stdout"], "")
+                item["resumed"] = True
+            else:
+                command = [args.vee, "review", "--commit", oid, "--output", "json"]
+                for reviewer in args.reviewers:
+                    command.extend(["--reviewer", reviewer])
+                result = run(command, worktree, args.timeout)
         except subprocess.TimeoutExpired as error:
             elapsed = round(time.monotonic() - started, 3)
             item.update({"state": "timeout", "error": f"Vee review exceeded {args.timeout}s", "elapsed_seconds": elapsed})
@@ -561,7 +598,7 @@ def assess_case(args: argparse.Namespace, case: dict[str, Any], repo: Path, labe
                 except (json.JSONDecodeError, OSError, ValueError):
                     pass
             return item
-        item["elapsed_seconds"] = round(time.monotonic() - started, 3)
+        item["elapsed_seconds"] = saved["elapsed_seconds"] if saved is not None else round(time.monotonic() - started, 3)
         try:
             report = json.loads(result.stdout)
         except json.JSONDecodeError:
@@ -610,6 +647,7 @@ def assess_case(args: argparse.Namespace, case: dict[str, Any], repo: Path, labe
         ensure_real_directory(case_artifacts)
         report_bytes = (json.dumps(report, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode()
         atomic_write(case_artifacts / "review.json", report_bytes)
+        atomic_write(case_artifacts / "review-input-key.json", (json.dumps({"input_key": input_key, "review_json_digest": sha256(report_bytes), "vee_exit_code": result.returncode, "elapsed_seconds": item["elapsed_seconds"]}, sort_keys=True) + "\n").encode())
         outcomes = report.get("reviewer_outcomes", [])
         manifests = report.get("reviewer_context", [])
         completed_reviewers = {
@@ -762,6 +800,7 @@ def main() -> int:
     parser.add_argument("--verify-fix", action="store_true", help="also execute selected local profiles on each case's pinned fix commit in a disposable checkout")
     parser.add_argument("--verification-only", action="store_true", help="compare selected trusted local verification profiles on each pinned buggy/fix commit without invoking review providers")
     parser.add_argument("--timeout", type=int, default=900)
+    parser.add_argument("--resume", action="store_true", help="reuse a case's saved review when the Vee binary, commit, trusted config and files, reviewers, and timeout are unchanged")
     parser.add_argument("--verification-timeout", type=int, default=900, help="maximum seconds per explicitly selected verification profile")
     args = parser.parse_args()
     if args.timeout < 1 or args.verification_timeout < 1:

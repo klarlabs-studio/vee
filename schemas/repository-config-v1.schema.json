@@ -264,6 +264,11 @@
         },
         "policy": {
           "$ref": "#/$defs/reviewer_policy"
+        },
+        "strategy": {
+          "enum": ["whole_change", "focused"],
+          "default": "whole_change",
+          "description": "whole_change sends the change in one request. focused reviews each changed file with a reasoning request followed by a structuring request whose findings are located by a quoted changed line; it suits small local models and requires an ollama_native provider."
         }
       }
     },

@@ -461,15 +461,23 @@ pub(crate) fn capture_provider_versions(
             || provider.kind == vee_core::ProviderKind::ClaudeCli
             || !provider.version_args.is_empty()
         {
-            vee_core::resolve_environment_allowlist(&provider.env_allowlist, |name| {
+            let probed = vee_core::resolve_environment_allowlist(&provider.env_allowlist, |name| {
                 std::env::var(name).ok()
             })
-            .ok()
             .and_then(|environment| {
                 probe_provider_version(provider, root, &environment, cancellation)
-                    .ok()
-                    .flatten()
-            })
+            });
+            match probed {
+                Ok(version) => version,
+                Err(error) => {
+                    // The outcome only records version_probe_failed; say why.
+                    eprintln!(
+                        "vee: provider {} version probe failed: {error}",
+                        reviewer.provider
+                    );
+                    None
+                }
+            }
         } else {
             None
         };

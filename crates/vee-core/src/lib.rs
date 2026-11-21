@@ -2201,6 +2201,49 @@ policy_profiles:
     }
 
     #[test]
+    fn focused_reviewer_strategy_defaults_to_whole_change_and_requires_ollama_native() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".vee.yaml");
+        let providers = "providers:\n  local:\n    kind: ollama_native\n    egress: local\n    endpoint: http://127.0.0.1:11434/api/chat\n    model: gemma3:12b\n    max_input_tokens: 28000\n    context_window_tokens: 32768\n  cli: { kind: cli, executable: reviewer, egress: local }\n";
+        let write = |reviewers: &str| {
+            std::fs::write(
+                &file,
+                format!("version: 1\n{providers}reviewers:\n{reviewers}"),
+            )
+            .unwrap();
+        };
+        write("  default: { provider: local, instructions_file: r.md }\n  focused: { provider: local, instructions_file: r.md, strategy: focused }\n");
+        let config = RepositoryConfig::load(&file).unwrap();
+        assert_eq!(
+            config.reviewers["default"].strategy,
+            ReviewStrategy::WholeChange
+        );
+        assert_eq!(
+            config.reviewers["focused"].strategy,
+            ReviewStrategy::Focused
+        );
+        assert!(
+            serde_json::to_value(&config.reviewers["default"])
+                .unwrap()
+                .get("strategy")
+                .is_none(),
+            "the default strategy leaves existing configuration digests unchanged"
+        );
+
+        write("  focused: { provider: cli, instructions_file: r.md, strategy: focused }\n");
+        let error = RepositoryConfig::load(&file).unwrap_err();
+        assert!(
+            error.contains(
+                "reviewer focused uses strategy focused, which requires an ollama_native provider"
+            ),
+            "{error}"
+        );
+
+        write("  focused: { provider: local, instructions_file: r.md, strategy: piecemeal }\n");
+        assert!(RepositoryConfig::load(&file).is_err());
+    }
+
+    #[test]
     fn ollama_native_provider_requires_loopback_and_explicit_context_budget() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join(".vee.yaml");
@@ -2564,6 +2607,26 @@ pub struct ReviewerConfig {
     pub exclude: Vec<String>,
     #[serde(default)]
     pub policy: ReviewerPolicyConfig,
+    /// How the provider is asked to review the change.
+    #[serde(default, skip_serializing_if = "ReviewStrategy::is_whole_change")]
+    pub strategy: ReviewStrategy,
+}
+/// How a reviewer's provider receives the change.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewStrategy {
+    /// One request carries every changed file and returns findings directly.
+    #[default]
+    WholeChange,
+    /// One reasoning request per changed file, then one request that turns the
+    /// reasoning into findings located by a quoted changed line. Suited to
+    /// small local models; requires an `ollama_native` provider.
+    Focused,
+}
+impl ReviewStrategy {
+    pub fn is_whole_change(&self) -> bool {
+        *self == ReviewStrategy::WholeChange
+    }
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -3065,6 +3128,13 @@ impl RepositoryConfig {
             }
             if reviewer.instructions_file.trim().is_empty() {
                 return Err(format!("reviewer {id} has an empty instructions_file"));
+            }
+            if reviewer.strategy == ReviewStrategy::Focused
+                && config.providers[&reviewer.provider].kind != ProviderKind::OllamaNative
+            {
+                return Err(format!(
+                    "reviewer {id} uses strategy focused, which requires an ollama_native provider"
+                ));
             }
             if reviewer.context_files.len() > 128 {
                 return Err(format!("reviewer {id} has more than 128 context_files"));

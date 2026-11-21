@@ -1,7 +1,85 @@
 # Local historical review benchmark
 
-**Status:** Local runner available; six initial debugging cases plus an independently reproduced lockout case across local MIT repositories; representative corpus remains open  
-**Date:** 2026-11-16
+**Status:** Local runner available; 16-case local corpus across 11 local MIT repositories (12 Go, 2 Rust, 1 TypeScript, 1 Python); a broader representative corpus remains open  
+**Date:** 2026-11-16 (provider comparison added 2026-11-21)
+
+### Provider comparison on the 16-case corpus (2026-11-21)
+
+Each case is a historical commit that introduced a later-fixed defect, with
+a human-written label for the defect's path, line range, and category. The
+same trusted reviewer instructions, include/exclude globs, and test-file
+exclusions were used for every run. Strict recall counts a label only when a
+finding has the label's path, a line inside the labeled range, and the
+labeled category or one of its declared aliases.
+
+| Reviewer | Strategy | Completed cases | Strict recall | Time |
+|---|---|---|---|---|
+| Claude Code CLI, `claude-sonnet-5-5` | `whole_change` | 16 / 16 | 9 / 17 labels (53%) | 5.5 min total, 12–31 s per case |
+| Ollama `gemma3:12b`, 32k window | `focused` | 14 / 16 | 1 / 14 labels (7%); Claude matched 7 / 14 on the same cases | 314 min total, 3.8–82 min per case |
+| Ollama `gemma3:12b`, 64k window | `whole_change` | see the earlier sections | 0 recalled; on the lockout case it returned no findings (13 output tokens) | — |
+
+**How to read the Claude result.** Strict scoring understates it. Three of
+the eight misses describe the labeled defect but fail the match: a
+lost-increment race inside the labeled range reported as `security`
+(brute-force through the race) rather than `concurrency`; an ignored
+authenticator clone warning, at a line inside the label range, reported as
+`correctness` rather than `security`; and a lock-ordering deadlock anchored
+in the function that holds the lock rather than the labeled function that
+takes it. Counting those by manual adjudication gives 12 / 17 (71%). The
+matching rules were not changed after seeing results; both numbers are
+reported. Genuine misses were a non-atomic SQLite consume, a re-read after
+`await`, a dropped context value, and the PostgreSQL untyped-parameter case.
+That last one was found by an earlier single-case run with the same
+configuration, so hosted-model results vary between runs. Findings per case
+were 0–5, with little of the noise the local model produced.
+
+**How to read the local result.** Whole-change requests to a 12B local model
+mostly return nothing. The `focused` strategy (ADR 0007) makes it produce
+findings, and it reports some real defects (the lockout race, a
+send/receive deadlock), but most output is speculative, localization is
+weak, and a case takes minutes rather than seconds. On this corpus and this
+machine, a small local model is not a substitute for a strong reviewer.
+It produced 123 findings across the 16 cases against Claude's 30, and used
+1.25 million input tokens. Its one strict match was the send/receive
+deadlock. It described the lockout race in the right function, but its quote
+did not resolve to a changed line, so the finding has no line and does not
+count. Four further findings had the right file and category at the wrong
+line.
+
+Two cases were incomplete and are excluded from recall:
+
+- In the PostgreSQL column-shift case, the single changed file is too large
+  for one focused request (about 39,600 estimated tokens against a 28,000
+  limit), so the reviewer stopped with `context_budget_exceeded`. Focused
+  mode does not split a file.
+- In the dropped-context case, the review finished, but the gate was
+  incomplete. A blocking finding in the labeled file, describing a different
+  defect, had no line, and Vee will not pass a gate on an unlocated blocking
+  finding.
+
+**Defects found and fixed while running the comparison:**
+
+- Focused reviews were budgeted against the whole-change payload, so five
+  cases were rejected as `context_budget_exceeded`; the budget now applies
+  to the largest single focused request.
+- The focused structuring step could cite rules the model had never been
+  shown (`invalid_rule_attribution`); its schema now allows only in-scope
+  approved guidance.
+- Ollama sampled at the model's default temperature, so the same case found
+  a race on one run and missed it on the next; requests now use temperature
+  0 and a fixed seed.
+- A bare provider executable such as `claude` was not found, because child
+  processes start with an empty environment; bare names are now resolved on
+  Vee's own `PATH`.
+- The Claude CLI adapter had only been tested against a fake executable. The
+  real CLI rejected the draft 2020-12 `$schema` reference and, without `HOME`
+  and `USER`, could not find its login.
+- The runner restarted from the first case after every interruption; it now
+  supports `--resume`.
+
+Token counts are not comparable across providers: the Claude CLI reports
+uncached input only (cache subtotals are not retained), while Ollama reports
+every prompt token.
 
 ### Local Gemma 3 rerun (2026-11-17)
 
@@ -341,6 +419,12 @@ case is marked `timeout` with elapsed time; a valid partial review document, if
 available, is stored separately from a complete review. Valid structured Vee
 reports are retained when the review command exits with its documented block or
 incomplete status codes.
+To continue a run that was stopped, rerun the same command with `--resume` and
+the same output folder. A case's saved review is reused only when the digest of
+the Vee binary, the pinned commit, the trusted config and files, the selected
+reviewers, and the timeout match the `review-input-key.json` saved beside it,
+and `review.json` still matches its recorded digest; otherwise the case is
+reviewed again. Reused cases are marked `resumed` in the aggregate report.
 When `--verify-profile` is explicitly selected, bounded stdout and stderr
 artifacts for the buggy and optional fixed revisions are copied into the local
 results folder. The runner verifies each declared size and SHA-256 before

@@ -6,6 +6,7 @@ mod config;
 pub mod coverage;
 pub mod failure;
 pub mod finding_task;
+mod focused_review;
 mod gate;
 mod impact;
 pub mod imported_history;

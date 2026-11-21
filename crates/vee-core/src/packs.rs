@@ -287,6 +287,9 @@ pub fn apply_packs(config: &mut RepositoryConfig, root: &Path) -> Result<(), Str
                     include: reviewer.include,
                     exclude: reviewer.exclude,
                     policy: reviewer.policy,
+                    // Packs do not choose the provider, and the focused
+                    // strategy depends on the provider kind.
+                    strategy: crate::ReviewStrategy::default(),
                 },
             );
         }
