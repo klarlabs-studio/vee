@@ -10295,12 +10295,14 @@ fn sampled_reviewer_merges_runs_and_blocks_only_findings_at_quorum() {
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&review.stdout);
-    let review: serde_json::Value = serde_json::from_slice(&review.stdout)
-        .unwrap_or_else(|_| panic!("{stdout} {}", String::from_utf8_lossy(&review.stderr)));
+    let stderr = String::from_utf8_lossy(&review.stderr).into_owned();
+    let review: serde_json::Value =
+        serde_json::from_slice(&review.stdout).unwrap_or_else(|_| panic!("{stdout} {stderr}"));
     assert_eq!(
         fs::read_dir(&slots).unwrap().count(),
         3,
-        "each sample is a separate provider call"
+        "each sample is a separate provider call; stderr: {stderr}; outcomes: {}",
+        review["reviewer_outcomes"]
     );
     let findings = review["findings"].as_array().unwrap();
     assert_eq!(findings.len(), 2, "{review}");
@@ -10411,12 +10413,14 @@ fn a_failed_sample_fails_the_sampled_reviewer() {
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&review.stdout);
-    let review: serde_json::Value = serde_json::from_slice(&review.stdout)
-        .unwrap_or_else(|_| panic!("{stdout} {}", String::from_utf8_lossy(&review.stderr)));
+    let stderr = String::from_utf8_lossy(&review.stderr).into_owned();
+    let review: serde_json::Value =
+        serde_json::from_slice(&review.stdout).unwrap_or_else(|_| panic!("{stdout} {stderr}"));
     assert_eq!(
         fs::read_dir(&slots).unwrap().count(),
         3,
-        "each sample is a separate provider call"
+        "each sample is a separate provider call; stderr: {stderr}; outcomes: {}",
+        review["reviewer_outcomes"]
     );
     assert_eq!(
         review["reviewer_outcomes"][0]["status"], "failed",

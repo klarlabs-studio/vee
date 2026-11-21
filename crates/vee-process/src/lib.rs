@@ -49,15 +49,15 @@ pub fn execute_verification_capture(
     let mut command = Command::new(&executable);
     command.args(&profile.args);
     configure_process_group(&mut command);
-    let mut child = command
+    let child = command
         .env_clear()
         .envs(platform_environment())
         .envs(environment.iter().cloned())
         .current_dir(working_directory)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    let mut child = spawn_retrying_busy_executable(child)
         .map_err(|error| format!("starting verification profile {profile_id}: {error}"))?;
     let limit = profile.output_limit_bytes;
     let stdout = child.stdout.take().expect("piped stdout");
@@ -495,15 +495,15 @@ pub fn execute_provider_reporting_exit(
     command.args(&request.args);
     command.current_dir(isolated_directory.path());
     configure_process_group(&mut command);
-    let mut child = command
+    let child = command
         .env_clear()
         .envs(platform_environment())
         .envs(request.environment.iter().cloned())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("starting provider: {e}"))?;
+        .stderr(Stdio::piped());
+    let mut child =
+        spawn_retrying_busy_executable(child).map_err(|e| format!("starting provider: {e}"))?;
     let mut input = child.stdin.take().expect("piped stdin");
     let request_input = request.stdin.clone();
     let input_thread = thread::spawn(move || input.write_all(&request_input));
@@ -601,6 +601,30 @@ pub const PLATFORM_ENVIRONMENT: &[&str] = if cfg!(windows) {
 /// The [`PLATFORM_ENVIRONMENT`] variables this process has, for
 /// `Command::envs` right after `env_clear` and before explicitly allowed
 /// variables.
+/// Spawn a command, retrying briefly while the executable is busy.
+///
+/// Linux refuses to execute a file that any process still holds open for
+/// writing (`ETXTBSY`). That happens when an executable was just written or
+/// updated, including when a concurrent `fork` briefly inherits the writer's
+/// descriptor. The condition clears within milliseconds.
+fn spawn_retrying_busy_executable(
+    command: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    const ATTEMPTS: u32 = 6;
+    let mut attempt = 1;
+    loop {
+        match command.spawn() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < ATTEMPTS =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(25 * u64::from(attempt)));
+                attempt += 1;
+            }
+            result => return result,
+        }
+    }
+}
+
 pub fn platform_environment() -> Vec<(&'static str, std::ffi::OsString)> {
     PLATFORM_ENVIRONMENT
         .iter()
@@ -1207,5 +1231,33 @@ mod tests {
     #[cfg(all(unix, not(target_os = "linux")))]
     fn process_is_running(pid: i32) -> bool {
         unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn spawn_waits_for_an_executable_that_is_still_open_for_writing() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("busy.sh");
+        let mut writer = std::fs::File::create(&script).unwrap();
+        writer.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            std::process::Command::new(&script)
+                .spawn()
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::ExecutableFileBusy,
+            "the open writer makes the script busy"
+        );
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            drop(writer);
+        });
+        let mut child =
+            spawn_retrying_busy_executable(&mut std::process::Command::new(&script)).unwrap();
+        assert!(child.wait().unwrap().success());
+        release.join().unwrap();
     }
 }
