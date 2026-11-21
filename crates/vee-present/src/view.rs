@@ -21,6 +21,8 @@ pub enum Style {
     Code,
     /// A status label shown with the tone's symbol.
     Badge(Tone),
+    /// A record identifier the reader may copy: dimmed in a terminal, code in Markdown.
+    Id,
 }
 
 /// A run of text with one style. Text may come from repositories or models,
@@ -61,6 +63,10 @@ impl Cell {
 
     pub fn code(text: impl Into<String>) -> Self {
         Self::from(Span::new(text, Style::Code))
+    }
+
+    pub fn id(text: impl Into<String>) -> Self {
+        Self::from(Span::new(text, Style::Id))
     }
 
     pub fn badge(tone: Tone, label: impl Into<String>) -> Self {
@@ -109,8 +115,22 @@ pub enum Block {
         tone: Tone,
         text: Cell,
     },
-    /// A command the reader can run next.
-    NextStep(String),
+    /// What the reader can do next.
+    NextStep(Action),
+}
+
+/// A next step, as a CLI command and, when one exists, the equivalent MCP
+/// tool call. Each backend shows the form its reader can act on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Action {
+    pub command: String,
+    pub tool: Option<ToolCall>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolCall {
+    pub name: String,
+    pub arguments: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -175,8 +195,29 @@ impl View {
         self
     }
 
+    /// A next step that only the CLI offers.
     pub fn next_step(mut self, command: impl Into<String>) -> Self {
-        self.blocks.push(Block::NextStep(command.into()));
+        self.blocks.push(Block::NextStep(Action {
+            command: command.into(),
+            tool: None,
+        }));
+        self
+    }
+
+    /// A next step offered by both transports.
+    pub fn next_action(
+        mut self,
+        command: impl Into<String>,
+        tool: &str,
+        arguments: serde_json::Value,
+    ) -> Self {
+        self.blocks.push(Block::NextStep(Action {
+            command: command.into(),
+            tool: Some(ToolCall {
+                name: tool.to_owned(),
+                arguments,
+            }),
+        }));
         self
     }
 

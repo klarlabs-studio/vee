@@ -4,7 +4,7 @@ use crate::views::serde_name;
 use vee_application::{ReviewResult, ReviewerOutcome};
 use vee_core::Finding;
 
-const SUMMARY_WIDTH: usize = 72;
+const SUMMARY_WIDTH: usize = 56;
 
 impl ToView for ReviewResult {
     fn to_view(&self) -> View {
@@ -15,7 +15,15 @@ impl ToView for ReviewResult {
             )
             .fields(vec![
                 ("Snapshot".into(), Cell::code(&self.snapshot_id)),
-                ("Status".into(), tone::status_text(&self.status)),
+                (
+                    "Status".into(),
+                    // The title badge already shows the gate status; repeat only a difference.
+                    if self.status == crate::views::serde_name(&self.gate.status) {
+                        Cell::default()
+                    } else {
+                        tone::status_text(&self.status)
+                    },
+                ),
                 (
                     "Changed files".into(),
                     Cell::plain(self.change_set.files.len().to_string()),
@@ -78,7 +86,7 @@ impl ToView for ReviewResult {
                         if item.rationale_disagreement {
                             dimensions.push("rationale");
                         }
-                        Cell::code(&item.finding_id).then(Span::new(
+                        Cell::id(&item.finding_id).then(Span::new(
                             format!(
                                 "{} reports disagree on {}",
                                 item.reports.len(),
@@ -90,8 +98,12 @@ impl ToView for ReviewResult {
                     .collect(),
             );
         }
-        if let Some(first) = self.findings.first() {
-            view = view.next_step(format!("vee findings show {}", first.id));
+        if let Some(first) = ranked(&self.findings, &self.gate.blocking_findings).first() {
+            view = view.next_action(
+                format!("vee findings show {}", first.id),
+                "get_finding",
+                serde_json::json!({"finding_id": first.id}),
+            );
         }
         view
     }
@@ -152,8 +164,8 @@ fn outcomes_view(outcomes: &[ReviewerOutcome]) -> View {
 pub(crate) fn findings_table(findings: &[Finding], blocking: &[String]) -> View {
     View::new().table(
         &["Severity", "Location", "Category", "Finding", "ID"],
-        findings
-            .iter()
+        ranked(findings, blocking)
+            .into_iter()
             .map(|finding| {
                 let mut severity = tone::severity(finding.severity);
                 if blocking.contains(&finding.id) {
@@ -166,11 +178,35 @@ pub(crate) fn findings_table(findings: &[Finding], blocking: &[String]) -> View 
                     tone::location(finding.path.as_deref(), finding.line),
                     Cell::plain(&finding.category),
                     Cell::plain(summary(&finding.rationale, SUMMARY_WIDTH)),
-                    Cell::muted(&finding.id),
+                    Cell::id(&finding.id),
                 ]
             })
             .collect(),
     )
+}
+
+/// Findings in reading order: blocking first, then by severity, then location.
+pub(crate) fn ranked<'a>(findings: &'a [Finding], blocking: &[String]) -> Vec<&'a Finding> {
+    let mut ranked: Vec<&Finding> = findings.iter().collect();
+    ranked.sort_by_key(|finding| {
+        (
+            !blocking.contains(&finding.id),
+            severity_rank(finding.severity),
+            finding.path.clone(),
+            finding.line,
+        )
+    });
+    ranked
+}
+
+pub(crate) fn severity_rank(severity: vee_core::Severity) -> u8 {
+    match severity {
+        vee_core::Severity::Critical => 0,
+        vee_core::Severity::High => 1,
+        vee_core::Severity::Medium => 2,
+        vee_core::Severity::Low => 3,
+        vee_core::Severity::Info => 4,
+    }
 }
 
 fn duration(milliseconds: u64) -> String {
@@ -193,7 +229,7 @@ pub fn review_report(review: &ReviewResult) -> View {
         .retain(|block| !matches!(block, crate::view::Block::NextStep(_)));
     if !review.findings.is_empty() {
         view = view.section("Finding details");
-        for finding in &review.findings {
+        for finding in ranked(&review.findings, &review.gate.blocking_findings) {
             view = view
                 .paragraph(
                     tone::severity(finding.severity)
@@ -215,7 +251,7 @@ pub fn review_report(review: &ReviewResult) -> View {
                         "Evidence".into(),
                         Cell::plain(finding.evidence_ids.join(", ")),
                     ),
-                    ("ID".into(), Cell::muted(&finding.id)),
+                    ("ID".into(), Cell::id(&finding.id)),
                 ]);
         }
     }
@@ -232,7 +268,7 @@ pub fn review_report(review: &ReviewResult) -> View {
                 .flat_map(|item| {
                     item.reports.iter().map(|report| {
                         vec![
-                            Cell::muted(&item.finding_id),
+                            Cell::id(&item.finding_id),
                             Cell::strong(&report.reviewer_id),
                             tone::severity(report.severity),
                             tone::confidence(report.confidence),

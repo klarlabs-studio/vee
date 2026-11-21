@@ -25,7 +25,7 @@ impl ToView for FindingsPage {
                         tone::finding_status(record.status),
                         tone::location(record.finding.path.as_deref(), record.finding.line),
                         Cell::plain(summary(&record.finding.rationale, SUMMARY_WIDTH)),
-                        Cell::muted(&record.finding.id),
+                        Cell::id(&record.finding.id),
                     ]
                 })
                 .collect(),
@@ -39,9 +39,17 @@ impl ToView for FindingsPage {
                     shown_end,
                     self.total
                 )))
-                .next_step(format!("vee findings list --offset {shown_end}"));
+                .next_action(
+                    format!("vee findings list --offset {shown_end}"),
+                    "list_findings",
+                    serde_json::json!({"offset": shown_end}),
+                );
         } else if let Some(first) = self.findings.first() {
-            view = view.next_step(format!("vee findings show {}", first.finding.id));
+            view = view.next_action(
+                format!("vee findings show {}", first.finding.id),
+                "get_finding",
+                serde_json::json!({"finding_id": first.finding.id}),
+            );
         }
         view
     }
@@ -116,7 +124,7 @@ impl ToView for FindingDetail {
                                 crate::views::serde_name(&item.kind),
                                 Style::Plain,
                             ))
-                            .then(Span::new(&item.id, Style::Muted))
+                            .then(Span::new(&item.id, Style::Id))
                     })
                     .collect(),
             );
@@ -125,7 +133,11 @@ impl ToView for FindingDetail {
         if self.verification_runs.is_empty() {
             view = view
                 .paragraph(Cell::muted("No finding-specific verification recorded."))
-                .next_step(format!("vee verify {} --profile <profile>", finding.id));
+                .next_action(
+                    format!("vee verify {} --profile <profile>", finding.id),
+                    "verify_finding",
+                    serde_json::json!({"finding_id": finding.id, "profile_id": "<profile>"}),
+                );
         } else {
             view = view.table(
                 &["Run", "Profile", "Status", "Snapshot"],
@@ -133,7 +145,7 @@ impl ToView for FindingDetail {
                     .iter()
                     .map(|run| {
                         vec![
-                            Cell::muted(&run.run_id),
+                            Cell::id(&run.run_id),
                             Cell::plain(&run.profile_id),
                             verification_status(run.status),
                             Cell::code(&run.snapshot_id),

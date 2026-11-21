@@ -8264,7 +8264,11 @@ esac
     let markdown = fs::read_to_string(markdown_report).unwrap();
     assert!(markdown.starts_with("## Review rev\\_"), "{markdown}");
     assert!(
-        markdown.contains("- **Status:** 🔴 **block**"),
+        markdown
+            .lines()
+            .next()
+            .unwrap()
+            .ends_with(" · 🔴 **block**"),
         "{markdown}"
     );
     assert!(markdown.contains("unsafe operation"), "{markdown}");

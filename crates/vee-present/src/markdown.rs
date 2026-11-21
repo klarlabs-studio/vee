@@ -96,7 +96,7 @@ fn span(span: &Span) -> String {
         Style::Plain => inline(&span.text),
         Style::Strong => format!("**{}**", inline(&span.text)),
         Style::Muted => format!("_{}_", inline(&span.text)),
-        Style::Code => code(&span.text),
+        Style::Code | Style::Id => code(&span.text),
         Style::Badge(tone) => format!("{} **{}**", marker(tone), inline(&span.text)),
     }
 }
@@ -152,6 +152,14 @@ fn block_markdown(block: &Block) -> String {
             .collect(),
         Block::Paragraph(content) => format!("{}\n", cell(content)),
         Block::Note { tone, text } => format!("> {} {}\n", marker(*tone), cell(text)),
-        Block::NextStep(command) => format!("Next: {}\n", code(command)),
+        Block::NextStep(action) => match &action.tool {
+            Some(tool) => format!(
+                "Next: call {} with {} (CLI: {})\n",
+                code(&tool.name),
+                code(&tool.arguments.to_string()),
+                code(&action.command)
+            ),
+            None => format!("Next: {}\n", code(&action.command)),
+        },
     }
 }

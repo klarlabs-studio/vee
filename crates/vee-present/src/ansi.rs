@@ -103,6 +103,13 @@ impl Painter {
                     width,
                 )
             }
+            Style::Id => {
+                let width = width(&text);
+                (
+                    self.paint(AnsiStyle::new().effects(Effects::DIMMED), &text),
+                    width,
+                )
+            }
             Style::Badge(tone) => {
                 let label = format!("{} {text}", symbol(tone));
                 let width = width(&label);
@@ -171,12 +178,12 @@ impl Painter {
                 self.paint(tone_color(*tone).effects(Effects::BOLD), symbol(*tone)),
                 self.cell(text).0
             ),
-            Block::NextStep(command) => format!(
+            Block::NextStep(action) => format!(
                 "{} {}\n",
                 self.paint(AnsiStyle::new().effects(Effects::DIMMED), "→"),
                 self.paint(
                     AnsiStyle::new().fg_color(Some(AnsiColor::Cyan.into())),
-                    &sanitize(command)
+                    &sanitize(&action.command)
                 )
             ),
         }

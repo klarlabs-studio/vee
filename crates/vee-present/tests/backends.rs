@@ -157,3 +157,24 @@ fn markdown_escaping_keeps_model_text_inert_and_code_intact() {
     assert_eq!(markdown::code("file`name.rs"), "``file`name.rs``");
     assert_eq!(markdown::code("`edge"), "`` `edge ``");
 }
+
+#[test]
+fn next_actions_show_the_command_in_a_terminal_and_the_tool_call_in_markdown() {
+    let view = View::new().next_action(
+        "vee findings show find_1",
+        "get_finding",
+        serde_json::json!({"finding_id": "find_1"}),
+    );
+    assert_eq!(ansi::render(&view, false), "→ vee findings show find_1\n");
+    assert_eq!(
+        markdown::render(&view),
+        "Next: call `get_finding` with `{\"finding_id\":\"find_1\"}` (CLI: `vee findings show find_1`)\n"
+    );
+}
+
+#[test]
+fn ids_are_dim_in_a_terminal_and_copyable_code_in_markdown() {
+    let view = View::new().paragraph(Cell::id("find_1"));
+    assert_eq!(ansi::render(&view, true), "\u{1b}[2mfind_1\u{1b}[0m\n");
+    assert_eq!(markdown::render(&view), "`find_1`\n");
+}

@@ -18,7 +18,7 @@ impl ToView for VerificationRun {
                 Some(verification_status(self.status)),
             )
             .fields(vec![
-                ("Run".into(), Cell::muted(&self.run_id)),
+                ("Run".into(), Cell::id(&self.run_id)),
                 ("Snapshot".into(), Cell::code(&self.snapshot_id)),
                 (
                     "Finding".into(),
