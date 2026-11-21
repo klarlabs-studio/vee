@@ -166,6 +166,24 @@ repository, nox reported four command-injection results on argument-list
 `subprocess.run` calls in a test script, which are false positives; gating only
 on changed lines limits, but does not remove, such noise.
 
+### Architecture reviewer (2026-11-21)
+
+The advisory `architecture` reviewer that `vee init` writes (ADR 0009) ran
+once on all 38 corpus commits with Claude at `low` effort. Design problems
+rarely have one introducing commit, so the corpus has no design labels yet;
+this run measures output, not recall.
+
+It reported 86 findings (5 high, 38 medium, 43 low), all advisory, and no gate
+blocked. Two commits received no findings. The most common themes were
+duplicated logic (15), leaky abstractions (10) and hidden coupling (7);
+categories are free text. In a fixed random sample of ten findings, the
+author judged nine specific and actionable. Several describe real
+behavior defects in design terms: a response wrapper that hides optional
+writer interfaces and breaks streaming, an aggregate method with no state
+guard, and duplicated approval code that had already drifted. The tenth is a
+defensible convention choice. That judgment is by the author of the
+reviewer instructions, so it is not an independent rating.
+
 Token counts are not comparable across providers: the Claude CLI reports
 uncached input only (cache subtotals are not retained), while Ollama reports
 every prompt token.
