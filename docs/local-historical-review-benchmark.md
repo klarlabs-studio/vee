@@ -77,6 +77,30 @@ Two cases were incomplete and are excluded from recall:
 - The runner restarted from the first case after every interruption; it now
   supports `--resume`.
 
+### Run-to-run variance and impact ranking (2026-11-21)
+
+Three identical Claude runs scored 9 / 17, 11 / 17 and 10 / 15 (one case was
+incomplete because a blocking finding had no line). Six of the 16 cases
+flipped between found and missed. A single run is therefore not enough to
+compare variants on this corpus; the comparisons below use three runs each.
+
+Impact context is capped at eight files per review. In the baseline, 79 of
+the 123 impact files sent were tests: same-directory tests outranked
+production callers, and syntactic production references were not ranked at
+all. After ranking production references first, 8 of 123 were tests.
+
+| Variant | Runs | Strict recall (sum over runs) | Union over the three runs |
+|---|---|---|---|
+| Baseline | 3 | 30 / 49 (61%) | 14 / 17 |
+| Production references first | 3 | 30 / 51 (59%) | 13 / 17 |
+
+The ranking change fixes what reviewers are shown but does not change
+recall measurably on this corpus. The larger effect is sampling: the union of
+three runs found 13–14 of 17 labels against about 60% for one run, with about
+50% more distinct findings rather than three times as many. Three defects (a
+dropped context value, a shuffle hang, and a re-read after `await`) were
+missed in all six runs.
+
 Token counts are not comparable across providers: the Claude CLI reports
 uncached input only (cache subtotals are not retained), while Ollama reports
 every prompt token.
