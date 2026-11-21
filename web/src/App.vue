@@ -874,7 +874,7 @@ onMounted(async () => {
       <p v-if="drawerError" class="alert">{{ drawerError }}</p>
       <p v-else-if="!drawerView" class="hint">Loading snapshot context…</p>
       <template v-else>
-        <p v-if="!drawerView.task.snapshot_current" class="alert">This snapshot no longer matches the working tree. The source below is the reviewed snapshot, not the current file.</p>
+        <p v-if="!drawerView.task.snapshot_current" class="alert">This snapshot no longer matches the working tree.<template v-if="drawerView.task.source_context"> The source below is the reviewed snapshot, not the current file.</template><template v-else> The reviewed source is no longer available.</template></p>
         <section class="drawer-section">
           <h4>Code reference</h4>
           <small>{{ drawerRecord.finding.path || 'No location' }}<template v-if="drawerRecord.finding.line">:{{ drawerRecord.finding.line }}</template></small>
