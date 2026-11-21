@@ -1,0 +1,13 @@
+[package]
+name = "vee-present"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared views of Vee result documents, rendered for terminals and Markdown"
+
+[dependencies]
+anstyle.workspace = true
+serde_json.workspace = true
+vee-core = { path = "../vee-core" }
+vee-application = { path = "../vee-application" }
