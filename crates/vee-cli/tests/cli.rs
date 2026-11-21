@@ -10238,7 +10238,7 @@ fn sampled_reviewer_merges_runs_and_blocks_only_findings_at_quorum() {
     git(&["config", "user.name", "Vee test"]);
     fs::write(
         root.join(".gitignore"),
-        "/.vee/\n/provider\n/reviewer.md\n/slots/\n",
+        "/.vee/\n/provider\n/reviewer.md\n/slots/\n/slots.log\n",
     )
     .unwrap();
     fs::write(root.join("src.rs"), "fn a() {}\n").unwrap();
@@ -10265,7 +10265,7 @@ fn sampled_reviewer_merges_runs_and_blocks_only_findings_at_quorum() {
     fs::write(
         &provider,
         format!(
-            "#!/bin/sh\ncat >/dev/null\nif mkdir {slots}/0 2>/dev/null; then printf '%s' '{first}'\nelif mkdir {slots}/1 2>/dev/null; then printf '%s' '{second}'\nelse mkdir {slots}/2; printf '%s' '{third}'\nfi\n",
+            "#!/bin/sh\necho \"$$ start\" >> {slots}.log\ncat >/dev/null\nif mkdir {slots}/0 2>/dev/null; then echo \"$$ slot 0\" >> {slots}.log; printf '%s' '{first}'\nelif mkdir {slots}/1 2>/dev/null; then echo \"$$ slot 1\" >> {slots}.log; printf '%s' '{second}'\nelse mkdir {slots}/2; echo \"$$ slot 2 status $?\" >> {slots}.log; printf '%s' '{third}'\nfi\n",
             slots = slots.display(),
             first = output(&[finding("a returns the wrong value", 1), finding("e overflows", 5)]),
             second = output(&[finding("the result of a is wrong", 2)]),
@@ -10301,8 +10301,9 @@ fn sampled_reviewer_merges_runs_and_blocks_only_findings_at_quorum() {
     assert_eq!(
         fs::read_dir(&slots).unwrap().count(),
         3,
-        "each sample is a separate provider call; stderr: {stderr}; outcomes: {}",
-        review["reviewer_outcomes"]
+        "each sample is a separate provider call; stderr: {stderr}; outcomes: {}; calls: {}",
+        review["reviewer_outcomes"],
+        fs::read_to_string(slots.with_extension("log")).unwrap_or_default()
     );
     let findings = review["findings"].as_array().unwrap();
     assert_eq!(findings.len(), 2, "{review}");
@@ -10357,7 +10358,7 @@ fn a_failed_sample_fails_the_sampled_reviewer() {
     git(&["config", "user.name", "Vee test"]);
     fs::write(
         root.join(".gitignore"),
-        "/.vee/\n/provider\n/reviewer.md\n/slots/\n",
+        "/.vee/\n/provider\n/reviewer.md\n/slots/\n/slots.log\n",
     )
     .unwrap();
     fs::write(root.join("src.rs"), "fn a() {}\n").unwrap();
@@ -10384,7 +10385,7 @@ fn a_failed_sample_fails_the_sampled_reviewer() {
     fs::write(
         &provider,
         format!(
-            "#!/bin/sh\ncat >/dev/null\nif mkdir {slots}/0 2>/dev/null; then printf '%s' '{first}'\nelif mkdir {slots}/1 2>/dev/null; then exit 3\nelse mkdir {slots}/2; printf '%s' '{third}'\nfi\n",
+            "#!/bin/sh\necho \"$$ start\" >> {slots}.log\ncat >/dev/null\nif mkdir {slots}/0 2>/dev/null; then echo \"$$ slot 0\" >> {slots}.log; printf '%s' '{first}'\nelif mkdir {slots}/1 2>/dev/null; then echo \"$$ slot 1\" >> {slots}.log; exit 3\nelse mkdir {slots}/2; echo \"$$ slot 2 status $?\" >> {slots}.log; printf '%s' '{third}'\nfi\n",
             slots = slots.display(),
             first = output(&[finding("a returns the wrong value", 1), finding("e overflows", 5)]),
             third = output(&[]),
@@ -10419,8 +10420,9 @@ fn a_failed_sample_fails_the_sampled_reviewer() {
     assert_eq!(
         fs::read_dir(&slots).unwrap().count(),
         3,
-        "each sample is a separate provider call; stderr: {stderr}; outcomes: {}",
-        review["reviewer_outcomes"]
+        "each sample is a separate provider call; stderr: {stderr}; outcomes: {}; calls: {}",
+        review["reviewer_outcomes"],
+        fs::read_to_string(slots.with_extension("log")).unwrap_or_default()
     );
     assert_eq!(
         review["reviewer_outcomes"][0]["status"], "failed",
