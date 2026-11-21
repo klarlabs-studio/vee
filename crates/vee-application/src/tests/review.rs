@@ -316,7 +316,7 @@ fn legacy_review_without_policy_findings_falls_back_to_display_findings() {
 }
 
 #[test]
-fn reviewer_impact_context_prioritizes_tests_and_direct_references() {
+fn reviewer_impact_context_prioritizes_production_references_over_tests() {
     let edge = |relationship: &str, certainty: &str| ImpactEdge {
         source_path: "src/lib.rs".into(),
         affected_path: "src/other.rs".into(),
@@ -325,19 +325,21 @@ fn reviewer_impact_context_prioritizes_tests_and_direct_references() {
         certainty: certainty.into(),
         evidence_line: 1,
     };
-
-    assert!(
-        impact_context_edge_priority(&edge("resolved_symbol_reference", "resolved_semantic"))
-            < impact_context_edge_priority(&edge("likely_test_reference", "inferred_heuristic"))
-    );
-    assert!(
-        impact_context_edge_priority(&edge("likely_test_reference", "inferred_heuristic"))
-            < impact_context_edge_priority(&edge("textual_symbol_reference", "inferred_heuristic"))
-    );
-    assert!(
-        impact_context_edge_priority(&edge("textual_symbol_reference", "inferred_heuristic"))
-            < impact_context_edge_priority(&edge("shared_local_dependency", "inferred_import"))
-    );
+    let ordered = [
+        edge("resolved_symbol_reference", "resolved_semantic"),
+        edge("syntactic_symbol_reference", "inferred_heuristic"),
+        edge("textual_symbol_reference", "inferred_heuristic"),
+        edge("likely_test_reference", "inferred_heuristic"),
+        edge("shared_local_dependency", "inferred_import"),
+    ];
+    for pair in ordered.windows(2) {
+        assert!(
+            impact_context_edge_priority(&pair[0]) < impact_context_edge_priority(&pair[1]),
+            "{} should rank before {}",
+            pair[0].relationship,
+            pair[1].relationship
+        );
+    }
     assert!(
         impact_context_edge_priority(&edge("resolved_symbol_reference", "resolved_semantic"))
             < impact_context_edge_priority(&edge(
@@ -345,9 +347,18 @@ fn reviewer_impact_context_prioritizes_tests_and_direct_references() {
                 "inferred_heuristic"
             ))
     );
+
+    let mut distant_caller = edge("syntactic_symbol_reference", "inferred_heuristic");
+    distant_caller.affected_path = "api/handlers.go".into();
+    let mut local_test = edge("likely_test_reference", "inferred_heuristic");
+    local_test.affected_path = "src/lib_test.go".into();
+    assert!(
+        impact_context_edge_priority(&distant_caller) < impact_context_edge_priority(&local_test),
+        "a production caller in another directory ranks before a same-directory test"
+    );
+
     let mut distant_test = edge("likely_test_reference", "inferred_heuristic");
     distant_test.affected_path = "domain/workload_test.go".into();
-    let local_test = edge("likely_test_reference", "inferred_heuristic");
     assert!(
         impact_context_edge_priority(&local_test) < impact_context_edge_priority(&distant_test)
     );

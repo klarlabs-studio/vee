@@ -13,24 +13,30 @@ pub struct ImpactEdge {
     pub evidence_line: u32,
 }
 
+/// Rank an impact edge for the bounded reviewer context; lower sorts first.
+///
+/// Production references come before tests, so same-package tests cannot
+/// crowd callers out of the context cap. Within a relationship, files in the
+/// changed file's directory come first, then stronger certainty.
 pub(crate) fn impact_context_edge_priority(edge: &ImpactEdge) -> (u8, u8, u8) {
-    let directory =
-        (Path::new(&edge.source_path).parent() != Path::new(&edge.affected_path).parent()) as u8;
     let relationship = match edge.relationship.as_str() {
         "resolved_symbol_reference" => 0,
-        "likely_test_reference" => 1,
+        "syntactic_symbol_reference" => 1,
         "textual_symbol_reference" => 2,
-        "inferred_import" => 3,
-        "shared_local_dependency" => 4,
-        _ => 5,
+        "likely_test_reference" => 3,
+        "inferred_import" => 4,
+        "shared_local_dependency" => 5,
+        _ => 6,
     };
+    let directory =
+        (Path::new(&edge.source_path).parent() != Path::new(&edge.affected_path).parent()) as u8;
     let certainty = match edge.certainty.as_str() {
         "resolved_semantic" => 0,
         "inferred_heuristic" => 1,
         "inferred_import" => 2,
         _ => 3,
     };
-    (directory, relationship, certainty)
+    (relationship, directory, certainty)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -732,17 +732,17 @@ pub fn run_review_with_provider_and_selection_context(
         if let Ok(impact) = impact_context.as_ref() {
             if impact.snapshot_id == snapshot {
                 let mut seen = std::collections::BTreeSet::new();
-                // Impact analyzers may emit many distant neighbors before
-                // same-directory tests and direct references. Rank candidates
-                // before enforcing the bounded file/byte budget, with stable
-                // path tie-breaks so identical snapshots produce identical context.
+                // Impact analyzers emit edges in discovery order. Rank them
+                // (production references before tests) before enforcing the
+                // bounded file/byte budget, with stable path tie-breaks so
+                // identical snapshots produce identical context.
                 let mut impact_edges = impact.paths.iter().collect::<Vec<_>>();
                 impact_edges.sort_by_key(|edge| {
-                    let (directory_rank, relationship_rank, certainty_rank) =
+                    let (relationship_rank, directory_rank, certainty_rank) =
                         impact_context_edge_priority(edge);
                     (
-                        directory_rank,
                         relationship_rank,
+                        directory_rank,
                         certainty_rank,
                         edge.affected_path.as_str(),
                         edge.source_path.as_str(),
