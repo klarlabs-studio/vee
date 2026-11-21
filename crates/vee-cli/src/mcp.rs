@@ -729,8 +729,8 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         "Get a finding with its lifecycle, referenced evidence, and verification runs. Same document as `vee findings show --output json`.",
         |ws, input: FindingInput| operations::finding_detail(&ws, &input.finding_id));
 
-    operation_tool!(server, workspace, "get_finding_task", "Get finding task", read_only_tool(),
-        Some("finding-task-v3"),
+    viewed_tool!(server, workspace, "get_finding_task", "Get finding task", read_only_tool(),
+        "finding-task-v3",
         "Build a bounded, snapshot-bound investigation task with source context for a coding agent. Same document as `vee findings task --output json`.",
         |ws, input: FindingTaskInput| operations::finding_task(
             &ws,
@@ -738,8 +738,8 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
             input.context_lines.unwrap_or(operations::DEFAULT_CONTEXT_LINES),
         ));
 
-    operation_tool!(server, workspace, "get_finding_work_package", "Get finding work package", read_only_tool(),
-        Some("finding-work-package-v2"),
+    viewed_tool!(server, workspace, "get_finding_work_package", "Get finding work package", read_only_tool(),
+        "finding-work-package-v2",
         "Build one agent work package from findings that share a review and exact source snapshot. Same document as `vee findings package --output json`.",
         |ws, input: FindingPackageInput| operations::finding_work_package(
             &ws,
@@ -754,8 +754,8 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
             &ws, &input.finding_id, input.status.into(), &input.reason,
         ));
 
-    operation_tool!(server, workspace, "record_finding_feedback", "Record finding feedback", write_tool(false, false, false),
-        Some("finding-feedback-v1"),
+    viewed_tool!(server, workspace, "record_finding_feedback", "Record finding feedback", write_tool(false, false, false),
+        "finding-feedback-v1",
         "Record explicit human accuracy/actionability feedback for a finding on a snapshot where it occurred. Same document as `vee findings feedback set --output json`.",
         |ws, input: RecordFindingFeedbackInput| operations::record_finding_feedback(&ws, operations::FeedbackRequest {
             finding_id: &input.finding_id,
@@ -779,13 +779,13 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
             impacted_tests: false,
         }));
 
-    operation_tool!(server, workspace, "diagnose_verification", "Diagnose verification run", read_only_tool(),
-        Some("verification-diagnosis-v2"),
+    viewed_tool!(server, workspace, "diagnose_verification", "Diagnose verification run", read_only_tool(),
+        "verification-diagnosis-v2",
         "Parse integrity-checked verification logs into deterministic, snapshot-linked compiler and test diagnostics. Same document as `vee verification diagnose --output json`.",
         |ws, input: DiagnoseVerificationInput| operations::diagnose_verification(&ws, &input.run_id));
 
-    operation_tool!(server, workspace, "analyze_impact", "Analyze impact", read_only_tool(),
-        Some("impact-assessment-v3"),
+    viewed_tool!(server, workspace, "analyze_impact", "Analyze impact", read_only_tool(),
+        "impact-assessment-v3",
         "Analyze files and tests likely affected by a saved review's snapshot, with evidence paths and uncertainty. Same document as `vee impact --review <id> --output json`.",
         |ws, input: ReviewInput| operations::impact(&ws, operations::ChangeTarget::Review(input.review_id)));
 
@@ -809,18 +809,18 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
             })
         })?;
 
-    operation_tool!(server, workspace, "acceptance_traceability", "Acceptance traceability", read_only_tool(),
-        Some("acceptance-traceability-v1"),
+    viewed_tool!(server, workspace, "acceptance_traceability", "Acceptance traceability", read_only_tool(),
+        "acceptance-traceability-v1",
         "Trace saved work-item acceptance criteria to the review's changes and likely tests, with provenance and uncertainty. Same document as `vee acceptance report --output json`.",
         |ws, input: ReviewInput| operations::acceptance_report(&ws, &input.review_id));
 
-    operation_tool!(server, workspace, "get_applicable_standards", "Get applicable standards", read_only_tool(),
-        Some("standards-resolution-v1"),
+    viewed_tool!(server, workspace, "get_applicable_standards", "Get applicable standards", read_only_tool(),
+        "standards-resolution-v1",
         "Resolve bounded repository standards with source provenance, precedence, scope, and potential-conflict disclosures. Same document as `vee standards --output json`.",
         |ws, input: StandardsInput| operations::applicable_standards(&ws, input.path.as_deref().map(std::path::Path::new)));
 
-    operation_tool!(server, workspace, "get_quality_analytics", "Get quality analytics", read_only_tool(),
-        Some("quality-analytics-v9"),
+    viewed_tool!(server, workspace, "get_quality_analytics", "Get quality analytics", read_only_tool(),
+        "quality-analytics-v9",
         "Summarize local reviews, gate decisions, finding lifecycle and severity, verification outcomes, feedback labels, and provider latency and cost. Same document as `vee analytics --output json`.",
         |ws, _input: EmptyInput| operations::quality_analytics(&ws));
 
@@ -853,8 +853,8 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         "List append-only human labels for archived provider comments; never gate eligible. Same document as `vee reviews imported feedback list --output json`.",
         |ws, input: ListExternalReviewFeedbackInput| operations::list_external_feedback(&ws, input.archive_digest.as_deref()));
 
-    operation_tool!(server, workspace, "list_rule_candidates", "List rule candidates", read_only_tool(),
-        Some("rule-candidates-v3"),
+    viewed_tool!(server, workspace, "list_rule_candidates", "List rule candidates", read_only_tool(),
+        "rule-candidates-v3",
         "Mine repeated explicit feedback into candidate reviewer guidance without changing policy. Same document as `vee rules candidates --output json`.",
         |ws, _input: EmptyInput| operations::rule_candidates(&ws));
 
@@ -882,8 +882,8 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         "Revoke scoped reviewer guidance by appending an auditable event. Same document as `vee rules revoke --output json`.",
         |ws, input: RevokeRuleApprovalInput| operations::revoke_rule(&ws, &input.approval_id, &input.actor, &input.reason));
 
-    operation_tool!(server, workspace, "rule_effectiveness", "Rule effectiveness", read_only_tool(),
-        Some("rule-effectiveness-v1"),
+    viewed_tool!(server, workspace, "rule_effectiveness", "Rule effectiveness", read_only_tool(),
+        "rule-effectiveness-v1",
         "Compare explicit category-matched feedback before and after approval activation; observational only. Same document as `vee rules effectiveness --output json`.",
         |ws, input: RuleEffectivenessInput| operations::rule_effectiveness(&ws, input.approval_id.as_deref()));
 
@@ -897,8 +897,8 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         "Validate an agent-authored unified diff against a saved, still-current review and save it as a digest-bound proposal. No repository file changes; a human applies it with `vee findings apply-patch <digest> --approve <digest>`. Same document as `vee findings propose-patch --output json`.",
         |ws, input: ProposePatchInput| operations::propose_patch(&ws, &input.review_id, input.patch.as_bytes()));
 
-    operation_tool!(server, workspace, "recommend_tests", "Recommend tests", read_only_tool(),
-        Some("test-recommendations-v1"),
+    viewed_tool!(server, workspace, "recommend_tests", "Recommend tests", read_only_tool(),
+        "test-recommendations-v1",
         "Recommend missing tests for a saved review's changes from impact analysis, optionally using LCOV coverage from a verification run on the same snapshot. Same document as `vee tests recommend --review <id> --output json`.",
         |ws, input: RecommendTestsInput| operations::recommend_tests(
             &ws,
@@ -906,9 +906,9 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
             input.coverage_run_id.as_deref(),
         ));
 
-    operation_tool!(server, workspace, "draft_pr_description", "Draft PR description",
+    viewed_tool!(server, workspace, "draft_pr_description", "Draft PR description",
         mcp_rs::model::ToolAnnotations::new().read_only(true).open_world(true),
-        Some("pr-description-v1"),
+        "pr-description-v1",
         "Draft a pull request title and body for a saved review's changes with a configured reviewer. The draft is digest-bound, local, and never used by a gate. Same document as `vee pr draft --review <id> --output json`.",
         |ws, input: DraftPullRequestInput| operations::draft_pr_description(
             &ws,
@@ -916,8 +916,8 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
             input.reviewer_id.as_deref().unwrap_or("correctness"),
         ));
 
-    operation_tool!(server, workspace, "resolve_owners", "Resolve owners", read_only_tool(),
-        Some("ownership-report-v1"),
+    viewed_tool!(server, workspace, "resolve_owners", "Resolve owners", read_only_tool(),
+        "ownership-report-v1",
         "Resolve advisory CODEOWNERS owners for repository paths, with the matching rule and file digest. Same document as `vee owners --output json`.",
         |ws, input: OwnersInput| operations::owners(
             &ws,
@@ -934,13 +934,13 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         "List persisted gate decisions for a saved review. Same document as `vee gate history --output json`.",
         |ws, input: ReviewInput| operations::gate_history(&ws, &input.review_id));
 
-    operation_tool!(server, workspace, "get_analyzer_findings", "Get analyzer findings", read_only_tool(),
-        Some("analyzer-report-v1"),
+    viewed_tool!(server, workspace, "get_analyzer_findings", "Get analyzer findings", read_only_tool(),
+        "analyzer-report-v1",
         "Results of a trusted SARIF analyzer verification run located on changed lines of its snapshot, exactly as the gate evaluates them. Results elsewhere are pre-existing and never block. Same document as `vee verification findings <run-id> --output json`.",
         |ws, input: VerificationRunInput| operations::analyzer_findings(&ws, &input.run_id));
 
-    operation_tool!(server, workspace, "list_packs", "List policy packs", read_only_tool(),
-        Some("packs-list-v1"),
+    viewed_tool!(server, workspace, "list_packs", "List policy packs", read_only_tool(),
+        "packs-list-v1",
         "List the policy packs pinned in .vee.yaml and whether each still matches its pinned digest. A changed or invalid pack makes configuration loading fail until a human re-pins it. Same document as `vee packs list --output json`.",
         |ws, _input: EmptyInput| crate::packs::list(&ws));
 

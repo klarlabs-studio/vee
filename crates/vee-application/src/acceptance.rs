@@ -674,59 +674,6 @@ fn criterion_id_with_source(
     format!("AC-{}", &encoded[..12])
 }
 
-pub fn render_text(report: &AcceptanceReport) {
-    println!("Acceptance traceability for review {}", report.review_id);
-    println!("Snapshot: {}", report.snapshot_id);
-    if let Some(work_item) = &report.work_item {
-        println!(
-            "Work item: {} ({})",
-            work_item.url, work_item.content_digest
-        );
-    } else {
-        println!("Work item: none");
-    }
-    if report.criteria.is_empty() {
-        println!("No supported acceptance criteria were extracted.");
-    }
-    for criterion in &report.criteria {
-        println!(
-            "{} [line {}] {}",
-            criterion.id, criterion.source_line, criterion.text
-        );
-        println!("  Status: {}", criterion.status);
-        if criterion.candidate_changed_paths.is_empty() {
-            println!("  Candidate changed paths: none");
-        } else {
-            println!(
-                "  Candidate changed paths: {}",
-                criterion.candidate_changed_paths.join(", ")
-            );
-        }
-    }
-    println!(
-        "Snapshot-bound verification runs: {}",
-        report.verification_runs.len()
-    );
-    for run in &report.verification_runs {
-        let result = match run.status {
-            VerificationStatus::Passed => "passed",
-            VerificationStatus::Failed => "failed",
-            VerificationStatus::TimedOut => "timed_out",
-            VerificationStatus::Incomplete => "incomplete",
-        };
-        println!(
-            "  {} [{}] {} targets={}",
-            run.run_id,
-            run.profile_id,
-            result,
-            run.targets.join(",")
-        );
-    }
-    for limitation in &report.limitations {
-        println!("Limitation: {limitation}");
-    }
-}
-
 pub fn render_validation_text(report: &AcceptanceValidation) {
     println!("Acceptance assessment for review {}", report.review_id);
     println!("Snapshot: {}", report.snapshot_id);

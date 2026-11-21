@@ -324,16 +324,29 @@ fn cli_and_mcp_return_identical_documents_for_shared_operations() {
     );
 
     let cli = cli_json(root, &["impact", "--review", &review_id]);
-    let via_mcp = mcp.call("analyze_impact", json!({"review_id": review_id}));
+    let (via_mcp, text) = mcp.call_with_text("analyze_impact", json!({"review_id": review_id}));
     assert_same(&cli, &via_mcp, "impact", "impact-assessment-v3");
+    assert_same_view::<vee_application::ImpactAssessment>(
+        root,
+        &["impact", "--review", &review_id],
+        &via_mcp,
+        &text,
+    );
 
     let cli = cli_json(root, &["acceptance", "report", "--review", &review_id]);
     let via_mcp = mcp.call("acceptance_traceability", json!({"review_id": review_id}));
     assert_same(&cli, &via_mcp, "acceptance", "acceptance-traceability-v1");
 
     let cli = cli_json(root, &["standards", "--path", "tracked.rs"]);
-    let via_mcp = mcp.call("get_applicable_standards", json!({"path": "tracked.rs"}));
+    let (via_mcp, text) =
+        mcp.call_with_text("get_applicable_standards", json!({"path": "tracked.rs"}));
     assert_same(&cli, &via_mcp, "standards", "standards-resolution-v1");
+    assert_same_view::<vee_application::standards::StandardsReport>(
+        root,
+        &["standards", "--path", "tracked.rs"],
+        &via_mcp,
+        &text,
+    );
 
     let cli = cli_json(root, &["rules", "candidates"]);
     let via_mcp = mcp.call("list_rule_candidates", json!({}));
@@ -384,12 +397,24 @@ fn cli_and_mcp_return_identical_documents_for_shared_operations() {
     assert_eq!(cli["finding_id"], via_mcp["finding_id"]);
 
     let cli = cli_json(root, &["tests", "recommend", "--review", &review_id]);
-    let via_mcp = mcp.call("recommend_tests", json!({"review_id": review_id}));
+    let (via_mcp, text) = mcp.call_with_text("recommend_tests", json!({"review_id": review_id}));
     assert_same(&cli, &via_mcp, "recommend tests", "test-recommendations-v1");
+    assert_same_view::<vee_application::test_recommendations::TestRecommendationReport>(
+        root,
+        &["tests", "recommend", "--review", &review_id],
+        &via_mcp,
+        &text,
+    );
 
     let cli = cli_json(root, &["owners", "--path", "tracked.rs"]);
-    let via_mcp = mcp.call("resolve_owners", json!({"paths": ["tracked.rs"]}));
+    let (via_mcp, text) = mcp.call_with_text("resolve_owners", json!({"paths": ["tracked.rs"]}));
     assert_same(&cli, &via_mcp, "owners", "ownership-report-v1");
+    assert_same_view::<vee_application::ownership::OwnershipReport>(
+        root,
+        &["owners", "--path", "tracked.rs"],
+        &via_mcp,
+        &text,
+    );
 
     let cli = cli_json(root, &["waivers", "list", "--review", &review_id]);
     let (via_mcp, text) = mcp.call_with_text("list_waivers", json!({"review_id": review_id}));
@@ -462,8 +487,14 @@ fn cli_and_mcp_return_identical_documents_for_shared_operations() {
     assert_eq!(cli["ready"], true, "{cli:#}");
 
     let cli = cli_json(root, &["analytics"]);
-    let via_mcp = mcp.call("get_quality_analytics", json!({}));
+    let (via_mcp, text) = mcp.call_with_text("get_quality_analytics", json!({}));
     assert_same(&cli, &via_mcp, "analytics", "quality-analytics-v9");
+    assert_same_view::<vee_application::analytics::QualityAnalytics>(
+        root,
+        &["analytics"],
+        &via_mcp,
+        &text,
+    );
 }
 
 #[test]
