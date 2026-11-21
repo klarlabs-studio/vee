@@ -101,6 +101,29 @@ three runs found 13–14 of 17 labels against about 60% for one run, with about
 dropped context value, a shuffle hang, and a re-read after `await`) were
 missed in all six runs.
 
+### Reviewer sampling (2026-11-21)
+
+With `samples: 3` (ADR 0008), each case sends the same request three times
+and merges the runs. Two sampled benchmark runs compared with the three
+single-run passes of the same build:
+
+| Variant | Runs | Strict recall | Findings per run | Below quorum (advisory) | Blocking findings | Blocked cases | Time per run |
+|---|---|---|---|---|---|---|---|
+| One sample | 3 | 30 / 51 (59%) | 33–38 | — | 8–9 | 6 / 16 | 4.9–5.2 min |
+| `samples: 3` | 2 | 26 / 34 (76%): 14 / 17 and 12 / 17 | 57–65 | 31–37 | 9–11 | 7–8 / 16 | 6.0–6.4 min |
+
+Sampling raised recall by about 17 points. Wall-clock time rose by about a
+fifth, because the samples run concurrently; provider calls tripled. The
+shuffle-hang defect, missed in all six earlier runs, was found once. Ten
+of the matched labels in each sampled run reached the quorum; the others
+(four and two) were found only as advisory findings. So the gate stays
+about as strict as a single run, and the extra recall shows up as advisory
+findings a person reads. More than half of the findings were advisory.
+
+Every case in this corpus contains a defect, so the corpus cannot tell
+whether the extra blocked cases are true or false blocks. Measuring false
+blocks needs clean changes in the corpus.
+
 Token counts are not comparable across providers: the Claude CLI reports
 uncached input only (cache subtotals are not retained), while Ollama reports
 every prompt token.
