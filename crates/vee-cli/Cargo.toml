@@ -21,6 +21,8 @@ vee-application = { path = "../vee-application" }
 vee-git = { path = "../vee-git" }
 vee-http = { path = "../vee-http" }
 vee-hosting = { path = "../vee-hosting" }
+vee-present = { path = "../vee-present" }
+anstream.workspace = true
 toml.workspace = true
 serde_yaml.workspace = true
 rusqlite.workspace = true

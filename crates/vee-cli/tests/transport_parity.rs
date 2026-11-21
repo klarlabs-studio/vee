@@ -193,23 +193,35 @@ impl McpSession {
         response["result"].clone()
     }
 
-    /// Call a tool and return its document. The text block and any structured
-    /// content must carry the same JSON.
+    /// Call a tool and return its document. A tool with a shared view returns
+    /// that view as Markdown text and the document as structured content;
+    /// other tools return the document as JSON text.
     fn call(&mut self, tool: &str, arguments: Value) -> Value {
+        self.call_with_text(tool, arguments).0
+    }
+
+    fn call_with_text(&mut self, tool: &str, arguments: Value) -> (Value, String) {
         let result = self.request("tools/call", json!({"name": tool, "arguments": arguments}));
         assert_ne!(
             result["isError"], true,
             "{tool} returned an error: {result}"
         );
-        let text = result["content"][0]["text"].as_str().unwrap();
-        let document: Value = serde_json::from_str(text).unwrap();
-        if let Some(structured) = result.get("structuredContent") {
-            assert_eq!(
-                structured, &document,
-                "{tool} text and structured content differ"
-            );
-        }
-        document
+        let text = result["content"][0]["text"].as_str().unwrap().to_owned();
+        let document = match serde_json::from_str::<Value>(&text) {
+            Ok(document) => {
+                if let Some(structured) = result.get("structuredContent") {
+                    assert_eq!(
+                        structured, &document,
+                        "{tool} text and structured content differ"
+                    );
+                }
+                document
+            }
+            Err(_) => result.get("structuredContent").cloned().unwrap_or_else(|| {
+                panic!("{tool} returned a text view without structured content")
+            }),
+        };
+        (document, text)
     }
 }
 
@@ -218,6 +230,33 @@ impl Drop for McpSession {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// Both transports show the same view of the same document: MCP as Markdown,
+/// the CLI as terminal text (`--color never` here, so it is comparable).
+fn assert_same_view<T>(root: &Path, cli_args: &[&str], document: &Value, mcp_text: &str)
+where
+    T: serde::de::DeserializeOwned + vee_present::ToView,
+{
+    let typed: T = serde_json::from_value(document.clone())
+        .unwrap_or_else(|error| panic!("{cli_args:?}: document does not deserialize: {error}"));
+    let view = typed.to_view();
+    assert_eq!(
+        mcp_text,
+        vee_present::markdown::render(&view),
+        "{cli_args:?}: MCP text is not the shared view"
+    );
+    let output = vee()
+        .args(cli_args)
+        .args(["--color", "never"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        vee_present::ansi::render(&view, false),
+        "{cli_args:?}: CLI text is not the shared view"
+    );
 }
 
 fn assert_same(cli: &Value, mcp: &Value, operation: &str, schema: &str) {
@@ -234,12 +273,24 @@ fn cli_and_mcp_return_identical_documents_for_shared_operations() {
     let mut mcp = McpSession::start(root);
 
     let cli = cli_json(root, &["reviews", "show", &review_id]);
-    let via_mcp = mcp.call("get_review", json!({"review_id": review_id}));
+    let (via_mcp, text) = mcp.call_with_text("get_review", json!({"review_id": review_id}));
     assert_same(&cli, &via_mcp, "get review", "review-output-v2");
+    assert_same_view::<vee_application::ReviewResult>(
+        root,
+        &["reviews", "show", &review_id],
+        &via_mcp,
+        &text,
+    );
 
     let cli = cli_json(root, &["findings", "list"]);
-    let via_mcp = mcp.call("list_findings", json!({}));
+    let (via_mcp, text) = mcp.call_with_text("list_findings", json!({}));
     assert_same(&cli, &via_mcp, "list findings", "findings-list-v2");
+    assert_same_view::<vee_application::operations::FindingsPage>(
+        root,
+        &["findings", "list"],
+        &via_mcp,
+        &text,
+    );
     assert_eq!(cli["total"], 1);
     let finding_id = cli["findings"][0]["finding"]["id"]
         .as_str()
@@ -247,7 +298,13 @@ fn cli_and_mcp_return_identical_documents_for_shared_operations() {
         .to_owned();
 
     let cli = cli_json(root, &["findings", "show", &finding_id]);
-    let via_mcp = mcp.call("get_finding", json!({"finding_id": finding_id}));
+    let (via_mcp, text) = mcp.call_with_text("get_finding", json!({"finding_id": finding_id}));
+    assert_same_view::<vee_application::operations::FindingDetail>(
+        root,
+        &["findings", "show", &finding_id],
+        &via_mcp,
+        &text,
+    );
     assert_same(&cli, &via_mcp, "show finding", "finding-detail-v2");
 
     let cli = cli_json(root, &["findings", "task", &finding_id]);
@@ -283,8 +340,15 @@ fn cli_and_mcp_return_identical_documents_for_shared_operations() {
     assert_same(&cli, &via_mcp, "rule candidates", "rule-candidates-v3");
 
     let cli = cli_json(root, &["gate", "check", "--review", &review_id]);
-    let via_mcp = mcp.call("evaluate_gate", json!({"review_id": review_id}));
+    let (via_mcp, text) = mcp.call_with_text("evaluate_gate", json!({"review_id": review_id}));
     assert_same(&cli, &via_mcp, "gate check", "gate-check-v1");
+    // Re-evaluating identical inputs yields the same decision, so this adds no history.
+    assert_same_view::<vee_application::GateCheckResult>(
+        root,
+        &["gate", "check", "--review", &review_id],
+        &via_mcp,
+        &text,
+    );
 
     let cli = cli_json(
         root,
@@ -328,14 +392,26 @@ fn cli_and_mcp_return_identical_documents_for_shared_operations() {
     assert_same(&cli, &via_mcp, "owners", "ownership-report-v1");
 
     let cli = cli_json(root, &["waivers", "list", "--review", &review_id]);
-    let via_mcp = mcp.call("list_waivers", json!({"review_id": review_id}));
+    let (via_mcp, text) = mcp.call_with_text("list_waivers", json!({"review_id": review_id}));
+    assert_same_view::<vee_application::operations::WaiverList>(
+        root,
+        &["waivers", "list", "--review", &review_id],
+        &via_mcp,
+        &text,
+    );
     assert_same(&cli, &via_mcp, "waivers", "waivers-list-v1");
 
     let cli = cli_json(root, &["gate", "history", "--review", &review_id]);
-    let via_mcp = mcp.call("get_gate_history", json!({"review_id": review_id}));
+    let (via_mcp, text) = mcp.call_with_text("get_gate_history", json!({"review_id": review_id}));
     assert_same(&cli, &via_mcp, "gate history", "gate-history-v1");
     // Both gate checks evaluated identical inputs, so they share one decision identity.
     assert_eq!(cli["decisions"].as_array().unwrap().len(), 1);
+    assert_same_view::<vee_application::operations::GateHistory>(
+        root,
+        &["gate", "history", "--review", &review_id],
+        &via_mcp,
+        &text,
+    );
 
     let cli = cli_json(root, &["pr", "draft", "--review", &review_id]);
     let via_mcp = mcp.call("draft_pr_description", json!({"review_id": review_id}));

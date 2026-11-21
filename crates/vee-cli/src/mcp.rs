@@ -609,6 +609,40 @@ macro_rules! operation_tool {
     }};
 }
 
+/// A tool result whose text is the shared view of `document`, rendered as
+/// Markdown: the same view the CLI prints. Structured content carries the
+/// document itself, validated against the tool's declared output schema.
+fn view_result<T>(document: &T) -> Result<mcp_rs::model::CallToolResult, ToolError>
+where
+    T: serde::Serialize + vee_present::ToView,
+{
+    let value = serde_json::to_value(document)
+        .map_err(|_| ToolError::new("Could not serialize tool result"))?;
+    let text = vee_present::markdown::render(&document.to_view());
+    let mut result =
+        mcp_rs::model::CallToolResult::success(vec![mcp_rs::model::ContentBlock::text(text)]);
+    result.structured_content = Some(value);
+    Ok(result)
+}
+
+/// Like `operation_tool!`, for operations whose document has a shared view.
+macro_rules! viewed_tool {
+    ($server:expr, $workspace:expr, $name:literal, $title:literal, $annotations:expr,
+     $schema:literal, $description:literal, |$ws:ident, $input:ident: $input_type:ty| $body:expr) => {{
+        let workspace = $workspace.clone();
+        $server
+            .tool($name)
+            .title($title)
+            .annotations($annotations)
+            .description($description)
+            .output_schema_json(crate::contracts::bundled($schema))?
+            .rich_handler(move |_ctx, $input: $input_type| {
+                let $ws = workspace.clone();
+                async move { view_result(&run_blocking(move || $body).await?) }
+            })?;
+    }};
+}
+
 fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationError> {
     let tasks = mcp_rs::protocol::task_manager::TaskManager::new();
     let mut server = Server::new("vee", env!("CARGO_PKG_VERSION"))
@@ -645,14 +679,7 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
                             let review = result
                                 .map_err(|error| internal(error.to_string()))?
                                 .map_err(|error| internal(format!("{error:#}")))?;
-                            let value = serde_json::to_value(review)
-                                .map_err(|error| internal(error.to_string()))?;
-                            // Clients without structured-content support read the text block.
-                            let mut result = mcp_rs::model::CallToolResult::success(vec![
-                                mcp_rs::model::ContentBlock::text(value.to_string()),
-                            ]);
-                            result.structured_content = Some(value);
-                            Ok(result)
+                            Ok(view_result(&review).map_err(|error| internal(error.to_string()))?)
                         }
                     }
                 }
@@ -666,26 +693,28 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         .annotations(write_tool(false, false, true))
         .description("Capture the requested repository scope, run configured reviewers, and persist a review. Same document as `vee review --output json`.")
         .output_schema_json(crate::contracts::bundled("review-output-v2"))?
-        .handler(move |ctx, input: StartReviewInput| {
+        .rich_handler(move |ctx, input: StartReviewInput| {
             let workspace = state.clone();
             // Client cancellation (notifications/cancelled) stops reviewer subprocesses.
             let cancellation = ctx.ct.clone();
-            run_blocking(move || run_review(&workspace, &input, &cancellation))
+            async move {
+                view_result(&run_blocking(move || run_review(&workspace, &input, &cancellation)).await?)
+            }
         })?;
 
-    operation_tool!(
+    viewed_tool!(
         server,
         workspace,
         "get_review",
         "Get review",
         read_only_tool(),
-        Some("review-output-v2"),
+        "review-output-v2",
         "Get a saved review. Same document as `vee reviews show --output json`.",
         |ws, input: ReviewInput| operations::get_review(&ws, &input.review_id)
     );
 
-    operation_tool!(server, workspace, "list_findings", "List findings", read_only_tool(),
-        Some("findings-list-v2"),
+    viewed_tool!(server, workspace, "list_findings", "List findings", read_only_tool(),
+        "findings-list-v2",
         "List persisted findings with optional filters and bounded pagination. Same document as `vee findings list --output json`.",
         |ws, input: ListFindingsInput| operations::list_findings(&ws, operations::FindingQuery {
             review_id: input.review_id,
@@ -695,8 +724,8 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
             offset: input.offset,
         }));
 
-    operation_tool!(server, workspace, "get_finding", "Get finding", read_only_tool(),
-        Some("finding-detail-v2"),
+    viewed_tool!(server, workspace, "get_finding", "Get finding", read_only_tool(),
+        "finding-detail-v2",
         "Get a finding with its lifecycle, referenced evidence, and verification runs. Same document as `vee findings show --output json`.",
         |ws, input: FindingInput| operations::finding_detail(&ws, &input.finding_id));
 
@@ -718,8 +747,8 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
             input.context_lines.unwrap_or(operations::DEFAULT_CONTEXT_LINES),
         ));
 
-    operation_tool!(server, workspace, "set_finding_status", "Set finding status", write_tool(false, true, false),
-        Some("finding-status-update-v1"),
+    viewed_tool!(server, workspace, "set_finding_status", "Set finding status", write_tool(false, true, false),
+        "finding-status-update-v1",
         "Record an auditable finding lifecycle status. This never waives a finding; use the waiver workflow. Same document as `vee findings set-status --output json`.",
         |ws, input: SetFindingStatusInput| operations::set_finding_status(
             &ws, &input.finding_id, input.status.into(), &input.reason,
@@ -736,13 +765,13 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
             reviewer: &input.reviewer,
         }));
 
-    operation_tool!(server, workspace, "evaluate_gate", "Evaluate gate", write_tool(false, true, true),
-        Some("gate-check-v1"),
+    viewed_tool!(server, workspace, "evaluate_gate", "Evaluate gate", write_tool(false, true, true),
+        "gate-check-v1",
         "Recapture the reviewed source and re-evaluate the deterministic gate, persisting the decision. Same document as `vee gate check --output json`.",
         |ws, input: ReviewInput| operations::gate_check(&ws, &input.review_id, None));
 
-    operation_tool!(server, workspace, "verify_finding", "Verify finding", write_tool(false, false, false),
-        Some("verification-run-v1"),
+    viewed_tool!(server, workspace, "verify_finding", "Verify finding", write_tool(false, false, false),
+        "verification-run-v1",
         "Run a configured verification profile on the exact snapshot containing a finding. Same document as `vee verify <finding> --output json`.",
         |ws, input: VerifyFindingInput| operations::verify(&ws, operations::VerifyRequest {
             target: operations::VerifyTarget::Finding(input.finding_id),
@@ -858,8 +887,8 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         "Compare explicit category-matched feedback before and after approval activation; observational only. Same document as `vee rules effectiveness --output json`.",
         |ws, input: RuleEffectivenessInput| operations::rule_effectiveness(&ws, input.approval_id.as_deref()));
 
-    operation_tool!(server, workspace, "check_setup", "Check setup", read_only_tool(),
-        Some("doctor-report-v1"),
+    viewed_tool!(server, workspace, "check_setup", "Check setup", read_only_tool(),
+        "doctor-report-v1",
         "Report whether this repository's reviewers can run on this machine, which AI backends (local models, agent CLIs, API keys) are available, and what to do next. Same document as `vee doctor --output json`.",
         |ws, _input: EmptyInput| operations::doctor(&ws));
 
@@ -895,13 +924,13 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
             &input.paths.iter().map(PathBuf::from).collect::<Vec<_>>(),
         ));
 
-    operation_tool!(server, workspace, "list_waivers", "List waivers", read_only_tool(),
-        Some("waivers-list-v1"),
+    viewed_tool!(server, workspace, "list_waivers", "List waivers", read_only_tool(),
+        "waivers-list-v1",
         "List waivers recorded for a saved review's exact snapshot. Same document as `vee waivers list --output json`.",
         |ws, input: ReviewInput| operations::list_waivers(&ws, &input.review_id));
 
-    operation_tool!(server, workspace, "get_gate_history", "Get gate history", read_only_tool(),
-        Some("gate-history-v1"),
+    viewed_tool!(server, workspace, "get_gate_history", "Get gate history", read_only_tool(),
+        "gate-history-v1",
         "List persisted gate decisions for a saved review. Same document as `vee gate history --output json`.",
         |ws, input: ReviewInput| operations::gate_history(&ws, &input.review_id));
 
