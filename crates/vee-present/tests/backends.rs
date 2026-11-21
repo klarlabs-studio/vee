@@ -143,3 +143,17 @@ fn strip_ansi(text: &str) -> String {
     }
     out
 }
+
+#[test]
+fn markdown_escaping_keeps_model_text_inert_and_code_intact() {
+    assert_eq!(
+        markdown::inline("[click](https://example.invalid)"),
+        "\\[click\\]\\(https://example\\.invalid\\)"
+    );
+    assert_eq!(
+        markdown::inline("title\n## forged section"),
+        "title \\#\\# forged section"
+    );
+    assert_eq!(markdown::code("file`name.rs"), "``file`name.rs``");
+    assert_eq!(markdown::code("`edge"), "`` `edge ``");
+}

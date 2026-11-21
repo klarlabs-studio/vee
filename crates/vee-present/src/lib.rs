@@ -11,4 +11,6 @@ pub mod tone;
 pub mod view;
 mod views;
 
+pub use views::review::review_report;
+
 pub use view::{summary, Block, Cell, Span, Style, ToView, Tone, View};

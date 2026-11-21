@@ -2,7 +2,8 @@
 
 mod findings;
 mod gate;
-mod review;
+pub mod review;
+mod setup;
 pub(crate) mod verification;
 
 /// The serialized (snake_case) name of a unit enum value, as the JSON documents spell it.

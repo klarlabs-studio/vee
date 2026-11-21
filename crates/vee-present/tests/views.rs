@@ -202,3 +202,19 @@ fn empty_documents_say_so_instead_of_printing_nothing() {
     };
     assert!(ansi::render(&history.to_view(), false).contains("No gate decisions recorded."));
 }
+
+#[test]
+fn markdown_report_adds_full_finding_details_without_an_interactive_next_step() {
+    let review = review(
+        vec![finding("find_a", "high", Some("a.go"), Some(9), "First line.\nSecond line with detail.")],
+        vec!["find_a".into()],
+        true,
+    );
+    let report = markdown::render(&vee_present::review_report(&review));
+    assert!(report.contains("### Finding details"), "{report}");
+    assert!(report.contains("Second line with detail\\."), "full rationale is kept: {report}");
+    assert!(!report.contains("Next:"), "{report}");
+    let shared = markdown::render(&review.to_view());
+    assert!(!shared.contains("Second line"), "the shared view stays compact");
+    assert!(shared.contains("Next: `vee findings show find_a`"));
+}

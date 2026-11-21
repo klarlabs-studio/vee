@@ -182,6 +182,70 @@ fn duration(milliseconds: u64) -> String {
     }
 }
 
+/// The portable review report written by `vee review --markdown`: the shared
+/// review view, followed by each finding in full and every reviewer's report
+/// on findings they disagree about. Terminal and MCP output stay compact and
+/// point to `vee findings show` / `get_finding` for the same detail.
+pub fn review_report(review: &ReviewResult) -> View {
+    let mut view = review.to_view();
+    // The next step suits an interactive reader, not a shared report.
+    view.blocks
+        .retain(|block| !matches!(block, crate::view::Block::NextStep(_)));
+    if !review.findings.is_empty() {
+        view = view.section("Finding details");
+        for finding in &review.findings {
+            view = view
+                .paragraph(
+                    tone::severity(finding.severity)
+                        .then(Span::new(&finding.category, Style::Strong))
+                        .then(Span::new(
+                            match (&finding.path, finding.line) {
+                                (Some(path), Some(line)) => format!("{path}:{line}"),
+                                (Some(path), None) => path.clone(),
+                                (None, _) => "no location".into(),
+                            },
+                            Style::Code,
+                        )),
+                )
+                .paragraph(Cell::plain(&finding.rationale))
+                .fields(vec![
+                    ("Confidence".into(), tone::confidence(finding.confidence)),
+                    ("Provenance".into(), Cell::code(&finding.provenance)),
+                    (
+                        "Evidence".into(),
+                        Cell::plain(finding.evidence_ids.join(", ")),
+                    ),
+                    ("ID".into(), Cell::muted(&finding.id)),
+                ]);
+        }
+    }
+    let disputed: Vec<_> = review
+        .reviewer_arbitration
+        .iter()
+        .filter(|item| item.reports.len() > 1)
+        .collect();
+    if !disputed.is_empty() {
+        view = view.section("Reviewer reports").table(
+            &["Finding", "Reviewer", "Severity", "Confidence", "Rationale"],
+            disputed
+                .iter()
+                .flat_map(|item| {
+                    item.reports.iter().map(|report| {
+                        vec![
+                            Cell::muted(&item.finding_id),
+                            Cell::strong(&report.reviewer_id),
+                            tone::severity(report.severity),
+                            tone::confidence(report.confidence),
+                            Cell::plain(&report.rationale),
+                        ]
+                    })
+                })
+                .collect(),
+        );
+    }
+    view
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
