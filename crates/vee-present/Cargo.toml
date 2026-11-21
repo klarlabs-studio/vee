@@ -8,6 +8,7 @@ description = "Shared views of Vee result documents, rendered for terminals and 
 
 [dependencies]
 anstyle.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 vee-core = { path = "../vee-core" }
 vee-application = { path = "../vee-application" }

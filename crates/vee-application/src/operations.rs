@@ -10,7 +10,7 @@
 use crate::failure::{configuration_failure, usage_failure};
 use crate::{GateCheckResult, ReviewResult};
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use vee_core::ports::*;
 use vee_core::{
@@ -469,7 +469,7 @@ pub struct FindingQuery {
 }
 
 /// `findings-list-v2`
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct FindingsPage {
     pub schema_version: u32,
     pub findings: Vec<FindingRecord>,
@@ -518,7 +518,7 @@ pub fn all_findings(
 }
 
 /// `finding-detail-v2`
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct FindingDetail {
     pub schema_version: u32,
     pub finding: FindingRecord,
@@ -575,7 +575,7 @@ pub fn finding_work_package(
 }
 
 /// `finding-status-update-v1`
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct FindingStatusUpdate {
     pub schema_version: u32,
     pub finding_id: String,
@@ -1259,7 +1259,7 @@ pub fn owners(
 }
 
 /// `gate-history-v1`
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct GateHistory {
     pub schema_version: u32,
     pub decisions: Vec<vee_core::GateDecision>,
@@ -1278,7 +1278,7 @@ pub fn gate_history(workspace: &Workspace, review_id: &str) -> Result<GateHistor
 }
 
 /// `waivers-list-v1`
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct WaiverList {
     pub schema_version: u32,
     pub waivers: Vec<vee_core::Waiver>,
