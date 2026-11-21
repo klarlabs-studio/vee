@@ -1176,3 +1176,95 @@ fn gemini_cli_failure_reports_its_json_error_message() {
         "{error}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn antigravity_cli_adapter_runs_read_only_with_the_findings_schema_and_reads_structured_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let args_log = directory.path().join("args.txt");
+    let mut request = failing_cli_request(
+        directory.path(),
+        vee_core::ProviderKind::AntigravityCli,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\0' \"$@\" > '{}'\nprintf '%s' '{{\"conversation_id\":\"c1\",\"status\":\"SUCCESS\",\"response\":\"ignored\",\"structured_output\":{{\"schema_version\":1,\"findings\":[]}},\"usage\":{{\"input_tokens\":100,\"output_tokens\":20,\"thinking_tokens\":7,\"cache_read_tokens\":3,\"total_tokens\":130}}}}'\n",
+            args_log.display()
+        ),
+    );
+    request.model = Some("test-model".into());
+    let mut input: serde_json::Value = serde_json::from_slice(&request.stdin).unwrap();
+    input["output_schema"]["$schema"] = "https://json-schema.org/draft/2020-12/schema".into();
+    request.stdin = serde_json::to_vec(&input).unwrap();
+
+    let result = execute_antigravity_cli(&request, None).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&result.stdout).unwrap(),
+        serde_json::json!({"schema_version": 1, "findings": []})
+    );
+    let usage = result.usage.unwrap();
+    assert_eq!(
+        (usage.input_tokens, usage.output_tokens, usage.total_tokens),
+        (Some(100), Some(20), Some(130))
+    );
+
+    let args: Vec<String> = std::fs::read_to_string(&args_log)
+        .unwrap()
+        .split('\0')
+        .map(str::to_owned)
+        .collect();
+    let value_after = |flag: &str| {
+        args.iter()
+            .position(|arg| arg == flag)
+            .and_then(|index| args.get(index + 1))
+            .cloned()
+            .unwrap_or_else(|| panic!("{flag} missing: {args:?}"))
+    };
+    assert_eq!(value_after("--output-format"), "json");
+    assert_eq!(value_after("--mode"), "plan");
+    assert_eq!(value_after("--model"), "test-model");
+    assert_eq!(value_after("--print-timeout"), "5s");
+    assert!(args.contains(&"--sandbox".to_string()), "{args:?}");
+    assert!(
+        args.contains(&"--disable-slash-commands".to_string()),
+        "{args:?}"
+    );
+    assert!(
+        !args.iter().any(|arg| arg.contains("dangerously")),
+        "{args:?}"
+    );
+    let schema: serde_json::Value = serde_json::from_str(&value_after("--json-schema")).unwrap();
+    assert!(schema.get("$schema").is_none(), "{schema}");
+    assert!(value_after("-p").contains("Review this change."));
+}
+
+#[cfg(unix)]
+#[test]
+fn antigravity_cli_without_sign_in_says_how_to_sign_in() {
+    let directory = tempfile::tempdir().unwrap();
+    let request = failing_cli_request(
+        directory.path(),
+        vee_core::ProviderKind::AntigravityCli,
+        "#!/bin/sh\necho 'Authentication required. Please visit the URL to log in:' >&2\nprintf '%s' '{\"conversation_id\":\"\",\"status\":\"ERROR\",\"response\":\"\",\"error\":\"authentication failed or timed out\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}'\nexit 1\n",
+    );
+    let error = execute_antigravity_cli(&request, None).unwrap_err();
+    assert!(
+        error.contains("Antigravity CLI is not signed in"),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn antigravity_cli_failure_reports_its_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let request = failing_cli_request(
+        directory.path(),
+        vee_core::ProviderKind::AntigravityCli,
+        "#!/bin/sh\nprintf '%s' '{\"status\":\"ERROR\",\"response\":\"\",\"error\":\"unknown model: nope\"}'\nexit 1\n",
+    );
+    let error = execute_antigravity_cli(&request, None).unwrap_err();
+    assert!(error.contains("provider exited with 1"), "{error}");
+    assert!(
+        error.contains("Antigravity: unknown model: nope"),
+        "{error}"
+    );
+}

@@ -134,6 +134,7 @@
             "cli",
             "codex_cli",
             "gemini_cli",
+            "antigravity_cli",
             "claude_cli",
             "openai_compatible",
             "ollama_native"

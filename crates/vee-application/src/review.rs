@@ -976,6 +976,7 @@ pub fn run_review_with_provider_and_selection_context(
         let provider_version = provider_versions.get(&reviewer.provider).cloned().flatten();
         if (provider.kind == vee_core::ProviderKind::CodexCli
             || provider.kind == vee_core::ProviderKind::GeminiCli
+            || provider.kind == vee_core::ProviderKind::AntigravityCli
             || provider.kind == vee_core::ProviderKind::ClaudeCli
             || !provider.version_args.is_empty())
             && provider_version.is_none()

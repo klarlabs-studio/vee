@@ -2350,6 +2350,40 @@ policy_profiles:
     }
 
     #[test]
+    fn antigravity_cli_provider_is_a_network_adapter_with_fixed_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".vee.yaml");
+        let write = |provider: &str| {
+            std::fs::write(
+                &file,
+                format!("version: 1\nproviders:\n  agy: {provider}\n"),
+            )
+            .unwrap();
+        };
+        write("{ kind: antigravity_cli, egress: network, executable: agy, model: gemini-3-pro }");
+        let config = RepositoryConfig::load(&file).unwrap();
+        assert_eq!(config.providers["agy"].kind, ProviderKind::AntigravityCli);
+        for (provider, expected) in [
+            (
+                "{ kind: antigravity_cli, egress: network, executable: agy, args: [--yolo] }",
+                "arguments are controlled by the adapter",
+            ),
+            (
+                "{ kind: antigravity_cli, egress: network, executable: agy, version_args: [-v] }",
+                "version arguments are fixed by the adapter",
+            ),
+            (
+                "{ kind: antigravity_cli, egress: local, executable: agy }",
+                "antigravity_cli cannot be declared local",
+            ),
+        ] {
+            write(provider);
+            let error = RepositoryConfig::load(&file).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
     fn review_effort_sets_the_number_of_samples() {
         assert_eq!(ReviewEffort::Low.samples(), 1);
         assert_eq!(ReviewEffort::Medium.samples(), 3);
@@ -2786,8 +2820,11 @@ pub enum ProviderKind {
     #[default]
     Cli,
     CodexCli,
+    /// Gemini CLI. Upstream deprecated it in June 2026 in favor of the Antigravity CLI.
     GeminiCli,
     ClaudeCli,
+    /// Google's Antigravity CLI (`agy`), the successor to Gemini CLI.
+    AntigravityCli,
     #[serde(rename = "openai_compatible")]
     OpenAiCompatible,
     OllamaNative,
@@ -3335,14 +3372,17 @@ impl RepositoryConfig {
             }
             if (provider.kind == ProviderKind::CodexCli
                 || provider.kind == ProviderKind::ClaudeCli
-                || provider.kind == ProviderKind::GeminiCli)
+                || provider.kind == ProviderKind::GeminiCli
+                || provider.kind == ProviderKind::AntigravityCli)
                 && !provider.args.is_empty()
             {
                 return Err(format!(
                     "provider {id} provider-specific arguments are controlled by the adapter"
                 ));
             }
-            if (provider.kind == ProviderKind::CodexCli || provider.kind == ProviderKind::ClaudeCli)
+            if (provider.kind == ProviderKind::CodexCli
+                || provider.kind == ProviderKind::ClaudeCli
+                || provider.kind == ProviderKind::AntigravityCli)
                 && !provider.version_args.is_empty()
             {
                 return Err(format!(
@@ -3357,6 +3397,13 @@ impl RepositoryConfig {
             if provider.kind == ProviderKind::GeminiCli && !provider.args.is_empty() {
                 return Err(format!(
                     "provider {id} Gemini CLI arguments are controlled by the adapter"
+                ));
+            }
+            if provider.kind == ProviderKind::AntigravityCli
+                && provider.egress == ProviderEgress::Local
+            {
+                return Err(format!(
+                    "provider {id} antigravity_cli cannot be declared local; use a local inference adapter"
                 ));
             }
             if provider.kind == ProviderKind::GeminiCli && provider.egress == ProviderEgress::Local

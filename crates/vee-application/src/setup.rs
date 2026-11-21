@@ -110,6 +110,13 @@ const AGENT_CLIS: &[AgentCli] = &[
         environment: &["PATH", "HOME", "CODEX_HOME"],
     },
     AgentCli {
+        candidate_id: "antigravity",
+        executable: "agy",
+        kind: ProviderKind::AntigravityCli,
+        kind_name: "antigravity_cli",
+        environment: &["PATH", "HOME", "USER"],
+    },
+    AgentCli {
         candidate_id: "gemini",
         executable: "gemini",
         kind: ProviderKind::GeminiCli,
@@ -680,6 +687,7 @@ fn kind_name(kind: ProviderKind) -> &'static str {
         ProviderKind::Cli => "cli",
         ProviderKind::CodexCli => "codex_cli",
         ProviderKind::GeminiCli => "gemini_cli",
+        ProviderKind::AntigravityCli => "antigravity_cli",
         ProviderKind::ClaudeCli => "claude_cli",
         ProviderKind::OpenAiCompatible => "openai_compatible",
         ProviderKind::OllamaNative => "ollama_native",
@@ -998,6 +1006,7 @@ mod tests {
             [
                 ("ollama", true),
                 ("codex", true),
+                ("antigravity", false),
                 ("gemini", false),
                 ("claude", true),
                 ("openai-api", true),
@@ -1069,7 +1078,13 @@ mod tests {
     #[test]
     fn generated_providers_pass_repository_validation() {
         let system = FakeSystem {
-            executables: [("codex", "1"), ("gemini", "1"), ("claude", "1")].into(),
+            executables: [
+                ("codex", "1"),
+                ("agy", "1"),
+                ("gemini", "1"),
+                ("claude", "1"),
+            ]
+            .into(),
             env: [
                 ("OPENAI_API_KEY", "k"),
                 ("ANTHROPIC_API_KEY", "k"),
