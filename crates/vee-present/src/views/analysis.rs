@@ -72,10 +72,10 @@ impl ToView for ImpactAssessment {
                     .map(|analyzer| {
                         vec![
                             Cell::strong(&analyzer.id),
-                            analyzer
-                                .version
-                                .clone()
-                                .map_or_else(|| Cell::muted("–"), Cell::plain),
+                            analyzer.version.as_deref().map_or_else(
+                                || Cell::muted("–"),
+                                |v| Cell::plain(short_version(v)),
+                            ),
                             tone::status_text(&analyzer.status),
                         ]
                     })
@@ -340,5 +340,30 @@ impl ToView for AnalyzerReport {
             );
         }
         view
+    }
+}
+
+/// A tool version fit for a table cell. Some tools report build metadata
+/// (gopls prints its whole JSON build info), so keep its `Version` field, or
+/// the first line shortened.
+pub(crate) fn short_version(version: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(version)
+        .ok()
+        .and_then(|info| {
+            info.get("Version")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| crate::view::summary(version, 32))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn analyzer_versions_reported_as_build_info_json_show_only_the_version() {
+        let json = r#"{"GoVersion":"go1.26.2","Path":"golang.org/x/tools/gopls","Version":"v0.21.1","Deps":[]}"#;
+        assert_eq!(super::short_version(json), "v0.21.1");
+        assert_eq!(super::short_version("go1.23"), "go1.23");
+        assert_eq!(super::short_version(&"x".repeat(50)).chars().count(), 32);
     }
 }
