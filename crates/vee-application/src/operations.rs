@@ -382,7 +382,7 @@ fn current_impact(root: &Path, review: &ReviewResult) -> crate::ImpactAssessment
     }
 }
 
-/// `local-review-analytics-v8`
+/// `local-review-analytics-v9`
 pub fn local_analytics(workspace: &Workspace) -> Result<crate::local_analytics::LocalAnalytics> {
     let store = workspace.store()?;
     crate::local_analytics::build(workspace.root(), &*store).map_err(anyhow::Error::msg)

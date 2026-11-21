@@ -69,7 +69,7 @@ test.beforeEach(async ({ page }) => {
     let body
     if (url.pathname === '/api/health') body = { status: 'ok', repository: '/repo' }
     else if (url.pathname === '/api/analytics') body = {
-      schema_version: 7,
+      schema_version: 9,
       review_count: 2,
       history_complete: true,
       dimensions_complete: true,
@@ -78,8 +78,8 @@ test.beforeEach(async ({ page }) => {
         { day: '2026-11-14', pass: 0, block: 1, incomplete: 0, ungated: 0 },
       ],
       review_dimensions: [
-        { review_id: 'rev_prior', day: '2026-11-13', status: 'block', summary_status: 'pass', reviewer_ids: ['correctness'], provider_ids: ['codex'], finding_categories: [], finding_rule_ids: [] },
-        { review_id: 'rev_latest', day: '2026-11-14', status: 'block', reviewer_ids: ['security'], provider_ids: ['claude'], finding_categories: ['correctness'], finding_rule_ids: ['RULE-001'] },
+        { review_id: 'rev_prior', day: '2026-11-13', status: 'block', summary_status: 'pass', reviewer_ids: ['correctness'], provider_ids: ['codex'], finding_categories: [], finding_rule_ids: [], next_action: { kind: 'rerun_reviewers', summary: 'Rerun reviewers: correctness (failed).' } },
+        { review_id: 'rev_latest', day: '2026-11-14', status: 'block', reviewer_ids: ['security'], provider_ids: ['claude'], finding_categories: ['correctness'], finding_rule_ids: ['RULE-001'], next_action: { kind: 'fix_findings', summary: 'Fix 1 blocking finding.' } },
       ],
       findings_by_severity: { high: 1, medium: 2 },
       findings_by_rule: { 'RULE-001': 1 },
@@ -210,7 +210,7 @@ test('verification chart filters by profile and date and drills into snapshot co
   await page.getByRole('button', { name: 'Export JSON' }).click()
   const download = await downloadEvent
   const report = JSON.parse(await readFile(await download.path(), 'utf8'))
-  expect(report.source_schema_version).toBe(7)
+  expect(report.source_schema_version).toBe(9)
   expect(report.verification_run_count).toBe(3)
   expect(report.verification_history_complete).toBe(true)
   expect(report.verification_filter.profile_id).toBe('unit')
@@ -323,7 +323,7 @@ test('analytics export preserves the visible trend window and explicit count den
   const report = JSON.parse(await readFile(path, 'utf8'))
   expect(report).toMatchObject({
     schema_version: 1,
-    source_schema_version: 7,
+    source_schema_version: 9,
     scope: 'repository_local',
     gate_trend_window: 'latest_2_dates_with_saved_reviews',
     history_complete: true,
@@ -793,4 +793,14 @@ test('the latest review shows no outdated marker', async ({ page }) => {
   await page.getByRole('button', { name: /Findings/ }).click()
   await expect(page.locator('.finding-row').first()).toBeVisible()
   await expect(page.getByText('Outdated', { exact: true })).toHaveCount(0)
+})
+
+test('queue cards show each review\'s next action from its gate', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: /Review queue/ }).click()
+  const latest = page.locator('.queue-card').filter({ hasText: 'rev_latest' })
+  await expect(latest.locator('.next-action')).toHaveText('Next: Fix 1 blocking finding.')
+  await expect(latest.locator('.next-action')).toHaveAttribute('data-kind', 'fix_findings')
+  const prior = page.locator('.queue-card').filter({ hasText: 'rev_prior' })
+  await expect(prior.locator('.next-action')).toHaveText('Next: Rerun reviewers: correctness (failed).')
 })

@@ -70,6 +70,7 @@ const queueItems = computed(() => {
       gate_status_stale: Boolean(analyticsError.value && dimension?.status),
       reviewer_ids: dimension?.reviewer_ids || [],
       provider_ids: dimension?.provider_ids || [],
+      next_action: analyticsError.value ? null : dimension?.next_action || null,
     }
   }).filter(item =>
     (queueStatus.value === 'all' || item.gate_status === queueStatus.value) &&
@@ -705,7 +706,7 @@ onMounted(async () => {
         <p class="queue-scope hint">Showing {{ queueItems.length }} matching reviews from the latest {{ Math.min(reviews.length, 500) }} saved records<template v-if="reviews.length > 500">; older records are omitted</template>. “Status unavailable” means Vee could not load the review's retained analytics dimensions; it does not mean ungated.</p>
         <div v-if="queueItems.length" class="queue-list">
           <article v-for="item in queueItems" :key="item.review_id" class="queue-card">
-            <div class="queue-card-main"><span class="status-pill" :class="statusTone(item.gate_status)">{{ item.gate_status_stale ? 'possibly outdated' : item.gate_status === 'unknown' ? 'status unavailable' : item.gate_status === 'ungated' ? 'no gate' : item.gate_status }}</span><div><strong>{{ item.review_id }}</strong><small>{{ item.created_at }} · snapshot {{ item.snapshot_id }}</small><small>Review state: {{ item.status }}</small></div></div>
+            <div class="queue-card-main"><span class="status-pill" :class="statusTone(item.gate_status)">{{ item.gate_status_stale ? 'possibly outdated' : item.gate_status === 'unknown' ? 'status unavailable' : item.gate_status === 'ungated' ? 'no gate' : item.gate_status }}</span><div><strong>{{ item.review_id }}</strong><small>{{ item.created_at }} · snapshot {{ item.snapshot_id }}</small><small>Review state: {{ item.status }}</small><small v-if="item.next_action" class="next-action" :data-kind="item.next_action.kind">Next: {{ item.next_action.summary }}</small></div></div>
             <div class="queue-tags"><span v-for="id in item.reviewer_ids" :key="`reviewer:${id}`">{{ id }}</span><span v-for="id in item.provider_ids" :key="`provider:${id}`" class="provider-tag">{{ id }}</span><span v-if="!item.reviewer_ids.length && !item.provider_ids.length" class="queue-no-tags">No reviewer dimensions available</span></div>
             <button class="text-button" :disabled="loading" @click="activeTab = 'overview'; openReview(item.review_id)">Open review →</button>
           </article>

@@ -1,0 +1,523 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vee.klarlabs.de/schemas/local-review-analytics-v9.schema.json",
+  "title": "Vee Local Review Analytics v9",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "review_count",
+    "history_complete",
+    "dimensions_complete",
+    "reviews_by_day",
+    "review_dimensions",
+    "findings_by_severity",
+    "finding_drilldown",
+    "finding_drilldown_total",
+    "finding_drilldown_complete",
+    "explicit_feedback_by_label",
+    "feedback_note",
+    "verification_run_count",
+    "verification_history_complete",
+    "verification_runs",
+    "findings_by_rule",
+    "findings_by_rule_complete",
+    "provider_latency",
+    "provider_latency_history_complete",
+    "provider_latency_note",
+    "provider_latency_reviews",
+    "provider_latency_history",
+    "provider_costs",
+    "provider_cost_history_complete",
+    "provider_cost_note",
+    "provider_cost_reviews",
+    "provider_cost_history"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 9
+    },
+    "review_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "history_complete": {
+      "type": "boolean"
+    },
+    "dimensions_complete": {
+      "type": "boolean"
+    },
+    "reviews_by_day": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "day",
+          "pass",
+          "block",
+          "incomplete",
+          "ungated"
+        ],
+        "properties": {
+          "day": {
+            "type": "string"
+          },
+          "pass": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "block": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "incomplete": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "ungated": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "review_dimensions": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "review_id",
+          "day",
+          "status",
+          "reviewer_ids",
+          "provider_ids",
+          "finding_categories",
+          "finding_rule_ids",
+          "summary_status",
+          "next_action"
+        ],
+        "properties": {
+          "review_id": {
+            "type": "string"
+          },
+          "day": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pass",
+              "block",
+              "incomplete",
+              "ungated"
+            ]
+          },
+          "reviewer_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "provider_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "finding_categories": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "finding_rule_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "summary_status": {
+            "type": "string",
+            "description": "Status recorded when the review was saved, before later gate decisions."
+          },
+          "next_action": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "summary"
+            ],
+            "description": "What the review needs next, derived from its latest gate decision and reviewer outcomes. A triage pointer, not a merge recommendation.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "none",
+                  "run_gate",
+                  "rerun_reviewers",
+                  "fix_findings",
+                  "resolve_gate_reason"
+                ]
+              },
+              "summary": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "findings_by_severity": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "finding_drilldown": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "finding_id",
+          "category",
+          "severity",
+          "rationale",
+          "status",
+          "last_seen",
+          "rule_attributions"
+        ],
+        "properties": {
+          "finding_id": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low",
+              "info"
+            ]
+          },
+          "rationale": {
+            "type": "string"
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "line": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "status": {
+            "enum": [
+              "open",
+              "verified",
+              "refuted",
+              "resolved",
+              "waived"
+            ]
+          },
+          "last_review_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_seen": {
+            "type": "string"
+          },
+          "rule_attributions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "rule_id",
+                "approval_id",
+                "reviewer_id"
+              ],
+              "properties": {
+                "rule_id": {
+                  "type": "string"
+                },
+                "approval_id": {
+                  "type": "string"
+                },
+                "reviewer_id": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "finding_drilldown_total": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "finding_drilldown_complete": {
+      "type": "boolean"
+    },
+    "explicit_feedback_by_label": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "feedback_note": {
+      "type": "string"
+    },
+    "verification_run_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "verification_history_complete": {
+      "type": "boolean"
+    },
+    "verification_runs": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "run_id",
+          "snapshot_id",
+          "profile_id",
+          "status",
+          "created_at"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "type": "string"
+          },
+          "profile_id": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "passed",
+              "failed",
+              "timed_out",
+              "incomplete"
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "findings_by_rule": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "findings_by_rule_complete": {
+      "type": "boolean"
+    },
+    "provider_latency": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "provider_id",
+          "measured_runs",
+          "unmeasured_runs",
+          "failed_runs",
+          "median_duration_ms",
+          "p95_duration_ms"
+        ],
+        "properties": {
+          "provider_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "measured_runs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "unmeasured_runs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "failed_runs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "median_duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "p95_duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "provider_latency_history_complete": {
+      "type": "boolean"
+    },
+    "provider_latency_note": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider_latency_reviews": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2000
+    },
+    "provider_latency_history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "day",
+          "provider_id",
+          "measured_runs",
+          "median_duration_ms",
+          "p95_duration_ms"
+        ],
+        "properties": {
+          "day": {
+            "type": "string"
+          },
+          "provider_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "measured_runs": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "median_duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "p95_duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "provider_costs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "provider_id",
+          "estimated_usd",
+          "priced_runs",
+          "unpriced_runs"
+        ],
+        "properties": {
+          "provider_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "estimated_usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "priced_runs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "unpriced_runs": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "provider_cost_history_complete": {
+      "type": "boolean"
+    },
+    "provider_cost_note": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider_cost_reviews": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2000
+    },
+    "provider_cost_history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "day",
+          "provider_id",
+          "estimated_usd",
+          "priced_runs",
+          "unpriced_runs"
+        ],
+        "properties": {
+          "day": {
+            "type": "string"
+          },
+          "provider_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "estimated_usd": {
+            "type": "number",
+            "minimum": 0
+          },
+          "priced_runs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "unpriced_runs": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    }
+  }
+}

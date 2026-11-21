@@ -1,4 +1,4 @@
-//! Local review analytics for the dashboard (`local-review-analytics-v8`):
+//! Local review analytics for the dashboard (`local-review-analytics-v9`):
 //! gate outcomes by day, finding drill-down, explicit feedback, verification
 //! history, and provider latency and cost. Reads only the local review store.
 
@@ -26,6 +26,79 @@ pub struct AnalyticsReviewDimension {
     pub provider_ids: Vec<String>,
     pub finding_categories: Vec<String>,
     pub finding_rule_ids: Vec<String>,
+    pub next_action: NextAction,
+}
+
+/// What a review needs next, derived only from its latest gate decision and
+/// its reviewer outcomes. It is a pointer for triage, not a recommendation
+/// about merging.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct NextAction {
+    /// `none`, `run_gate`, `rerun_reviewers`, `fix_findings` or
+    /// `resolve_gate_reason`.
+    pub kind: &'static str,
+    pub summary: String,
+}
+
+/// Reviewers named in a rerun summary before it is shortened.
+const MAX_NAMED_REVIEWERS: usize = 3;
+
+pub fn next_action(
+    decision: Option<&vee_core::GateDecision>,
+    outcomes: &[crate::ReviewerOutcome],
+) -> NextAction {
+    let Some(decision) = decision else {
+        return NextAction {
+            kind: "run_gate",
+            summary: "No gate decision yet: run vee gate.".into(),
+        };
+    };
+    if decision.status == vee_core::GateStatus::Pass {
+        return NextAction {
+            kind: "none",
+            summary: "Gate passed.".into(),
+        };
+    }
+    let failed: Vec<String> = outcomes
+        .iter()
+        .filter(|outcome| outcome.status != "completed")
+        .map(|outcome| {
+            format!(
+                "{} ({})",
+                outcome.reviewer_id,
+                outcome.status.replace('_', " ")
+            )
+        })
+        .collect();
+    if !failed.is_empty() {
+        let mut named = failed[..failed.len().min(MAX_NAMED_REVIEWERS)].join(", ");
+        if failed.len() > MAX_NAMED_REVIEWERS {
+            named.push_str(&format!(" and {} more", failed.len() - MAX_NAMED_REVIEWERS));
+        }
+        return NextAction {
+            kind: "rerun_reviewers",
+            summary: format!("Rerun reviewers: {named}."),
+        };
+    }
+    if !decision.blocking_findings.is_empty() {
+        let count = decision.blocking_findings.len();
+        return NextAction {
+            kind: "fix_findings",
+            summary: format!(
+                "Fix {count} blocking finding{}.",
+                if count == 1 { "" } else { "s" }
+            ),
+        };
+    }
+    NextAction {
+        kind: "resolve_gate_reason",
+        summary: decision.reasons.first().cloned().unwrap_or_else(|| {
+            format!(
+                "Gate {}; open the review for details.",
+                format!("{:?}", decision.status).to_lowercase()
+            )
+        }),
+    }
 }
 
 pub const MAX_ANALYTICS_FINDING_DRILLDOWN: usize = 200;
@@ -234,6 +307,7 @@ pub fn build(root: &Path, store: &dyn Repositories) -> Result<LocalAnalytics, St
         });
         let latest_decision = store.gate_decisions_for_review(&review.review_id)?.pop();
         let status = latest_decision
+            .as_ref()
             .map(|decision| format!("{:?}", decision.status).to_lowercase())
             .unwrap_or_else(|| "ungated".to_owned());
         match status.as_str() {
@@ -247,8 +321,10 @@ pub fn build(root: &Path, store: &dyn Repositories) -> Result<LocalAnalytics, St
         let mut provider_ids = Vec::new();
         let mut finding_categories = Vec::new();
         let mut finding_rule_ids = Vec::new();
+        let mut outcomes = Vec::new();
         if let Some(payload) = payload {
             if let Ok(saved) = crate::deserialize_review_result(&payload) {
+                outcomes.clone_from(&saved.reviewer_outcomes);
                 reviewer_ids.extend(
                     saved
                         .reviewer_outcomes
@@ -297,6 +373,7 @@ pub fn build(root: &Path, store: &dyn Repositories) -> Result<LocalAnalytics, St
             provider_ids,
             finding_categories,
             finding_rule_ids,
+            next_action: next_action(latest_decision.as_ref(), &outcomes),
         });
     }
     let (finding_records, finding_drilldown_total) =
@@ -364,7 +441,7 @@ pub fn build(root: &Path, store: &dyn Repositories) -> Result<LocalAnalytics, St
         *explicit_feedback_by_label.entry(label).or_insert(0) += 1;
     }
     Ok(LocalAnalytics {
-        schema_version: 8,
+        schema_version: 9,
         review_count: reviews.len(),
         history_complete,
         dimensions_complete,
@@ -488,4 +565,116 @@ pub fn build(root: &Path, store: &dyn Repositories) -> Result<LocalAnalytics, St
             )
             .collect(),
     })
+}
+
+#[cfg(test)]
+mod next_action_tests {
+    use super::*;
+    use vee_core::GateDecision;
+
+    fn decision(status: vee_core::GateStatus, blocking: &[&str], reasons: &[&str]) -> GateDecision {
+        GateDecision {
+            schema_version: 1,
+            decision_id: "gate".into(),
+            snapshot_id: "snapshot".into(),
+            effective_config_digest: "config".into(),
+            policy_digest: "policy".into(),
+            status,
+            blocking_findings: blocking.iter().map(|id| id.to_string()).collect(),
+            verification_run_ids: Vec::new(),
+            evidence_digest: "evidence".into(),
+            reasons: reasons.iter().map(|reason| reason.to_string()).collect(),
+            replay_inputs: None,
+        }
+    }
+
+    fn outcome(reviewer: &str, status: &str) -> crate::ReviewerOutcome {
+        crate::ReviewerOutcome {
+            reviewer_id: reviewer.into(),
+            provider_id: "provider".into(),
+            provider_kind: Default::default(),
+            model: None,
+            provider_version: None,
+            status: status.into(),
+            duration_ms: None,
+            usage: None,
+        }
+    }
+
+    #[test]
+    fn next_action_follows_the_gate_and_reviewer_outcomes() {
+        use vee_core::GateStatus::{Block, Incomplete, Pass};
+        // (name, latest decision, reviewer outcomes, expected kind, expected summary)
+        type Case = (
+            &'static str,
+            Option<GateDecision>,
+            Vec<crate::ReviewerOutcome>,
+            &'static str,
+            &'static str,
+        );
+        let cases: Vec<Case> = vec![
+            (
+                "no decision",
+                None,
+                vec![],
+                "run_gate",
+                "No gate decision yet: run vee gate.",
+            ),
+            (
+                "passed",
+                Some(decision(Pass, &[], &[])),
+                vec![outcome("correctness", "completed")],
+                "none",
+                "Gate passed.",
+            ),
+            (
+                "failed reviewers come first",
+                Some(decision(
+                    Incomplete,
+                    &["f1"],
+                    &["required reviewer correctness did not complete"],
+                )),
+                vec![
+                    outcome("correctness", "failed"),
+                    outcome("security", "context_budget_exceeded"),
+                    outcome("style", "completed"),
+                ],
+                "rerun_reviewers",
+                "Rerun reviewers: correctness (failed), security (context budget exceeded).",
+            ),
+            (
+                "blocking findings",
+                Some(decision(Block, &["f1", "f2"], &["2 blocking findings"])),
+                vec![outcome("correctness", "completed")],
+                "fix_findings",
+                "Fix 2 blocking findings.",
+            ),
+            (
+                "one blocking finding",
+                Some(decision(Block, &["f1"], &[])),
+                vec![],
+                "fix_findings",
+                "Fix 1 blocking finding.",
+            ),
+            (
+                "blocked by policy without findings",
+                Some(decision(Block, &[], &["verification profile unit failed"])),
+                vec![outcome("correctness", "completed")],
+                "resolve_gate_reason",
+                "verification profile unit failed",
+            ),
+            (
+                "incomplete without a reason",
+                Some(decision(Incomplete, &[], &[])),
+                vec![],
+                "resolve_gate_reason",
+                "Gate incomplete; open the review for details.",
+            ),
+        ];
+        for (name, decision, outcomes, kind, summary) in cases {
+            let action = next_action(decision.as_ref(), &outcomes);
+            assert_eq!(action.kind, kind, "{name}");
+            assert_eq!(action.summary, summary, "{name}");
+        }
+    }
 }
