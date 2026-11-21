@@ -36,7 +36,24 @@ def run(command: list[str], cwd: Path) -> None:
         raise RuntimeError(f"command exited {result.returncode}: {' '.join(command)}")
 
 
+def missing_acceptance_modules() -> list[str]:
+    """Python modules the acceptance scripts import, absent from this interpreter."""
+    import importlib.util
+
+    return [name for name in ("jsonschema",) if importlib.util.find_spec(name) is None]
+
+
 def main() -> int:
+    missing = missing_acceptance_modules()
+    if missing:
+        print(
+            f"verify-clean-build: {sys.executable} lacks {', '.join(missing)}, which the "
+            "acceptance scripts need. Run from a virtualenv:\n"
+            "  python3 -m venv .venv && .venv/bin/pip install -r scripts/acceptance/requirements.txt\n"
+            "  .venv/bin/python scripts/verify-clean-build.py",
+            file=sys.stderr,
+        )
+        return 1
     source = Path(__file__).resolve().parent.parent
     try:
         with tempfile.TemporaryDirectory(prefix="vee-clean-build-") as temporary:

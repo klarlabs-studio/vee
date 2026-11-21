@@ -376,6 +376,11 @@
       },
       "uniqueItems": true
     },
+    "unreviewed_paths": {
+      "type": "array",
+      "description": "Changed paths inside the repository review filter that no reviewer received as source or diff.",
+      "items": { "type": "string" }
+    },
     "reviewer_context": {
       "type": "array",
       "description": "Local, snapshot-bound manifest of changed-file and optional impact context supplied or omitted for each reviewer. Impact coverage is reported separately from changed-source completeness. Digests identify context artifacts without including source text.",

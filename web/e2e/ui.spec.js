@@ -44,6 +44,22 @@ const config = {
   policy: { required_reviewers: ['correctness'], block_severities: ['high'], on_incomplete: 'block' },
 }
 
+const findingTask = {
+  schema_version: 1,
+  task: {
+    schema_version: 2, task_id: 'task_find001', review_id: 'rev_latest', snapshot_id: 'sha256:latest',
+    snapshot_current: false, finding: findingRecord,
+    source_context: { path: 'src/lib.rs', start_line: 40, end_line: 44, classification: 'untrusted_repository_source',
+      // The backend numbers each line itself: `{n:>6} | {text}\n` (finding_task.rs).
+      content: '    40 | fn handle(input: &str) {\n    41 |     if input.is_empty() {\n    42 |         return process(input);\n    43 |     }\n    44 | }\n' },
+    context_note: null, impact_paths: [], impact_coverage_complete: true,
+    evidence: [{ id: 'ev_1', kind: 'source', classification: 'observed', provenance: 'source_snapshot', source_path: 'src/lib.rs', start_line: 42, end_line: 42, verification: 'unverified', content_digest: 'sha256:abc' }],
+    applicable_standards: [], standards_note: null, ownership: null, ownership_note: null,
+    instructions: 'Fix the finding against the exact snapshot.',
+  },
+  verification_runs: [{ run_id: 'verify_2', profile_id: 'unit', status: 'failed', snapshot_id: 'sha256:latest', created_at: '2026-11-14 13:00:00' }],
+}
+
 test.beforeEach(async ({ page }) => {
   let latestSummary = latest
   let latestDetail = detail(latest)
@@ -54,7 +70,7 @@ test.beforeEach(async ({ page }) => {
     let body
     if (url.pathname === '/api/health') body = { status: 'ok', repository: '/repo' }
     else if (url.pathname === '/api/analytics') body = {
-      schema_version: 7,
+      schema_version: 9,
       review_count: 2,
       history_complete: true,
       dimensions_complete: true,
@@ -63,8 +79,8 @@ test.beforeEach(async ({ page }) => {
         { day: '2026-11-14', pass: 0, block: 1, incomplete: 0, ungated: 0 },
       ],
       review_dimensions: [
-        { review_id: 'rev_prior', day: '2026-11-13', status: 'block', summary_status: 'pass', reviewer_ids: ['correctness'], provider_ids: ['codex'], finding_categories: [], finding_rule_ids: [] },
-        { review_id: 'rev_latest', day: '2026-11-14', status: 'block', reviewer_ids: ['security'], provider_ids: ['claude'], finding_categories: ['correctness'], finding_rule_ids: ['RULE-001'] },
+        { review_id: 'rev_prior', day: '2026-11-13', status: 'block', summary_status: 'pass', reviewer_ids: ['correctness'], provider_ids: ['codex'], finding_categories: [], finding_rule_ids: [], next_action: { kind: 'rerun_reviewers', summary: 'Rerun reviewers: correctness (failed).' } },
+        { review_id: 'rev_latest', day: '2026-11-14', status: 'block', reviewer_ids: ['security'], provider_ids: ['claude'], finding_categories: ['correctness'], finding_rule_ids: ['RULE-001'], next_action: { kind: 'fix_findings', summary: 'Fix 1 blocking finding.' } },
       ],
       findings_by_severity: { high: 1, medium: 2 },
       findings_by_rule: { 'RULE-001': 1 },
@@ -113,8 +129,9 @@ test.beforeEach(async ({ page }) => {
       latestDetail.findings = [{ ...latestDetail.findings[0], status: update.status, status_reason: update.reason }]
       body = { schema_version: 1, finding_id: 'FIND-001', ...update, note: 'Lifecycle status is audit metadata. Use the waiver workflow for a scoped gate exception.' }
     }
+    else if (url.pathname === '/api/findings/FIND-001/task') body = findingTask
     else if (url.pathname === '/api/reviews/rev_latest') body = latestDetail
-    else if (url.pathname === '/api/reviews/rev_prior') body = detail(prior)
+    else if (url.pathname === '/api/reviews/rev_prior') body = { ...detail(prior), superseded_by: { review_id: 'rev_latest', created_at: '2026-11-14 09:00:00', outdated_finding_ids: ['FIND-001'] } }
     else if (url.pathname === '/api/reviews/rev_started') body = latestDetail
     else body = { error: `Unexpected API path ${url.pathname}` }
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
@@ -194,7 +211,7 @@ test('verification chart filters by profile and date and drills into snapshot co
   await page.getByRole('button', { name: 'Export JSON' }).click()
   const download = await downloadEvent
   const report = JSON.parse(await readFile(await download.path(), 'utf8'))
-  expect(report.source_schema_version).toBe(7)
+  expect(report.source_schema_version).toBe(9)
   expect(report.verification_run_count).toBe(3)
   expect(report.verification_history_complete).toBe(true)
   expect(report.verification_filter.profile_id).toBe('unit')
@@ -307,7 +324,7 @@ test('analytics export preserves the visible trend window and explicit count den
   const report = JSON.parse(await readFile(path, 'utf8'))
   expect(report).toMatchObject({
     schema_version: 1,
-    source_schema_version: 7,
+    source_schema_version: 9,
     scope: 'repository_local',
     gate_trend_window: 'latest_2_dates_with_saved_reviews',
     history_complete: true,
@@ -735,4 +752,135 @@ test('failed history selection never shows another review result as its own', as
   await page.getByRole('button', { name: /rev_prior/ }).click()
   await expect(page.getByText('The selected review could not be loaded.')).toBeVisible()
   await expect(page.getByText('Action required')).toHaveCount(0)
+})
+
+test('finding drawer shows title, snapshot source, evidence, verification, and copies the work package', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+  await page.goto('/')
+  await page.getByRole('button', { name: /Findings/ }).click()
+  await page.getByRole('button', { name: 'Open details for FIND-001' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Finding details' })
+  await expect(drawer.getByRole('heading', { name: 'The changed branch skips validation.' })).toBeVisible()
+  await expect(drawer.getByText('src/lib.rs:42')).toBeVisible()
+  const highlighted = drawer.locator('.source-line.flagged')
+  await expect(highlighted).toHaveCount(1)
+  await expect(highlighted).toContainText('42')
+  await expect(highlighted).toContainText('return process(input);')
+  await expect(drawer.locator('.source-line')).toHaveCount(5)
+  await expect(highlighted.locator('.line-number')).toHaveText('42')
+  await expect(highlighted).not.toContainText('| ')
+  await expect(drawer.getByText(/This snapshot no longer matches the working tree/)).toBeVisible()
+  await expect(drawer.getByText('src/lib.rs[42–42]')).toBeVisible()
+  await expect(drawer.getByText(/observed · source_snapshot/)).toBeVisible()
+  await expect(drawer.getByText(/unit · failed/)).toBeVisible()
+  await drawer.getByRole('button', { name: 'Copy work package' }).click()
+  await expect(drawer.getByRole('status')).toHaveText('Work package copied.')
+  const copied = JSON.parse(await page.evaluate(() => navigator.clipboard.readText()))
+  expect(copied.task_id).toBe('task_find001')
+  await drawer.getByRole('button', { name: 'Close finding details' }).click()
+  await expect(drawer).toBeHidden()
+})
+
+test('an older review marks findings the later review of the same base no longer reported', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: /Insights/ }).click()
+  await page.getByRole('button', { name: /rev_prior/ }).click()
+  await expect(page.getByText(/A later review of the same base, rev_latest, exists/)).toBeVisible()
+  await page.getByRole('button', { name: /Findings/ }).click()
+  const badge = page.locator('.finding-row').getByText('Outdated', { exact: true })
+  await expect(badge).toBeVisible()
+  await expect(badge).toHaveAttribute('title', /Not reported by rev_latest/)
+})
+
+test('the latest review shows no outdated marker', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: /Findings/ }).click()
+  await expect(page.locator('.finding-row').first()).toBeVisible()
+  await expect(page.getByText('Outdated', { exact: true })).toHaveCount(0)
+})
+
+test('queue cards show each review\'s next action from its gate', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: /Review queue/ }).click()
+  const latest = page.locator('.queue-card').filter({ hasText: 'rev_latest' })
+  await expect(latest.locator('.next-action')).toHaveText('Next: Fix 1 blocking finding.')
+  await expect(latest.locator('.next-action')).toHaveAttribute('data-kind', 'fix_findings')
+  const prior = page.locator('.queue-card').filter({ hasText: 'rev_prior' })
+  await expect(prior.locator('.next-action')).toHaveText('Next: Rerun reviewers: correctness (failed).')
+})
+
+test('a slow response for an earlier finding never fills the drawer of a later one', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+  let calls = 0
+  let releaseFirst
+  const firstHeld = new Promise(resolve => { releaseFirst = resolve })
+  let firstSent
+  const firstDone = new Promise(resolve => { firstSent = resolve })
+  await page.route('**/api/findings/FIND-001/task', async route => {
+    calls += 1
+    if (calls === 1) {
+      await firstHeld
+      const stale = { ...findingTask, task: { ...findingTask.task, task_id: 'task_stale' } }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(stale) })
+      firstSent()
+    } else {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(findingTask) })
+    }
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: /Findings/ }).click()
+  const open = page.getByRole('button', { name: 'Open details for FIND-001' })
+  const drawer = page.getByRole('dialog', { name: 'Finding details' })
+  await open.click()
+  await drawer.getByRole('button', { name: 'Close finding details' }).click()
+  await open.click()
+  await expect(drawer.getByRole('button', { name: 'Copy work package' })).toBeVisible()
+  releaseFirst()
+  await firstDone
+  await page.waitForTimeout(200)
+  await drawer.getByRole('button', { name: 'Copy work package' }).click()
+  const copied = JSON.parse(await page.evaluate(() => navigator.clipboard.readText()))
+  expect(copied.task_id).toBe('task_find001')
+})
+
+test('a review lists changed files no reviewer received', async ({ page }) => {
+  await page.route('**/api/reviews/rev_latest', async route => {
+    const body = detail(latest)
+    body.review.unreviewed_paths = ['crates/core/lib.rs', 'schemas/new.json']
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
+  })
+  await page.goto('/')
+  const note = page.getByRole('note', { name: 'Not reviewed' })
+  await expect(note).toContainText('No reviewer received 2 changed files')
+  await expect(note.getByText('crates/core/lib.rs')).toBeVisible()
+  await expect(note.getByText('schemas/new.json')).toBeVisible()
+})
+
+test('the finding drawer follows disposition saves and closes when another review opens', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: /Findings/ }).click()
+  await page.getByRole('button', { name: 'Open details for FIND-001' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Finding details' })
+  await expect(drawer).toContainText('correctness · open')
+  await page.getByLabel('Disposition for FIND-001').selectOption('verified')
+  await page.getByLabel('Reason for FIND-001').fill('Reproduced locally')
+  await page.getByRole('button', { name: 'Save disposition' }).click()
+  await expect(drawer).toContainText('correctness · verified')
+
+  await page.getByRole('button', { name: /Insights/ }).click()
+  await page.getByRole('button', { name: /rev_prior/ }).click()
+  await expect(page.getByText('sha256:prior', { exact: true })).toBeVisible()
+  await expect(drawer).toBeHidden()
+})
+
+test('opening a finding moves focus into the drawer and Escape closes it', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: /Findings/ }).click()
+  const opener = page.getByRole('button', { name: 'Open details for FIND-001' })
+  await opener.click()
+  const drawer = page.getByRole('dialog', { name: 'Finding details' })
+  await expect(drawer.getByRole('button', { name: 'Close finding details' })).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(drawer).toBeHidden()
+  await expect(opener).toBeFocused()
 })

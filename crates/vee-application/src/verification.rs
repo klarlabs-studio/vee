@@ -1281,13 +1281,13 @@ pub(crate) fn persist_artifact(
     use std::io::Write;
 
     if digest(bytes) != expected_digest {
-        return Err("verification output digest changed before artifact persistence".into());
+        return Err("artifact digest changed before persistence".into());
     }
     let digest_hex = expected_digest
         .strip_prefix("sha256:")
-        .ok_or("verification output has an unsupported digest format")?;
+        .ok_or("artifact has an unsupported digest format")?;
     if digest_hex.len() != 64 || !digest_hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("verification output has an invalid SHA-256 digest".into());
+        return Err("artifact has an invalid SHA-256 digest".into());
     }
     let mut directory = root.join(".vee");
     for component in ["artifacts", "sha256"] {
@@ -1298,39 +1298,33 @@ pub(crate) fn persist_artifact(
     let destination = directory.join(digest_hex);
     match std::fs::symlink_metadata(&destination) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            return Err("verification artifact destination is not a regular file".into());
+            return Err("artifact destination is not a regular file".into());
         }
         Ok(_) => {
             let existing = std::fs::read(&destination).map_err(|error| error.to_string())?;
             if existing != bytes || digest(&existing) != expected_digest {
-                return Err(
-                    "content-addressed verification artifact failed integrity check".into(),
-                );
+                return Err("content-addressed artifact failed integrity check".into());
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let mut temporary = tempfile::NamedTempFile::new_in(&directory)
-                .map_err(|error| format!("creating verification artifact: {error}"))?;
+                .map_err(|error| format!("creating artifact: {error}"))?;
             temporary
                 .write_all(bytes)
-                .map_err(|error| format!("writing verification artifact: {error}"))?;
+                .map_err(|error| format!("writing artifact: {error}"))?;
             match temporary.persist_noclobber(&destination) {
                 Ok(_) => {}
                 Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
                     let existing =
                         std::fs::read(&destination).map_err(|error| error.to_string())?;
                     if existing != bytes || digest(&existing) != expected_digest {
-                        return Err(
-                            "content-addressed verification artifact failed integrity check".into(),
-                        );
+                        return Err("content-addressed artifact failed integrity check".into());
                     }
                 }
-                Err(error) => {
-                    return Err(format!("persisting verification artifact: {}", error.error))
-                }
+                Err(error) => return Err(format!("persisting artifact: {}", error.error)),
             }
         }
-        Err(error) => return Err(format!("checking verification artifact path: {error}")),
+        Err(error) => return Err(format!("checking artifact path: {error}")),
     }
     let path = format!(".vee/artifacts/sha256/{digest_hex}");
     Ok(vee_core::ArtifactReference {

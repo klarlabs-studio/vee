@@ -56,6 +56,33 @@ reviewers:
       - web/playwright.config.js
       - web/vite.config.js
       - scripts/ui-smoke.py
+  # Every other Rust source file. The reviewers above split the largest files so
+  # each fits a provider's context; this one covers the rest (ADR 0010).
+  correctness-crates:
+    provider: codex
+    instructions_file: .vee/reviewers/correctness.md
+    include:
+      - crates/**/*.rs
+    exclude:
+      - crates/vee-application/src/lib.rs
+      - crates/vee-core/src/lib.rs
+      - crates/vee-cli/src/main.rs
+      - crates/vee-cli/src/mcp.rs
+      - crates/vee-cli/tests/cli.rs
+      - crates/vee-http/**
+  # Output contracts and project files the code reviewers do not receive.
+  contracts:
+    provider: codex
+    instructions_file: .vee/reviewers/cli.md
+    include:
+      - docs/**/*.md
+      - schemas/**/*.json
+      - .github/workflows/*.yml
+      - Cargo.lock
+      - crates/*/Cargo.toml
+    exclude:
+      - schemas/gate-decision-v1.schema.json
+      - schemas/review-output-v2.schema.json
 verification:
   # nox security scan (secrets, code, dependencies, IaC), offline. Error-level
   # results on changed lines block; pre-existing results never do. See ADR 0002.
@@ -71,7 +98,7 @@ verification:
     sarif:
       block_levels: [error]
 policy:
-  required_reviewers: [correctness, correctness-core, cli-contract, cli-surface, cli-acceptance, local-ui]
+  required_reviewers: [correctness, correctness-core, cli-contract, cli-surface, cli-acceptance, local-ui, correctness-crates, contracts]
   required_verifications: [security]
   block_severities: [critical, high]
   minimum_confidence: 80

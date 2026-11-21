@@ -453,6 +453,11 @@
           "minimum": 0,
           "maximum": 100
         },
+        "on_unreviewed": {
+          "enum": ["block", "allow"],
+          "default": "block",
+          "description": "block: a changed file inside review.include/exclude that no reviewer received leaves the analysis incomplete. allow: such files are only reported in unreviewed_paths."
+        },
         "on_incomplete": {
           "enum": [
             "block",

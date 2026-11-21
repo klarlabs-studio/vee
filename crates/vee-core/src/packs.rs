@@ -384,6 +384,9 @@ pub fn strictest(repository: &PolicyConfig, pack: &PolicyConfig) -> PolicyConfig
     if pack.on_incomplete == "block" {
         merged.on_incomplete = "block".into();
     }
+    if pack.on_unreviewed == "block" {
+        merged.on_unreviewed = "block".into();
+    }
     merged.acceptance.require_passing_verification |= pack.acceptance.require_passing_verification;
     merged.acceptance.required_verification_profiles = union(
         &repository.acceptance.required_verification_profiles,

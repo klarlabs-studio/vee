@@ -29,6 +29,10 @@ pub struct ReviewResult {
     /// content is represented only by per-artifact digests.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviewer_context: Vec<ReviewerContextManifest>,
+    /// Changed paths inside the repository review filter that no reviewer
+    /// received as source or diff.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreviewed_paths: Vec<String>,
     #[serde(default)]
     pub policy_profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -106,6 +110,14 @@ pub fn render_review_markdown(review: &ReviewResult) -> String {
     } else {
         for reason in &review.gate.reasons {
             report.push_str(&format!("- {}\n", markdown_inline(reason)));
+        }
+        report.push('\n');
+    }
+
+    if !review.unreviewed_paths.is_empty() {
+        report.push_str("## Not reviewed\n\nNo reviewer received these changed files:\n\n");
+        for path in &review.unreviewed_paths {
+            report.push_str(&format!("- `{}`\n", markdown_code(path)));
         }
         report.push('\n');
     }
@@ -1354,6 +1366,11 @@ pub fn run_review_with_provider_and_selection_context(
             });
         }
     }
+    keep_snapshot_sources_of_findings(root, &change_set, &findings);
+    let unreviewed_paths = unreviewed_paths(&change_set, &config.review, &reviewer_context);
+    if !unreviewed_paths.is_empty() && config.policy.on_unreviewed == "block" {
+        complete = false;
+    }
     let verification_runs = store.verifications_for_snapshot(&snapshot)?;
     let gate_verification_runs =
         gate_eligible_verification_runs(root, &snapshot, config, &verification_runs);
@@ -1421,6 +1438,7 @@ pub fn run_review_with_provider_and_selection_context(
         effective_config_digest: config_digest.clone(),
         selected_reviewers,
         reviewer_context,
+        unreviewed_paths,
         policy_profile: config.active_policy_profile.clone(),
         work_item,
         work_item_token_env,
@@ -1463,6 +1481,64 @@ pub(crate) fn reviewer_path_is_included(path: &str, reviewer: &vee_core::Reviewe
                 .include
                 .iter()
                 .any(|pattern| glob_matches(pattern, path)))
+}
+
+/// Changed paths inside the repository review filter that no reviewer
+/// received as full source or as a diff. Paths the repository filter excludes
+/// are out of scope by configuration and are not listed.
+/// Keep the snapshot bytes of each changed file with a located finding in the
+/// content-addressed artifact store, so the finding's source can be shown
+/// after the working tree moves on. Best effort: a file that cannot be kept
+/// only loses that fallback.
+fn keep_snapshot_sources_of_findings(
+    root: &Path,
+    change_set: &ChangeSet,
+    findings: &[vee_core::Finding],
+) {
+    let paths: std::collections::BTreeSet<&str> = findings
+        .iter()
+        .filter(|finding| finding.line.is_some())
+        .filter_map(|finding| finding.path.as_deref())
+        .collect();
+    for path in paths {
+        let Some(entry) = change_set
+            .files
+            .iter()
+            .find(|file| file.path == path && file.status != "deleted")
+        else {
+            continue;
+        };
+        if let Ok(Some(bytes)) = vee_git::read_snapshot_tree_file(root, change_set, Path::new(path))
+        {
+            let _ = crate::verification::persist_artifact(root, &bytes, &entry.content_digest);
+        }
+    }
+}
+
+pub(crate) fn unreviewed_paths(
+    change_set: &ChangeSet,
+    review: &vee_core::ReviewConfig,
+    manifests: &[ReviewerContextManifest],
+) -> Vec<String> {
+    let received: std::collections::BTreeSet<&str> = manifests
+        .iter()
+        .flat_map(|manifest| &manifest.files)
+        .filter(|file| {
+            file.role == "changed_file"
+                && (file.status == "full_source" || file.status == "bounded_diff")
+        })
+        .map(|file| file.path.as_str())
+        .collect();
+    let mut paths: Vec<String> = change_set
+        .files
+        .iter()
+        .filter(|file| review_path_is_included(&file.path, review))
+        .filter(|file| !received.contains(file.path.as_str()))
+        .map(|file| file.path.clone())
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 pub(crate) fn reviewer_context_manifest(

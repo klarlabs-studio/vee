@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 
 const reviews = ref([])
 const analytics = ref(null)
@@ -21,6 +21,10 @@ const saving = ref(false)
 const savingFinding = ref('')
 const findingMessage = ref('')
 const dispositionDrafts = ref({})
+const drawerRecord = ref(null)
+const drawerView = ref(null)
+const drawerError = ref('')
+const drawerMessage = ref('')
 const error = ref('')
 const scope = ref('base')
 const base = ref('main')
@@ -51,6 +55,8 @@ const selectedVerificationDay = ref('')
 const activeTab = ref('overview')
 const statusTone = value => ({ pass: 'good', block: 'bad', incomplete: 'warn' }[String(value).toLowerCase()] || 'muted')
 const findings = computed(() => selected.value?.findings || [])
+const supersession = computed(() => selected.value?.superseded_by || null)
+const isOutdated = record => Boolean(supersession.value?.outdated_finding_ids?.includes(record.finding.id))
 const impactPaths = computed(() => selected.value?.impact?.paths || [])
 const analyticsDimensions = computed(() => analytics.value?.review_dimensions || [])
 const queueItems = computed(() => {
@@ -64,6 +70,7 @@ const queueItems = computed(() => {
       gate_status_stale: Boolean(analyticsError.value && dimension?.status),
       reviewer_ids: dimension?.reviewer_ids || [],
       provider_ids: dimension?.provider_ids || [],
+      next_action: analyticsError.value ? null : dimension?.next_action || null,
     }
   }).filter(item =>
     (queueStatus.value === 'all' || item.gate_status === queueStatus.value) &&
@@ -550,13 +557,19 @@ function deleteSavedAnalyticsView() {
 async function openReview(id, showError = true, allowWhileLoading = false) {
   if (loading.value && !allowWhileLoading) return
   const requestId = ++detailRequestId
-  if (selected.value?.review?.review_id !== id) selected.value = null
+  if (selected.value?.review?.review_id !== id) { selected.value = null; closeFinding() }
   detailLoaded.value = false
   detailError.value = false
   try {
     const detail = await api(`/api/reviews/${encodeURIComponent(id)}`)
     if (requestId !== detailRequestId) return
     selected.value = detail; detailLoaded.value = true
+    // Keep an open drawer on the saved record, e.g. after a disposition change.
+    if (drawerRecord.value) {
+      const fresh = (detail.findings || []).find(record => record.finding.id === drawerRecord.value.finding.id)
+      if (fresh) drawerRecord.value = fresh
+      else closeFinding()
+    }
   } catch (e) {
     if (requestId !== detailRequestId) return
     detailError.value = true
@@ -613,6 +626,50 @@ async function updateFindingStatus(record) {
   } catch (e) { error.value = e.message }
   finally { savingFinding.value = '' }
 }
+// A one-line label for a finding: the first sentence of its rationale, bounded.
+const findingTitle = finding => {
+  const text = String(finding?.rationale || finding?.category || 'Finding').trim()
+  const sentence = (text.match(/^[\s\S]*?[.!?](\s|$)/)?.[0] || text).trim()
+  return sentence.length > 120 ? `${sentence.slice(0, 117)}…` : sentence
+}
+const drawerSourceLines = computed(() => {
+  const context = drawerView.value?.task?.source_context
+  if (!context) return []
+  // The backend renders each line as `{n:>6} | {text}`; keep its numbers.
+  return context.content.split('\n').filter(line => line !== '').map((line, index) => {
+    const match = line.match(/^\s*(\d+) \| ?(.*)$/)
+    const number = match ? Number(match[1]) : context.start_line + index
+    return { number, text: match ? match[2] : line, flagged: number === drawerRecord.value?.finding?.line }
+  })
+})
+// Identifies the latest drawer request, so a slower earlier response is dropped.
+let drawerRequest = 0
+const drawerCloseButton = ref(null)
+let drawerOpener = null
+async function openFinding(record) {
+  const request = ++drawerRequest
+  drawerOpener = document.activeElement
+  drawerRecord.value = record; drawerView.value = null; drawerError.value = ''; drawerMessage.value = ''
+  // After the state change, so the callback runs once the drawer is rendered.
+  nextTick(() => drawerCloseButton.value?.focus())
+  try {
+    const view = await api(`/api/findings/${encodeURIComponent(record.finding.id)}/task`)
+    if (request === drawerRequest) drawerView.value = view
+  } catch (e) { if (request === drawerRequest) drawerError.value = e.message }
+}
+function closeFinding() {
+  const wasOpen = Boolean(drawerRecord.value)
+  drawerRequest += 1; drawerRecord.value = null; drawerView.value = null
+  // Return focus to the control that opened the drawer, if it is still on the page.
+  if (wasOpen && drawerOpener?.isConnected) drawerOpener.focus()
+  drawerOpener = null
+}
+async function copyWorkPackage() {
+  try {
+    await navigator.clipboard.writeText(JSON.stringify(drawerView.value.task, null, 2))
+    drawerMessage.value = 'Work package copied.'
+  } catch { drawerMessage.value = 'Copy failed: the browser did not allow clipboard access.' }
+}
 onMounted(async () => {
   try {
     const health = await api('/api/health')
@@ -627,7 +684,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="shell">
+  <div class="shell" :class="{ 'drawer-open': drawerRecord }">
     <aside class="rail">
       <div class="brand"><span class="brand-mark">V</span><div><strong>vee</strong><small>LOCAL CODE ASSURANCE</small></div></div>
       <div class="rail-label">WORKSPACE</div>
@@ -671,7 +728,7 @@ onMounted(async () => {
         <p class="queue-scope hint">Showing {{ queueItems.length }} matching reviews from the latest {{ Math.min(reviews.length, 500) }} saved records<template v-if="reviews.length > 500">; older records are omitted</template>. “Status unavailable” means Vee could not load the review's retained analytics dimensions; it does not mean ungated.</p>
         <div v-if="queueItems.length" class="queue-list">
           <article v-for="item in queueItems" :key="item.review_id" class="queue-card">
-            <div class="queue-card-main"><span class="status-pill" :class="statusTone(item.gate_status)">{{ item.gate_status_stale ? 'possibly outdated' : item.gate_status === 'unknown' ? 'status unavailable' : item.gate_status === 'ungated' ? 'no gate' : item.gate_status }}</span><div><strong>{{ item.review_id }}</strong><small>{{ item.created_at }} · snapshot {{ item.snapshot_id }}</small><small>Review state: {{ item.status }}</small></div></div>
+            <div class="queue-card-main"><span class="status-pill" :class="statusTone(item.gate_status)">{{ item.gate_status_stale ? 'possibly outdated' : item.gate_status === 'unknown' ? 'status unavailable' : item.gate_status === 'ungated' ? 'no gate' : item.gate_status }}</span><div><strong>{{ item.review_id }}</strong><small>{{ item.created_at }} · snapshot {{ item.snapshot_id }}</small><small>Review state: {{ item.status }}</small><small v-if="item.next_action" class="next-action" :data-kind="item.next_action.kind">Next: {{ item.next_action.summary }}</small></div></div>
             <div class="queue-tags"><span v-for="id in item.reviewer_ids" :key="`reviewer:${id}`">{{ id }}</span><span v-for="id in item.provider_ids" :key="`provider:${id}`" class="provider-tag">{{ id }}</span><span v-if="!item.reviewer_ids.length && !item.provider_ids.length" class="queue-no-tags">No reviewer dimensions available</span></div>
             <button class="text-button" :disabled="loading" @click="activeTab = 'overview'; openReview(item.review_id)">Open review →</button>
           </article>
@@ -788,12 +845,14 @@ onMounted(async () => {
             <div class="summary-card"><div class="card-label">FINDINGS</div><strong class="metric">{{ findings.length }}</strong><small>reported in this review</small></div>
             <div class="summary-card"><div class="card-label">IMPACT PATHS</div><strong class="metric">{{ impactPaths.length }}</strong><small>{{ selected.impact?.coverage_complete ? 'coverage complete' : 'coverage has limitations' }}</small></div>
           </section>
+          <section v-if="selected.review.unreviewed_paths?.length" class="alert" role="note" aria-label="Not reviewed"><strong>No reviewer received {{ selected.review.unreviewed_paths.length }} changed file{{ selected.review.unreviewed_paths.length === 1 ? '' : 's' }}.</strong> No reviewer's include rules matched them<template v-if="!selected.review.analysis_complete">, so the analysis is incomplete</template>. Add or widen a reviewer, or set <code>policy.on_unreviewed: allow</code>.<ul class="unreviewed-list"><li v-for="path in selected.review.unreviewed_paths" :key="path"><code>{{ path }}</code></li></ul></section>
+          <p v-if="supersession" class="alert supersession-note" role="note">A later review of the same base, {{ supersession.review_id }}, exists ({{ supersession.created_at }}). {{ supersession.outdated_finding_ids.length }} of this review's findings were not reported again there and are marked Outdated. This is display only; it does not change gates or dispositions. <button class="text-button" @click="openReview(supersession.review_id)">Open later review →</button></p>
           <nav class="tabs"><button :class="{ selected: activeTab === 'overview' }" @click="activeTab = 'overview'">Overview</button><button :class="{ selected: activeTab === 'findings' }" @click="activeTab = 'findings'">Findings <span>{{ findings.length }}</span></button><button :class="{ selected: activeTab === 'impact' }" @click="activeTab = 'impact'">Impact <span>{{ impactPaths.length }}</span></button><button :class="{ selected: activeTab === 'reviewers' }" @click="activeTab = 'reviewers'">Reviewers <span>{{ selected.review.reviewer_outcomes?.length || 0 }}</span></button></nav>
           <section v-if="activeTab === 'overview'" class="content-grid">
             <div class="panel"><div class="panel-head"><div><h3>Findings</h3><p>Evidence-backed issues from the selected snapshot.</p></div><button class="text-button" @click="activeTab = 'findings'">View all →</button></div><div v-if="!findings.length" class="empty-state"><span>✓</span><strong>No findings reported</strong><small v-if="selected.review.analysis_complete && selected.review.reviewer_outcomes?.length">Reviewers completed without actionable findings.</small><small v-else-if="!selected.review.analysis_complete">Analysis did not complete; findings may be missing.</small><small v-else>No reviewers ran for this review.</small></div><article v-for="record in findings.slice(0, 5)" :key="record.finding.id" class="finding-row"><span class="severity" :class="statusTone(record.finding.severity)">{{ record.finding.severity }}</span><div><strong>{{ record.finding.category }}</strong><p>{{ record.finding.rationale }}</p><small>{{ record.finding.path || 'No location' }}<template v-if="record.finding.line">:{{ record.finding.line }}</template></small></div></article></div>
             <div class="panel"><div class="panel-head"><div><h3>Review details</h3><p>Snapshot-bound run information.</p></div></div><dl class="details"><dt>Snapshot</dt><dd>{{ selected.review.snapshot_id }}</dd><dt>Config digest</dt><dd>{{ selected.review.effective_config_digest }}</dd><dt>Analysis</dt><dd>{{ selected.review.analysis_complete ? 'Complete' : 'Incomplete' }}</dd><dt>Scope</dt><dd>{{ selected.review.change_set?.scope }}</dd></dl><div class="reason" v-for="reason in selected.review.reasons" :key="reason">{{ reason }}</div></div>
           </section>
-          <section v-else-if="activeTab === 'findings'" class="panel full-panel"><div class="panel-head"><div><h3>Findings</h3><p>{{ findings.length }} findings · status and provenance from Vee’s saved review.</p></div></div><p v-if="findingMessage" class="hint" role="status">{{ findingMessage }}</p><div v-if="!findings.length" class="empty-state"><span>✓</span><strong>{{ selected.review.analysis_complete ? 'No findings reported' : 'Findings may be incomplete' }}</strong><small v-if="!selected.review.analysis_complete">Analysis did not complete; findings may be missing.</small><small v-else-if="selected.review.reviewer_outcomes?.length">Reviewers completed without actionable findings.</small><small v-else>No reviewers ran for this review.</small></div><article v-for="record in findings" :key="record.finding.id" class="finding-row"><span class="severity" :class="statusTone(record.finding.severity)">{{ record.finding.severity }}</span><div class="finding-content"><div><div class="finding-title"><strong>{{ record.finding.category }}</strong><span class="provenance">{{ record.finding.provenance }}</span></div><p>{{ record.finding.rationale }}</p><small>{{ record.finding.path || 'No location' }}<template v-if="record.finding.line">:{{ record.finding.line }}</template> · confidence {{ record.finding.confidence ?? 'unknown' }}</small><small class="disposition-meta">Disposition: {{ record.status }}<template v-if="record.status_reason"> · {{ record.status_reason }}</template></small></div><div class="disposition-controls"><select :aria-label="`Disposition for ${record.finding.id}`" :value="dispositionDrafts[record.finding.id]?.status || record.status" @change="dispositionDrafts[record.finding.id] = { ...dispositionDrafts[record.finding.id], status: $event.target.value, reason: dispositionDrafts[record.finding.id]?.reason || '' }"><option value="open">Open</option><option value="verified">Verified</option><option value="refuted">Refuted</option><option value="resolved">Resolved</option></select><input :aria-label="`Reason for ${record.finding.id}`" :value="dispositionDrafts[record.finding.id]?.reason || ''" placeholder="Reason required" @input="dispositionDrafts[record.finding.id] = { ...dispositionDrafts[record.finding.id], status: dispositionDrafts[record.finding.id]?.status || record.status, reason: $event.target.value }"/><button class="text-button" :disabled="savingFinding === record.finding.id" @click="updateFindingStatus(record)">{{ savingFinding === record.finding.id ? 'Saving…' : 'Save disposition' }}</button></div></div></article><p class="hint">Disposition records are audit metadata and do not waive gate findings. Use the scoped waiver workflow for policy exceptions.</p></section>
+          <section v-else-if="activeTab === 'findings'" class="panel full-panel"><div class="panel-head"><div><h3>Findings</h3><p>{{ findings.length }} findings · status and provenance from Vee’s saved review.</p></div></div><p v-if="findingMessage" class="hint" role="status">{{ findingMessage }}</p><div v-if="!findings.length" class="empty-state"><span>✓</span><strong>{{ selected.review.analysis_complete ? 'No findings reported' : 'Findings may be incomplete' }}</strong><small v-if="!selected.review.analysis_complete">Analysis did not complete; findings may be missing.</small><small v-else-if="selected.review.reviewer_outcomes?.length">Reviewers completed without actionable findings.</small><small v-else>No reviewers ran for this review.</small></div><article v-for="record in findings" :key="record.finding.id" class="finding-row"><span class="severity" :class="statusTone(record.finding.severity)">{{ record.finding.severity }}</span><div class="finding-content"><div><div class="finding-title"><strong>{{ findingTitle(record.finding) }}</strong><span class="provenance">{{ record.finding.category }} · {{ record.finding.provenance }}</span><span v-if="isOutdated(record)" class="provenance outdated" :title="`Not reported by ${supersession.review_id}, a later review of the same base`">Outdated</span><span v-if="record.finding.advisory" class="provenance">advisory</span><span v-if="record.finding.sample_agreement" class="provenance">{{ record.finding.sample_agreement.reported }}/{{ record.finding.sample_agreement.samples }} runs</span><button class="text-button" :aria-label="`Open details for ${record.finding.id}`" @click="openFinding(record)">Details</button></div><p v-if="String(record.finding.rationale || '').trim() !== findingTitle(record.finding)">{{ record.finding.rationale }}</p><small>{{ record.finding.path || 'No location' }}<template v-if="record.finding.line">:{{ record.finding.line }}</template> · confidence {{ record.finding.confidence ?? 'unknown' }}</small><small class="disposition-meta">Disposition: {{ record.status }}<template v-if="record.status_reason"> · {{ record.status_reason }}</template></small></div><div class="disposition-controls"><select :aria-label="`Disposition for ${record.finding.id}`" :value="dispositionDrafts[record.finding.id]?.status || record.status" @change="dispositionDrafts[record.finding.id] = { ...dispositionDrafts[record.finding.id], status: $event.target.value, reason: dispositionDrafts[record.finding.id]?.reason || '' }"><option value="open">Open</option><option value="verified">Verified</option><option value="refuted">Refuted</option><option value="resolved">Resolved</option></select><input :aria-label="`Reason for ${record.finding.id}`" :value="dispositionDrafts[record.finding.id]?.reason || ''" placeholder="Reason required" @input="dispositionDrafts[record.finding.id] = { ...dispositionDrafts[record.finding.id], status: dispositionDrafts[record.finding.id]?.status || record.status, reason: $event.target.value }"/><button class="text-button" :disabled="savingFinding === record.finding.id" @click="updateFindingStatus(record)">{{ savingFinding === record.finding.id ? 'Saving…' : 'Save disposition' }}</button></div></div></article><p class="hint">Disposition records are audit metadata and do not waive gate findings. Use the scoped waiver workflow for policy exceptions.</p></section>
           <section v-else-if="activeTab === 'impact'" class="panel full-panel"><div class="panel-head"><div><h3>Change impact</h3><p>Relationships include evidence and certainty labels; this is not a complete call graph.</p></div><span class="coverage" :class="selected.impact?.coverage_complete ? 'good' : 'warn'">{{ selected.impact?.coverage_complete ? 'COVERAGE COMPLETE' : 'LIMITED COVERAGE' }}</span></div><div v-if="!impactPaths.length" class="empty-state"><strong>No impact paths found</strong><small>Changed symbols: {{ selected.impact?.changed_symbols?.join(', ') || 'none identified' }}</small></div><article v-for="(path, index) in impactPaths" :key="index" class="impact-row"><span class="impact-index">{{ String(index + 1).padStart(2, '0') }}</span><div><strong>{{ path.affected_path }} <span class="arrow">→</span> {{ path.source_path }}</strong><small>{{ path.symbol }} · {{ path.relationship }} · {{ path.certainty }} · line {{ path.evidence_line }}</small></div></article><div v-for="limitation in selected.impact?.limitations" :key="limitation" class="reason">{{ limitation }}</div></section>
           <section v-else class="panel full-panel"><div class="panel-head"><div><h3>Reviewer outcomes</h3><p>Each required reviewer must complete for the gate to pass.</p></div></div><article v-for="outcome in selected.review.reviewer_outcomes" :key="outcome.reviewer_id" class="reviewer-row"><span class="reviewer-avatar">{{ outcome.reviewer_id.slice(0, 1).toUpperCase() }}</span><div><strong>{{ outcome.reviewer_id }}</strong><small>{{ outcome.provider_id }} · {{ outcome.provider_kind }}<template v-if="outcome.provider_version"> · {{ outcome.provider_version }}</template></small></div><span class="status-pill" :class="statusTone(outcome.status)">{{ outcome.status }}</span></article><div v-if="!selected.review.reviewer_outcomes?.length" class="empty-state"><strong>No reviewers ran</strong></div></section>
           </template>
@@ -802,5 +861,51 @@ onMounted(async () => {
         <section v-else class="welcome"><div class="welcome-art">V</div><h2>Make the change understandable.</h2><p>Run a review to inspect findings, evidence, reviewer outcomes, and likely impact paths for this checkout.</p></section>
       </template>
     </main>
+    <aside v-if="drawerRecord" class="finding-drawer" role="dialog" aria-modal="false" aria-label="Finding details" @keydown.esc="closeFinding">
+      <div class="drawer-head">
+        <div>
+          <span class="severity" :class="statusTone(drawerRecord.finding.severity)">{{ drawerRecord.finding.severity }}</span>
+          <h3>{{ findingTitle(drawerRecord.finding) }}</h3>
+          <small>{{ drawerRecord.finding.category }} · {{ drawerRecord.status }} · confidence {{ drawerRecord.finding.confidence ?? 'unknown' }} · {{ drawerRecord.finding.id }}</small>
+        </div>
+        <button ref="drawerCloseButton" class="text-button" aria-label="Close finding details" @click="closeFinding">✕</button>
+      </div>
+      <p v-if="String(drawerRecord.finding.rationale || '').trim() !== findingTitle(drawerRecord.finding)" class="drawer-rationale">{{ drawerRecord.finding.rationale }}</p>
+      <p v-if="drawerError" class="alert">{{ drawerError }}</p>
+      <p v-else-if="!drawerView" class="hint">Loading snapshot context…</p>
+      <template v-else>
+        <p v-if="!drawerView.task.snapshot_current" class="alert">This snapshot no longer matches the working tree.<template v-if="drawerView.task.source_context"> The source below is the reviewed snapshot, not the current file.</template><template v-else> The reviewed source is no longer available.</template></p>
+        <section class="drawer-section">
+          <h4>Code reference</h4>
+          <small>{{ drawerRecord.finding.path || 'No location' }}<template v-if="drawerRecord.finding.line">:{{ drawerRecord.finding.line }}</template></small>
+          <pre v-if="drawerSourceLines.length" class="source-excerpt"><code><span v-for="line in drawerSourceLines" :key="line.number" class="source-line" :class="{ flagged: line.flagged }"><span class="line-number">{{ line.number }}</span>{{ line.text }}
+</span></code></pre>
+          <small v-if="drawerView.task.context_note" class="hint">{{ drawerView.task.context_note }}</small>
+        </section>
+        <section class="drawer-section">
+          <h4>Evidence</h4>
+          <p class="hint">Model findings are inferences from the reviewed source; evidence below records where Vee anchored them and how each item was obtained.</p>
+          <article v-for="item in drawerView.task.evidence" :key="item.id" class="evidence-item">
+            <strong>{{ item.source_path }}[{{ item.start_line ?? '?' }}–{{ item.end_line ?? '?' }}]</strong>
+            <small>{{ item.classification }} · {{ item.provenance }} · {{ item.verification }}</small>
+          </article>
+          <p v-if="!drawerView.task.evidence.length" class="hint">No evidence records are attached to this finding.</p>
+        </section>
+        <section class="drawer-section">
+          <h4>Verification runs</h4>
+          <article v-for="run in drawerView.verification_runs" :key="run.run_id" class="evidence-item">
+            <strong>{{ run.profile_id }} · {{ String(run.status).replace('_', ' ') }}</strong>
+            <small>{{ run.run_id }} · snapshot {{ run.snapshot_id }}</small>
+          </article>
+          <p v-if="!drawerView.verification_runs.length" class="hint">No trusted verification has run against this finding.</p>
+        </section>
+        <section class="drawer-section">
+          <h4>Hand off</h4>
+          <p class="hint">The work package is bound to snapshot {{ drawerView.task.snapshot_id }}; an agent can check it is still current before editing.</p>
+          <button class="primary" @click="copyWorkPackage">Copy work package</button>
+          <p v-if="drawerMessage" class="hint" role="status">{{ drawerMessage }}</p>
+        </section>
+      </template>
+    </aside>
   </div>
 </template>
