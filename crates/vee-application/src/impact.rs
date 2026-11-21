@@ -211,14 +211,31 @@ pub(crate) fn analyze_impact_with_typescript_server(
     );
     let mut changed_symbols_by_path = std::collections::BTreeMap::new();
     let mut symbols = std::collections::BTreeSet::new();
-    for path in &changed {
-        let path_symbols = changed_file_symbols(
+    // One Git process reads every changed source file's base side.
+    let symbol_paths: Vec<&String> = changed
+        .iter()
+        .filter(|path| declares_symbols(path))
+        .collect();
+    let mut base_bytes: std::collections::HashMap<&str, Vec<u8>> =
+        vee_git::read_snapshot_base_files(
             root,
             change_set,
+            &symbol_paths
+                .iter()
+                .map(|path| PathBuf::from(path.as_str()))
+                .collect::<Vec<_>>(),
+        )?
+        .into_iter()
+        .zip(&symbol_paths)
+        .filter_map(|(bytes, path)| Some((path.as_str(), bytes?)))
+        .collect();
+    for path in &changed {
+        let path_symbols = changed_file_symbols(
             path,
             source.get(path),
+            base_bytes.remove(path.as_str()),
             &mut coverage_complete,
-        )?;
+        );
         symbols.extend(path_symbols.iter().cloned());
         changed_symbols_by_path.insert(path.clone(), path_symbols);
     }
@@ -276,6 +293,15 @@ pub(crate) fn analyze_impact_with_typescript_server(
         paths.extend(go_local_dependency_edges(module_path, &changed, &source));
     }
     // Each Rust candidate is parsed once and queried for every changed file.
+    // A candidate that names no changed symbol is not parsed, and only
+    // identifiers some changed file declares are kept, so each query scans a
+    // few occurrences rather than every identifier in the candidate.
+    let changed_symbol_filter = ChangedSymbolFilter::new(
+        changed_symbols_by_path
+            .values()
+            .flatten()
+            .map(String::as_str),
+    );
     let mut rust_occurrences =
         std::collections::HashMap::<&str, Option<Vec<(String, u32, bool)>>>::new();
     // Comment- and string-stripped TypeScript, Python, and Java, computed once per file.
@@ -288,6 +314,8 @@ pub(crate) fn analyze_impact_with_typescript_server(
             .into_iter()
             .collect();
         let symbol_matcher = SymbolMatcher::new(&local_symbols);
+        let wanted: std::collections::HashSet<&str> =
+            local_symbols.iter().map(String::as_str).collect();
         for (candidate_path, candidate_text) in &source {
             let same_file_rust = candidate_path == changed_path && candidate_path.ends_with(".rs");
             if !should_scan_impact_candidate(&changed, changed_path, candidate_path) {
@@ -296,9 +324,15 @@ pub(crate) fn analyze_impact_with_typescript_server(
             if candidate_path.ends_with(".rs") {
                 let occurrences = rust_occurrences
                     .entry(candidate_path.as_str())
-                    .or_insert_with(|| rust_identifier_occurrences(candidate_text));
-                let wanted: std::collections::HashSet<&str> =
-                    local_symbols.iter().map(String::as_str).collect();
+                    .or_insert_with(|| {
+                        if changed_symbol_filter.may_mention(candidate_text) {
+                            rust_identifier_occurrences_matching(candidate_text, &|name| {
+                                changed_symbol_filter.contains(name)
+                            })
+                        } else {
+                            Some(Vec::new())
+                        }
+                    });
                 let references = occurrences.as_ref().map(|occurrences| {
                     occurrences
                         .iter()
@@ -558,21 +592,25 @@ pub(crate) fn analyze_impact_with_typescript_server(
     })
 }
 
+/// Whether impact analysis extracts declared symbols from files at `path`.
+fn declares_symbols(path: &str) -> bool {
+    path.ends_with(".rs")
+        || path.ends_with(".go")
+        || is_typescript_path(path)
+        || is_python_path(path)
+        || is_java_path(path)
+}
+
+/// Symbols declared by a changed file in its current and base versions.
 pub(crate) fn changed_file_symbols(
-    root: &Path,
-    change_set: &ChangeSet,
     path: &str,
     current: Option<&String>,
+    base: Option<Vec<u8>>,
     coverage_complete: &mut bool,
-) -> Result<std::collections::BTreeSet<String>, String> {
+) -> std::collections::BTreeSet<String> {
     let mut symbols = std::collections::BTreeSet::new();
-    if !path.ends_with(".rs")
-        && !path.ends_with(".go")
-        && !is_typescript_path(path)
-        && !is_python_path(path)
-        && !is_java_path(path)
-    {
-        return Ok(symbols);
+    if !declares_symbols(path) {
+        return symbols;
     }
     let mut add = |text: &str| {
         if path.ends_with(".rs") {
@@ -604,14 +642,14 @@ pub(crate) fn changed_file_symbols(
     if let Some(text) = current {
         add(text);
     }
-    if let Some(bytes) = vee_git::read_snapshot_base_file(root, change_set, Path::new(path))? {
+    if let Some(bytes) = base {
         if let Ok(text) = String::from_utf8(bytes) {
             add(&text);
         } else {
             *coverage_complete = false;
         }
     }
-    Ok(symbols)
+    symbols
 }
 
 pub(crate) fn snapshot_go_module_path(
@@ -2210,10 +2248,6 @@ pub(crate) fn rust_identifier_occurrences_matching(
 
 /// Every identifier occurrence in a Rust file (see
 /// [`rust_identifier_occurrences_matching`]); parse once, query many times.
-pub(crate) fn rust_identifier_occurrences(source: &str) -> Option<Vec<(String, u32, bool)>> {
-    rust_identifier_occurrences_matching(source, &|_| true)
-}
-
 #[cfg(test)]
 pub(crate) fn rust_references(
     source: &str,
@@ -2954,6 +2988,46 @@ pub fn java_declared_symbols(source: &str) -> std::collections::BTreeSet<String>
         }
     }
     symbols
+}
+
+/// The symbols every changed file declares, used to skip parsing candidate
+/// files that cannot reference any of them.
+pub(crate) struct ChangedSymbolFilter<'a> {
+    all: std::collections::HashSet<&'a str>,
+    /// Symbols made only of identifier characters, matched as whole tokens.
+    identifiers: std::collections::HashSet<&'a str>,
+    /// Symbols with other characters (for example `r#type`), matched as substrings.
+    other: Vec<&'a str>,
+}
+
+impl<'a> ChangedSymbolFilter<'a> {
+    pub(crate) fn new(symbols: impl IntoIterator<Item = &'a str>) -> Self {
+        let all: std::collections::HashSet<&str> = symbols.into_iter().collect();
+        let (identifiers, other): (Vec<&str>, Vec<&str>) = all
+            .iter()
+            .partition(|symbol| !symbol.is_empty() && symbol.chars().all(is_identifier_character));
+        Self {
+            all,
+            identifiers: identifiers.into_iter().collect(),
+            other,
+        }
+    }
+
+    /// Whether `name` is one of the changed symbols.
+    pub(crate) fn contains(&self, name: &str) -> bool {
+        self.all.contains(name)
+    }
+
+    /// Whether `text` may reference a changed symbol. Never false for a text
+    /// that names one; it can be true for a text that only mentions one in a
+    /// comment or string.
+    pub(crate) fn may_mention(&self, text: &str) -> bool {
+        self.other.iter().any(|symbol| text.contains(symbol))
+            || (!self.identifiers.is_empty()
+                && text
+                    .split(|character: char| !is_identifier_character(character))
+                    .any(|token| self.identifiers.contains(token)))
+    }
 }
 
 /// Finds which of a fixed list of symbols occur in a line as whole identifiers,

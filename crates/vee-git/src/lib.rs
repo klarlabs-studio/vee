@@ -341,6 +341,38 @@ pub fn read_snapshot_base_file(
     read_tree_file(root, base_oid, relative)
 }
 
+/// Read the base-side bytes of several changed paths with one `git cat-file
+/// --batch`, in `relatives` order. Results match `read_snapshot_base_file`:
+/// `None` for an added path or a snapshot without a base.
+pub fn read_snapshot_base_files(
+    root: &Path,
+    change_set: &ChangeSet,
+    relatives: &[PathBuf],
+) -> Result<Vec<Option<Vec<u8>>>, String> {
+    let mut results = vec![None; relatives.len()];
+    let Some(base_oid) = change_set.base_oid.as_deref() else {
+        return Ok(results);
+    };
+    let mut batched = Vec::new();
+    for (index, relative) in relatives.iter().enumerate() {
+        validate_relative_path(relative)?;
+        let normalized = relative.to_string_lossy().replace('\\', "/");
+        if normalized.contains('\n') {
+            // A batch request is one line per object.
+            results[index] = read_tree_file(root, base_oid, relative)?;
+        } else {
+            batched.push((index, format!("{base_oid}:{normalized}")));
+        }
+    }
+    if !batched.is_empty() {
+        let specs: Vec<String> = batched.iter().map(|(_, spec)| spec.clone()).collect();
+        for ((index, _), bytes) in batched.iter().zip(cat_file_batch(root, &specs)?) {
+            results[*index] = bytes;
+        }
+    }
+    Ok(results)
+}
+
 pub fn capture(path: &Path, scope: ChangeScope) -> Result<ChangeSet, String> {
     let root = repository_root(path)?;
     if let ChangeScope::Commit { oid } = &scope {
@@ -1146,6 +1178,42 @@ mod tests {
         assert_eq!(batched[1].as_ref().unwrap().len(), 200_000);
         assert_eq!(batched[2].as_deref(), Some(&b"fn c() { 1 }\n"[..]));
         assert!(batched[3].is_none());
+    }
+
+    #[test]
+    fn batched_base_reads_match_single_reads() {
+        let repo = Repo::new();
+        let root = repo.0.path();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/a.rs"), "fn a() {}\n").unwrap();
+        fs::write(root.join("src/b.rs"), vec![b'x'; 200_000]).unwrap();
+        repo.git(&["add", "."]);
+        repo.git(&["commit", "-qm", "base"]);
+        fs::write(root.join("src/a.rs"), "fn a() { 1 }\n").unwrap();
+        fs::write(root.join("src/b.rs"), "fn b() {}\n").unwrap();
+        fs::write(root.join("src/added.rs"), "fn added() {}\n").unwrap();
+        let change_set = capture(root, ChangeScope::WorkingTree).unwrap();
+        let paths: Vec<PathBuf> = ["src/a.rs", "src/b.rs", "src/added.rs"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        let batched = read_snapshot_base_files(root, &change_set, &paths).unwrap();
+        for (path, batched) in paths.iter().zip(&batched) {
+            let single = read_snapshot_base_file(root, &change_set, path).unwrap();
+            assert_eq!(batched, &single, "{}", path.display());
+        }
+        assert_eq!(batched[0].as_deref(), Some(&b"fn a() {}\n"[..]));
+        assert_eq!(batched[1].as_ref().unwrap().len(), 200_000);
+        assert!(batched[2].is_none(), "an added file has no base");
+
+        let no_base = ChangeSet {
+            base_oid: None,
+            ..change_set
+        };
+        assert_eq!(
+            read_snapshot_base_files(root, &no_base, &paths).unwrap(),
+            vec![None, None, None]
+        );
     }
 
     #[test]

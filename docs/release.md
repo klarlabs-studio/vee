@@ -111,3 +111,29 @@ installation path on macOS. It does not establish Windows runtime results,
 representative model review quality, or registry-free setup. No public release
 artifacts were produced. Binary packaging/signing and a registry publication
 path remain unconfigured; source installation is still the supported route.
+
+Release-candidate acceptance on 2026-11-21 (macOS arm64, Rust 1.100.0), after
+the finding drawer, outdated findings, review-queue next actions and
+unreviewed-path gating merged in PR #6. `scripts/verify-clean-build.py`, run
+from a virtualenv with `scripts/acceptance/requirements.txt`, passed on the
+merged `main`: `npm ci` reported zero vulnerabilities, the UI rebuilt and all
+40 Playwright workflows passed, formatting and strict workspace Clippy
+passed, the locked serial workspace suite passed, the optimized temporary
+install reported `vee 0.1.0`, and the installed CLI passed the offline
+review/gate, CLI-to-MCP and historical-benchmark safety acceptances. The
+follow-up commits on `chore/release-prep` passed all 557 workspace tests and
+strict Clippy; the hosted matrix runs on their pull request. The offline nox
+scan configured in `.vee.yaml` reports no unbaselined error-level results.
+
+A new plumbing baseline,
+[performance-baseline-2026-11-21.json](performance-baseline-2026-11-21.json),
+was captured with the debug CLI on a shared machine (load average 9–34 during
+the run), so treat it as an upper bound. Medians: 0.53 s for 100 repository
+files / 5 changed, 3.6 s for 1,000 / 25, and 16.2 s for 5,000 / 100. A release
+build took about 5 s (3.3 s CPU) for 5,000 / 100. The 2026-11-15 baseline is
+not comparable: it predates syntactic Rust impact analysis over the whole
+snapshot. The earliest revision in this repository's history (3d6356d) took
+618 s for the same 5,000 / 100 review; parsing only files that name a
+changed symbol and batching base reads brought it to the figures above. The
+remaining cost is mostly one Git diff and base read per changed file per
+reviewer.

@@ -975,24 +975,13 @@ fn impact_uses_baseline_symbols_for_deleted_rust_declarations() {
 
 #[test]
 fn non_source_changes_do_not_mark_impact_coverage_incomplete() {
-    let directory = tempfile::tempdir().unwrap();
     let mut coverage_complete = true;
     let symbols = changed_file_symbols(
-        directory.path(),
-        &ChangeSet {
-            schema_version: 1,
-            base_oid: None,
-            head_oid: None,
-            scope: "working_tree".into(),
-            files: vec![],
-            warnings: vec![],
-            digest: "digest".into(),
-        },
         "assets/logo.png",
         None,
+        Some(vec![0xff, 0xfe]),
         &mut coverage_complete,
-    )
-    .unwrap();
+    );
     assert!(symbols.is_empty());
     assert!(coverage_complete);
 }
@@ -1217,4 +1206,16 @@ fn tsserver_messages_without_content_length_or_over_the_limit_are_rejected() {
         .contains("omitted Content-Length"));
     let mut large = std::io::BufReader::new(&b"Content-Length: 4096\r\n\r\n"[..]);
     assert!(crate::impact::read_tsserver_message(&mut large, 1024).is_err());
+}
+
+#[test]
+fn only_files_naming_a_changed_symbol_need_parsing() {
+    let symbols = ["parse_config".to_owned(), "r#type".to_owned()];
+    let filter = ChangedSymbolFilter::new(symbols.iter().map(String::as_str));
+    assert!(filter.may_mention("fn main() { parse_config(); }"));
+    assert!(filter.may_mention("let value = r#type;"));
+    // Substrings of a longer identifier are not mentions.
+    assert!(!filter.may_mention("fn main() { parse_config_file(); }"));
+    assert!(!filter.may_mention("fn unrelated() {}"));
+    assert!(!ChangedSymbolFilter::new(std::iter::empty()).may_mention("parse_config"));
 }

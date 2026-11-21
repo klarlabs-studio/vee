@@ -2969,6 +2969,14 @@ fn json_output_requested(args: &[std::ffi::OsString]) -> bool {
         .any(|triple| matches!(triple, ["reviews", "imported", "show"]))
 }
 
+/// Name each reviewer whose provider did not return valid findings, so an
+/// incomplete gate says which reviewer to rerun.
+fn print_unsuccessful_reviewers(outcomes: &[vee_application::ReviewerOutcome]) {
+    for outcome in outcomes.iter().filter(|outcome| !outcome.succeeded()) {
+        println!("Reviewer {}: {}", outcome.reviewer_id, outcome.status);
+    }
+}
+
 fn write_markdown_report(path: &std::path::Path, contents: &[u8]) -> Result<()> {
     if let Ok(metadata) = std::fs::symlink_metadata(path) {
         anyhow::ensure!(
@@ -3475,6 +3483,7 @@ fn run() -> Result<u8> {
                     for reason in &out.reasons {
                         println!("- {reason}");
                     }
+                    print_unsuccessful_reviewers(&out.reviewer_outcomes);
                     if !out.unreviewed_paths.is_empty() {
                         println!("Not reviewed: {}", out.unreviewed_paths.join(", "));
                         println!("  No reviewer's include rules matched these changed files; add or widen a reviewer, or set policy.on_unreviewed: allow.");
@@ -7393,6 +7402,13 @@ fn run() -> Result<u8> {
                                 "Snapshot: {}  Gate: {:?}",
                                 review.snapshot_id, review.gate.status
                             );
+                            for reason in &review.gate.reasons {
+                                println!("- {reason}");
+                            }
+                            print_unsuccessful_reviewers(&review.reviewer_outcomes);
+                            if !review.unreviewed_paths.is_empty() {
+                                println!("Not reviewed: {}", review.unreviewed_paths.join(", "));
+                            }
                         }
                     }
                     Ok(if concurrent_mutation_detected {

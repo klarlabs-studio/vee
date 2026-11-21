@@ -8789,6 +8789,106 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
 
 #[cfg(unix)]
 #[test]
+fn an_incomplete_follow_up_review_says_why_in_text_output() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    fs::write(
+        root.join(".gitignore"),
+        "/.vee/\n/provider\n/reviewer.md\n/agent.patch\n",
+    )
+    .unwrap();
+    fs::write(root.join("src.rs"), "pub fn value() -> i32 { 0 }\n").unwrap();
+    git(&["add", ".gitignore", "src.rs"]);
+    git(&["commit", "-qm", "baseline"]);
+    fs::write(root.join("src.rs"), "pub fn value() -> i32 { 1 }\n").unwrap();
+    fs::write(root.join("reviewer.md"), "Review the changed code.\n").unwrap();
+    // The provider reports a finding on the original change and fails on the
+    // patched source, so the follow-up review is incomplete.
+    let provider = root.join("provider");
+    fs::write(
+        &provider,
+        "#!/bin/sh\nrequest=$(cat)\nif printf '%s' \"$request\" | grep -Fq 'pub fn value() -> i32 { 1 }'; then\n  printf '%s' '{\"schema_version\":1,\"findings\":[{\"category\":\"correctness\",\"severity\":\"high\",\"confidence\":95,\"rationale\":\"The function returns the wrong value.\",\"path\":\"src.rs\",\"line\":1}]}'\nelse\n  echo 'provider unavailable' >&2\n  exit 1\nfi\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&provider).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&provider, permissions).unwrap();
+    fs::write(root.join(".vee.yaml"), format!(
+        "version: 1\nreview:\n  include: ['*.rs', '**/*.rs']\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\npolicy:\n  required_reviewers: [correctness]\n  on_incomplete: block\n",
+        provider.display()
+    )).unwrap();
+
+    let review = vee()
+        .args(["review", "--base", "HEAD", "--output", "json"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        review.status.success(),
+        "{}",
+        String::from_utf8_lossy(&review.stderr)
+    );
+    let review: serde_json::Value = serde_json::from_slice(&review.stdout).unwrap();
+    let review_id = review["review_id"].as_str().unwrap();
+    fs::write(root.join("agent.patch"), "diff --git a/src.rs b/src.rs\n--- a/src.rs\n+++ b/src.rs\n@@ -1 +1 @@\n-pub fn value() -> i32 { 1 }\n+pub fn value() -> i32 { 2 }\n").unwrap();
+    let proposed = vee()
+        .args(["findings", "propose-patch", "--review", review_id])
+        .arg("agent.patch")
+        .args(["--output", "json"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        proposed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&proposed.stderr)
+    );
+    let proposed: serde_json::Value = serde_json::from_slice(&proposed.stdout).unwrap();
+    let digest = proposed["patch_digest"].as_str().unwrap();
+
+    let applied = vee()
+        .args(["findings", "apply-patch", digest, "--approve", digest])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert_eq!(
+        applied.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&applied.stdout);
+    assert!(stdout.contains("Gate: Incomplete"), "{stdout}");
+    assert!(
+        stdout.contains("- required review did not complete"),
+        "the text output should say why the gate is incomplete: {stdout}"
+    );
+    assert!(
+        stdout.contains("Reviewer correctness: failed"),
+        "the text output should name the reviewer to rerun: {stdout}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn user_provider_config_supplies_repo_reviewer_and_passes_gate() {
     use std::os::unix::fs::PermissionsExt;
 

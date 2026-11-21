@@ -40,11 +40,6 @@ pub struct NextAction {
     pub summary: String,
 }
 
-/// Outcome statuses of a reviewer whose provider returned valid findings: a
-/// fresh run, a provider-cache hit, or a run on budget-limited context.
-pub(crate) const SUCCESSFUL_REVIEWER_STATUSES: [&str; 3] =
-    ["completed", "cached", "context_limited"];
-
 /// Reviewers named in a rerun summary before it is shortened.
 const MAX_NAMED_REVIEWERS: usize = 3;
 
@@ -68,7 +63,7 @@ pub fn next_action(
     }
     let failed: Vec<String> = outcomes
         .iter()
-        .filter(|outcome| !SUCCESSFUL_REVIEWER_STATUSES.contains(&outcome.status.as_str()))
+        .filter(|outcome| !outcome.succeeded())
         .map(|outcome| {
             format!(
                 "{} ({})",

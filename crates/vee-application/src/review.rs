@@ -322,6 +322,17 @@ pub struct ReviewerOutcome {
     pub usage: Option<vee_core::ProviderUsage>,
 }
 
+/// Outcome statuses of a reviewer whose provider returned valid findings: a
+/// fresh run, a provider-cache hit, or a run on budget-limited context.
+const SUCCESSFUL_REVIEWER_STATUSES: [&str; 3] = ["completed", "cached", "context_limited"];
+
+impl ReviewerOutcome {
+    /// Whether the reviewer's provider returned valid findings for this review.
+    pub fn succeeded(&self) -> bool {
+        SUCCESSFUL_REVIEWER_STATUSES.contains(&self.status.as_str())
+    }
+}
+
 /// Load a persisted review payload and upgrade supported historical schemas for current output.
 pub fn deserialize_review_result(payload: &str) -> Result<ReviewResult, String> {
     let mut review: ReviewResult = serde_json::from_str(payload)
