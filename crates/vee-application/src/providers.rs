@@ -470,9 +470,19 @@ impl ReviewProvider for CliReviewProvider {
         cancellation: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<ProviderResult, String> {
         match request.kind {
-            vee_core::ProviderKind::Cli => {
-                vee_process::execute_provider_cancellable(request, cancellation)
-            }
+            vee_core::ProviderKind::Cli => match request.sample {
+                // A generic provider receives the same request for every sample;
+                // tell it which run this is so it can vary its own sampling.
+                Some(sample) => {
+                    let mut sampled = request.clone();
+                    sampled.environment.extend([
+                        ("VEE_SAMPLE_INDEX".to_string(), sample.index.to_string()),
+                        ("VEE_SAMPLE_COUNT".to_string(), sample.count.to_string()),
+                    ]);
+                    vee_process::execute_provider_cancellable(&sampled, cancellation)
+                }
+                None => vee_process::execute_provider_cancellable(request, cancellation),
+            },
             vee_core::ProviderKind::CodexCli => execute_codex_cli(request, cancellation),
             vee_core::ProviderKind::GeminiCli => execute_gemini_cli(request, cancellation),
             vee_core::ProviderKind::AntigravityCli => {

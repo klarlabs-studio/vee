@@ -1268,3 +1268,33 @@ fn antigravity_cli_failure_reports_its_error() {
         "{error}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_sampled_generic_cli_provider_learns_which_sample_it_runs() {
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("env.txt");
+    let mut request = failing_cli_request(
+        directory.path(),
+        vee_core::ProviderKind::Cli,
+        &format!(
+            "#!/bin/sh\ncat >/dev/null\nenv > '{}'\nprintf '%s' '{{\"schema_version\":1,\"findings\":[]}}'\n",
+            log.display()
+        ),
+    );
+    CliReviewProvider.execute(&request, None).unwrap();
+    let unsampled = std::fs::read_to_string(&log).unwrap();
+    assert!(!unsampled.contains("VEE_SAMPLE_"), "{unsampled}");
+
+    request.sample = Some(vee_core::ProviderSample { index: 2, count: 3 });
+    CliReviewProvider.execute(&request, None).unwrap();
+    let sampled = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        sampled.lines().any(|line| line == "VEE_SAMPLE_INDEX=2"),
+        "{sampled}"
+    );
+    assert!(
+        sampled.lines().any(|line| line == "VEE_SAMPLE_COUNT=3"),
+        "{sampled}"
+    );
+}
