@@ -270,6 +270,10 @@
           "default": "whole_change",
           "description": "whole_change sends the change in one request. focused reviews each changed file with a reasoning request followed by a structuring request whose findings are located by a quoted changed line; it suits small local models and requires an ollama_native provider."
         },
+        "effort": {
+          "enum": ["low", "medium", "high"],
+          "description": "Preset for samples: low runs the reviewer once, medium three times, high five times. Cannot be combined with samples. `vee review --effort` overrides it for one review."
+        },
         "samples": {
           "type": "integer",
           "minimum": 1,

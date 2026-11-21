@@ -292,6 +292,7 @@ pub fn apply_packs(config: &mut RepositoryConfig, root: &Path) -> Result<(), Str
                     strategy: crate::ReviewStrategy::default(),
                     // Sampling multiplies provider cost, which is the
                     // consuming repository's choice, not the pack's.
+                    effort: None,
                     samples: None,
                     sample_quorum: None,
                 },

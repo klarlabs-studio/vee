@@ -91,6 +91,8 @@ struct ReviewRequest {
     reviewer_ids: Vec<String>,
     #[serde(default)]
     policy_profile: Option<String>,
+    #[serde(default)]
+    effort: Option<vee_core::ReviewEffort>,
 }
 
 #[derive(Deserialize)]
@@ -351,6 +353,7 @@ async fn start_review(
                 scope,
                 reviewer_ids: selection,
                 policy_profile: request.policy_profile.as_deref(),
+                effort: request.effort,
                 work_item: None,
                 work_item_token_env: None,
             },

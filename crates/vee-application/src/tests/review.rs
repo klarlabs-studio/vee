@@ -1472,6 +1472,7 @@ fn reviewer_scope_globs_match_and_exclude_paths() {
         exclude: vec!["src/generated/**".into()],
         policy: vee_core::ReviewerPolicyConfig::default(),
         strategy: vee_core::ReviewStrategy::default(),
+        effort: None,
         samples: None,
         sample_quorum: None,
     };
@@ -1521,6 +1522,7 @@ fn reviewer_context_manifest_distinguishes_supplied_filtered_and_omitted_paths()
         exclude: vec!["src/reviewer-excluded.rs".into()],
         policy: vee_core::ReviewerPolicyConfig::default(),
         strategy: vee_core::ReviewStrategy::default(),
+        effort: None,
         samples: None,
         sample_quorum: None,
     };

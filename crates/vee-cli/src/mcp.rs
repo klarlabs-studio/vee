@@ -73,6 +73,25 @@ enum ReviewScope {
     Commit,
 }
 
+/// Review effort: low runs each reviewer once, medium three times, high five times.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ReviewEffortInput {
+    Low,
+    Medium,
+    High,
+}
+
+impl From<ReviewEffortInput> for vee_core::ReviewEffort {
+    fn from(effort: ReviewEffortInput) -> Self {
+        match effort {
+            ReviewEffortInput::Low => Self::Low,
+            ReviewEffortInput::Medium => Self::Medium,
+            ReviewEffortInput::High => Self::High,
+        }
+    }
+}
+
 /// Finding severity.
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -350,6 +369,9 @@ struct StartReviewInput {
     reviewer_ids: Option<Vec<String>>,
     /// Named policy profile from .vee.yaml.
     policy_profile: Option<String>,
+    /// Override every reviewer's effort for this review. Higher effort finds more
+    /// defects at more provider calls; findings most runs agree on can block.
+    effort: Option<ReviewEffortInput>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -451,6 +473,7 @@ fn run_review(
             scope: scope_request(input)?,
             reviewer_ids: input.reviewer_ids.as_deref(),
             policy_profile: input.policy_profile.as_deref(),
+            effort: input.effort.map(Into::into),
             work_item: None,
             work_item_token_env: None,
         },
@@ -939,6 +962,7 @@ mod tests {
             commit: commit.map(str::to_owned),
             reviewer_ids: None,
             policy_profile: None,
+            effort: None,
         };
         assert_eq!(
             scope_request(&input(ReviewScope::Base, Some("main"), None)).unwrap(),
@@ -1003,6 +1027,7 @@ mod tests {
                 commit: None,
                 policy_profile: None,
                 reviewer_ids: None,
+                effort: None,
             },
             &tokio_util::sync::CancellationToken::new(),
         )

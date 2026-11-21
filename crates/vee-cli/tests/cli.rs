@@ -10429,3 +10429,91 @@ fn a_failed_sample_fails_the_sampled_reviewer() {
         "agreement counts every configured sample: {review}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn review_effort_flag_sets_the_runs_per_reviewer_and_is_recorded_in_the_config_digest() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    fs::write(
+        root.join(".gitignore"),
+        "/.vee/\n/provider\n/reviewer.md\n/calls/\n",
+    )
+    .unwrap();
+    fs::write(root.join("src.rs"), "fn a() {}\n").unwrap();
+    git(&["add", ".gitignore", "src.rs"]);
+    git(&["commit", "-qm", "baseline"]);
+    fs::write(root.join("src.rs"), "fn a() { 1 }\n").unwrap();
+    fs::write(root.join("reviewer.md"), "Review the changed code.\n").unwrap();
+    let calls = root.join("calls");
+    let provider = root.join("provider");
+    fs::write(
+        &provider,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\nmktemp {}/call.XXXXXX >/dev/null\nprintf '%s' '{{\"schema_version\":1,\"findings\":[]}}'\n",
+            calls.display()
+        ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&provider).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&provider, permissions).unwrap();
+    fs::write(root.join(".vee.yaml"), format!(
+        "version: 1\nreview:\n  include: ['*.rs']\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\n",
+        provider.display()
+    )).unwrap();
+    let review = |effort: Option<&str>| {
+        if calls.exists() {
+            fs::remove_dir_all(&calls).unwrap();
+        }
+        fs::create_dir(&calls).unwrap();
+        let mut args = vec!["review", "--working-tree", "--output", "json"];
+        if let Some(effort) = effort {
+            args.extend(["--effort", effort]);
+        }
+        let output = vee().args(&args).current_dir(root).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let review: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        (fs::read_dir(&calls).unwrap().count(), review)
+    };
+
+    let (plain_calls, plain) = review(None);
+    assert_eq!(plain_calls, 1);
+    let (medium_calls, medium) = review(Some("medium"));
+    assert_eq!(medium_calls, 3);
+    let (high_calls, _) = review(Some("high"));
+    assert_eq!(high_calls, 5);
+    assert_ne!(
+        plain["effective_config_digest"], medium["effective_config_digest"],
+        "the effort used is part of the recorded configuration"
+    );
+    assert_eq!(medium["reviewer_outcomes"][0]["status"], "completed");
+
+    let rejected = vee()
+        .args(["review", "--working-tree", "--effort", "max"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+}

@@ -2311,6 +2311,61 @@ policy_profiles:
     }
 
     #[test]
+    fn review_effort_sets_the_number_of_samples() {
+        assert_eq!(ReviewEffort::Low.samples(), 1);
+        assert_eq!(ReviewEffort::Medium.samples(), 3);
+        assert_eq!(ReviewEffort::High.samples(), 5);
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".vee.yaml");
+        let write = |reviewers: &str| {
+            std::fs::write(
+                &file,
+                format!("version: 1\nproviders:\n  cli: {{ kind: cli, executable: reviewer, egress: local }}\nreviewers:\n{reviewers}"),
+            )
+            .unwrap();
+        };
+        write("  medium: { provider: cli, instructions_file: r.md, effort: medium }\n  high: { provider: cli, instructions_file: r.md, effort: high, sample_quorum: 4 }\n  low: { provider: cli, instructions_file: r.md, effort: low }\n");
+        let config = RepositoryConfig::load(&file).unwrap();
+        assert_eq!(config.reviewers["medium"].sample_count(), 3);
+        assert_eq!(config.reviewers["medium"].effective_sample_quorum(), 2);
+        assert_eq!(config.reviewers["high"].sample_count(), 5);
+        assert_eq!(config.reviewers["high"].effective_sample_quorum(), 4);
+        assert_eq!(config.reviewers["low"].sample_count(), 1);
+
+        for (reviewers, expected) in [
+            ("  r: { provider: cli, instructions_file: r.md, effort: medium, samples: 3 }\n", "reviewer r sets both effort and samples"),
+            ("  r: { provider: cli, instructions_file: r.md, effort: low, sample_quorum: 1 }\n", "reviewer r sets sample_quorum without samples"),
+            ("  r: { provider: cli, instructions_file: r.md, effort: medium, sample_quorum: 4 }\n", "reviewer r sample_quorum must be 1..=3"),
+            ("  r: { provider: cli, instructions_file: r.md, effort: max }\n", "unknown variant"),
+        ] {
+            write(reviewers);
+            let error = RepositoryConfig::load(&file).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_review_effort_override_replaces_every_reviewers_sampling() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".vee.yaml");
+        std::fs::write(
+            &file,
+            "version: 1\nproviders:\n  cli: { kind: cli, executable: reviewer, egress: local }\nreviewers:\n  plain: { provider: cli, instructions_file: r.md }\n  sampled: { provider: cli, instructions_file: r.md, samples: 5, sample_quorum: 5 }\n",
+        )
+        .unwrap();
+        let mut config = RepositoryConfig::load(&file).unwrap();
+        config.override_review_effort(ReviewEffort::Medium);
+        for id in ["plain", "sampled"] {
+            assert_eq!(config.reviewers[id].sample_count(), 3, "{id}");
+            assert_eq!(config.reviewers[id].effective_sample_quorum(), 2, "{id}");
+            assert_eq!(config.reviewers[id].effort, Some(ReviewEffort::Medium));
+        }
+        config.override_review_effort(ReviewEffort::Low);
+        assert_eq!(config.reviewers["sampled"].sample_count(), 1);
+    }
+
+    #[test]
     fn reviewer_sampling_defaults_to_one_run_and_a_majority_quorum() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join(".vee.yaml");
@@ -2729,6 +2784,9 @@ pub struct ReviewerConfig {
     /// How the provider is asked to review the change.
     #[serde(default, skip_serializing_if = "ReviewStrategy::is_whole_change")]
     pub strategy: ReviewStrategy,
+    /// How hard the reviewer works: a preset for `samples`. Mutually exclusive with `samples`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReviewEffort>,
     /// How many times the review request is sent; findings are merged by agreement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub samples: Option<u32>,
@@ -2738,7 +2796,9 @@ pub struct ReviewerConfig {
 }
 impl ReviewerConfig {
     pub fn sample_count(&self) -> u32 {
-        self.samples.unwrap_or(1)
+        self.samples
+            .or(self.effort.map(ReviewEffort::samples))
+            .unwrap_or(1)
     }
 
     pub fn effective_sample_quorum(&self) -> u32 {
@@ -2761,6 +2821,27 @@ pub enum ReviewStrategy {
 impl ReviewStrategy {
     pub fn is_whole_change(&self) -> bool {
         *self == ReviewStrategy::WholeChange
+    }
+}
+/// How much work a reviewer spends on a change. Higher effort sends the review
+/// request more times and merges the runs by agreement (see `samples`).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewEffort {
+    /// One run.
+    Low,
+    /// Three runs.
+    Medium,
+    /// Five runs.
+    High,
+}
+impl ReviewEffort {
+    pub fn samples(self) -> u32 {
+        match self {
+            ReviewEffort::Low => 1,
+            ReviewEffort::Medium => 3,
+            ReviewEffort::High => sampling::MAX_REVIEWER_SAMPLES,
+        }
     }
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -2871,6 +2952,16 @@ fn default_incomplete() -> String {
 }
 
 impl RepositoryConfig {
+    /// Apply one effort level to every reviewer for a single review, replacing
+    /// configured `effort`, `samples` and `sample_quorum` (quorum returns to a majority).
+    pub fn override_review_effort(&mut self, effort: ReviewEffort) {
+        for reviewer in self.reviewers.values_mut() {
+            reviewer.effort = Some(effort);
+            reviewer.samples = None;
+            reviewer.sample_quorum = None;
+        }
+    }
+
     pub fn select_policy_profile(&mut self, profile: Option<&str>) -> Result<(), String> {
         self.active_policy_profile = None;
         if let Some(profile_id) = profile {
@@ -3280,8 +3371,11 @@ impl RepositoryConfig {
                     sampling::MAX_REVIEWER_SAMPLES
                 ));
             }
+            if reviewer.effort.is_some() && reviewer.samples.is_some() {
+                return Err(format!("reviewer {id} sets both effort and samples"));
+            }
             if let Some(quorum) = reviewer.sample_quorum {
-                if reviewer.samples.is_none() {
+                if reviewer.sample_count() <= 1 {
                     return Err(format!("reviewer {id} sets sample_quorum without samples"));
                 }
                 if !(1..=reviewer.sample_count()).contains(&quorum) {

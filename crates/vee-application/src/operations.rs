@@ -187,6 +187,8 @@ pub struct ReviewRequest<'a> {
     pub scope: ScopeRequest,
     pub reviewer_ids: Option<&'a [String]>,
     pub policy_profile: Option<&'a str>,
+    /// Effort for every reviewer in this review, replacing configured sampling.
+    pub effort: Option<vee_core::ReviewEffort>,
     /// Work item fetched by the caller; requires online configuration.
     pub work_item: Option<vee_hosting::WorkItemSnapshot>,
     pub work_item_token_env: Option<String>,
@@ -202,7 +204,10 @@ pub fn review(
         anyhow::bail!("review cancelled before capture");
     }
     // Validate configuration before touching local state.
-    let config = workspace.effective_config(request.policy_profile)?;
+    let mut config = workspace.effective_config(request.policy_profile)?;
+    if let Some(effort) = request.effort {
+        config.override_review_effort(effort);
+    }
     if request.work_item.is_some() && config.offline {
         return Err(configuration_failure(
             "offline mode prevents fetching work item context",
