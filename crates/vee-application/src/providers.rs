@@ -999,6 +999,27 @@ pub(crate) fn execute_claude_cli(
     Ok(result)
 }
 
+/// The `error.message` Gemini CLI writes as JSON (on stderr or stdout) when
+/// it fails in `--output-format json` mode, redacted and bounded.
+fn gemini_reported_failure(
+    result: &ProviderResult,
+    environment: &[(String, String)],
+) -> Option<String> {
+    [&result.stderr, &result.stdout]
+        .into_iter()
+        .find_map(|stream| {
+            let mut output = stream.clone();
+            vee_process::redact_provider_output(&mut output, environment);
+            let text = String::from_utf8_lossy(&output);
+            let start = text.find('{')?;
+            let envelope: serde_json::Value = serde_json::from_str(text[start..].trim()).ok()?;
+            envelope
+                .pointer("/error/message")
+                .and_then(serde_json::Value::as_str)
+                .map(|message| message.chars().take(512).collect())
+        })
+}
+
 pub(crate) fn execute_gemini_cli(
     request: &ProviderRequest,
     cancellation: Option<&tokio_util::sync::CancellationToken>,
@@ -1042,9 +1063,15 @@ pub(crate) fn execute_gemini_cli(
             .collect(),
         sample: None,
     };
-    let mut result = vee_process::execute_provider_cancellable(&gemini_request, cancellation)?;
+    let mut result = vee_process::execute_provider_reporting_exit(&gemini_request, cancellation)?;
     if result.exit_code != Some(0) {
-        return Ok(result);
+        let error = vee_process::provider_exit_error(&result, &gemini_request.environment);
+        return Err(
+            match gemini_reported_failure(&result, &gemini_request.environment) {
+                Some(reason) => format!("{error}; Gemini: {reason}"),
+                None => error,
+            },
+        );
     }
     let envelope: serde_json::Value = serde_json::from_slice(&result.stdout).map_err(|error| {
         if String::from_utf8_lossy(&result.stdout).contains("authorize the application") {
@@ -1285,6 +1312,10 @@ pub(crate) fn parse_codex_jsonl_output(
     Ok((message.into_bytes(), reported_usage.then_some(usage)))
 }
 
+/// Upper bound for a provider's version probe. Agent CLIs load their own
+/// configuration before answering `--version`; Gemini CLI 0.70 takes 8–9 s.
+pub(crate) const VERSION_PROBE_TIMEOUT_SECONDS: u64 = 30;
+
 /// Run a configured provider's bounded version probe, as reviews do before execution.
 /// Returns `None` for providers without a version probe (HTTP adapters, generic
 /// CLIs without `version_args`).
@@ -1325,7 +1356,7 @@ pub(crate) fn probe_provider_version(
             model: None,
             working_directory: root.to_path_buf(),
             stdin: Vec::new(),
-            timeout_seconds: provider.timeout_seconds.min(10),
+            timeout_seconds: provider.timeout_seconds.min(VERSION_PROBE_TIMEOUT_SECONDS),
             output_limit_bytes: 4096,
             context_window_tokens: None,
             max_output_tokens: None,

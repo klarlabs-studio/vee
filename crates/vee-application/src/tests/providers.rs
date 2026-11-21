@@ -1159,3 +1159,20 @@ fn gemini_cli_without_credentials_says_how_to_sign_in() {
     let error = execute_gemini_cli(&request, None).unwrap_err();
     assert!(error.contains("Gemini CLI is not signed in"), "{error}");
 }
+
+#[cfg(unix)]
+#[test]
+fn gemini_cli_failure_reports_its_json_error_message() {
+    let directory = tempfile::tempdir().unwrap();
+    let request = failing_cli_request(
+        directory.path(),
+        vee_core::ProviderKind::GeminiCli,
+        "#!/bin/sh\nprintf '%s' '{\"session_id\":\"x\",\"error\":{\"type\":\"Error\",\"message\":\"When using Gemini API, you must specify the GEMINI_API_KEY environment variable.\",\"code\":41}}' >&2\nexit 41\n",
+    );
+    let error = execute_gemini_cli(&request, None).unwrap_err();
+    assert!(error.contains("provider exited with 41"), "{error}");
+    assert!(
+        error.contains("you must specify the GEMINI_API_KEY"),
+        "{error}"
+    );
+}
