@@ -417,7 +417,57 @@ pub fn execute_provider(request: &ProviderRequest) -> Result<ProviderResult, Str
     execute_provider_cancellable(request, None)
 }
 
+/// Run a provider and fail on a non-zero exit, summarizing its stderr.
 pub fn execute_provider_cancellable(
+    request: &ProviderRequest,
+    cancellation: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<ProviderResult, String> {
+    let result = execute_provider_reporting_exit(request, cancellation)?;
+    if result.exit_code != Some(0) {
+        return Err(provider_exit_error(&result, &request.environment));
+    }
+    Ok(result)
+}
+
+/// The error for a provider that exited unsuccessfully: its exit status and a
+/// redacted, bounded summary of stderr.
+pub fn provider_exit_error(result: &ProviderResult, environment: &[(String, String)]) -> String {
+    let mut stderr = result.stderr.clone();
+    redact_output_values(&mut stderr, environment);
+    let detail = String::from_utf8_lossy(&stderr);
+    let detail = detail
+        .rsplit_once("Error:")
+        .map(|(_, message)| format!("Error:{}", message.trim()))
+        .unwrap_or_else(|| {
+            if detail.trim().is_empty() {
+                String::new()
+            } else {
+                format!("provider wrote {} bytes of stderr", stderr.len())
+            }
+        });
+    let detail: String = detail.chars().take(2048).collect();
+    let detail = if detail.is_empty() {
+        String::new()
+    } else {
+        format!("; stderr: {detail}")
+    };
+    format!(
+        "provider exited with {}{detail}",
+        result
+            .exit_code
+            .map_or("signal".into(), |code| code.to_string()),
+    )
+}
+
+/// Redact configured environment values from provider output.
+pub fn redact_provider_output(output: &mut Vec<u8>, environment: &[(String, String)]) {
+    redact_output_values(output, environment);
+}
+
+/// Run a provider and return its output whatever its exit status, so an adapter
+/// can read a failure reason the provider reports on stdout. `exit_code` is
+/// `None` when the provider was ended by a signal.
+pub fn execute_provider_reporting_exit(
     request: &ProviderRequest,
     cancellation: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<ProviderResult, String> {
@@ -489,31 +539,6 @@ pub fn execute_provider_cancellable(
                     stdout.len(),
                     stderr.len(),
                     request.output_limit_bytes
-                ));
-            }
-            if !status.success() {
-                let mut stderr = stderr;
-                redact_output_values(&mut stderr, &request.environment);
-                let detail = String::from_utf8_lossy(&stderr);
-                let detail = detail
-                    .rsplit_once("Error:")
-                    .map(|(_, message)| format!("Error:{}", message.trim()))
-                    .unwrap_or_else(|| {
-                        if detail.trim().is_empty() {
-                            String::new()
-                        } else {
-                            format!("provider wrote {} bytes of stderr", stderr.len())
-                        }
-                    });
-                let detail: String = detail.chars().take(2048).collect();
-                let detail = if detail.is_empty() {
-                    String::new()
-                } else {
-                    format!("; stderr: {detail}")
-                };
-                return Err(format!(
-                    "provider exited with {}{detail}",
-                    status.code().map_or("signal".into(), |c| c.to_string()),
                 ));
             }
             return Ok(ProviderResult {

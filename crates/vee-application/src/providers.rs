@@ -1031,15 +1031,28 @@ pub(crate) fn execute_gemini_cli(
         output_limit_bytes: request.output_limit_bytes,
         context_window_tokens: request.context_window_tokens,
         max_output_tokens: request.max_output_tokens,
-        environment: request.environment.clone(),
+        // Gemini falls back to browser sign-in when it has no credentials and
+        // can hang for minutes; a review must fail fast instead.
+        environment: request
+            .environment
+            .iter()
+            .filter(|(name, _)| name != "NO_BROWSER")
+            .cloned()
+            .chain([("NO_BROWSER".to_string(), "true".to_string())])
+            .collect(),
         sample: None,
     };
     let mut result = vee_process::execute_provider_cancellable(&gemini_request, cancellation)?;
     if result.exit_code != Some(0) {
         return Ok(result);
     }
-    let envelope: serde_json::Value = serde_json::from_slice(&result.stdout)
-        .map_err(|error| format!("parsing Gemini JSON output: {error}"))?;
+    let envelope: serde_json::Value = serde_json::from_slice(&result.stdout).map_err(|error| {
+        if String::from_utf8_lossy(&result.stdout).contains("authorize the application") {
+            "Gemini CLI is not signed in: run `gemini` once interactively, or set GEMINI_API_KEY and allow it in the provider's env_allowlist".to_string()
+        } else {
+            format!("parsing Gemini JSON output: {error}")
+        }
+    })?;
     if !envelope
         .get("error")
         .unwrap_or(&serde_json::Value::Null)
@@ -1185,9 +1198,44 @@ pub(crate) fn execute_codex_cli(
         environment: request.environment.clone(),
         sample: None,
     };
-    let mut result = vee_process::execute_provider_cancellable(&codex_request, cancellation)?;
+    let mut result = vee_process::execute_provider_reporting_exit(&codex_request, cancellation)?;
+    if result.exit_code != Some(0) {
+        let error = vee_process::provider_exit_error(&result, &codex_request.environment);
+        return Err(
+            match codex_reported_failure(&result.stdout, &codex_request.environment) {
+                Some(reason) => format!("{error}; Codex: {reason}"),
+                None => error,
+            },
+        );
+    }
     (result.stdout, result.usage) = parse_codex_jsonl_output(&result.stdout)?;
     Ok(result)
+}
+
+/// The failure message Codex reports in its JSONL event stream (`turn.failed`
+/// or `error`), redacted and bounded. Usage limits and authentication errors
+/// arrive here rather than on stderr.
+fn codex_reported_failure(stdout: &[u8], environment: &[(String, String)]) -> Option<String> {
+    let mut output = stdout.to_vec();
+    vee_process::redact_provider_output(&mut output, environment);
+    let text = String::from_utf8_lossy(&output);
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(
+            |event| match event.get("type").and_then(serde_json::Value::as_str) {
+                Some("turn.failed") => event
+                    .pointer("/error/message")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                Some("error") => event
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                _ => None,
+            },
+        )
+        .next_back()
+        .map(|message| message.chars().take(512).collect())
 }
 
 pub(crate) fn parse_codex_jsonl_output(

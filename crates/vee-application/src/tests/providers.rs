@@ -1080,3 +1080,82 @@ fn provider_cache_keys_distinguish_samples_and_keep_unsampled_keys() {
             .unwrap()
     );
 }
+
+#[cfg(unix)]
+fn failing_cli_request(
+    directory: &std::path::Path,
+    kind: vee_core::ProviderKind,
+    script: &str,
+) -> ProviderRequest {
+    use std::os::unix::fs::PermissionsExt;
+    let executable = directory.join("fake-cli");
+    std::fs::write(&executable, script).unwrap();
+    let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&executable, permissions).unwrap();
+    ProviderRequest {
+        kind,
+        executable: executable.to_string_lossy().into_owned(),
+        args: Vec::new(),
+        model: None,
+        working_directory: directory.to_path_buf(),
+        stdin: serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "instructions": "Review this change.",
+            "output_schema": {"title": "Vee provider findings", "type": "object", "properties": {"schema_version": {"const": 1}, "findings": {"type": "array", "items": {"type": "object", "required": ["category", "severity", "rationale"], "properties": {"category": {"type": "string"}, "severity": {"type": "string"}, "rationale": {"type": "string"}}}}}},
+            "context_files": [],
+        }))
+        .unwrap(),
+        timeout_seconds: 5,
+        output_limit_bytes: 4096,
+        context_window_tokens: None,
+        max_output_tokens: None,
+        environment: vec![],
+        sample: None,
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_cli_failure_reports_the_turn_error_from_its_event_stream() {
+    let directory = tempfile::tempdir().unwrap();
+    let request = failing_cli_request(
+        directory.path(),
+        vee_core::ProviderKind::CodexCli,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"turn.started\"}' '{\"type\":\"turn.failed\",\"error\":{\"message\":\"You have hit your usage limit.\"}}'\nexit 1\n",
+    );
+    let error = execute_codex_cli(&request, None).unwrap_err();
+    assert!(error.contains("provider exited with 1"), "{error}");
+    assert!(error.contains("You have hit your usage limit."), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn gemini_cli_never_starts_browser_sign_in() {
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("env.txt");
+    let request = failing_cli_request(
+        directory.path(),
+        vee_core::ProviderKind::GeminiCli,
+        &format!("#!/bin/sh\nenv > '{}'\nprintf '%s' '{{\"response\":\"{{\\\"schema_version\\\":1,\\\"findings\\\":[]}}\"}}'\n", log.display()),
+    );
+    let _ = execute_gemini_cli(&request, None);
+    let environment = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        environment.lines().any(|line| line == "NO_BROWSER=true"),
+        "{environment}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn gemini_cli_without_credentials_says_how_to_sign_in() {
+    let directory = tempfile::tempdir().unwrap();
+    let request = failing_cli_request(
+        directory.path(),
+        vee_core::ProviderKind::GeminiCli,
+        "#!/bin/sh\nprintf '%s\\n' 'Please visit the following URL to authorize the application:' 'https://accounts.example.invalid/auth'\n",
+    );
+    let error = execute_gemini_cli(&request, None).unwrap_err();
+    assert!(error.contains("Gemini CLI is not signed in"), "{error}");
+}
