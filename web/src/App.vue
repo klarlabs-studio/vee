@@ -557,13 +557,19 @@ function deleteSavedAnalyticsView() {
 async function openReview(id, showError = true, allowWhileLoading = false) {
   if (loading.value && !allowWhileLoading) return
   const requestId = ++detailRequestId
-  if (selected.value?.review?.review_id !== id) selected.value = null
+  if (selected.value?.review?.review_id !== id) { selected.value = null; closeFinding() }
   detailLoaded.value = false
   detailError.value = false
   try {
     const detail = await api(`/api/reviews/${encodeURIComponent(id)}`)
     if (requestId !== detailRequestId) return
     selected.value = detail; detailLoaded.value = true
+    // Keep an open drawer on the saved record, e.g. after a disposition change.
+    if (drawerRecord.value) {
+      const fresh = (detail.findings || []).find(record => record.finding.id === drawerRecord.value.finding.id)
+      if (fresh) drawerRecord.value = fresh
+      else closeFinding()
+    }
   } catch (e) {
     if (requestId !== detailRequestId) return
     detailError.value = true
@@ -667,7 +673,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="shell">
+  <div class="shell" :class="{ 'drawer-open': drawerRecord }">
     <aside class="rail">
       <div class="brand"><span class="brand-mark">V</span><div><strong>vee</strong><small>LOCAL CODE ASSURANCE</small></div></div>
       <div class="rail-label">WORKSPACE</div>

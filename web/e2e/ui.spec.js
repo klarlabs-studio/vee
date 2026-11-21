@@ -855,3 +855,20 @@ test('a review lists changed files no reviewer received', async ({ page }) => {
   await expect(note.getByText('crates/core/lib.rs')).toBeVisible()
   await expect(note.getByText('schemas/new.json')).toBeVisible()
 })
+
+test('the finding drawer follows disposition saves and closes when another review opens', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: /Findings/ }).click()
+  await page.getByRole('button', { name: 'Open details for FIND-001' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Finding details' })
+  await expect(drawer).toContainText('correctness · open')
+  await page.getByLabel('Disposition for FIND-001').selectOption('verified')
+  await page.getByLabel('Reason for FIND-001').fill('Reproduced locally')
+  await page.getByRole('button', { name: 'Save disposition' }).click()
+  await expect(drawer).toContainText('correctness · verified')
+
+  await page.getByRole('button', { name: /Insights/ }).click()
+  await page.getByRole('button', { name: /rev_prior/ }).click()
+  await expect(page.getByText('sha256:prior', { exact: true })).toBeVisible()
+  await expect(drawer).toBeHidden()
+})

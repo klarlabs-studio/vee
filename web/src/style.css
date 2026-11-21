@@ -24,3 +24,4 @@
 .provenance.outdated{background:rgba(160,120,20,.16);color:var(--amber,#9a6b00)}.supersession-note{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .next-action{font-weight:600}.next-action[data-kind="none"]{font-weight:400;opacity:.75}
 .unreviewed-list{margin:6px 0 0;padding-left:18px}
+@media (min-width:1100px){.shell.drawer-open{padding-right:min(560px,45vw)}.finding-drawer{width:min(560px,45vw)}}
