@@ -216,6 +216,7 @@ printf '%s\n' '{{"type":"item.completed","item":{{"type":"agent_message","text":
         context_window_tokens: None,
         max_output_tokens: None,
         environment: Vec::new(),
+        sample: None,
     };
     let result = CliReviewProvider.execute(&request, None).unwrap();
     assert_eq!(
@@ -357,6 +358,7 @@ fn gemini_cli_adapter_uses_headless_json_and_extracts_only_response() {
         context_window_tokens: None,
         max_output_tokens: None,
         environment: vec![],
+        sample: None,
     };
     let result = CliReviewProvider.execute(&request, None).unwrap();
     let extracted: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
@@ -438,6 +440,7 @@ fn claude_cli_adapter_uses_restricted_schema_validated_json_contract() {
         context_window_tokens: None,
         max_output_tokens: None,
         environment: vec![],
+        sample: None,
     };
     let result = CliReviewProvider.execute(&request, None).unwrap();
     let extracted: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
@@ -570,6 +573,7 @@ fn openai_compatible_adapter_sends_schema_and_extracts_content() {
                 context_window_tokens: None,
             max_output_tokens: None,
                 environment: vec![("OPENAI_API_KEY".into(), "local-secret".into())],
+                sample: None,
             },
             None,
         )
@@ -649,6 +653,7 @@ fn ollama_native_adapter_sets_context_window_schema_and_extracts_usage() {
                 context_window_tokens: Some(32768),
                 max_output_tokens: Some(4096),
                 environment: vec![],
+                sample: None,
             },
             None,
         )
@@ -694,6 +699,7 @@ fn openai_compatible_adapter_rejects_http_errors_and_oversized_response() {
         context_window_tokens: None,
         max_output_tokens: None,
         environment: vec![],
+        sample: None,
     };
     let error = execute_openai_compatible(&request(serve("401 Unauthorized", b"nope"), 4096), None)
         .unwrap_err();
@@ -776,6 +782,7 @@ fn openai_compatible_adapter_does_not_forward_credentials_or_context_across_redi
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![("OPENAI_API_KEY".into(), "do-not-forward".into())],
+            sample: None,
         },
         None,
     )
@@ -856,6 +863,7 @@ fn openai_compatible_adapter_honors_cancellation_while_waiting_for_response() {
         context_window_tokens: None,
         max_output_tokens: None,
         environment: vec![],
+        sample: None,
     };
     let error = execute_openai_compatible(&request, Some(&cancellation)).unwrap_err();
     thread.join().unwrap();
@@ -979,6 +987,7 @@ fn ollama_native_focused_strategy_reasons_then_structures_each_changed_file() {
             context_window_tokens: Some(32768),
             max_output_tokens: Some(4096),
             environment: vec![],
+            sample: None,
         },
         None,
     )
@@ -1007,4 +1016,67 @@ fn ollama_native_focused_strategy_reasons_then_structures_each_changed_file() {
     let usage = result.usage.unwrap();
     assert_eq!(usage.input_tokens, Some(100));
     assert_eq!(usage.output_tokens, Some(10));
+}
+
+#[test]
+fn ollama_samples_vary_reproducibly_while_a_single_run_stays_greedy() {
+    let sample = |index, count| Some(vee_core::ProviderSample { index, count });
+    assert_eq!(
+        ollama_sampling_options(None),
+        (serde_json::json!(0), OLLAMA_SEED)
+    );
+    assert_eq!(
+        ollama_sampling_options(sample(0, 1)),
+        (serde_json::json!(0), OLLAMA_SEED)
+    );
+    assert_eq!(
+        ollama_sampling_options(sample(0, 3)),
+        (serde_json::json!(OLLAMA_SAMPLED_TEMPERATURE), OLLAMA_SEED)
+    );
+    assert_eq!(
+        ollama_sampling_options(sample(2, 3)),
+        (
+            serde_json::json!(OLLAMA_SAMPLED_TEMPERATURE),
+            OLLAMA_SEED + 2
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn provider_cache_keys_distinguish_samples_and_keep_unsampled_keys() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let executable = dir.path().join("reviewer");
+    std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let request = |sample| ProviderRequest {
+        kind: vee_core::ProviderKind::Cli,
+        executable: executable.to_string_lossy().into_owned(),
+        args: vec![],
+        model: None,
+        working_directory: dir.path().to_path_buf(),
+        stdin: b"{}".to_vec(),
+        timeout_seconds: 5,
+        output_limit_bytes: 4096,
+        context_window_tokens: None,
+        max_output_tokens: None,
+        environment: vec![],
+        sample,
+    };
+    let key = |sample| {
+        provider_cache_key(&request(sample), "1.0", &mut Default::default())
+            .unwrap()
+            .unwrap()
+    };
+    let sample = |index| Some(vee_core::ProviderSample { index, count: 3 });
+    assert_ne!(key(sample(0)), key(sample(1)));
+    assert_ne!(key(None), key(sample(0)));
+    assert_eq!(key(sample(1)), key(sample(1)));
+    assert_eq!(
+        key(None),
+        provider_cache_key(&request(None), "1.0", &mut Default::default())
+            .unwrap()
+            .unwrap()
+    );
 }

@@ -1022,6 +1022,7 @@ pub fn run_review_with_provider_and_selection_context(
                     1_048_576
                 },
                 environment,
+                sample: None,
             },
         });
         if let Some(prepared_reviewer) = prepared.last_mut() {
@@ -1034,6 +1035,8 @@ pub fn run_review_with_provider_and_selection_context(
             }
         }
     }
+    let mut prepared =
+        expand_reviewer_samples(prepared, &enabled_reviewers, &mut executable_fingerprints)?;
     let mut provider_results = vec![None; prepared.len()];
     let mut provider_durations_ms = vec![None; enabled_reviewers.len()];
     let mut provider_usage = vec![None; enabled_reviewers.len()];
@@ -1059,6 +1062,8 @@ pub fn run_review_with_provider_and_selection_context(
             pending.push(reviewer.clone());
         }
     }
+    let mut sample_findings: Vec<Vec<Vec<vee_core::Finding>>> =
+        vec![Vec::new(); enabled_reviewers.len()];
     let executed = execute_prepared_reviewers(
         &pending,
         provider_adapter,
@@ -1067,7 +1072,8 @@ pub fn run_review_with_provider_and_selection_context(
     );
     for (index, result) in pending_indexes.into_iter().zip(executed) {
         if let Some((result, duration_ms)) = result {
-            provider_durations_ms[prepared[index].index] = Some(duration_ms);
+            let total = &mut provider_durations_ms[prepared[index].index];
+            *total = Some(total.unwrap_or(0) + duration_ms);
             provider_results[index] = Some(result);
         }
     }
@@ -1075,7 +1081,10 @@ pub fn run_review_with_provider_and_selection_context(
         let result = result.unwrap_or_else(|| Err("provider execution did not complete".into()));
         match result {
             Ok(provider_result) => {
-                provider_usage[reviewer.index] = provider_result.usage.clone();
+                accumulate_usage(
+                    &mut provider_usage[reviewer.index],
+                    provider_result.usage.as_ref(),
+                );
                 match vee_core::parse_provider_findings_with_anchor(
                     &provider_result.stdout,
                     root,
@@ -1118,9 +1127,14 @@ pub fn run_review_with_provider_and_selection_context(
                                 )?;
                             }
                         }
-                        findings_by_reviewer[reviewer.index].append(&mut normalized);
+                        sample_findings[reviewer.index].push(normalized);
                         if reviewer.context_limited {
                             complete = false;
+                        }
+                        if reviewer_outcomes[reviewer.index].is_some() {
+                            // An earlier sample of this reviewer already set
+                            // the outcome; a failure there must stand.
+                            continue;
                         }
                         reviewer_outcomes[reviewer.index] = Some(ReviewerOutcome {
                             reviewer_id: reviewer.reviewer_id.clone(),
@@ -1176,6 +1190,14 @@ pub fn run_review_with_provider_and_selection_context(
                 });
             }
         }
+    }
+    for (index, samples) in sample_findings.into_iter().enumerate() {
+        let reviewer = enabled_reviewers[index].1;
+        findings_by_reviewer[index].extend(vee_core::merge_sampled_findings(
+            samples,
+            reviewer.sample_count(),
+            reviewer.effective_sample_quorum(),
+        ));
     }
     let mut policy_findings = findings_by_reviewer
         .into_iter()
@@ -1802,6 +1824,7 @@ mod rule_attribution_contract_tests {
                 approval_id: "approval_2".into(),
                 reviewer_id: String::new(),
             }],
+            sample_agreement: None,
         }
     }
 
@@ -1861,6 +1884,48 @@ mod rule_attribution_contract_tests {
                 .unwrap_err()
                 .contains("does not apply to the finding location")
         );
+    }
+}
+
+/// Send a sampled reviewer's request once per sample. Each sample gets its own
+/// cache key, so a cached run is never reused for a different sample.
+fn expand_reviewer_samples(
+    prepared: Vec<PreparedReviewer>,
+    enabled_reviewers: &[(&String, &vee_core::ReviewerConfig)],
+    executable_fingerprints: &mut std::collections::HashMap<std::path::PathBuf, String>,
+) -> Result<Vec<PreparedReviewer>, String> {
+    let mut expanded = Vec::with_capacity(prepared.len());
+    for reviewer in prepared {
+        let count = enabled_reviewers[reviewer.index].1.sample_count();
+        if count <= 1 {
+            expanded.push(reviewer);
+            continue;
+        }
+        for index in 0..count {
+            let mut sample = reviewer.clone();
+            sample.request.sample = Some(vee_core::ProviderSample { index, count });
+            sample.cache_key = match sample.provider_version.as_deref() {
+                Some(version) => {
+                    provider_cache_key(&sample.request, version, executable_fingerprints)?
+                }
+                None => None,
+            };
+            expanded.push(sample);
+        }
+    }
+    Ok(expanded)
+}
+
+fn accumulate_usage(
+    total: &mut Option<vee_core::ProviderUsage>,
+    usage: Option<&vee_core::ProviderUsage>,
+) {
+    let Some(usage) = usage else {
+        return;
+    };
+    match total {
+        Some(total) => total.accumulate(usage),
+        None => *total = Some(usage.clone()),
     }
 }
 
@@ -1983,6 +2048,7 @@ mod finding_deduplication_tests {
             reviewer_ids: Vec::new(),
             evidence_ids: vec![],
             rule_attributions: Vec::new(),
+            sample_agreement: None,
         }
     }
 

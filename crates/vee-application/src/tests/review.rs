@@ -116,6 +116,7 @@ fn source_evidence_marks_unchanged_finding_lines_as_unknown() {
             reviewer_ids: Vec::new(),
             evidence_ids: Vec::new(),
             rule_attributions: Vec::new(),
+            sample_agreement: None,
         },
         vee_core::Finding {
             id: "unchanged".into(),
@@ -130,6 +131,7 @@ fn source_evidence_marks_unchanged_finding_lines_as_unknown() {
             reviewer_ids: Vec::new(),
             evidence_ids: Vec::new(),
             rule_attributions: Vec::new(),
+            sample_agreement: None,
         },
     ];
 
@@ -202,6 +204,7 @@ fn invalid_finding_line_preserves_other_source_evidence_and_is_reported() {
         reviewer_ids: Vec::new(),
         evidence_ids: Vec::new(),
         rule_attributions: Vec::new(),
+        sample_agreement: None,
     };
     let mut findings = vec![make_finding("valid", 1), make_finding("invalid", 292)];
 
@@ -242,6 +245,7 @@ fn legacy_review_without_policy_findings_falls_back_to_display_findings() {
         reviewer_ids: Vec::new(),
         evidence_ids: vec!["ev_legacy_source".into()],
         rule_attributions: Vec::new(),
+        sample_agreement: None,
     };
     let evidence = Evidence {
         id: "ev_legacy_source".into(),
@@ -1468,6 +1472,8 @@ fn reviewer_scope_globs_match_and_exclude_paths() {
         exclude: vec!["src/generated/**".into()],
         policy: vee_core::ReviewerPolicyConfig::default(),
         strategy: vee_core::ReviewStrategy::default(),
+        samples: None,
+        sample_quorum: None,
     };
 
     assert!(reviewer_path_is_included("src/lib.rs", &reviewer));
@@ -1515,6 +1521,8 @@ fn reviewer_context_manifest_distinguishes_supplied_filtered_and_omitted_paths()
         exclude: vec!["src/reviewer-excluded.rs".into()],
         policy: vee_core::ReviewerPolicyConfig::default(),
         strategy: vee_core::ReviewStrategy::default(),
+        samples: None,
+        sample_quorum: None,
     };
     let context_files = vec![
         serde_json::json!({"path":"src/full.rs","content":"source", "base_content":"base", "truncated":false}),

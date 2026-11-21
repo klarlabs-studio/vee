@@ -6,8 +6,10 @@ pub mod lifecycle;
 pub mod packs;
 pub mod paths;
 pub mod ports;
+pub mod sampling;
 pub use lifecycle::{ActorName, FindingStatusChange, Reason, RuleApprovalStatus};
 pub use packs::{PackReference, PolicyPack};
+pub use sampling::{merge_sampled_findings, SampleAgreement};
 
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -356,6 +358,18 @@ pub struct Finding {
     /// These links are claims from model output, constrained to approvals supplied to that run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rule_attributions: Vec<RuleAttribution>,
+    /// Agreement across a sampled reviewer's runs; absent for unsampled reviewers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_agreement: Option<SampleAgreement>,
+}
+
+impl Finding {
+    /// Whether enough of a sampled reviewer's runs reported this finding for it to block.
+    /// Unsampled findings always qualify.
+    pub fn meets_sample_quorum(&self) -> bool {
+        self.sample_agreement
+            .is_none_or(|agreement| agreement.meets_quorum())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -736,6 +750,7 @@ where
                     reviewer_id: String::new(),
                 })
                 .collect(),
+            sample_agreement: None,
         })
         .collect();
     normalize_provider_findings_with_anchor(findings, repository_root, resolve_anchor)
@@ -850,16 +865,17 @@ pub fn evaluate_gate_with_waivers_and_reviewer_policies(
         .map(|waiver| waiver.finding_fingerprint.as_str())
         .collect();
     let meets_blocking_policy = |f: &Finding| {
-        policy.block_severities.contains(&f.severity)
-            && f.confidence.unwrap_or(0) >= policy.minimum_confidence
-            || f.reviewer_ids.iter().any(|reviewer_id| {
-                reviewer_policies
-                    .get(reviewer_id)
-                    .is_some_and(|reviewer_policy| {
-                        reviewer_policy.block_severities.contains(&f.severity)
-                            && f.confidence.unwrap_or(0) >= reviewer_policy.minimum_confidence
-                    })
-            })
+        f.meets_sample_quorum()
+            && (policy.block_severities.contains(&f.severity)
+                && f.confidence.unwrap_or(0) >= policy.minimum_confidence
+                || f.reviewer_ids.iter().any(|reviewer_id| {
+                    reviewer_policies
+                        .get(reviewer_id)
+                        .is_some_and(|reviewer_policy| {
+                            reviewer_policy.block_severities.contains(&f.severity)
+                                && f.confidence.unwrap_or(0) >= reviewer_policy.minimum_confidence
+                        })
+                }))
     };
     let unlocated_blockers: Vec<String> = findings
         .iter()
@@ -1186,6 +1202,7 @@ mod tests {
             reviewer_ids: Vec::new(),
             evidence_ids: Vec::new(),
             rule_attributions: Vec::new(),
+            sample_agreement: None,
         }
     }
 
@@ -1373,6 +1390,56 @@ mod tests {
         );
         assert_eq!(decision.status, GateStatus::Block);
         assert_eq!(decision.blocking_findings, vec!["high"]);
+    }
+
+    #[test]
+    fn gate_blocks_a_sampled_finding_only_at_its_quorum() {
+        let policy = Policy {
+            block_severities: vec![Severity::High],
+            minimum_confidence: 80,
+            required_review_complete: true,
+            required_verifications: vec![],
+            analyzer_block_levels: Default::default(),
+        };
+        let agreement = |reported| {
+            Some(SampleAgreement {
+                reported,
+                samples: 3,
+                quorum: 2,
+            })
+        };
+        let mut minority = finding("minority", Severity::High, Some(95));
+        minority.sample_agreement = agreement(1);
+        let mut majority = finding("majority", Severity::High, Some(95));
+        majority.sample_agreement = agreement(2);
+        let mut unlocated_minority = finding("unlocated-minority", Severity::High, Some(95));
+        unlocated_minority.sample_agreement = agreement(1);
+        unlocated_minority.line = None;
+        let mut findings = vec![minority, majority, unlocated_minority];
+        let evidence = observed_test_evidence(&mut findings);
+        let decision = evaluate_gate(
+            "snapshot",
+            "config",
+            "policy",
+            &findings,
+            &policy,
+            true,
+            GateEvidence {
+                verification_runs: &[],
+                source_evidence: &evidence,
+                analyzer_reports: &[],
+            },
+        );
+        assert_eq!(decision.status, GateStatus::Block);
+        assert_eq!(decision.blocking_findings, vec!["majority"]);
+        assert!(
+            decision
+                .reasons
+                .iter()
+                .all(|reason| !reason.contains("lack a source path")),
+            "an advisory minority finding without a line does not make the gate incomplete: {:?}",
+            decision.reasons
+        );
     }
 
     #[test]
@@ -2244,6 +2311,58 @@ policy_profiles:
     }
 
     #[test]
+    fn reviewer_sampling_defaults_to_one_run_and_a_majority_quorum() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".vee.yaml");
+        let write = |reviewers: &str| {
+            std::fs::write(
+                &file,
+                format!("version: 1\nproviders:\n  cli: {{ kind: cli, executable: reviewer, egress: local }}\nreviewers:\n{reviewers}"),
+            )
+            .unwrap();
+        };
+        write("  single: { provider: cli, instructions_file: r.md }\n  sampled: { provider: cli, instructions_file: r.md, samples: 3 }\n  strict: { provider: cli, instructions_file: r.md, samples: 3, sample_quorum: 3 }\n");
+        let config = RepositoryConfig::load(&file).unwrap();
+        assert_eq!(config.reviewers["single"].sample_count(), 1);
+        assert_eq!(config.reviewers["single"].effective_sample_quorum(), 1);
+        assert_eq!(config.reviewers["sampled"].sample_count(), 3);
+        assert_eq!(config.reviewers["sampled"].effective_sample_quorum(), 2);
+        assert_eq!(config.reviewers["strict"].effective_sample_quorum(), 3);
+        let single = serde_json::to_value(&config.reviewers["single"]).unwrap();
+        assert!(
+            single.get("samples").is_none() && single.get("sample_quorum").is_none(),
+            "an unsampled reviewer leaves existing configuration digests unchanged"
+        );
+
+        for (reviewers, expected) in [
+            (
+                "  r: { provider: cli, instructions_file: r.md, samples: 0 }\n",
+                "reviewer r samples must be 1..=5",
+            ),
+            (
+                "  r: { provider: cli, instructions_file: r.md, samples: 6 }\n",
+                "reviewer r samples must be 1..=5",
+            ),
+            (
+                "  r: { provider: cli, instructions_file: r.md, samples: 3, sample_quorum: 4 }\n",
+                "reviewer r sample_quorum must be 1..=3",
+            ),
+            (
+                "  r: { provider: cli, instructions_file: r.md, samples: 3, sample_quorum: 0 }\n",
+                "reviewer r sample_quorum must be 1..=3",
+            ),
+            (
+                "  r: { provider: cli, instructions_file: r.md, sample_quorum: 1 }\n",
+                "reviewer r sets sample_quorum without samples",
+            ),
+        ] {
+            write(reviewers);
+            let error = RepositoryConfig::load(&file).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
     fn ollama_native_provider_requires_loopback_and_explicit_context_budget() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join(".vee.yaml");
@@ -2610,6 +2729,22 @@ pub struct ReviewerConfig {
     /// How the provider is asked to review the change.
     #[serde(default, skip_serializing_if = "ReviewStrategy::is_whole_change")]
     pub strategy: ReviewStrategy,
+    /// How many times the review request is sent; findings are merged by agreement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub samples: Option<u32>,
+    /// How many samples must report a finding for it to block; defaults to a strict majority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_quorum: Option<u32>,
+}
+impl ReviewerConfig {
+    pub fn sample_count(&self) -> u32 {
+        self.samples.unwrap_or(1)
+    }
+
+    pub fn effective_sample_quorum(&self) -> u32 {
+        self.sample_quorum
+            .unwrap_or_else(|| sampling::default_sample_quorum(self.sample_count()))
+    }
 }
 /// How a reviewer's provider receives the change.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -3136,6 +3271,26 @@ impl RepositoryConfig {
                     "reviewer {id} uses strategy focused, which requires an ollama_native provider"
                 ));
             }
+            if reviewer
+                .samples
+                .is_some_and(|samples| !(1..=sampling::MAX_REVIEWER_SAMPLES).contains(&samples))
+            {
+                return Err(format!(
+                    "reviewer {id} samples must be 1..={}",
+                    sampling::MAX_REVIEWER_SAMPLES
+                ));
+            }
+            if let Some(quorum) = reviewer.sample_quorum {
+                if reviewer.samples.is_none() {
+                    return Err(format!("reviewer {id} sets sample_quorum without samples"));
+                }
+                if !(1..=reviewer.sample_count()).contains(&quorum) {
+                    return Err(format!(
+                        "reviewer {id} sample_quorum must be 1..={}",
+                        reviewer.sample_count()
+                    ));
+                }
+            }
             if reviewer.context_files.len() > 128 {
                 return Err(format!("reviewer {id} has more than 128 context_files"));
             }
@@ -3308,4 +3463,25 @@ pub struct ProviderRequest {
     pub context_window_tokens: Option<usize>,
     pub max_output_tokens: Option<usize>,
     pub environment: Vec<(String, String)>,
+    /// Which run of a sampled reviewer this request is; absent for an unsampled reviewer.
+    pub sample: Option<ProviderSample>,
+}
+/// One run of a reviewer that sends the same request several times.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ProviderSample {
+    /// Zero-based run number.
+    pub index: u32,
+    /// How many runs the reviewer makes.
+    pub count: u32,
+}
+impl ProviderUsage {
+    /// Add another run's usage; a total is known only when both sides know it.
+    pub fn accumulate(&mut self, other: &ProviderUsage) {
+        fn add(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+            Some(left?.saturating_add(right?))
+        }
+        self.input_tokens = add(self.input_tokens, other.input_tokens);
+        self.output_tokens = add(self.output_tokens, other.output_tokens);
+        self.total_tokens = add(self.total_tokens, other.total_tokens);
+    }
 }

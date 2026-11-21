@@ -88,6 +88,31 @@
               },
               "additionalProperties": false
             }
+          },
+          "sample_agreement": {
+            "type": "object",
+            "description": "For a sampled reviewer: how many of its runs reported this finding, how many ran, and how many must agree for the finding to block. Absent for unsampled reviewers.",
+            "required": [
+              "reported",
+              "samples",
+              "quorum"
+            ],
+            "properties": {
+              "reported": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "samples": {
+                "type": "integer",
+                "minimum": 2,
+                "maximum": 5
+              },
+              "quorum": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "additionalProperties": false
           }
         },
         "additionalProperties": true

@@ -713,6 +713,7 @@ mod tests {
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![("VEE_TEST_ALLOWED".into(), "present".into())],
+            sample: None,
         };
         let _result = execute_provider(&ok).unwrap();
         assert!(!working_dir.path().join("provider-relative-file").exists());
@@ -728,6 +729,7 @@ mod tests {
             max_output_tokens: None,
             environment: vec![],
             timeout_seconds: 2,
+            sample: None,
         };
         assert!(execute_provider(&too_small)
             .unwrap_err()
@@ -759,6 +761,7 @@ mod tests {
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![],
+            sample: None,
         })
         .unwrap();
 
@@ -793,6 +796,7 @@ mod tests {
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![("API_TOKEN".into(), "secret-value".into())],
+            sample: None,
         })
         .unwrap_err();
 
@@ -822,6 +826,7 @@ mod tests {
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![],
+            sample: None,
         };
         let error = execute_provider_cancellable(&request, Some(&cancellation)).unwrap_err();
         cancel_thread.join().unwrap();
@@ -851,6 +856,7 @@ mod tests {
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![],
+            sample: None,
         };
         assert!(execute_provider(&request)
             .unwrap_err()
@@ -891,6 +897,7 @@ mod tests {
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![],
+            sample: None,
         };
         assert!(execute_provider_cancellable(&request, Some(&cancellation))
             .unwrap_err()

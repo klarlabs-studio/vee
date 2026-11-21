@@ -7986,6 +7986,7 @@ mod tests {
             reviewer_ids: Vec::new(),
             evidence_ids: Vec::new(),
             rule_attributions: Vec::new(),
+            sample_agreement: None,
         };
         let findings = vec![
             finding("added", 3, vee_core::Severity::High),
@@ -8098,6 +8099,7 @@ mod tests {
                 reviewer_ids: Vec::new(),
                 evidence_ids: Vec::new(),
                 rule_attributions: Vec::new(),
+                sample_agreement: None,
             },
             status: vee_core::FindingStatus::Resolved,
             status_reason: Some("fixed and verified".into()),
@@ -8146,6 +8148,7 @@ mod tests {
                 reviewer_ids: Vec::new(),
                 evidence_ids: Vec::new(),
                 rule_attributions: Vec::new(),
+                sample_agreement: None,
             },
             status,
             status_reason: Some("fixed and verified".into()),

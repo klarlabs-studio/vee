@@ -5727,6 +5727,7 @@ fn rule_candidate_report_uses_versioned_schema_and_does_not_mutate_policy() {
             reviewer_ids: vec!["correctness".into()],
             evidence_ids: Vec::new(),
             rule_attributions: Vec::new(),
+            sample_agreement: None,
         };
         store
             .save_review(
@@ -7076,6 +7077,7 @@ fn mcp_stdio_exposes_findings_tool_over_the_pinned_protocol() {
             reviewer_ids: Vec::new(),
             evidence_ids: vec![],
             rule_attributions: Vec::new(),
+            sample_agreement: None,
         }],
     )
     .unwrap();
@@ -7093,6 +7095,7 @@ fn mcp_stdio_exposes_findings_tool_over_the_pinned_protocol() {
             reviewer_ids: vec!["correctness".into()],
             evidence_ids: Vec::new(),
             rule_attributions: Vec::new(),
+            sample_agreement: None,
         };
         db.save_review(
             &format!("rule-review-{index}"),
@@ -10206,4 +10209,223 @@ fn mcp_stdio_supports_legacy_initialize_and_read_only_tool_calls() {
 
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[cfg(unix)]
+#[test]
+fn sampled_reviewer_merges_runs_and_blocks_only_findings_at_quorum() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    fs::write(
+        root.join(".gitignore"),
+        "/.vee/\n/provider\n/reviewer.md\n/slots/\n",
+    )
+    .unwrap();
+    fs::write(root.join("src.rs"), "fn a() {}\n").unwrap();
+    git(&["add", ".gitignore", "src.rs"]);
+    git(&["commit", "-qm", "baseline"]);
+    fs::write(
+        root.join("src.rs"),
+        "fn a() { 1 }\nfn b() { 2 }\nfn c() { 3 }\nfn d() { 4 }\nfn e() { 5 }\n",
+    )
+    .unwrap();
+    fs::write(root.join("reviewer.md"), "Review the changed code.\n").unwrap();
+    let slots = root.join("slots");
+    fs::create_dir(&slots).unwrap();
+    let finding = |rationale: &str, line: u32| {
+        format!("{{\"category\":\"correctness\",\"severity\":\"high\",\"confidence\":95,\"rationale\":\"{rationale}\",\"path\":\"src.rs\",\"line\":{line}}}")
+    };
+    let output = |findings: &[String]| {
+        format!(
+            "{{\"schema_version\":1,\"findings\":[{}]}}",
+            findings.join(",")
+        )
+    };
+    let provider = root.join("provider");
+    fs::write(
+        &provider,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\nif mkdir {slots}/0 2>/dev/null; then printf '%s' '{first}'\nelif mkdir {slots}/1 2>/dev/null; then printf '%s' '{second}'\nelse mkdir {slots}/2; printf '%s' '{third}'\nfi\n",
+            slots = slots.display(),
+            first = output(&[finding("a returns the wrong value", 1), finding("e overflows", 5)]),
+            second = output(&[finding("the result of a is wrong", 2)]),
+            third = output(&[]),
+        ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&provider).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&provider, permissions).unwrap();
+    fs::write(root.join(".vee.yaml"), format!(
+        "version: 1\nreview:\n  include: ['*.rs']\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md, samples: 3 }}\npolicy:\n  block_severities: [high]\n  minimum_confidence: 80\n  required_reviewers: [correctness]\n",
+        provider.display()
+    )).unwrap();
+
+    let review = vee()
+        .args([
+            "review",
+            "--base",
+            "HEAD",
+            "--reviewer",
+            "correctness",
+            "--output",
+            "json",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&review.stdout);
+    let review: serde_json::Value = serde_json::from_slice(&review.stdout)
+        .unwrap_or_else(|_| panic!("{stdout} {}", String::from_utf8_lossy(&review.stderr)));
+    assert_eq!(
+        fs::read_dir(&slots).unwrap().count(),
+        3,
+        "each sample is a separate provider call"
+    );
+    let findings = review["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 2, "{review}");
+    let reported = |finding: &serde_json::Value| finding["sample_agreement"]["reported"].clone();
+    let repeated = findings
+        .iter()
+        .find(|finding| reported(finding) == 2)
+        .unwrap_or_else(|| panic!("no finding reported by two samples: {review}"));
+    assert_eq!(
+        repeated["sample_agreement"],
+        serde_json::json!({"reported": 2, "samples": 3, "quorum": 2})
+    );
+    assert!(
+        repeated["line"] == 1 || repeated["line"] == 2,
+        "the reports at lines 1 and 2 merge: {review}"
+    );
+    let single = findings
+        .iter()
+        .find(|finding| finding["line"] == 5)
+        .unwrap_or_else(|| panic!("no finding at line 5: {review}"));
+    assert_eq!(reported(single), 1);
+    assert_eq!(review["gate"]["status"], "block", "{review}");
+    assert_eq!(
+        review["gate"]["blocking_findings"],
+        serde_json::json!([repeated["id"]]),
+        "only the finding at quorum blocks"
+    );
+    assert_eq!(review["reviewer_outcomes"][0]["status"], "completed");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_sample_fails_the_sampled_reviewer() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    fs::write(
+        root.join(".gitignore"),
+        "/.vee/\n/provider\n/reviewer.md\n/slots/\n",
+    )
+    .unwrap();
+    fs::write(root.join("src.rs"), "fn a() {}\n").unwrap();
+    git(&["add", ".gitignore", "src.rs"]);
+    git(&["commit", "-qm", "baseline"]);
+    fs::write(
+        root.join("src.rs"),
+        "fn a() { 1 }\nfn b() { 2 }\nfn c() { 3 }\nfn d() { 4 }\nfn e() { 5 }\n",
+    )
+    .unwrap();
+    fs::write(root.join("reviewer.md"), "Review the changed code.\n").unwrap();
+    let slots = root.join("slots");
+    fs::create_dir(&slots).unwrap();
+    let finding = |rationale: &str, line: u32| {
+        format!("{{\"category\":\"correctness\",\"severity\":\"high\",\"confidence\":95,\"rationale\":\"{rationale}\",\"path\":\"src.rs\",\"line\":{line}}}")
+    };
+    let output = |findings: &[String]| {
+        format!(
+            "{{\"schema_version\":1,\"findings\":[{}]}}",
+            findings.join(",")
+        )
+    };
+    let provider = root.join("provider");
+    fs::write(
+        &provider,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\nif mkdir {slots}/0 2>/dev/null; then printf '%s' '{first}'\nelif mkdir {slots}/1 2>/dev/null; then exit 3\nelse mkdir {slots}/2; printf '%s' '{third}'\nfi\n",
+            slots = slots.display(),
+            first = output(&[finding("a returns the wrong value", 1), finding("e overflows", 5)]),
+            third = output(&[]),
+        ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&provider).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&provider, permissions).unwrap();
+    fs::write(root.join(".vee.yaml"), format!(
+        "version: 1\nreview:\n  include: ['*.rs']\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md, samples: 3 }}\npolicy:\n  block_severities: [high]\n  minimum_confidence: 80\n  required_reviewers: [correctness]\n",
+        provider.display()
+    )).unwrap();
+
+    let review = vee()
+        .args([
+            "review",
+            "--base",
+            "HEAD",
+            "--reviewer",
+            "correctness",
+            "--output",
+            "json",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&review.stdout);
+    let review: serde_json::Value = serde_json::from_slice(&review.stdout)
+        .unwrap_or_else(|_| panic!("{stdout} {}", String::from_utf8_lossy(&review.stderr)));
+    assert_eq!(
+        fs::read_dir(&slots).unwrap().count(),
+        3,
+        "each sample is a separate provider call"
+    );
+    assert_eq!(
+        review["reviewer_outcomes"][0]["status"], "failed",
+        "{review}"
+    );
+    assert_eq!(review["analysis_complete"], false, "{review}");
+    assert!(
+        review["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|finding| finding["sample_agreement"]["samples"] == 3),
+        "agreement counts every configured sample: {review}"
+    );
 }

@@ -1118,6 +1118,7 @@ mod tests {
                     approval_id: "approval_validation_v2".into(),
                     reviewer_id: "correctness".into(),
                 }],
+                sample_agreement: None,
             })
             .collect::<Vec<_>>();
         store
@@ -1263,6 +1264,7 @@ mod tests {
                 approval_id: "approval_validation_v2".into(),
                 reviewer_id: "correctness".into(),
             }],
+            sample_agreement: None,
         };
         store
             .save_review(
@@ -1558,6 +1560,7 @@ mod tests {
                     reviewer_ids: Vec::new(),
                     evidence_ids: vec![],
                     rule_attributions: Vec::new(),
+                    sample_agreement: None,
                 }],
             )
             .unwrap();

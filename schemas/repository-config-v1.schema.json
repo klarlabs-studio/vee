@@ -269,6 +269,19 @@
           "enum": ["whole_change", "focused"],
           "default": "whole_change",
           "description": "whole_change sends the change in one request. focused reviews each changed file with a reasoning request followed by a structuring request whose findings are located by a quoted changed line; it suits small local models and requires an ollama_native provider."
+        },
+        "samples": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5,
+          "default": 1,
+          "description": "How many times the review request is sent. Findings from the runs are merged by location and record how many runs reported them. Costs that many provider calls."
+        },
+        "sample_quorum": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5,
+          "description": "How many runs must report a finding for it to block the gate; must not exceed samples. Defaults to a strict majority. Findings below the quorum are kept as advisory."
         }
       }
     },

@@ -141,6 +141,7 @@ pub fn run_provider_task(
         context_window_tokens: provider.context_window_tokens,
         max_output_tokens: provider.max_output_tokens,
         environment,
+        sample: None,
     };
     let result = provider_adapter.execute(&request, None)?;
     if result.exit_code != Some(0) {
@@ -249,6 +250,24 @@ pub(crate) const OLLAMA_DEFAULT_MAX_OUTPUT_TOKENS: usize = 2048;
 /// request repeatable, so a finding does not appear on one run and vanish on
 /// the next.
 pub(crate) const OLLAMA_SEED: u64 = 7;
+
+/// Temperature for the runs of a sampled reviewer: Ollama's own default, so
+/// samples differ, while seeds `OLLAMA_SEED + index` keep each run repeatable.
+pub(crate) const OLLAMA_SAMPLED_TEMPERATURE: f64 = 0.8;
+
+/// Temperature and seed for one Ollama request. A single run decodes greedily;
+/// runs of a sampled reviewer sample with distinct, fixed seeds.
+pub(crate) fn ollama_sampling_options(
+    sample: Option<vee_core::ProviderSample>,
+) -> (serde_json::Value, u64) {
+    match sample {
+        Some(sample) if sample.count > 1 => (
+            serde_json::json!(OLLAMA_SAMPLED_TEMPERATURE),
+            OLLAMA_SEED + u64::from(sample.index),
+        ),
+        _ => (serde_json::json!(0), OLLAMA_SEED),
+    }
+}
 
 pub(crate) fn fit_review_payload_to_provider_budget(
     payload: &mut serde_json::Value,
@@ -363,7 +382,7 @@ pub(crate) fn provider_cache_key(
         };
     let environment_digest =
         digest(&serde_json::to_vec(&request.environment).map_err(|error| error.to_string())?);
-    let key_material = serde_json::to_vec(&serde_json::json!({
+    let mut key_material = serde_json::json!({
         "review_cache_contract_version": REVIEW_CACHE_CONTRACT_VERSION,
         "provider_version": provider_version,
         "executable_fingerprint": executable_fingerprint,
@@ -375,8 +394,12 @@ pub(crate) fn provider_cache_key(
         "output_limit_bytes": request.output_limit_bytes,
         "environment_digest": environment_digest,
         "request": request.stdin,
-    }))
-    .map_err(|error| error.to_string())?;
+    });
+    // Unsampled keys keep their earlier shape, so existing cache entries stay valid.
+    if let Some(sample) = request.sample {
+        key_material["sample"] = serde_json::json!(sample);
+    }
+    let key_material = serde_json::to_vec(&key_material).map_err(|error| error.to_string())?;
     Ok(Some(digest(&key_material)))
 }
 
@@ -693,6 +716,7 @@ pub(crate) fn execute_ollama_native(
     let max_output_tokens = request
         .max_output_tokens
         .unwrap_or(OLLAMA_DEFAULT_MAX_OUTPUT_TOKENS);
+    let (temperature, seed) = ollama_sampling_options(request.sample);
     let mut chat = |messages: &Vec<serde_json::Value>,
                     format: Option<&serde_json::Value>|
      -> Result<(String, Option<vee_core::ProviderUsage>), String> {
@@ -703,8 +727,8 @@ pub(crate) fn execute_ollama_native(
             "options": {
                 "num_ctx": context_window,
                 "num_predict": max_output_tokens,
-                "temperature": 0,
-                "seed": OLLAMA_SEED,
+                "temperature": temperature.clone(),
+                "seed": seed,
             }
         });
         if let Some(format) = format {
@@ -936,6 +960,7 @@ pub(crate) fn execute_claude_cli(
         context_window_tokens: request.context_window_tokens,
         max_output_tokens: request.max_output_tokens,
         environment: with_cli_login_environment(&request.environment),
+        sample: None,
     };
     let mut result = vee_process::execute_provider_cancellable(&claude_request, cancellation)?;
     if result.exit_code != Some(0) {
@@ -1007,6 +1032,7 @@ pub(crate) fn execute_gemini_cli(
         context_window_tokens: request.context_window_tokens,
         max_output_tokens: request.max_output_tokens,
         environment: request.environment.clone(),
+        sample: None,
     };
     let mut result = vee_process::execute_provider_cancellable(&gemini_request, cancellation)?;
     if result.exit_code != Some(0) {
@@ -1157,6 +1183,7 @@ pub(crate) fn execute_codex_cli(
         context_window_tokens: request.context_window_tokens,
         max_output_tokens: request.max_output_tokens,
         environment: request.environment.clone(),
+        sample: None,
     };
     let mut result = vee_process::execute_provider_cancellable(&codex_request, cancellation)?;
     (result.stdout, result.usage) = parse_codex_jsonl_output(&result.stdout)?;
@@ -1255,6 +1282,7 @@ pub(crate) fn probe_provider_version(
             context_window_tokens: None,
             max_output_tokens: None,
             environment: environment.to_vec(),
+            sample: None,
         },
         cancellation,
     )?;
