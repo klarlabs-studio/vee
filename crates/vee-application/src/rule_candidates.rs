@@ -559,6 +559,7 @@ mod tests {
                 evidence_ids: vec![],
                 rule_attributions: Vec::new(),
                 sample_agreement: None,
+                advisory: false,
             },
             status: vee_core::FindingStatus::Waived,
             status_reason: Some("waiver reason does not imply false positive".into()),

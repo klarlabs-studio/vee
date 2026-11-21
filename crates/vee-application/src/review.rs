@@ -1113,8 +1113,10 @@ pub fn run_review_with_provider_and_selection_context(
                             });
                             continue;
                         }
+                        let advisory = enabled_reviewers[reviewer.index].1.advisory;
                         for finding in &mut normalized {
                             finding.reviewer_ids.push(reviewer.reviewer_id.clone());
+                            finding.advisory = advisory;
                         }
                         if !reviewer.cache_hit {
                             if let (Some(cache_key), Some(provider_version)) =
@@ -1717,6 +1719,8 @@ pub(crate) fn deduplicate_findings(findings: Vec<vee_core::Finding>) -> Vec<vee_
     for finding in findings {
         if let Some(index) = index_by_fingerprint.get(&finding.fingerprint).copied() {
             let existing = &mut merged[index];
+            // Advisory only while every reporting reviewer is advisory.
+            existing.advisory &= finding.advisory;
             existing.reviewer_ids.extend(finding.reviewer_ids);
             existing.reviewer_ids.sort();
             existing.reviewer_ids.dedup();
@@ -1825,6 +1829,7 @@ mod rule_attribution_contract_tests {
                 reviewer_id: String::new(),
             }],
             sample_agreement: None,
+            advisory: false,
         }
     }
 
@@ -2049,6 +2054,7 @@ mod finding_deduplication_tests {
             evidence_ids: vec![],
             rule_attributions: Vec::new(),
             sample_agreement: None,
+            advisory: false,
         }
     }
 

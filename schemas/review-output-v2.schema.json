@@ -89,6 +89,10 @@
               "additionalProperties": false
             }
           },
+          "advisory": {
+            "type": "boolean",
+            "description": "Reported only by advisory reviewers; shown, but never blocks the gate. Absent when false."
+          },
           "sample_agreement": {
             "type": "object",
             "description": "For a sampled reviewer: how many of its runs reported this finding, how many ran, and how many must agree for the finding to block. Absent for unsampled reviewers.",

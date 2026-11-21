@@ -5728,6 +5728,7 @@ fn rule_candidate_report_uses_versioned_schema_and_does_not_mutate_policy() {
             evidence_ids: Vec::new(),
             rule_attributions: Vec::new(),
             sample_agreement: None,
+            advisory: false,
         };
         store
             .save_review(
@@ -7078,6 +7079,7 @@ fn mcp_stdio_exposes_findings_tool_over_the_pinned_protocol() {
             evidence_ids: vec![],
             rule_attributions: Vec::new(),
             sample_agreement: None,
+            advisory: false,
         }],
     )
     .unwrap();
@@ -7096,6 +7098,7 @@ fn mcp_stdio_exposes_findings_tool_over_the_pinned_protocol() {
             evidence_ids: Vec::new(),
             rule_attributions: Vec::new(),
             sample_agreement: None,
+            advisory: false,
         };
         db.save_review(
             &format!("rule-review-{index}"),
@@ -10516,4 +10519,87 @@ fn review_effort_flag_sets_the_runs_per_reviewer_and_is_recorded_in_the_config_d
         .output()
         .unwrap();
     assert!(!rejected.status.success());
+}
+
+#[cfg(unix)]
+#[test]
+fn advisory_reviewer_findings_show_but_block_only_when_a_blocking_reviewer_agrees() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    fs::write(
+        root.join(".gitignore"),
+        "/.vee/\n/provider\n/architecture.md\n/correctness.md\n",
+    )
+    .unwrap();
+    fs::write(root.join("src.rs"), "fn a() {}\n").unwrap();
+    git(&["add", ".gitignore", "src.rs"]);
+    git(&["commit", "-qm", "baseline"]);
+    fs::write(root.join("src.rs"), "fn a() { 1 }\n").unwrap();
+    fs::write(root.join("architecture.md"), "ARCHITECTURE review.\n").unwrap();
+    fs::write(root.join("correctness.md"), "CORRECTNESS review.\n").unwrap();
+    let finding = "{\"schema_version\":1,\"findings\":[{\"category\":\"maintainability\",\"severity\":\"high\",\"confidence\":95,\"rationale\":\"a mixes layers\",\"path\":\"src.rs\",\"line\":1}]}";
+    let provider = root.join("provider");
+    fs::write(
+        &provider,
+        format!(
+            "#!/bin/sh\ninput=$(cat)\ncase \"$input\" in\n  *ARCHITECTURE*|*AGREES*) printf '%s' '{finding}' ;;\n  *) printf '%s' '{{\"schema_version\":1,\"findings\":[]}}' ;;\nesac\n"
+        ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&provider).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&provider, permissions).unwrap();
+    fs::write(root.join(".vee.yaml"), format!(
+        "version: 1\nreview:\n  include: ['*.rs']\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  architecture: {{ provider: fake, instructions_file: architecture.md, advisory: true }}\n  correctness: {{ provider: fake, instructions_file: correctness.md }}\npolicy:\n  block_severities: [high]\n  minimum_confidence: 80\n",
+        provider.display()
+    )).unwrap();
+    let review = || {
+        let output = vee()
+            .args(["review", "--working-tree", "--output", "json"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+
+    let advisory_only = review();
+    assert_eq!(advisory_only["gate"]["status"], "pass", "{advisory_only}");
+    assert_eq!(advisory_only["findings"].as_array().unwrap().len(), 1);
+    assert_eq!(advisory_only["findings"][0]["advisory"], true);
+
+    fs::write(
+        root.join("correctness.md"),
+        "CORRECTNESS review that AGREES.\n",
+    )
+    .unwrap();
+    let agreed = review();
+    assert_eq!(agreed["gate"]["status"], "block", "{agreed}");
+    let merged = &agreed["findings"][0];
+    assert!(merged.get("advisory").is_none(), "{agreed}");
+    assert_eq!(
+        merged["reviewer_ids"],
+        serde_json::json!(["architecture", "correctness"])
+    );
 }

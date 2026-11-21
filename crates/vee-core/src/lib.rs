@@ -361,6 +361,9 @@ pub struct Finding {
     /// Agreement across a sampled reviewer's runs; absent for unsampled reviewers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sample_agreement: Option<SampleAgreement>,
+    /// Reported only by advisory reviewers: shown, but never blocks the gate.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub advisory: bool,
 }
 
 impl Finding {
@@ -751,6 +754,7 @@ where
                 })
                 .collect(),
             sample_agreement: None,
+            advisory: false,
         })
         .collect();
     normalize_provider_findings_with_anchor(findings, repository_root, resolve_anchor)
@@ -865,7 +869,8 @@ pub fn evaluate_gate_with_waivers_and_reviewer_policies(
         .map(|waiver| waiver.finding_fingerprint.as_str())
         .collect();
     let meets_blocking_policy = |f: &Finding| {
-        f.meets_sample_quorum()
+        !f.advisory
+            && f.meets_sample_quorum()
             && (policy.block_severities.contains(&f.severity)
                 && f.confidence.unwrap_or(0) >= policy.minimum_confidence
                 || f.reviewer_ids.iter().any(|reviewer_id| {
@@ -1203,6 +1208,7 @@ mod tests {
             evidence_ids: Vec::new(),
             rule_attributions: Vec::new(),
             sample_agreement: None,
+            advisory: false,
         }
     }
 
@@ -1440,6 +1446,39 @@ mod tests {
             "an advisory minority finding without a line does not make the gate incomplete: {:?}",
             decision.reasons
         );
+    }
+
+    #[test]
+    fn gate_never_blocks_on_an_advisory_finding() {
+        let policy = Policy {
+            block_severities: vec![Severity::High],
+            minimum_confidence: 80,
+            required_review_complete: true,
+            required_verifications: vec![],
+            analyzer_block_levels: Default::default(),
+        };
+        let mut advisory = finding("advisory", Severity::Critical, Some(99));
+        advisory.advisory = true;
+        let mut unlocated_advisory = finding("unlocated-advisory", Severity::Critical, Some(99));
+        unlocated_advisory.advisory = true;
+        unlocated_advisory.line = None;
+        let mut findings = vec![advisory, unlocated_advisory];
+        let evidence = observed_test_evidence(&mut findings);
+        let decision = evaluate_gate(
+            "snapshot",
+            "config",
+            "policy",
+            &findings,
+            &policy,
+            true,
+            GateEvidence {
+                verification_runs: &[],
+                source_evidence: &evidence,
+                analyzer_reports: &[],
+            },
+        );
+        assert_eq!(decision.status, GateStatus::Pass, "{:?}", decision.reasons);
+        assert!(decision.blocking_findings.is_empty());
     }
 
     #[test]
@@ -2784,6 +2823,9 @@ pub struct ReviewerConfig {
     /// How the provider is asked to review the change.
     #[serde(default, skip_serializing_if = "ReviewStrategy::is_whole_change")]
     pub strategy: ReviewStrategy,
+    /// Advisory reviewers report findings that are shown but never block the gate.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub advisory: bool,
     /// How hard the reviewer works: a preset for `samples`. Mutually exclusive with `samples`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReviewEffort>,

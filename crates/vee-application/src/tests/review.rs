@@ -117,6 +117,7 @@ fn source_evidence_marks_unchanged_finding_lines_as_unknown() {
             evidence_ids: Vec::new(),
             rule_attributions: Vec::new(),
             sample_agreement: None,
+            advisory: false,
         },
         vee_core::Finding {
             id: "unchanged".into(),
@@ -132,6 +133,7 @@ fn source_evidence_marks_unchanged_finding_lines_as_unknown() {
             evidence_ids: Vec::new(),
             rule_attributions: Vec::new(),
             sample_agreement: None,
+            advisory: false,
         },
     ];
 
@@ -205,6 +207,7 @@ fn invalid_finding_line_preserves_other_source_evidence_and_is_reported() {
         evidence_ids: Vec::new(),
         rule_attributions: Vec::new(),
         sample_agreement: None,
+        advisory: false,
     };
     let mut findings = vec![make_finding("valid", 1), make_finding("invalid", 292)];
 
@@ -246,6 +249,7 @@ fn legacy_review_without_policy_findings_falls_back_to_display_findings() {
         evidence_ids: vec!["ev_legacy_source".into()],
         rule_attributions: Vec::new(),
         sample_agreement: None,
+        advisory: false,
     };
     let evidence = Evidence {
         id: "ev_legacy_source".into(),
@@ -1472,6 +1476,7 @@ fn reviewer_scope_globs_match_and_exclude_paths() {
         exclude: vec!["src/generated/**".into()],
         policy: vee_core::ReviewerPolicyConfig::default(),
         strategy: vee_core::ReviewStrategy::default(),
+        advisory: false,
         effort: None,
         samples: None,
         sample_quorum: None,
@@ -1522,6 +1527,7 @@ fn reviewer_context_manifest_distinguishes_supplied_filtered_and_omitted_paths()
         exclude: vec!["src/reviewer-excluded.rs".into()],
         policy: vee_core::ReviewerPolicyConfig::default(),
         strategy: vee_core::ReviewStrategy::default(),
+        advisory: false,
         effort: None,
         samples: None,
         sample_quorum: None,

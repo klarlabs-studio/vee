@@ -102,6 +102,8 @@ reviewers:
 
 Small local models often return no findings when the whole change arrives in one request. For an `ollama_native` provider, set `strategy: focused` on the reviewer to review each changed file separately: Vee first asks for free-text reasoning over line-numbered source with changed lines marked, then asks for structured findings. Each finding quotes the faulty changed statement, and Vee resolves that quote to a line number itself; a quote it cannot match to exactly one changed line leaves the line empty. Focused review makes two requests per changed file, so it takes longer and uses more tokens than the default `whole_change`. Use reviewer `exclude` globs to leave out test files when that time matters. Impact-reference files are not sent in focused mode; other changed non-test files are added as related context while they fit the context window. Focused review makes a small local model useful, but it does not match a strong hosted reviewer: on Vee's local historical-defect benchmark it recalled far fewer labeled defects and took minutes per change instead of seconds ([results](docs/local-historical-review-benchmark.md), [ADR 0007](docs/adr/0007-focused-review-strategy.md)). The `max_input_tokens` budget applies to the largest single focused request, not to the whole change. Rule attributions are limited to approved guidance whose scope covers the file under review.
 
+Set `advisory: true` on a reviewer to show its findings without letting them block the gate; a finding that a non-advisory reviewer also reports still blocks. `vee init` adds an advisory `architecture` reviewer for layering, coupling, duplication and other design problems the change introduces. It is disabled by default because it doubles provider calls and its instructions are not yet benchmarked; set `enabled: true` to use it. See [ADR 0009](docs/adr/0009-advisory-reviewers-and-analyzer-split.md).
+
 A single model review is a sample: on Vee's historical-defect benchmark, three identical runs of the same hosted reviewer found different defects. Set `effort: medium` on a reviewer to send the request three times (`low` runs it once, the default; `high` five times), or run `vee review --effort high` to raise every reviewer's effort for one review. `samples: N` (1–5) sets the count exactly. Vee merges the runs by location (same file, lines at most three apart), and each finding records how many runs reported it in `sample_agreement`. A finding blocks the gate only when at least `sample_quorum` runs reported it (default: a strict majority); the rest are shown as advisory. Sampling costs one provider call per sample. Runs proceed concurrently within `review.max_concurrency`. If any run fails, the reviewer fails and the review is incomplete. Sampled Ollama runs use temperature 0.8 with distinct fixed seeds; unsampled Ollama reviews stay at temperature 0. See [ADR 0008](docs/adr/0008-reviewer-sampling.md).
 
 Provider defaults can also live in a per-user `config.yaml`: `$XDG_CONFIG_HOME/vee/config.yaml` (or `~/.config/vee/config.yaml` when XDG is unset) on Unix-like systems, and `%APPDATA%/vee/config.yaml` on Windows. Set `VEE_CONFIG` to use a specific file. This file uses [user-config-v1.schema.json](schemas/user-config-v1.schema.json) and may define `version: 1` plus `providers`; repository provider entries override same-ID user entries. This lets a checked-in reviewer refer to a provider configured on the developer's machine. Effective merged provider settings participate in the review digest. Keep credentials outside both config files: use environment variables named by `env_allowlist` or an OS secret store.
@@ -274,6 +276,22 @@ verification:
 policy:
   required_verifications: [semgrep]
 ```
+
+For vulnerable dependencies, secrets and known vulnerability patterns, run a security scanner the same way instead of relying on the AI reviewer. With nox:
+
+```yaml
+verification:
+  nox:
+    executable: nox
+    args: [scan, ., --format, sarif, --output, "-", --offline, -q]
+    env_allowlist: [PATH, HOME]
+    sarif:
+      block_levels: [error]
+policy:
+  required_verifications: [nox]
+```
+
+nox exits non-zero when it reports findings; with valid SARIF that is a complete run. Drop `--offline` to include OSV dependency advisories. Suppress accepted results with a nox baseline or a Vee waiver.
 
 Run it on the same scope as the review (`vee verify --profile semgrep --base main`), then review with `--gate`. Only results located on lines added or modified in the snapshot count; pre-existing results never block. Results at a level listed in `block_levels` block the gate and appear in `blocking_findings` as `analyzer:<profile>:<id>`. A non-zero analyzer exit with valid SARIF is complete; a run that produced no valid SARIF makes the gate incomplete. Inspect a run with `vee verification findings <run-id>` (MCP: `get_analyzer_findings`), and waive an accepted result for one snapshot with `vee waivers create <analyzer-finding-id> --review <id> ...`. The derived reports are stored in the gate decision's replay inputs. JSON follows [analyzer-report-v1.schema.json](schemas/analyzer-report-v1.schema.json); see [ADR 0002](docs/adr/0002-trusted-analyzers-block-the-gate.md).
 

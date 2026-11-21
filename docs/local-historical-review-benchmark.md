@@ -153,6 +153,19 @@ below the quorum and stay advisory, which is why false blocks stay at zero.
 With 21 controls, "zero" bounds the false-block rate only loosely (the 95%
 upper bound is about 13%).
 
+### Security scanner on the same corpus (2026-11-21)
+
+nox 1.69.0 (`nox scan --format sarif --offline`) ran on each of the 17 defect
+commits. It reported nothing inside any labeled range. The two
+command-injection cases were rerun with the taint-analysis, reachability and
+attack-surface plugins enabled, with the same result. The corpus has no
+dependency, secret or known-pattern defects, which is where a scanner is
+strongest, so this shows that the scanner and the AI reviewer barely overlap
+on logic defects; it does not measure the scanner's value. On Vee's own
+repository, nox reported four command-injection results on argument-list
+`subprocess.run` calls in a test script, which are false positives; gating only
+on changed lines limits, but does not remove, such noise.
+
 Token counts are not comparable across providers: the Claude CLI reports
 uncached input only (cache subtotals are not retained), while Ollama reports
 every prompt token.

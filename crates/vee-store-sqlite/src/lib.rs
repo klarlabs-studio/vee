@@ -1831,6 +1831,7 @@ mod tests {
             evidence_ids: Vec::new(),
             rule_attributions: Vec::new(),
             sample_agreement: None,
+            advisory: false,
         }
     }
 

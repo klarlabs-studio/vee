@@ -1122,6 +1122,7 @@ mod tests {
                     reviewer_id: "correctness".into(),
                 }],
                 sample_agreement: None,
+                advisory: false,
             })
             .collect::<Vec<_>>();
         store
@@ -1268,6 +1269,7 @@ mod tests {
                 reviewer_id: "correctness".into(),
             }],
             sample_agreement: None,
+            advisory: false,
         };
         store
             .save_review(
@@ -1564,6 +1566,7 @@ mod tests {
                     evidence_ids: vec![],
                     rule_attributions: Vec::new(),
                     sample_agreement: None,
+                    advisory: false,
                 }],
             )
             .unwrap();

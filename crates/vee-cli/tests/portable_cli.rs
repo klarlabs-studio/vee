@@ -92,6 +92,16 @@ fn init_configures_detected_backend_and_doctor_reports_ready() {
     assert_eq!(report["repository_config_status"], "written");
     assert!(root.join(".vee.yaml").is_file());
     assert!(root.join(".vee/reviewers/correctness.md").is_file());
+    assert!(root.join(".vee/reviewers/architecture.md").is_file());
+    let written: serde_yaml::Value =
+        serde_yaml::from_str(&fs::read_to_string(root.join(".vee.yaml")).unwrap()).unwrap();
+    let architecture = &written["reviewers"]["architecture"];
+    assert_eq!(architecture["advisory"], serde_yaml::Value::Bool(true));
+    assert_eq!(
+        architecture["enabled"],
+        serde_yaml::Value::Bool(false),
+        "the architecture reviewer is opt-in"
+    );
     assert!(fs::read_to_string(&machine.user_config)
         .unwrap()
         .contains("codex_cli"));
@@ -100,9 +110,19 @@ fn init_configures_detected_backend_and_doctor_reports_ready() {
     let diagnosis: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
     assert_eq!(doctor.status.code(), Some(0), "{diagnosis:#}");
     assert_eq!(diagnosis["ready"], true);
-    assert_eq!(diagnosis["reviewers"][0]["reviewer_id"], "correctness");
-    assert_eq!(diagnosis["reviewers"][0]["kind"], "codex_cli");
-    assert_eq!(diagnosis["reviewers"][0]["detail"], "codex-cli 9.9.9");
+    let reviewer = |id: &str| {
+        diagnosis["reviewers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|reviewer| reviewer["reviewer_id"] == id)
+            .unwrap_or_else(|| panic!("no reviewer {id}: {diagnosis:#}"))
+            .clone()
+    };
+    assert_eq!(reviewer("correctness")["kind"], "codex_cli");
+    assert_eq!(reviewer("correctness")["detail"], "codex-cli 9.9.9");
+    assert_eq!(reviewer("architecture")["enabled"], false);
+    assert_eq!(reviewer("architecture")["detail"], "reviewer is disabled");
 
     let original = fs::read(root.join(".vee.yaml")).unwrap();
     let repeated = machine.vee(root, &["init"]);
