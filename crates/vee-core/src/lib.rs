@@ -6,8 +6,10 @@ pub mod lifecycle;
 pub mod packs;
 pub mod paths;
 pub mod ports;
+pub mod sampling;
 pub use lifecycle::{ActorName, FindingStatusChange, Reason, RuleApprovalStatus};
 pub use packs::{PackReference, PolicyPack};
+pub use sampling::{merge_sampled_findings, SampleAgreement};
 
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -356,6 +358,21 @@ pub struct Finding {
     /// These links are claims from model output, constrained to approvals supplied to that run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rule_attributions: Vec<RuleAttribution>,
+    /// Agreement across a sampled reviewer's runs; absent for unsampled reviewers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_agreement: Option<SampleAgreement>,
+    /// Reported only by advisory reviewers: shown, but never blocks the gate.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub advisory: bool,
+}
+
+impl Finding {
+    /// Whether enough of a sampled reviewer's runs reported this finding for it to block.
+    /// Unsampled findings always qualify.
+    pub fn meets_sample_quorum(&self) -> bool {
+        self.sample_agreement
+            .is_none_or(|agreement| agreement.meets_quorum())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -736,6 +753,8 @@ where
                     reviewer_id: String::new(),
                 })
                 .collect(),
+            sample_agreement: None,
+            advisory: false,
         })
         .collect();
     normalize_provider_findings_with_anchor(findings, repository_root, resolve_anchor)
@@ -850,16 +869,18 @@ pub fn evaluate_gate_with_waivers_and_reviewer_policies(
         .map(|waiver| waiver.finding_fingerprint.as_str())
         .collect();
     let meets_blocking_policy = |f: &Finding| {
-        policy.block_severities.contains(&f.severity)
-            && f.confidence.unwrap_or(0) >= policy.minimum_confidence
-            || f.reviewer_ids.iter().any(|reviewer_id| {
-                reviewer_policies
-                    .get(reviewer_id)
-                    .is_some_and(|reviewer_policy| {
-                        reviewer_policy.block_severities.contains(&f.severity)
-                            && f.confidence.unwrap_or(0) >= reviewer_policy.minimum_confidence
-                    })
-            })
+        !f.advisory
+            && f.meets_sample_quorum()
+            && (policy.block_severities.contains(&f.severity)
+                && f.confidence.unwrap_or(0) >= policy.minimum_confidence
+                || f.reviewer_ids.iter().any(|reviewer_id| {
+                    reviewer_policies
+                        .get(reviewer_id)
+                        .is_some_and(|reviewer_policy| {
+                            reviewer_policy.block_severities.contains(&f.severity)
+                                && f.confidence.unwrap_or(0) >= reviewer_policy.minimum_confidence
+                        })
+                }))
     };
     let unlocated_blockers: Vec<String> = findings
         .iter()
@@ -1186,6 +1207,8 @@ mod tests {
             reviewer_ids: Vec::new(),
             evidence_ids: Vec::new(),
             rule_attributions: Vec::new(),
+            sample_agreement: None,
+            advisory: false,
         }
     }
 
@@ -1373,6 +1396,89 @@ mod tests {
         );
         assert_eq!(decision.status, GateStatus::Block);
         assert_eq!(decision.blocking_findings, vec!["high"]);
+    }
+
+    #[test]
+    fn gate_blocks_a_sampled_finding_only_at_its_quorum() {
+        let policy = Policy {
+            block_severities: vec![Severity::High],
+            minimum_confidence: 80,
+            required_review_complete: true,
+            required_verifications: vec![],
+            analyzer_block_levels: Default::default(),
+        };
+        let agreement = |reported| {
+            Some(SampleAgreement {
+                reported,
+                samples: 3,
+                quorum: 2,
+            })
+        };
+        let mut minority = finding("minority", Severity::High, Some(95));
+        minority.sample_agreement = agreement(1);
+        let mut majority = finding("majority", Severity::High, Some(95));
+        majority.sample_agreement = agreement(2);
+        let mut unlocated_minority = finding("unlocated-minority", Severity::High, Some(95));
+        unlocated_minority.sample_agreement = agreement(1);
+        unlocated_minority.line = None;
+        let mut findings = vec![minority, majority, unlocated_minority];
+        let evidence = observed_test_evidence(&mut findings);
+        let decision = evaluate_gate(
+            "snapshot",
+            "config",
+            "policy",
+            &findings,
+            &policy,
+            true,
+            GateEvidence {
+                verification_runs: &[],
+                source_evidence: &evidence,
+                analyzer_reports: &[],
+            },
+        );
+        assert_eq!(decision.status, GateStatus::Block);
+        assert_eq!(decision.blocking_findings, vec!["majority"]);
+        assert!(
+            decision
+                .reasons
+                .iter()
+                .all(|reason| !reason.contains("lack a source path")),
+            "an advisory minority finding without a line does not make the gate incomplete: {:?}",
+            decision.reasons
+        );
+    }
+
+    #[test]
+    fn gate_never_blocks_on_an_advisory_finding() {
+        let policy = Policy {
+            block_severities: vec![Severity::High],
+            minimum_confidence: 80,
+            required_review_complete: true,
+            required_verifications: vec![],
+            analyzer_block_levels: Default::default(),
+        };
+        let mut advisory = finding("advisory", Severity::Critical, Some(99));
+        advisory.advisory = true;
+        let mut unlocated_advisory = finding("unlocated-advisory", Severity::Critical, Some(99));
+        unlocated_advisory.advisory = true;
+        unlocated_advisory.line = None;
+        let mut findings = vec![advisory, unlocated_advisory];
+        let evidence = observed_test_evidence(&mut findings);
+        let decision = evaluate_gate(
+            "snapshot",
+            "config",
+            "policy",
+            &findings,
+            &policy,
+            true,
+            GateEvidence {
+                verification_runs: &[],
+                source_evidence: &evidence,
+                analyzer_reports: &[],
+            },
+        );
+        assert_eq!(decision.status, GateStatus::Pass, "{:?}", decision.reasons);
+        assert!(decision.blocking_findings.is_empty());
     }
 
     #[test]
@@ -2244,6 +2350,147 @@ policy_profiles:
     }
 
     #[test]
+    fn antigravity_cli_provider_is_a_network_adapter_with_fixed_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".vee.yaml");
+        let write = |provider: &str| {
+            std::fs::write(
+                &file,
+                format!("version: 1\nproviders:\n  agy: {provider}\n"),
+            )
+            .unwrap();
+        };
+        write("{ kind: antigravity_cli, egress: network, executable: agy, model: gemini-3-pro }");
+        let config = RepositoryConfig::load(&file).unwrap();
+        assert_eq!(config.providers["agy"].kind, ProviderKind::AntigravityCli);
+        for (provider, expected) in [
+            (
+                "{ kind: antigravity_cli, egress: network, executable: agy, args: [--yolo] }",
+                "arguments are controlled by the adapter",
+            ),
+            (
+                "{ kind: antigravity_cli, egress: network, executable: agy, version_args: [-v] }",
+                "version arguments are fixed by the adapter",
+            ),
+            (
+                "{ kind: antigravity_cli, egress: local, executable: agy }",
+                "antigravity_cli cannot be declared local",
+            ),
+        ] {
+            write(provider);
+            let error = RepositoryConfig::load(&file).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn review_effort_sets_the_number_of_samples() {
+        assert_eq!(ReviewEffort::Low.samples(), 1);
+        assert_eq!(ReviewEffort::Medium.samples(), 3);
+        assert_eq!(ReviewEffort::High.samples(), 5);
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".vee.yaml");
+        let write = |reviewers: &str| {
+            std::fs::write(
+                &file,
+                format!("version: 1\nproviders:\n  cli: {{ kind: cli, executable: reviewer, egress: local }}\nreviewers:\n{reviewers}"),
+            )
+            .unwrap();
+        };
+        write("  medium: { provider: cli, instructions_file: r.md, effort: medium }\n  high: { provider: cli, instructions_file: r.md, effort: high, sample_quorum: 4 }\n  low: { provider: cli, instructions_file: r.md, effort: low }\n");
+        let config = RepositoryConfig::load(&file).unwrap();
+        assert_eq!(config.reviewers["medium"].sample_count(), 3);
+        assert_eq!(config.reviewers["medium"].effective_sample_quorum(), 2);
+        assert_eq!(config.reviewers["high"].sample_count(), 5);
+        assert_eq!(config.reviewers["high"].effective_sample_quorum(), 4);
+        assert_eq!(config.reviewers["low"].sample_count(), 1);
+
+        for (reviewers, expected) in [
+            ("  r: { provider: cli, instructions_file: r.md, effort: medium, samples: 3 }\n", "reviewer r sets both effort and samples"),
+            ("  r: { provider: cli, instructions_file: r.md, effort: low, sample_quorum: 1 }\n", "reviewer r sets sample_quorum without samples"),
+            ("  r: { provider: cli, instructions_file: r.md, effort: medium, sample_quorum: 4 }\n", "reviewer r sample_quorum must be 1..=3"),
+            ("  r: { provider: cli, instructions_file: r.md, effort: max }\n", "unknown variant"),
+        ] {
+            write(reviewers);
+            let error = RepositoryConfig::load(&file).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_review_effort_override_replaces_every_reviewers_sampling() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".vee.yaml");
+        std::fs::write(
+            &file,
+            "version: 1\nproviders:\n  cli: { kind: cli, executable: reviewer, egress: local }\nreviewers:\n  plain: { provider: cli, instructions_file: r.md }\n  sampled: { provider: cli, instructions_file: r.md, samples: 5, sample_quorum: 5 }\n",
+        )
+        .unwrap();
+        let mut config = RepositoryConfig::load(&file).unwrap();
+        config.override_review_effort(ReviewEffort::Medium);
+        for id in ["plain", "sampled"] {
+            assert_eq!(config.reviewers[id].sample_count(), 3, "{id}");
+            assert_eq!(config.reviewers[id].effective_sample_quorum(), 2, "{id}");
+            assert_eq!(config.reviewers[id].effort, Some(ReviewEffort::Medium));
+        }
+        config.override_review_effort(ReviewEffort::Low);
+        assert_eq!(config.reviewers["sampled"].sample_count(), 1);
+    }
+
+    #[test]
+    fn reviewer_sampling_defaults_to_one_run_and_a_majority_quorum() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".vee.yaml");
+        let write = |reviewers: &str| {
+            std::fs::write(
+                &file,
+                format!("version: 1\nproviders:\n  cli: {{ kind: cli, executable: reviewer, egress: local }}\nreviewers:\n{reviewers}"),
+            )
+            .unwrap();
+        };
+        write("  single: { provider: cli, instructions_file: r.md }\n  sampled: { provider: cli, instructions_file: r.md, samples: 3 }\n  strict: { provider: cli, instructions_file: r.md, samples: 3, sample_quorum: 3 }\n");
+        let config = RepositoryConfig::load(&file).unwrap();
+        assert_eq!(config.reviewers["single"].sample_count(), 1);
+        assert_eq!(config.reviewers["single"].effective_sample_quorum(), 1);
+        assert_eq!(config.reviewers["sampled"].sample_count(), 3);
+        assert_eq!(config.reviewers["sampled"].effective_sample_quorum(), 2);
+        assert_eq!(config.reviewers["strict"].effective_sample_quorum(), 3);
+        let single = serde_json::to_value(&config.reviewers["single"]).unwrap();
+        assert!(
+            single.get("samples").is_none() && single.get("sample_quorum").is_none(),
+            "an unsampled reviewer leaves existing configuration digests unchanged"
+        );
+
+        for (reviewers, expected) in [
+            (
+                "  r: { provider: cli, instructions_file: r.md, samples: 0 }\n",
+                "reviewer r samples must be 1..=5",
+            ),
+            (
+                "  r: { provider: cli, instructions_file: r.md, samples: 6 }\n",
+                "reviewer r samples must be 1..=5",
+            ),
+            (
+                "  r: { provider: cli, instructions_file: r.md, samples: 3, sample_quorum: 4 }\n",
+                "reviewer r sample_quorum must be 1..=3",
+            ),
+            (
+                "  r: { provider: cli, instructions_file: r.md, samples: 3, sample_quorum: 0 }\n",
+                "reviewer r sample_quorum must be 1..=3",
+            ),
+            (
+                "  r: { provider: cli, instructions_file: r.md, sample_quorum: 1 }\n",
+                "reviewer r sets sample_quorum without samples",
+            ),
+        ] {
+            write(reviewers);
+            let error = RepositoryConfig::load(&file).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
     fn ollama_native_provider_requires_loopback_and_explicit_context_budget() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join(".vee.yaml");
@@ -2573,8 +2820,11 @@ pub enum ProviderKind {
     #[default]
     Cli,
     CodexCli,
+    /// Gemini CLI. Upstream deprecated it in June 2026 in favor of the Antigravity CLI.
     GeminiCli,
     ClaudeCli,
+    /// Google's Antigravity CLI (`agy`), the successor to Gemini CLI.
+    AntigravityCli,
     #[serde(rename = "openai_compatible")]
     OpenAiCompatible,
     OllamaNative,
@@ -2610,6 +2860,30 @@ pub struct ReviewerConfig {
     /// How the provider is asked to review the change.
     #[serde(default, skip_serializing_if = "ReviewStrategy::is_whole_change")]
     pub strategy: ReviewStrategy,
+    /// Advisory reviewers report findings that are shown but never block the gate.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub advisory: bool,
+    /// How hard the reviewer works: a preset for `samples`. Mutually exclusive with `samples`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReviewEffort>,
+    /// How many times the review request is sent; findings are merged by agreement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub samples: Option<u32>,
+    /// How many samples must report a finding for it to block; defaults to a strict majority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_quorum: Option<u32>,
+}
+impl ReviewerConfig {
+    pub fn sample_count(&self) -> u32 {
+        self.samples
+            .or(self.effort.map(ReviewEffort::samples))
+            .unwrap_or(1)
+    }
+
+    pub fn effective_sample_quorum(&self) -> u32 {
+        self.sample_quorum
+            .unwrap_or_else(|| sampling::default_sample_quorum(self.sample_count()))
+    }
 }
 /// How a reviewer's provider receives the change.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -2626,6 +2900,27 @@ pub enum ReviewStrategy {
 impl ReviewStrategy {
     pub fn is_whole_change(&self) -> bool {
         *self == ReviewStrategy::WholeChange
+    }
+}
+/// How much work a reviewer spends on a change. Higher effort sends the review
+/// request more times and merges the runs by agreement (see `samples`).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewEffort {
+    /// One run.
+    Low,
+    /// Three runs.
+    Medium,
+    /// Five runs.
+    High,
+}
+impl ReviewEffort {
+    pub fn samples(self) -> u32 {
+        match self {
+            ReviewEffort::Low => 1,
+            ReviewEffort::Medium => 3,
+            ReviewEffort::High => sampling::MAX_REVIEWER_SAMPLES,
+        }
     }
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -2736,6 +3031,16 @@ fn default_incomplete() -> String {
 }
 
 impl RepositoryConfig {
+    /// Apply one effort level to every reviewer for a single review, replacing
+    /// configured `effort`, `samples` and `sample_quorum` (quorum returns to a majority).
+    pub fn override_review_effort(&mut self, effort: ReviewEffort) {
+        for reviewer in self.reviewers.values_mut() {
+            reviewer.effort = Some(effort);
+            reviewer.samples = None;
+            reviewer.sample_quorum = None;
+        }
+    }
+
     pub fn select_policy_profile(&mut self, profile: Option<&str>) -> Result<(), String> {
         self.active_policy_profile = None;
         if let Some(profile_id) = profile {
@@ -3067,14 +3372,17 @@ impl RepositoryConfig {
             }
             if (provider.kind == ProviderKind::CodexCli
                 || provider.kind == ProviderKind::ClaudeCli
-                || provider.kind == ProviderKind::GeminiCli)
+                || provider.kind == ProviderKind::GeminiCli
+                || provider.kind == ProviderKind::AntigravityCli)
                 && !provider.args.is_empty()
             {
                 return Err(format!(
                     "provider {id} provider-specific arguments are controlled by the adapter"
                 ));
             }
-            if (provider.kind == ProviderKind::CodexCli || provider.kind == ProviderKind::ClaudeCli)
+            if (provider.kind == ProviderKind::CodexCli
+                || provider.kind == ProviderKind::ClaudeCli
+                || provider.kind == ProviderKind::AntigravityCli)
                 && !provider.version_args.is_empty()
             {
                 return Err(format!(
@@ -3089,6 +3397,13 @@ impl RepositoryConfig {
             if provider.kind == ProviderKind::GeminiCli && !provider.args.is_empty() {
                 return Err(format!(
                     "provider {id} Gemini CLI arguments are controlled by the adapter"
+                ));
+            }
+            if provider.kind == ProviderKind::AntigravityCli
+                && provider.egress == ProviderEgress::Local
+            {
+                return Err(format!(
+                    "provider {id} antigravity_cli cannot be declared local; use a local inference adapter"
                 ));
             }
             if provider.kind == ProviderKind::GeminiCli && provider.egress == ProviderEgress::Local
@@ -3135,6 +3450,29 @@ impl RepositoryConfig {
                 return Err(format!(
                     "reviewer {id} uses strategy focused, which requires an ollama_native provider"
                 ));
+            }
+            if reviewer
+                .samples
+                .is_some_and(|samples| !(1..=sampling::MAX_REVIEWER_SAMPLES).contains(&samples))
+            {
+                return Err(format!(
+                    "reviewer {id} samples must be 1..={}",
+                    sampling::MAX_REVIEWER_SAMPLES
+                ));
+            }
+            if reviewer.effort.is_some() && reviewer.samples.is_some() {
+                return Err(format!("reviewer {id} sets both effort and samples"));
+            }
+            if let Some(quorum) = reviewer.sample_quorum {
+                if reviewer.sample_count() <= 1 {
+                    return Err(format!("reviewer {id} sets sample_quorum without samples"));
+                }
+                if !(1..=reviewer.sample_count()).contains(&quorum) {
+                    return Err(format!(
+                        "reviewer {id} sample_quorum must be 1..={}",
+                        reviewer.sample_count()
+                    ));
+                }
             }
             if reviewer.context_files.len() > 128 {
                 return Err(format!("reviewer {id} has more than 128 context_files"));
@@ -3308,4 +3646,25 @@ pub struct ProviderRequest {
     pub context_window_tokens: Option<usize>,
     pub max_output_tokens: Option<usize>,
     pub environment: Vec<(String, String)>,
+    /// Which run of a sampled reviewer this request is; absent for an unsampled reviewer.
+    pub sample: Option<ProviderSample>,
+}
+/// One run of a reviewer that sends the same request several times.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ProviderSample {
+    /// Zero-based run number.
+    pub index: u32,
+    /// How many runs the reviewer makes.
+    pub count: u32,
+}
+impl ProviderUsage {
+    /// Add another run's usage; a total is known only when both sides know it.
+    pub fn accumulate(&mut self, other: &ProviderUsage) {
+        fn add(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+            Some(left?.saturating_add(right?))
+        }
+        self.input_tokens = add(self.input_tokens, other.input_tokens);
+        self.output_tokens = add(self.output_tokens, other.output_tokens);
+        self.total_tokens = add(self.total_tokens, other.total_tokens);
+    }
 }

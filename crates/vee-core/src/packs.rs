@@ -83,6 +83,9 @@ pub struct PackReviewer {
     pub exclude: Vec<String>,
     #[serde(default)]
     pub policy: ReviewerPolicyConfig,
+    /// Findings from this reviewer are shown but never block the gate.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub advisory: bool,
 }
 
 fn enabled() -> bool {
@@ -290,6 +293,12 @@ pub fn apply_packs(config: &mut RepositoryConfig, root: &Path) -> Result<(), Str
                     // Packs do not choose the provider, and the focused
                     // strategy depends on the provider kind.
                     strategy: crate::ReviewStrategy::default(),
+                    // Sampling multiplies provider cost, which is the
+                    // consuming repository's choice, not the pack's.
+                    advisory: reviewer.advisory,
+                    effort: None,
+                    samples: None,
+                    sample_quorum: None,
                 },
             );
         }

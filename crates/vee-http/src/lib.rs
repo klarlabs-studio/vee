@@ -91,6 +91,8 @@ struct ReviewRequest {
     reviewer_ids: Vec<String>,
     #[serde(default)]
     policy_profile: Option<String>,
+    #[serde(default)]
+    effort: Option<vee_core::ReviewEffort>,
 }
 
 #[derive(Deserialize)]
@@ -351,6 +353,7 @@ async fn start_review(
                 scope,
                 reviewer_ids: selection,
                 policy_profile: request.policy_profile.as_deref(),
+                effort: request.effort,
                 work_item: None,
                 work_item_token_env: None,
             },
@@ -1118,6 +1121,8 @@ mod tests {
                     approval_id: "approval_validation_v2".into(),
                     reviewer_id: "correctness".into(),
                 }],
+                sample_agreement: None,
+                advisory: false,
             })
             .collect::<Vec<_>>();
         store
@@ -1263,6 +1268,8 @@ mod tests {
                 approval_id: "approval_validation_v2".into(),
                 reviewer_id: "correctness".into(),
             }],
+            sample_agreement: None,
+            advisory: false,
         };
         store
             .save_review(
@@ -1558,6 +1565,8 @@ mod tests {
                     reviewer_ids: Vec::new(),
                     evidence_ids: vec![],
                     rule_attributions: Vec::new(),
+                    sample_agreement: None,
+                    advisory: false,
                 }],
             )
             .unwrap();

@@ -405,6 +405,10 @@ enum Command {
         /// Run only these configured reviewer IDs (repeatable).
         #[arg(long = "reviewer")]
         reviewer_ids: Vec<String>,
+        /// Review effort for every reviewer, replacing configured sampling: low runs each
+        /// reviewer once, medium three times, high five times. Findings most runs agree on can block.
+        #[arg(long, value_enum)]
+        effort: Option<EffortArg>,
         /// Attach hosting issue context as untrusted, digest-bound reviewer input (OWNER/REPO#NUMBER).
         #[arg(long, value_name = "OWNER/REPO#NUMBER")]
         work_item: Option<String>,
@@ -944,6 +948,23 @@ enum VerificationCommand {
         output: Output,
     },
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum EffortArg {
+    Low,
+    Medium,
+    High,
+}
+
+impl From<EffortArg> for vee_core::ReviewEffort {
+    fn from(effort: EffortArg) -> Self {
+        match effort {
+            EffortArg::Low => Self::Low,
+            EffortArg::Medium => Self::Medium,
+            EffortArg::High => Self::High,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum AttestationFormat {
     Dsse,
@@ -3376,6 +3397,7 @@ fn run() -> Result<u8> {
             gate,
             policy_profile,
             reviewer_ids,
+            effort,
             work_item,
             hosting_provider,
             hosting_host,
@@ -3424,6 +3446,7 @@ fn run() -> Result<u8> {
                     scope,
                     reviewer_ids: (!reviewer_ids.is_empty()).then_some(reviewer_ids.as_slice()),
                     policy_profile: policy_profile.as_deref(),
+                    effort: effort.map(Into::into),
                     work_item,
                     work_item_token_env: Some(
                         effective_work_item_token_env(&hosting_provider, &hosting_token_env)
@@ -7986,6 +8009,8 @@ mod tests {
             reviewer_ids: Vec::new(),
             evidence_ids: Vec::new(),
             rule_attributions: Vec::new(),
+            sample_agreement: None,
+            advisory: false,
         };
         let findings = vec![
             finding("added", 3, vee_core::Severity::High),
@@ -8098,6 +8123,8 @@ mod tests {
                 reviewer_ids: Vec::new(),
                 evidence_ids: Vec::new(),
                 rule_attributions: Vec::new(),
+                sample_agreement: None,
+                advisory: false,
             },
             status: vee_core::FindingStatus::Resolved,
             status_reason: Some("fixed and verified".into()),
@@ -8146,6 +8173,8 @@ mod tests {
                 reviewer_ids: Vec::new(),
                 evidence_ids: Vec::new(),
                 rule_attributions: Vec::new(),
+                sample_agreement: None,
+                advisory: false,
             },
             status,
             status_reason: Some("fixed and verified".into()),

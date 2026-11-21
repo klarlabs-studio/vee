@@ -77,6 +77,137 @@ Two cases were incomplete and are excluded from recall:
 - The runner restarted from the first case after every interruption; it now
   supports `--resume`.
 
+### Run-to-run variance and impact ranking (2026-11-21)
+
+Three identical Claude runs scored 9 / 17, 11 / 17 and 10 / 15 (one case was
+incomplete because a blocking finding had no line). Six of the 16 cases
+flipped between found and missed. A single run is therefore not enough to
+compare variants on this corpus; the comparisons below use three runs each.
+
+Impact context is capped at eight files per review. In the baseline, 79 of
+the 123 impact files sent were tests: same-directory tests outranked
+production callers, and syntactic production references were not ranked at
+all. After ranking production references first, 8 of 123 were tests.
+
+| Variant | Runs | Strict recall (sum over runs) | Union over the three runs |
+|---|---|---|---|
+| Baseline | 3 | 30 / 49 (61%) | 14 / 17 |
+| Production references first | 3 | 30 / 51 (59%) | 13 / 17 |
+
+The ranking change fixes what reviewers are shown but does not change
+recall measurably on this corpus. The larger effect is sampling: the union of
+three runs found 13–14 of 17 labels against about 60% for one run, with about
+50% more distinct findings rather than three times as many. Three defects (a
+dropped context value, a shuffle hang, and a re-read after `await`) were
+missed in all six runs.
+
+### Reviewer sampling (2026-11-21)
+
+With `samples: 3` (ADR 0008), each case sends the same request three times
+and merges the runs. Two sampled benchmark runs compared with the three
+single-run passes of the same build:
+
+| Variant | Runs | Strict recall | Findings per run | Below quorum (advisory) | Blocking findings | Blocked cases | Time per run |
+|---|---|---|---|---|---|---|---|
+| One sample | 3 | 30 / 51 (59%) | 33–38 | — | 8–9 | 6 / 16 | 4.9–5.2 min |
+| `samples: 3` | 2 | 26 / 34 (76%): 14 / 17 and 12 / 17 | 57–65 | 31–37 | 9–11 | 7–8 / 16 | 6.0–6.4 min |
+
+Sampling raised recall by about 17 points. Wall-clock time rose by about a
+fifth, because the samples run concurrently; provider calls tripled. The
+shuffle-hang defect, missed in all six earlier runs, was found once. Ten
+of the matched labels in each sampled run reached the quorum; the others
+(four and two) were found only as advisory findings. So the gate stays
+about as strict as a single run, and the extra recall shows up as advisory
+findings a person reads. More than half of the findings were advisory.
+
+Every case in this corpus contains a defect, so the corpus cannot tell
+whether the extra blocked cases are true or false blocks. Measuring false
+blocks needs clean changes in the corpus.
+
+### Review effort levels and control cases (2026-11-21)
+
+Effort presets (ADR 0008) map `low`, `medium` and `high` to 1, 3 and 5
+samples. To measure false blocks, the corpus gained 22 control cases:
+`feat`, `refactor` and `perf` commits of 20–300 changed source lines, two per
+repository, each at least 30 commits old, with at least 90% of its changed
+lines unchanged at HEAD despite later edits to the same files.
+
+One control case was blocked at `low` and `medium` with the same finding,
+reported by all three `medium` samples: an option that silently replaced
+the default middleware chain. A later commit fixed exactly that, so the
+case was relabeled as a defect. The label was written after the result,
+so the table below leaves it out; the selection rule missed it because the
+fix changed a different file from the defect's lines.
+
+| Effort | Runs | Strict recall (16 defect cases) | False blocks (21 controls) | Findings on controls | Defect-case time per run |
+|---|---|---|---|---|---|
+| `low` | 3 | 30 / 51 (59%): 10, 11, 9 of 17 | 0 / 21 | 20 | 4.9–5.2 min |
+| `medium` | 2 | 26 / 34 (76%): 14, 12 of 17 | 0 / 21 | 39 | 6.0–6.4 min |
+| `high` | 2 | 28 / 34 (82%): 14, 14 of 17 | 0 / 21 | 50 | 11.0–11.1 min |
+
+Controls were run once per effort level. `high` was also the most stable
+level: both runs found the same count. Its wall-clock time roughly doubles
+over `medium` because five samples exceed the default concurrency. Findings
+on control changes grow with effort, but almost all of the extra ones fall
+below the quorum and stay advisory, which is why false blocks stay at zero.
+With 21 controls, "zero" bounds the false-block rate only loosely (the 95%
+upper bound is about 13%).
+
+### Security scanner on the same corpus (2026-11-21)
+
+nox 1.69.0 (`nox scan --format sarif --offline`) ran on each of the 17 defect
+commits. It reported nothing inside any labeled range. The two
+command-injection cases were rerun with the taint-analysis, reachability and
+attack-surface plugins enabled, with the same result. The corpus has no
+dependency, secret or known-pattern defects, which is where a scanner is
+strongest, so this shows that the scanner and the AI reviewer barely overlap
+on logic defects; it does not measure the scanner's value. On Vee's own
+repository, nox reported four command-injection results on argument-list
+`subprocess.run` calls in a test script, which are false positives; gating only
+on changed lines limits, but does not remove, such noise.
+
+### Architecture reviewer (2026-11-21)
+
+The advisory `architecture` reviewer that `vee init` writes (ADR 0009) ran
+once on all 38 corpus commits with Claude at `low` effort. Design problems
+rarely have one introducing commit, so the corpus has no design labels yet;
+this run measures output, not recall.
+
+It reported 86 findings (5 high, 38 medium, 43 low), all advisory, and no gate
+blocked. Two commits received no findings. The most common themes were
+duplicated logic (15), leaky abstractions (10) and hidden coupling (7);
+categories are free text. In a fixed random sample of ten findings, the
+author judged nine specific and actionable. Several describe real
+behavior defects in design terms: a response wrapper that hides optional
+writer interfaces and breaks streaming, an aggregate method with no state
+guard, and duplicated approval code that had already drifted. The tenth is a
+defensible convention choice. That judgment is by the author of the
+reviewer instructions, so it is not an independent rating.
+
+### Public multi-language cases (2026-11-21)
+
+Nine cases from public, permissively licensed projects were added to make the
+corpus less Go-heavy: three Python (click, httpx, starlette), two TypeScript
+(date-fns, zod), one JavaScript (axios) and three Rust (ripgrep, regex,
+clap), with 11 labels in total. Each case is the single-parent commit that
+introduced a defect a later commit fixed. Every label lies on lines that
+commit added or changed, and three cases were checked by hand against the
+fix.
+
+| Effort | Strict recall (9 public cases) |
+|---|---|
+| `low` | 7 / 11 |
+| `medium` | 7 / 10, with the clap case not yet rerun |
+
+The clap case first came back incomplete: the Claude CLI adapter passed the
+review payload as a command-line argument, and the 300 KB change exceeded
+the operating system's argument limit, so the reviewer failed before it
+ran. With the prompt on stdin, the reviewer found the defect. Misses were
+the httpx case, whose defect needs a type definition from a file outside the
+change, and the axios case, where the finding was in the right file at the
+wrong line. Recall on public cases is close to the private cases (59% at
+`low` and 76% at `medium`), but nine cases are too few to separate the two.
+
 Token counts are not comparable across providers: the Claude CLI reports
 uncached input only (cache subtotals are not retained), while Ollama reports
 every prompt token.

@@ -216,6 +216,7 @@ printf '%s\n' '{{"type":"item.completed","item":{{"type":"agent_message","text":
         context_window_tokens: None,
         max_output_tokens: None,
         environment: Vec::new(),
+        sample: None,
     };
     let result = CliReviewProvider.execute(&request, None).unwrap();
     assert_eq!(
@@ -357,6 +358,7 @@ fn gemini_cli_adapter_uses_headless_json_and_extracts_only_response() {
         context_window_tokens: None,
         max_output_tokens: None,
         environment: vec![],
+        sample: None,
     };
     let result = CliReviewProvider.execute(&request, None).unwrap();
     let extracted: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
@@ -408,9 +410,10 @@ fn claude_cli_adapter_uses_restricted_schema_validated_json_contract() {
     std::fs::write(
         &executable,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nenv > '{}'\nprintf '%s' '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nenv > '{}'\ncat > '{}'\nprintf '%s' '{}'\n",
             args_log.display(),
             env_log.display(),
+            directory.path().join("stdin.txt").display(),
             envelope
         ),
     )
@@ -438,6 +441,7 @@ fn claude_cli_adapter_uses_restricted_schema_validated_json_contract() {
         context_window_tokens: None,
         max_output_tokens: None,
         environment: vec![],
+        sample: None,
     };
     let result = CliReviewProvider.execute(&request, None).unwrap();
     let extracted: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
@@ -477,6 +481,17 @@ fn claude_cli_adapter_uses_restricted_schema_validated_json_contract() {
         schema,
         serde_json::json!({"title": "provider findings"}),
         "Claude CLI cannot resolve the draft meta-schema reference"
+    );
+    let prompt = std::fs::read_to_string(directory.path().join("stdin.txt")).unwrap();
+    assert!(
+        prompt.contains("Vee review request JSON") || prompt.contains("task request"),
+        "the prompt goes to stdin, which has no argument-size limit: {prompt:.200}"
+    );
+    assert!(
+        !args
+            .iter()
+            .any(|arg| arg.contains(&prompt[..prompt.len().min(40)])),
+        "the prompt is not passed as an argument"
     );
     let environment = std::fs::read_to_string(env_log).unwrap();
     for name in ["HOME", "USER"] {
@@ -570,6 +585,7 @@ fn openai_compatible_adapter_sends_schema_and_extracts_content() {
                 context_window_tokens: None,
             max_output_tokens: None,
                 environment: vec![("OPENAI_API_KEY".into(), "local-secret".into())],
+                sample: None,
             },
             None,
         )
@@ -649,6 +665,7 @@ fn ollama_native_adapter_sets_context_window_schema_and_extracts_usage() {
                 context_window_tokens: Some(32768),
                 max_output_tokens: Some(4096),
                 environment: vec![],
+                sample: None,
             },
             None,
         )
@@ -694,6 +711,7 @@ fn openai_compatible_adapter_rejects_http_errors_and_oversized_response() {
         context_window_tokens: None,
         max_output_tokens: None,
         environment: vec![],
+        sample: None,
     };
     let error = execute_openai_compatible(&request(serve("401 Unauthorized", b"nope"), 4096), None)
         .unwrap_err();
@@ -776,6 +794,7 @@ fn openai_compatible_adapter_does_not_forward_credentials_or_context_across_redi
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![("OPENAI_API_KEY".into(), "do-not-forward".into())],
+            sample: None,
         },
         None,
     )
@@ -856,6 +875,7 @@ fn openai_compatible_adapter_honors_cancellation_while_waiting_for_response() {
         context_window_tokens: None,
         max_output_tokens: None,
         environment: vec![],
+        sample: None,
     };
     let error = execute_openai_compatible(&request, Some(&cancellation)).unwrap_err();
     thread.join().unwrap();
@@ -979,6 +999,7 @@ fn ollama_native_focused_strategy_reasons_then_structures_each_changed_file() {
             context_window_tokens: Some(32768),
             max_output_tokens: Some(4096),
             environment: vec![],
+            sample: None,
         },
         None,
     )
@@ -1007,4 +1028,303 @@ fn ollama_native_focused_strategy_reasons_then_structures_each_changed_file() {
     let usage = result.usage.unwrap();
     assert_eq!(usage.input_tokens, Some(100));
     assert_eq!(usage.output_tokens, Some(10));
+}
+
+#[test]
+fn ollama_samples_vary_reproducibly_while_a_single_run_stays_greedy() {
+    let sample = |index, count| Some(vee_core::ProviderSample { index, count });
+    assert_eq!(
+        ollama_sampling_options(None),
+        (serde_json::json!(0), OLLAMA_SEED)
+    );
+    assert_eq!(
+        ollama_sampling_options(sample(0, 1)),
+        (serde_json::json!(0), OLLAMA_SEED)
+    );
+    assert_eq!(
+        ollama_sampling_options(sample(0, 3)),
+        (serde_json::json!(OLLAMA_SAMPLED_TEMPERATURE), OLLAMA_SEED)
+    );
+    assert_eq!(
+        ollama_sampling_options(sample(2, 3)),
+        (
+            serde_json::json!(OLLAMA_SAMPLED_TEMPERATURE),
+            OLLAMA_SEED + 2
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn provider_cache_keys_distinguish_samples_and_keep_unsampled_keys() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let executable = dir.path().join("reviewer");
+    std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let request = |sample| ProviderRequest {
+        kind: vee_core::ProviderKind::Cli,
+        executable: executable.to_string_lossy().into_owned(),
+        args: vec![],
+        model: None,
+        working_directory: dir.path().to_path_buf(),
+        stdin: b"{}".to_vec(),
+        timeout_seconds: 5,
+        output_limit_bytes: 4096,
+        context_window_tokens: None,
+        max_output_tokens: None,
+        environment: vec![],
+        sample,
+    };
+    let key = |sample| {
+        provider_cache_key(&request(sample), "1.0", &mut Default::default())
+            .unwrap()
+            .unwrap()
+    };
+    let sample = |index| Some(vee_core::ProviderSample { index, count: 3 });
+    assert_ne!(key(sample(0)), key(sample(1)));
+    assert_ne!(key(None), key(sample(0)));
+    assert_eq!(key(sample(1)), key(sample(1)));
+    assert_eq!(
+        key(None),
+        provider_cache_key(&request(None), "1.0", &mut Default::default())
+            .unwrap()
+            .unwrap()
+    );
+}
+
+#[cfg(unix)]
+fn failing_cli_request(
+    directory: &std::path::Path,
+    kind: vee_core::ProviderKind,
+    script: &str,
+) -> ProviderRequest {
+    use std::os::unix::fs::PermissionsExt;
+    let executable = directory.join("fake-cli");
+    std::fs::write(&executable, script).unwrap();
+    let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&executable, permissions).unwrap();
+    ProviderRequest {
+        kind,
+        executable: executable.to_string_lossy().into_owned(),
+        args: Vec::new(),
+        model: None,
+        working_directory: directory.to_path_buf(),
+        stdin: serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "instructions": "Review this change.",
+            "output_schema": {"title": "Vee provider findings", "type": "object", "properties": {"schema_version": {"const": 1}, "findings": {"type": "array", "items": {"type": "object", "required": ["category", "severity", "rationale"], "properties": {"category": {"type": "string"}, "severity": {"type": "string"}, "rationale": {"type": "string"}}}}}},
+            "context_files": [],
+        }))
+        .unwrap(),
+        timeout_seconds: 5,
+        output_limit_bytes: 4096,
+        context_window_tokens: None,
+        max_output_tokens: None,
+        environment: vec![],
+        sample: None,
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_cli_failure_reports_the_turn_error_from_its_event_stream() {
+    let directory = tempfile::tempdir().unwrap();
+    let request = failing_cli_request(
+        directory.path(),
+        vee_core::ProviderKind::CodexCli,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"turn.started\"}' '{\"type\":\"turn.failed\",\"error\":{\"message\":\"You have hit your usage limit.\"}}'\nexit 1\n",
+    );
+    let error = execute_codex_cli(&request, None).unwrap_err();
+    assert!(error.contains("provider exited with 1"), "{error}");
+    assert!(error.contains("You have hit your usage limit."), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn gemini_cli_never_starts_browser_sign_in() {
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("env.txt");
+    let request = failing_cli_request(
+        directory.path(),
+        vee_core::ProviderKind::GeminiCli,
+        &format!("#!/bin/sh\nenv > '{}'\nprintf '%s' '{{\"response\":\"{{\\\"schema_version\\\":1,\\\"findings\\\":[]}}\"}}'\n", log.display()),
+    );
+    let _ = execute_gemini_cli(&request, None);
+    let environment = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        environment.lines().any(|line| line == "NO_BROWSER=true"),
+        "{environment}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn gemini_cli_without_credentials_says_how_to_sign_in() {
+    let directory = tempfile::tempdir().unwrap();
+    let request = failing_cli_request(
+        directory.path(),
+        vee_core::ProviderKind::GeminiCli,
+        "#!/bin/sh\nprintf '%s\\n' 'Please visit the following URL to authorize the application:' 'https://accounts.example.invalid/auth'\n",
+    );
+    let error = execute_gemini_cli(&request, None).unwrap_err();
+    assert!(error.contains("Gemini CLI is not signed in"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn gemini_cli_failure_reports_its_json_error_message() {
+    let directory = tempfile::tempdir().unwrap();
+    let request = failing_cli_request(
+        directory.path(),
+        vee_core::ProviderKind::GeminiCli,
+        "#!/bin/sh\nprintf '%s' '{\"session_id\":\"x\",\"error\":{\"type\":\"Error\",\"message\":\"When using Gemini API, you must specify the GEMINI_API_KEY environment variable.\",\"code\":41}}' >&2\nexit 41\n",
+    );
+    let error = execute_gemini_cli(&request, None).unwrap_err();
+    assert!(error.contains("provider exited with 41"), "{error}");
+    assert!(
+        error.contains("you must specify the GEMINI_API_KEY"),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn antigravity_cli_adapter_runs_read_only_with_the_findings_schema_and_reads_structured_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let args_log = directory.path().join("args.txt");
+    let mut request = failing_cli_request(
+        directory.path(),
+        vee_core::ProviderKind::AntigravityCli,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\0' \"$@\" > '{}'\nprintf '%s' '{{\"conversation_id\":\"c1\",\"status\":\"SUCCESS\",\"response\":\"ignored\",\"structured_output\":{{\"schema_version\":1,\"findings\":[]}},\"usage\":{{\"input_tokens\":100,\"output_tokens\":20,\"thinking_tokens\":7,\"cache_read_tokens\":3,\"total_tokens\":130}}}}'\n",
+            args_log.display()
+        ),
+    );
+    request.model = Some("test-model".into());
+    let mut input: serde_json::Value = serde_json::from_slice(&request.stdin).unwrap();
+    input["output_schema"]["$schema"] = "https://json-schema.org/draft/2020-12/schema".into();
+    request.stdin = serde_json::to_vec(&input).unwrap();
+
+    let result = execute_antigravity_cli(&request, None).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&result.stdout).unwrap(),
+        serde_json::json!({"schema_version": 1, "findings": []})
+    );
+    let usage = result.usage.unwrap();
+    assert_eq!(
+        (usage.input_tokens, usage.output_tokens, usage.total_tokens),
+        (Some(100), Some(20), Some(130))
+    );
+
+    let args: Vec<String> = std::fs::read_to_string(&args_log)
+        .unwrap()
+        .split('\0')
+        .map(str::to_owned)
+        .collect();
+    let value_after = |flag: &str| {
+        args.iter()
+            .position(|arg| arg == flag)
+            .and_then(|index| args.get(index + 1))
+            .cloned()
+            .unwrap_or_else(|| panic!("{flag} missing: {args:?}"))
+    };
+    assert_eq!(value_after("--output-format"), "json");
+    assert_eq!(value_after("--mode"), "plan");
+    assert_eq!(value_after("--model"), "test-model");
+    assert_eq!(value_after("--print-timeout"), "5s");
+    assert!(args.contains(&"--sandbox".to_string()), "{args:?}");
+    assert!(
+        args.contains(&"--disable-slash-commands".to_string()),
+        "{args:?}"
+    );
+    assert!(
+        !args.iter().any(|arg| arg.contains("dangerously")),
+        "{args:?}"
+    );
+    let schema: serde_json::Value = serde_json::from_str(&value_after("--json-schema")).unwrap();
+    assert!(schema.get("$schema").is_none(), "{schema}");
+    assert!(value_after("-p").contains("Review this change."));
+}
+
+#[cfg(unix)]
+#[test]
+fn antigravity_cli_without_sign_in_says_how_to_sign_in() {
+    let directory = tempfile::tempdir().unwrap();
+    let request = failing_cli_request(
+        directory.path(),
+        vee_core::ProviderKind::AntigravityCli,
+        "#!/bin/sh\necho 'Authentication required. Please visit the URL to log in:' >&2\nprintf '%s' '{\"conversation_id\":\"\",\"status\":\"ERROR\",\"response\":\"\",\"error\":\"authentication failed or timed out\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}'\nexit 1\n",
+    );
+    let error = execute_antigravity_cli(&request, None).unwrap_err();
+    assert!(
+        error.contains("Antigravity CLI is not signed in"),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn antigravity_cli_failure_reports_its_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let request = failing_cli_request(
+        directory.path(),
+        vee_core::ProviderKind::AntigravityCli,
+        "#!/bin/sh\nprintf '%s' '{\"status\":\"ERROR\",\"response\":\"\",\"error\":\"unknown model: nope\"}'\nexit 1\n",
+    );
+    let error = execute_antigravity_cli(&request, None).unwrap_err();
+    assert!(error.contains("provider exited with 1"), "{error}");
+    assert!(
+        error.contains("Antigravity: unknown model: nope"),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_sampled_generic_cli_provider_learns_which_sample_it_runs() {
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("env.txt");
+    let mut request = failing_cli_request(
+        directory.path(),
+        vee_core::ProviderKind::Cli,
+        &format!(
+            "#!/bin/sh\ncat >/dev/null\nenv > '{}'\nprintf '%s' '{{\"schema_version\":1,\"findings\":[]}}'\n",
+            log.display()
+        ),
+    );
+    CliReviewProvider.execute(&request, None).unwrap();
+    let unsampled = std::fs::read_to_string(&log).unwrap();
+    assert!(!unsampled.contains("VEE_SAMPLE_"), "{unsampled}");
+
+    request.sample = Some(vee_core::ProviderSample { index: 2, count: 3 });
+    CliReviewProvider.execute(&request, None).unwrap();
+    let sampled = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        sampled.lines().any(|line| line == "VEE_SAMPLE_INDEX=2"),
+        "{sampled}"
+    );
+    assert!(
+        sampled.lines().any(|line| line == "VEE_SAMPLE_COUNT=3"),
+        "{sampled}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn argument_prompt_adapters_reject_requests_over_the_argument_limit() {
+    let directory = tempfile::tempdir().unwrap();
+    for kind in [
+        vee_core::ProviderKind::AntigravityCli,
+        vee_core::ProviderKind::GeminiCli,
+    ] {
+        let mut request = failing_cli_request(directory.path(), kind, "#!/bin/sh\nexit 99\n");
+        let mut input: serde_json::Value = serde_json::from_slice(&request.stdin).unwrap();
+        input["context_files"] =
+            serde_json::json!([{"path": "big.rs", "content": "x".repeat(200_000)}]);
+        request.stdin = serde_json::to_vec(&input).unwrap();
+        let error = CliReviewProvider.execute(&request, None).unwrap_err();
+        assert!(error.contains("argument size limit"), "{kind:?}: {error}");
+    }
 }

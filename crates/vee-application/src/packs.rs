@@ -127,6 +127,7 @@ pub fn export(workspace: &Workspace, request: ExportRequest<'_>) -> Result<PackS
                 include: reviewer.include.clone(),
                 exclude: reviewer.exclude.clone(),
                 policy: reviewer.policy.clone(),
+                advisory: reviewer.advisory,
             },
         );
     }

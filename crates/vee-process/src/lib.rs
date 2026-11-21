@@ -49,15 +49,15 @@ pub fn execute_verification_capture(
     let mut command = Command::new(&executable);
     command.args(&profile.args);
     configure_process_group(&mut command);
-    let mut child = command
+    let child = command
         .env_clear()
         .envs(platform_environment())
         .envs(environment.iter().cloned())
         .current_dir(working_directory)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    let mut child = spawn_retrying_busy_executable(child)
         .map_err(|error| format!("starting verification profile {profile_id}: {error}"))?;
     let limit = profile.output_limit_bytes;
     let stdout = child.stdout.take().expect("piped stdout");
@@ -417,7 +417,57 @@ pub fn execute_provider(request: &ProviderRequest) -> Result<ProviderResult, Str
     execute_provider_cancellable(request, None)
 }
 
+/// Run a provider and fail on a non-zero exit, summarizing its stderr.
 pub fn execute_provider_cancellable(
+    request: &ProviderRequest,
+    cancellation: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<ProviderResult, String> {
+    let result = execute_provider_reporting_exit(request, cancellation)?;
+    if result.exit_code != Some(0) {
+        return Err(provider_exit_error(&result, &request.environment));
+    }
+    Ok(result)
+}
+
+/// The error for a provider that exited unsuccessfully: its exit status and a
+/// redacted, bounded summary of stderr.
+pub fn provider_exit_error(result: &ProviderResult, environment: &[(String, String)]) -> String {
+    let mut stderr = result.stderr.clone();
+    redact_output_values(&mut stderr, environment);
+    let detail = String::from_utf8_lossy(&stderr);
+    let detail = detail
+        .rsplit_once("Error:")
+        .map(|(_, message)| format!("Error:{}", message.trim()))
+        .unwrap_or_else(|| {
+            if detail.trim().is_empty() {
+                String::new()
+            } else {
+                format!("provider wrote {} bytes of stderr", stderr.len())
+            }
+        });
+    let detail: String = detail.chars().take(2048).collect();
+    let detail = if detail.is_empty() {
+        String::new()
+    } else {
+        format!("; stderr: {detail}")
+    };
+    format!(
+        "provider exited with {}{detail}",
+        result
+            .exit_code
+            .map_or("signal".into(), |code| code.to_string()),
+    )
+}
+
+/// Redact configured environment values from provider output.
+pub fn redact_provider_output(output: &mut Vec<u8>, environment: &[(String, String)]) {
+    redact_output_values(output, environment);
+}
+
+/// Run a provider and return its output whatever its exit status, so an adapter
+/// can read a failure reason the provider reports on stdout. `exit_code` is
+/// `None` when the provider was ended by a signal.
+pub fn execute_provider_reporting_exit(
     request: &ProviderRequest,
     cancellation: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<ProviderResult, String> {
@@ -445,15 +495,15 @@ pub fn execute_provider_cancellable(
     command.args(&request.args);
     command.current_dir(isolated_directory.path());
     configure_process_group(&mut command);
-    let mut child = command
+    let child = command
         .env_clear()
         .envs(platform_environment())
         .envs(request.environment.iter().cloned())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("starting provider: {e}"))?;
+        .stderr(Stdio::piped());
+    let mut child =
+        spawn_retrying_busy_executable(child).map_err(|e| format!("starting provider: {e}"))?;
     let mut input = child.stdin.take().expect("piped stdin");
     let request_input = request.stdin.clone();
     let input_thread = thread::spawn(move || input.write_all(&request_input));
@@ -489,31 +539,6 @@ pub fn execute_provider_cancellable(
                     stdout.len(),
                     stderr.len(),
                     request.output_limit_bytes
-                ));
-            }
-            if !status.success() {
-                let mut stderr = stderr;
-                redact_output_values(&mut stderr, &request.environment);
-                let detail = String::from_utf8_lossy(&stderr);
-                let detail = detail
-                    .rsplit_once("Error:")
-                    .map(|(_, message)| format!("Error:{}", message.trim()))
-                    .unwrap_or_else(|| {
-                        if detail.trim().is_empty() {
-                            String::new()
-                        } else {
-                            format!("provider wrote {} bytes of stderr", stderr.len())
-                        }
-                    });
-                let detail: String = detail.chars().take(2048).collect();
-                let detail = if detail.is_empty() {
-                    String::new()
-                } else {
-                    format!("; stderr: {detail}")
-                };
-                return Err(format!(
-                    "provider exited with {}{detail}",
-                    status.code().map_or("signal".into(), |c| c.to_string()),
                 ));
             }
             return Ok(ProviderResult {
@@ -576,6 +601,30 @@ pub const PLATFORM_ENVIRONMENT: &[&str] = if cfg!(windows) {
 /// The [`PLATFORM_ENVIRONMENT`] variables this process has, for
 /// `Command::envs` right after `env_clear` and before explicitly allowed
 /// variables.
+/// Spawn a command, retrying briefly while the executable is busy.
+///
+/// Linux refuses to execute a file that any process still holds open for
+/// writing (`ETXTBSY`). That happens when an executable was just written or
+/// updated, including when a concurrent `fork` briefly inherits the writer's
+/// descriptor. The condition clears within milliseconds.
+fn spawn_retrying_busy_executable(
+    command: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    const ATTEMPTS: u32 = 6;
+    let mut attempt = 1;
+    loop {
+        match command.spawn() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < ATTEMPTS =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(25 * u64::from(attempt)));
+                attempt += 1;
+            }
+            result => return result,
+        }
+    }
+}
+
 pub fn platform_environment() -> Vec<(&'static str, std::ffi::OsString)> {
     PLATFORM_ENVIRONMENT
         .iter()
@@ -713,6 +762,7 @@ mod tests {
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![("VEE_TEST_ALLOWED".into(), "present".into())],
+            sample: None,
         };
         let _result = execute_provider(&ok).unwrap();
         assert!(!working_dir.path().join("provider-relative-file").exists());
@@ -728,6 +778,7 @@ mod tests {
             max_output_tokens: None,
             environment: vec![],
             timeout_seconds: 2,
+            sample: None,
         };
         assert!(execute_provider(&too_small)
             .unwrap_err()
@@ -759,6 +810,7 @@ mod tests {
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![],
+            sample: None,
         })
         .unwrap();
 
@@ -793,6 +845,7 @@ mod tests {
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![("API_TOKEN".into(), "secret-value".into())],
+            sample: None,
         })
         .unwrap_err();
 
@@ -822,6 +875,7 @@ mod tests {
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![],
+            sample: None,
         };
         let error = execute_provider_cancellable(&request, Some(&cancellation)).unwrap_err();
         cancel_thread.join().unwrap();
@@ -851,6 +905,7 @@ mod tests {
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![],
+            sample: None,
         };
         assert!(execute_provider(&request)
             .unwrap_err()
@@ -891,6 +946,7 @@ mod tests {
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![],
+            sample: None,
         };
         assert!(execute_provider_cancellable(&request, Some(&cancellation))
             .unwrap_err()
@@ -1175,5 +1231,33 @@ mod tests {
     #[cfg(all(unix, not(target_os = "linux")))]
     fn process_is_running(pid: i32) -> bool {
         unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn spawn_waits_for_an_executable_that_is_still_open_for_writing() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("busy.sh");
+        let mut writer = std::fs::File::create(&script).unwrap();
+        writer.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            std::process::Command::new(&script)
+                .spawn()
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::ExecutableFileBusy,
+            "the open writer makes the script busy"
+        );
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            drop(writer);
+        });
+        let mut child =
+            spawn_retrying_busy_executable(&mut std::process::Command::new(&script)).unwrap();
+        assert!(child.wait().unwrap().success());
+        release.join().unwrap();
     }
 }

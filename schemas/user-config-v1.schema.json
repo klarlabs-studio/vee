@@ -18,7 +18,7 @@
       "additionalProperties": false,
       "required": ["kind"],
       "properties": {
-        "kind": { "enum": ["cli", "codex_cli", "gemini_cli", "claude_cli", "openai_compatible"] },
+        "kind": { "enum": ["cli", "codex_cli", "gemini_cli", "claude_cli", "antigravity_cli", "openai_compatible"] },
         "egress": { "enum": ["local", "network"] },
         "executable": { "type": "string", "minLength": 1 },
         "endpoint": { "type": "string", "format": "uri", "minLength": 1 },

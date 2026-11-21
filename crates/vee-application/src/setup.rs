@@ -17,6 +17,8 @@ use vee_core::{ProviderConfig, ProviderEgress, ProviderKind};
 pub const DEFAULT_PROVIDER_ID: &str = "default";
 const DEFAULT_REVIEWER_ID: &str = "correctness";
 const REVIEWER_INSTRUCTIONS_PATH: &str = ".vee/reviewers/correctness.md";
+const ARCHITECTURE_REVIEWER_ID: &str = "architecture";
+const ARCHITECTURE_INSTRUCTIONS_PATH: &str = ".vee/reviewers/architecture.md";
 const DEFAULT_OLLAMA_HOST: &str = "127.0.0.1:11434";
 const MAX_OLLAMA_CONTEXT_WINDOW: usize = 32_768;
 const FALLBACK_OLLAMA_CONTEXT_WINDOW: usize = 8_192;
@@ -30,6 +32,14 @@ const REVIEWER_INSTRUCTIONS: &str = "Review only for concrete correctness defect
 wrong results, unhandled errors, broken invariants, resource leaks, concurrency hazards, and security flaws. \
 Ignore style and speculative risks. Cite the changed line for every finding. \
 Return no findings when no actionable defect is evident. Do not edit files or run commands.\n";
+
+const ARCHITECTURE_INSTRUCTIONS: &str = "Review the changed code for design problems that will make it harder to change correctly: \
+dependencies that cross layer or module boundaries in the wrong direction, domain logic leaking into adapters or transport code, \
+duplicated logic that should share one implementation, functions or types that take on unrelated responsibilities, \
+leaky abstractions, hidden coupling through shared mutable state, and names that misstate what the code does. \
+Report only problems the change introduces or makes worse, cite the changed line, and explain the concrete cost and a better structure. \
+Ignore formatting and personal style. Use severity for the cost of leaving it: high only for a boundary violation that other code \
+will start to depend on. Return no findings when the design is sound. Do not edit files or run commands.\n";
 
 /// Read access to the machine, so detection can be tested deterministically.
 pub trait SystemProbe {
@@ -98,6 +108,13 @@ const AGENT_CLIS: &[AgentCli] = &[
         kind: ProviderKind::CodexCli,
         kind_name: "codex_cli",
         environment: &["PATH", "HOME", "CODEX_HOME"],
+    },
+    AgentCli {
+        candidate_id: "antigravity",
+        executable: "agy",
+        kind: ProviderKind::AntigravityCli,
+        kind_name: "antigravity_cli",
+        environment: &["PATH", "HOME", "USER"],
     },
     AgentCli {
         candidate_id: "gemini",
@@ -456,7 +473,7 @@ fn repository_config_yaml() -> String {
         "version: 1\n\
 # Reviewers reference provider IDs. `{DEFAULT_PROVIDER_ID}` is defined per machine in the\n\
 # user config (see `vee doctor`), so each developer can use their own AI backend.\n\
-reviewers:\n  {DEFAULT_REVIEWER_ID}:\n    provider: {DEFAULT_PROVIDER_ID}\n    instructions_file: {REVIEWER_INSTRUCTIONS_PATH}\n\
+reviewers:\n  {DEFAULT_REVIEWER_ID}:\n    provider: {DEFAULT_PROVIDER_ID}\n    instructions_file: {REVIEWER_INSTRUCTIONS_PATH}\n  # Design and maintainability findings, shown but never blocking. Opt in with `enabled: true`.\n  {ARCHITECTURE_REVIEWER_ID}:\n    provider: {DEFAULT_PROVIDER_ID}\n    instructions_file: {ARCHITECTURE_INSTRUCTIONS_PATH}\n    advisory: true\n    enabled: false\n\
 verification: {{}}\n\
 policy:\n  required_reviewers: [{DEFAULT_REVIEWER_ID}]\n  required_verifications: []\n  block_severities: [critical, high]\n  minimum_confidence: 80\n  on_incomplete: block\n"
     )
@@ -580,6 +597,11 @@ pub fn init(
     if instructions_created {
         write_atomically(&instructions, REVIEWER_INSTRUCTIONS).map_err(InitError::Configuration)?;
     }
+    let architecture_instructions = root.join(ARCHITECTURE_INSTRUCTIONS_PATH);
+    if !repository_exists && !architecture_instructions.exists() {
+        write_atomically(&architecture_instructions, ARCHITECTURE_INSTRUCTIONS)
+            .map_err(InitError::Configuration)?;
+    }
     if !repository_exists {
         write_atomically(&repository_config, &repository_config_yaml())
             .map_err(InitError::Configuration)?;
@@ -665,6 +687,7 @@ fn kind_name(kind: ProviderKind) -> &'static str {
         ProviderKind::Cli => "cli",
         ProviderKind::CodexCli => "codex_cli",
         ProviderKind::GeminiCli => "gemini_cli",
+        ProviderKind::AntigravityCli => "antigravity_cli",
         ProviderKind::ClaudeCli => "claude_cli",
         ProviderKind::OpenAiCompatible => "openai_compatible",
         ProviderKind::OllamaNative => "ollama_native",
@@ -983,6 +1006,7 @@ mod tests {
             [
                 ("ollama", true),
                 ("codex", true),
+                ("antigravity", false),
                 ("gemini", false),
                 ("claude", true),
                 ("openai-api", true),
@@ -1054,7 +1078,13 @@ mod tests {
     #[test]
     fn generated_providers_pass_repository_validation() {
         let system = FakeSystem {
-            executables: [("codex", "1"), ("gemini", "1"), ("claude", "1")].into(),
+            executables: [
+                ("codex", "1"),
+                ("agy", "1"),
+                ("gemini", "1"),
+                ("claude", "1"),
+            ]
+            .into(),
             env: [
                 ("OPENAI_API_KEY", "k"),
                 ("ANTHROPIC_API_KEY", "k"),

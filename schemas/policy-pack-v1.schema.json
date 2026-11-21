@@ -89,6 +89,11 @@
         },
         "policy": {
           "$ref": "repository-config-v1.schema.json#/$defs/reviewer_policy"
+        },
+        "advisory": {
+          "type": "boolean",
+          "default": false,
+          "description": "Findings from this reviewer are shown but never block the gate."
         }
       }
     }

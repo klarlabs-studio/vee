@@ -458,6 +458,7 @@ pub(crate) fn capture_provider_versions(
         }
         let version = if provider.kind == vee_core::ProviderKind::CodexCli
             || provider.kind == vee_core::ProviderKind::GeminiCli
+            || provider.kind == vee_core::ProviderKind::AntigravityCli
             || provider.kind == vee_core::ProviderKind::ClaudeCli
             || !provider.version_args.is_empty()
         {

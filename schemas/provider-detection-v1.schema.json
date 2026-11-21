@@ -48,6 +48,7 @@
           "enum": [
             "ollama",
             "codex",
+            "antigravity",
             "gemini",
             "claude",
             "openai-api",
@@ -67,6 +68,7 @@
             "ollama_native",
             "codex_cli",
             "gemini_cli",
+            "antigravity_cli",
             "claude_cli",
             "openai_compatible"
           ]

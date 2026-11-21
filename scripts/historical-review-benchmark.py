@@ -180,6 +180,27 @@ def safe_relative(root: Path, value: str, label: str) -> Path:
     return resolved
 
 
+CONTROL_FORBIDDEN_KEYS = ("labels", "labels_digest", "category_aliases", "defect_reference", "fix_commit", "fix_reference")
+
+
+def load_control_case(case: dict[str, Any], case_id: str, corpus_root: Path) -> tuple[Any, ...]:
+    """A control case is a change with no known defect; it measures false blocks and noise."""
+    present = [key for key in CONTROL_FORBIDDEN_KEYS if key in case]
+    if present:
+        raise ValueError(f"{case_id}: control cases cannot set {', '.join(present)}")
+    rationale = case.get("control_rationale")
+    if not isinstance(rationale, str) or not rationale.strip() or len(rationale) > 2048:
+        raise ValueError(f"{case_id}: control cases need a curator control_rationale")
+    if not isinstance(case.get("repository"), str):
+        raise ValueError(f"{case_id}: repository path must be a string")
+    if "project_license" in case and (not isinstance(case["project_license"], str) or len(case["project_license"]) > 2048):
+        raise ValueError(f"{case_id}: project_license must be a bounded string")
+    repo_path = safe_relative(corpus_root, case["repository"], f"{case_id} repository")
+    if not repo_path.is_dir() or not (repo_path / ".git").exists():
+        raise ValueError(f"{case_id}: repository must be an existing local Git checkout")
+    return (case, repo_path, None, b"", [], {})
+
+
 def load_corpus(manifest_path: Path, corpus_root: Path) -> dict[str, Any]:
     raw = manifest_path.read_bytes()
     if len(raw) > MAX_MANIFEST_BYTES:
@@ -205,7 +226,7 @@ def load_corpus(manifest_path: Path, corpus_root: Path) -> dict[str, Any]:
     for case in cases:
         if not isinstance(case, dict):
             raise ValueError("each case must be an object")
-        if set(case) - {"id", "repository", "commit", "labels", "labels_digest", "category_aliases", "defect_reference", "fix_commit", "fix_reference", "project_license"}:
+        if set(case) - {"id", "kind", "repository", "commit", "labels", "labels_digest", "category_aliases", "defect_reference", "fix_commit", "fix_reference", "project_license", "control_rationale"}:
             raise ValueError("case contains unknown fields")
         case_id = case.get("id")
         if not isinstance(case_id, str) or not TOKEN.fullmatch(case_id) or case_id in seen:
@@ -214,6 +235,14 @@ def load_corpus(manifest_path: Path, corpus_root: Path) -> dict[str, Any]:
         oid = case.get("commit")
         if not isinstance(oid, str) or not OID.fullmatch(oid):
             raise ValueError(f"{case_id}: commit must be a full lowercase Git object ID")
+        kind = case.get("kind", "defect")
+        if kind not in ("defect", "control"):
+            raise ValueError(f"{case_id}: kind must be defect or control")
+        if kind == "control":
+            normalized.append(load_control_case(case, case_id, corpus_root))
+            continue
+        if "control_rationale" in case:
+            raise ValueError(f"{case_id}: control_rationale applies only to control cases")
         if not isinstance(case.get("repository"), str) or not isinstance(case.get("labels"), str):
             raise ValueError(f"{case_id}: repository and labels paths must be strings")
         if not isinstance(case.get("labels_digest"), str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", case["labels_digest"]):
@@ -522,7 +551,12 @@ def load_resumable_review(case_artifacts: Path, input_key: str) -> dict[str, Any
 
 def assess_case(args: argparse.Namespace, case: dict[str, Any], repo: Path, label_bytes: bytes, labels: list[dict[str, Any]], aliases: dict[str, list[str]], config_bytes: bytes, trusted_files: list[tuple[PurePosixPath, Path]], artifacts: Path) -> dict[str, Any]:
     case_id, oid = case["id"], case["commit"]
-    item: dict[str, Any] = {"case_id": case_id, "repository": case["repository"], "commit": oid, "labels_digest": sha256(label_bytes), "state": "incomplete", "defect_reference": case.get("defect_reference"), "fix_commit": case.get("fix_commit"), "fix_reference": case.get("fix_reference"), "project_license": case.get("project_license")}
+    is_control = case.get("kind") == "control"
+    item: dict[str, Any] = {"case_id": case_id, "kind": "control" if is_control else "defect", "repository": case["repository"], "commit": oid, "state": "incomplete", "project_license": case.get("project_license")}
+    if is_control:
+        item["control_rationale"] = case["control_rationale"]
+    else:
+        item.update({"labels_digest": sha256(label_bytes), "defect_reference": case.get("defect_reference"), "fix_commit": case.get("fix_commit"), "fix_reference": case.get("fix_reference")})
     temp_parent = Path(tempfile.mkdtemp(prefix="vee-historical-"))
     worktree = temp_parent / "checkout"
     fix_worktree: Path | None = None
@@ -550,7 +584,10 @@ def assess_case(args: argparse.Namespace, case: dict[str, Any], repo: Path, labe
             if label["end_line"] > len(source.splitlines()):
                 raise ValueError(f"label {label['id']} line range exceeds the pinned source file")
         if args.scope_languages:
-            case_languages = sorted({EXTENSION_LANGUAGE.get(PurePosixPath(label["path"]).suffix.lower(), "unknown") for label in labels})
+            if is_control:
+                case_languages = sorted({EXTENSION_LANGUAGE[suffix] for path in changed_paths if (suffix := PurePosixPath(path).suffix.lower()) in EXTENSION_LANGUAGE}) or ["unknown"]
+            else:
+                case_languages = sorted({EXTENSION_LANGUAGE.get(PurePosixPath(label["path"]).suffix.lower(), "unknown") for label in labels})
             unsupported = sorted(set(case_languages) - set(args.scope_languages))
             if unsupported:
                 item.update({"state": "out_of_scope", "languages": case_languages, "unsupported_languages": unsupported, "scope_languages": sorted(set(args.scope_languages))})
@@ -694,6 +731,9 @@ def assess_case(args: argparse.Namespace, case: dict[str, Any], repo: Path, labe
             item["uncovered_labels"] = uncovered_labels
             item["error"] = "one or more labeled paths were not supplied in full to a completed reviewer"
             return item
+        if is_control:
+            item.update(control_outcome(report))
+            return item
         matched, missed, unmatched, localization_candidates = match_findings(labels, report["findings"], aliases)
         item.update({"label_count": len(labels), "matched_labels": matched, "missed_labels": missed, "localization_candidates": localization_candidates, "unmatched_findings": unmatched})
         if args.verify_profiles:
@@ -728,13 +768,36 @@ def assess_case(args: argparse.Namespace, case: dict[str, Any], repo: Path, labe
         shutil.rmtree(temp_parent, ignore_errors=True)
 
 
+def control_outcome(report: dict[str, Any]) -> dict[str, Any]:
+    """Gate result and finding counts for a change with no known defect."""
+    gate = report.get("gate") if isinstance(report.get("gate"), dict) else {}
+    findings = report.get("findings", [])
+    advisory = sum(
+        1 for finding in findings
+        if isinstance(finding.get("sample_agreement"), dict)
+        and finding["sample_agreement"].get("reported", 0) < finding["sample_agreement"].get("quorum", 0)
+    )
+    return {
+        "gate_status": gate.get("status", report.get("status")),
+        "blocking_finding_count": len(gate.get("blocking_findings", [])),
+        "advisory_finding_count": advisory,
+    }
+
+
 def build_report(corpus: dict[str, Any], config_bytes: bytes, version: str, executable: str, cases: list[dict[str, Any]], report_path: Path, scope_languages: list[str], interrupted: bool = False) -> dict[str, Any]:
     complete = [case for case in cases if case["state"] == "complete"]
     out_of_scope = [case for case in cases if case["state"] == "out_of_scope"]
     total_labels = sum(case.get("label_count", 0) for case in complete)
     matched_labels = sum(len(case.get("matched_labels", [])) for case in complete)
     localization_candidates = sum(len(case.get("localization_candidates", [])) for case in complete)
-    return {"schema_version": 1, "benchmark": "historical_review", "corpus_id": corpus["document"]["corpus_id"], "source": corpus["document"]["source"], "source_revision": corpus["document"].get("source_revision"), "license_reference": corpus["document"].get("license_reference"), "manifest_digest": corpus["manifest_digest"], "benchmark_config_digest": sha256(config_bytes), "vee_version": version, "verifier_digest": sha256(Path(executable).read_bytes()), "provider_egress_mode": "declared_in_trusted_config; CLI_adapter_egress_not_independently_verified", "case_count": len(cases), "completed_cases": len(complete), "incomplete_cases": len(cases) - len(complete) - len(out_of_scope), "out_of_scope_cases": len(out_of_scope), "scope_languages": sorted(set(scope_languages)), "label_count_completed_cases": total_labels, "matched_labels": matched_labels, "missed_labels": total_labels - matched_labels, "finding_recall": matched_labels / total_labels if total_labels else None, "labels_with_localization_candidates": localization_candidates, "interrupted": interrupted, "cases": cases, "report_path": str(report_path), "limitations": ["Labels and license references are curator-supplied and are not authenticated by Vee.", "Strict matches require exact repository-relative file and overlapping line range plus category or a curator-defined alias. Same-file/category localization candidates are diagnostic only and do not increase recall.", "The configured provider may use a network; local CLI execution does not imply local inference.", "Completed cases require every labeled path to be supplied in full to at least one completed reviewer, based on Vee's local context manifest.", "Recall is specific to this corpus, Vee/provider versions, reviewer configuration, and matching policy."]}
+    controls = [case for case in complete if case.get("kind") == "control"]
+    control_metrics = {
+        "control_cases": len(controls),
+        "false_block_cases": sum(case.get("gate_status") == "block" for case in controls),
+        "control_findings": sum(case.get("finding_count", 0) for case in controls),
+        "control_blocking_findings": sum(case.get("blocking_finding_count", 0) for case in controls),
+    }
+    return {**control_metrics, "schema_version": 1, "benchmark": "historical_review", "corpus_id": corpus["document"]["corpus_id"], "source": corpus["document"]["source"], "source_revision": corpus["document"].get("source_revision"), "license_reference": corpus["document"].get("license_reference"), "manifest_digest": corpus["manifest_digest"], "benchmark_config_digest": sha256(config_bytes), "vee_version": version, "verifier_digest": sha256(Path(executable).read_bytes()), "provider_egress_mode": "declared_in_trusted_config; CLI_adapter_egress_not_independently_verified", "case_count": len(cases), "completed_cases": len(complete), "incomplete_cases": len(cases) - len(complete) - len(out_of_scope), "out_of_scope_cases": len(out_of_scope), "scope_languages": sorted(set(scope_languages)), "label_count_completed_cases": total_labels, "matched_labels": matched_labels, "missed_labels": total_labels - matched_labels, "finding_recall": matched_labels / total_labels if total_labels else None, "labels_with_localization_candidates": localization_candidates, "interrupted": interrupted, "cases": cases, "report_path": str(report_path), "limitations": ["Labels and license references are curator-supplied and are not authenticated by Vee.", "Strict matches require exact repository-relative file and overlapping line range plus category or a curator-defined alias. Same-file/category localization candidates are diagnostic only and do not increase recall.", "The configured provider may use a network; local CLI execution does not imply local inference.", "Completed cases require every labeled path to be supplied in full to at least one completed reviewer, based on Vee's local context manifest.", "Recall is specific to this corpus, Vee/provider versions, reviewer configuration, and matching policy.", "Control cases are curator-presumed clean changes; a block on one is counted as a false block, but a control change can still contain an undiscovered defect."]}
 
 
 def assess_verification_case(args: argparse.Namespace, case: dict[str, Any], repo: Path, config_bytes: bytes, trusted_files: list[tuple[PurePosixPath, Path]], artifacts: Path) -> dict[str, Any]:
@@ -863,7 +926,7 @@ def main() -> int:
             return 130
         report = build_report(corpus, config_bytes, version.stdout.strip(), args.vee, cases, report_path, args.scope_languages)
         atomic_write(report_path, (json.dumps(report, indent=2, sort_keys=True) + "\n").encode("utf-8"))
-        print(json.dumps({k: report[k] for k in ("benchmark", "corpus_id", "case_count", "completed_cases", "incomplete_cases", "out_of_scope_cases", "label_count_completed_cases", "matched_labels", "missed_labels", "finding_recall", "labels_with_localization_candidates", "interrupted", "report_path")}, indent=2))
+        print(json.dumps({k: report[k] for k in ("benchmark", "corpus_id", "case_count", "completed_cases", "incomplete_cases", "out_of_scope_cases", "label_count_completed_cases", "matched_labels", "missed_labels", "finding_recall", "labels_with_localization_candidates", "control_cases", "false_block_cases", "control_findings", "interrupted", "report_path")}, indent=2))
         return 0 if not report["incomplete_cases"] and not report["out_of_scope_cases"] else 2
     except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as error:
         print(f"historical-review-benchmark: {error}", file=sys.stderr)

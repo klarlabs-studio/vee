@@ -116,6 +116,8 @@ fn source_evidence_marks_unchanged_finding_lines_as_unknown() {
             reviewer_ids: Vec::new(),
             evidence_ids: Vec::new(),
             rule_attributions: Vec::new(),
+            sample_agreement: None,
+            advisory: false,
         },
         vee_core::Finding {
             id: "unchanged".into(),
@@ -130,6 +132,8 @@ fn source_evidence_marks_unchanged_finding_lines_as_unknown() {
             reviewer_ids: Vec::new(),
             evidence_ids: Vec::new(),
             rule_attributions: Vec::new(),
+            sample_agreement: None,
+            advisory: false,
         },
     ];
 
@@ -202,6 +206,8 @@ fn invalid_finding_line_preserves_other_source_evidence_and_is_reported() {
         reviewer_ids: Vec::new(),
         evidence_ids: Vec::new(),
         rule_attributions: Vec::new(),
+        sample_agreement: None,
+        advisory: false,
     };
     let mut findings = vec![make_finding("valid", 1), make_finding("invalid", 292)];
 
@@ -242,6 +248,8 @@ fn legacy_review_without_policy_findings_falls_back_to_display_findings() {
         reviewer_ids: Vec::new(),
         evidence_ids: vec!["ev_legacy_source".into()],
         rule_attributions: Vec::new(),
+        sample_agreement: None,
+        advisory: false,
     };
     let evidence = Evidence {
         id: "ev_legacy_source".into(),
@@ -316,7 +324,7 @@ fn legacy_review_without_policy_findings_falls_back_to_display_findings() {
 }
 
 #[test]
-fn reviewer_impact_context_prioritizes_tests_and_direct_references() {
+fn reviewer_impact_context_prioritizes_production_references_over_tests() {
     let edge = |relationship: &str, certainty: &str| ImpactEdge {
         source_path: "src/lib.rs".into(),
         affected_path: "src/other.rs".into(),
@@ -325,19 +333,21 @@ fn reviewer_impact_context_prioritizes_tests_and_direct_references() {
         certainty: certainty.into(),
         evidence_line: 1,
     };
-
-    assert!(
-        impact_context_edge_priority(&edge("resolved_symbol_reference", "resolved_semantic"))
-            < impact_context_edge_priority(&edge("likely_test_reference", "inferred_heuristic"))
-    );
-    assert!(
-        impact_context_edge_priority(&edge("likely_test_reference", "inferred_heuristic"))
-            < impact_context_edge_priority(&edge("textual_symbol_reference", "inferred_heuristic"))
-    );
-    assert!(
-        impact_context_edge_priority(&edge("textual_symbol_reference", "inferred_heuristic"))
-            < impact_context_edge_priority(&edge("shared_local_dependency", "inferred_import"))
-    );
+    let ordered = [
+        edge("resolved_symbol_reference", "resolved_semantic"),
+        edge("syntactic_symbol_reference", "inferred_heuristic"),
+        edge("textual_symbol_reference", "inferred_heuristic"),
+        edge("likely_test_reference", "inferred_heuristic"),
+        edge("shared_local_dependency", "inferred_import"),
+    ];
+    for pair in ordered.windows(2) {
+        assert!(
+            impact_context_edge_priority(&pair[0]) < impact_context_edge_priority(&pair[1]),
+            "{} should rank before {}",
+            pair[0].relationship,
+            pair[1].relationship
+        );
+    }
     assert!(
         impact_context_edge_priority(&edge("resolved_symbol_reference", "resolved_semantic"))
             < impact_context_edge_priority(&edge(
@@ -345,9 +355,18 @@ fn reviewer_impact_context_prioritizes_tests_and_direct_references() {
                 "inferred_heuristic"
             ))
     );
+
+    let mut distant_caller = edge("syntactic_symbol_reference", "inferred_heuristic");
+    distant_caller.affected_path = "api/handlers.go".into();
+    let mut local_test = edge("likely_test_reference", "inferred_heuristic");
+    local_test.affected_path = "src/lib_test.go".into();
+    assert!(
+        impact_context_edge_priority(&distant_caller) < impact_context_edge_priority(&local_test),
+        "a production caller in another directory ranks before a same-directory test"
+    );
+
     let mut distant_test = edge("likely_test_reference", "inferred_heuristic");
     distant_test.affected_path = "domain/workload_test.go".into();
-    let local_test = edge("likely_test_reference", "inferred_heuristic");
     assert!(
         impact_context_edge_priority(&local_test) < impact_context_edge_priority(&distant_test)
     );
@@ -1457,6 +1476,10 @@ fn reviewer_scope_globs_match_and_exclude_paths() {
         exclude: vec!["src/generated/**".into()],
         policy: vee_core::ReviewerPolicyConfig::default(),
         strategy: vee_core::ReviewStrategy::default(),
+        advisory: false,
+        effort: None,
+        samples: None,
+        sample_quorum: None,
     };
 
     assert!(reviewer_path_is_included("src/lib.rs", &reviewer));
@@ -1504,6 +1527,10 @@ fn reviewer_context_manifest_distinguishes_supplied_filtered_and_omitted_paths()
         exclude: vec!["src/reviewer-excluded.rs".into()],
         policy: vee_core::ReviewerPolicyConfig::default(),
         strategy: vee_core::ReviewStrategy::default(),
+        advisory: false,
+        effort: None,
+        samples: None,
+        sample_quorum: None,
     };
     let context_files = vec![
         serde_json::json!({"path":"src/full.rs","content":"source", "base_content":"base", "truncated":false}),

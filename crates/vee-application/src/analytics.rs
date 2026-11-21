@@ -682,6 +682,8 @@ mod tests {
                 reviewer_ids: Vec::new(),
                 evidence_ids: Vec::new(),
                 rule_attributions: Vec::new(),
+                sample_agreement: None,
+                advisory: false,
             };
             store
                 .save_review(
