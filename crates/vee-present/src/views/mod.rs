@@ -1,10 +1,14 @@
 //! `ToView` implementations, one module per bounded context.
 
+mod analysis;
 mod findings;
 mod gate;
+mod governance;
+mod insights;
 pub mod review;
 mod setup;
 pub(crate) mod verification;
+mod work;
 
 /// The serialized (snake_case) name of a unit enum value, as the JSON documents spell it.
 pub(crate) fn serde_name<T: serde::Serialize>(value: &T) -> String {
