@@ -81,3 +81,7 @@ for method and limits.
 - A `focused` review cannot split a single file larger than the model's
   input budget.
 - Finding categories are free text.
+- Review time grows with the number of changed files: Vee runs a Git diff
+  and a base read per changed file and reviewer. A 100-file change in a
+  5,000-file repository took about 5 s with a release build, excluding
+  provider time ([baseline](docs/performance-baseline-2026-11-21.json)).
