@@ -1,18 +1,18 @@
 use crate::ImpactAssessment;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TestRecommendationReport {
     pub schema_version: u32,
     pub snapshot_id: String,
     pub coverage_complete: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_coverage: Option<ExecutionCoverageSummary>,
     pub recommendations: Vec<TestRecommendation>,
     pub limitations: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExecutionCoverageSummary {
     pub run_id: String,
     pub profile_id: String,
@@ -21,7 +21,7 @@ pub struct ExecutionCoverageSummary {
     pub limitations: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExecutionCoverageFile {
     pub path: String,
     pub covered_lines: u64,
@@ -34,7 +34,7 @@ pub struct ExecutionCoverageFile {
     pub signal: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TestRecommendation {
     pub changed_path: String,
     pub rationale: String,

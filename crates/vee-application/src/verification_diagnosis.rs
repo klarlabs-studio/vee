@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 use vee_core::{ChangeSet, SnapshotFile, VerificationRun, VerificationStatus};
 
@@ -6,7 +6,7 @@ const MAX_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_DIAGNOSTICS: usize = 200;
 const MAX_DIAGNOSTIC_CHARS: usize = 1200;
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct VerificationDiagnosis {
     pub schema_version: u32,
     pub run_id: String,
@@ -19,7 +19,7 @@ pub struct VerificationDiagnosis {
     pub limitations: Vec<String>,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ParsedDiagnostic {
     pub provenance: String,
     pub stream: String,

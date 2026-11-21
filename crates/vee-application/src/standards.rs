@@ -1,5 +1,5 @@
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
 const MAX_RULE_BYTES: usize = 64 * 1024;
@@ -7,7 +7,7 @@ const MAX_TOTAL_BYTES: usize = 256 * 1024;
 const MAX_SOURCES: usize = 128;
 const MAX_DISCOVERY_PER_DIRECTORY: usize = 256;
 
-#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct StandardsReport {
     pub schema_version: u32,
     pub target_path: Option<String>,
@@ -16,7 +16,7 @@ pub struct StandardsReport {
     pub limitations: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct StandardSource {
     pub path: String,
     pub kind: String,

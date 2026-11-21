@@ -19,7 +19,7 @@ pub struct AcceptanceReport {
     pub limitations: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkItemReference {
     pub url: String,
     pub content_digest: String,
@@ -39,7 +39,7 @@ pub struct AcceptanceCriterion {
     pub status: &'static str,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TestReferenceCandidate {
     pub changed_path: String,
     pub test_path: String,
@@ -48,7 +48,7 @@ pub struct TestReferenceCandidate {
     pub certainty: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VerificationSummary {
     pub run_id: String,
     pub profile_id: String,
