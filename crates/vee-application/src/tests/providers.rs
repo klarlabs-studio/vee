@@ -410,9 +410,10 @@ fn claude_cli_adapter_uses_restricted_schema_validated_json_contract() {
     std::fs::write(
         &executable,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nenv > '{}'\nprintf '%s' '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nenv > '{}'\ncat > '{}'\nprintf '%s' '{}'\n",
             args_log.display(),
             env_log.display(),
+            directory.path().join("stdin.txt").display(),
             envelope
         ),
     )
@@ -480,6 +481,17 @@ fn claude_cli_adapter_uses_restricted_schema_validated_json_contract() {
         schema,
         serde_json::json!({"title": "provider findings"}),
         "Claude CLI cannot resolve the draft meta-schema reference"
+    );
+    let prompt = std::fs::read_to_string(directory.path().join("stdin.txt")).unwrap();
+    assert!(
+        prompt.contains("Vee review request JSON") || prompt.contains("task request"),
+        "the prompt goes to stdin, which has no argument-size limit: {prompt:.200}"
+    );
+    assert!(
+        !args
+            .iter()
+            .any(|arg| arg.contains(&prompt[..prompt.len().min(40)])),
+        "the prompt is not passed as an argument"
     );
     let environment = std::fs::read_to_string(env_log).unwrap();
     for name in ["HOME", "USER"] {
@@ -1297,4 +1309,22 @@ fn a_sampled_generic_cli_provider_learns_which_sample_it_runs() {
         sampled.lines().any(|line| line == "VEE_SAMPLE_COUNT=3"),
         "{sampled}"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn argument_prompt_adapters_reject_requests_over_the_argument_limit() {
+    let directory = tempfile::tempdir().unwrap();
+    for kind in [
+        vee_core::ProviderKind::AntigravityCli,
+        vee_core::ProviderKind::GeminiCli,
+    ] {
+        let mut request = failing_cli_request(directory.path(), kind, "#!/bin/sh\nexit 99\n");
+        let mut input: serde_json::Value = serde_json::from_slice(&request.stdin).unwrap();
+        input["context_files"] =
+            serde_json::json!([{"path": "big.rs", "content": "x".repeat(200_000)}]);
+        request.stdin = serde_json::to_vec(&input).unwrap();
+        let error = CliReviewProvider.execute(&request, None).unwrap_err();
+        assert!(error.contains("argument size limit"), "{kind:?}: {error}");
+    }
 }
