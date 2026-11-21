@@ -252,6 +252,67 @@ pub struct ReviewDetail {
     pub review: ReviewResult,
     pub findings: Vec<FindingRecord>,
     pub impact: crate::ImpactAssessment,
+    /// The newest later review of the same scope and base, when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<Supersession>,
+}
+
+/// A later review of the same scope and base commit, and which of this
+/// review's findings it no longer reported. Display only: it does not change
+/// gates, dispositions or waivers.
+#[derive(Debug, Serialize)]
+pub struct Supersession {
+    pub review_id: String,
+    pub created_at: String,
+    pub outdated_finding_ids: Vec<String>,
+}
+
+/// How many newer saved reviews are inspected when looking for a later review
+/// of the same scope and base.
+const MAX_SUPERSESSION_CANDIDATES: usize = 100;
+
+fn later_review_of_same_base(
+    workspace: &Workspace,
+    store: &dyn Repositories,
+    review: &ReviewResult,
+) -> Result<Option<Supersession>> {
+    let summaries = store.list_reviews().map_err(anyhow::Error::msg)?;
+    let Some(position) = summaries
+        .iter()
+        .position(|summary| summary.review_id == review.review_id)
+    else {
+        return Ok(None);
+    };
+    // Summaries are newest first, so everything before this review is later.
+    for summary in summaries[..position]
+        .iter()
+        .take(MAX_SUPERSESSION_CANDIDATES)
+    {
+        let Ok(candidate) = workspace.saved_review(store, &summary.review_id) else {
+            continue;
+        };
+        if candidate.change_set.scope != review.change_set.scope
+            || candidate.change_set.base_oid != review.change_set.base_oid
+        {
+            continue;
+        }
+        let reported: std::collections::BTreeSet<&str> = candidate
+            .findings
+            .iter()
+            .map(|finding| finding.fingerprint.as_str())
+            .collect();
+        return Ok(Some(Supersession {
+            review_id: summary.review_id.clone(),
+            created_at: summary.created_at.clone(),
+            outdated_finding_ids: review
+                .findings
+                .iter()
+                .filter(|finding| !reported.contains(finding.fingerprint.as_str()))
+                .map(|finding| finding.id.clone())
+                .collect(),
+        }));
+    }
+    Ok(None)
 }
 
 /// A saved review with its latest gate decision applied, its findings, and an
@@ -278,10 +339,12 @@ pub fn review_detail(workspace: &Workspace, review_id: &str) -> Result<ReviewDet
         .list_findings(None, None, Some(review_id))
         .map_err(anyhow::Error::msg)?;
     let impact = current_impact(workspace.root(), &review);
+    let superseded_by = later_review_of_same_base(workspace, &*store, &review)?;
     Ok(ReviewDetail {
         review,
         findings,
         impact,
+        superseded_by,
     })
 }
 

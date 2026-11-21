@@ -130,7 +130,7 @@ test.beforeEach(async ({ page }) => {
     }
     else if (url.pathname === '/api/findings/FIND-001/task') body = findingTask
     else if (url.pathname === '/api/reviews/rev_latest') body = latestDetail
-    else if (url.pathname === '/api/reviews/rev_prior') body = detail(prior)
+    else if (url.pathname === '/api/reviews/rev_prior') body = { ...detail(prior), superseded_by: { review_id: 'rev_latest', created_at: '2026-11-14 09:00:00', outdated_finding_ids: ['FIND-001'] } }
     else if (url.pathname === '/api/reviews/rev_started') body = latestDetail
     else body = { error: `Unexpected API path ${url.pathname}` }
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
@@ -775,4 +775,22 @@ test('finding drawer shows title, snapshot source, evidence, verification, and c
   expect(copied.task_id).toBe('task_find001')
   await drawer.getByRole('button', { name: 'Close finding details' }).click()
   await expect(drawer).toBeHidden()
+})
+
+test('an older review marks findings the later review of the same base no longer reported', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: /Insights/ }).click()
+  await page.getByRole('button', { name: /rev_prior/ }).click()
+  await expect(page.getByText(/A later review of the same base, rev_latest, exists/)).toBeVisible()
+  await page.getByRole('button', { name: /Findings/ }).click()
+  const badge = page.locator('.finding-row').getByText('Outdated', { exact: true })
+  await expect(badge).toBeVisible()
+  await expect(badge).toHaveAttribute('title', /Not reported by rev_latest/)
+})
+
+test('the latest review shows no outdated marker', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: /Findings/ }).click()
+  await expect(page.locator('.finding-row').first()).toBeVisible()
+  await expect(page.getByText('Outdated', { exact: true })).toHaveCount(0)
 })

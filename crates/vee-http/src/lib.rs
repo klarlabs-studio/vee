@@ -1659,6 +1659,138 @@ mod tests {
         }
     }
 
+    fn saved_fixture_review(
+        root: &std::path::Path,
+        review_id: &str,
+        findings: Vec<vee_core::Finding>,
+    ) -> ReviewResult {
+        let change_set =
+            vee_application::capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
+        let review = ReviewResult {
+            schema_version: 2,
+            review_id: review_id.into(),
+            snapshot_id: format!("{}-{review_id}", change_set.digest),
+            status: "block".into(),
+            findings: findings.clone(),
+            policy_findings: None,
+            evidence: Vec::new(),
+            verification_runs: Vec::new(),
+            reviewer_outcomes: Vec::new(),
+            reviewer_arbitration: Vec::new(),
+            analysis_complete: true,
+            reasons: Vec::new(),
+            gate: vee_core::GateDecision {
+                schema_version: 1,
+                decision_id: format!("gate_{review_id}"),
+                snapshot_id: change_set.digest.clone(),
+                effective_config_digest: "config".into(),
+                policy_digest: "policy".into(),
+                status: vee_core::GateStatus::Block,
+                blocking_findings: Vec::new(),
+                verification_run_ids: Vec::new(),
+                evidence_digest: "evidence".into(),
+                reasons: Vec::new(),
+                replay_inputs: None,
+            },
+            change_set,
+            effective_config_digest: "config".into(),
+            selected_reviewers: Vec::new(),
+            reviewer_context: Vec::new(),
+            policy_profile: None,
+            work_item: None,
+            work_item_token_env: None,
+        };
+        open_store(root)
+            .unwrap()
+            .save_review(
+                &review.review_id,
+                &review.snapshot_id,
+                &review.effective_config_digest,
+                &review.status,
+                &serde_json::to_string(&review).unwrap(),
+                &findings,
+            )
+            .unwrap();
+        review
+    }
+
+    #[tokio::test]
+    async fn a_later_review_of_the_same_base_marks_unreported_findings_outdated() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "vee@example.invalid"]);
+        git(&["config", "user.name", "Vee test"]);
+        std::fs::write(root.join("src.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "/.vee/\n").unwrap();
+        std::fs::create_dir_all(root.join(".vee")).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "baseline"]);
+        let finding = |id: &str, fingerprint: &str| vee_core::Finding {
+            id: id.into(),
+            fingerprint: fingerprint.into(),
+            category: "correctness".into(),
+            severity: Severity::High,
+            confidence: Some(90),
+            rationale: "fixture".into(),
+            path: Some("src.rs".into()),
+            line: Some(1),
+            provenance: "model_inference".into(),
+            reviewer_ids: Vec::new(),
+            evidence_ids: Vec::new(),
+            rule_attributions: Vec::new(),
+            sample_agreement: None,
+            advisory: false,
+        };
+        saved_fixture_review(
+            root,
+            "rev_a",
+            vec![
+                finding("find_fixed", "fp-fixed"),
+                finding("find_kept", "fp-kept"),
+            ],
+        );
+        saved_fixture_review(root, "rev_b", vec![finding("find_kept", "fp-kept")]);
+        let app = router(root.to_owned(), "127.0.0.1:7878".parse().unwrap());
+        let detail = |uri: &'static str| {
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .uri(uri)
+                            .header(header::HOST, "127.0.0.1:7878")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+            }
+        };
+        let earlier = detail("/api/reviews/rev_a").await;
+        assert_eq!(earlier["superseded_by"]["review_id"], "rev_b", "{earlier}");
+        assert_eq!(
+            earlier["superseded_by"]["outdated_finding_ids"],
+            serde_json::json!(["find_fixed"])
+        );
+        let latest = detail("/api/reviews/rev_b").await;
+        assert!(latest.get("superseded_by").is_none(), "{latest}");
+    }
+
     #[tokio::test]
     async fn finding_task_route_returns_snapshot_context_and_verification_runs() {
         let directory = tempfile::tempdir().unwrap();
