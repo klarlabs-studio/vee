@@ -44,6 +44,21 @@ const config = {
   policy: { required_reviewers: ['correctness'], block_severities: ['high'], on_incomplete: 'block' },
 }
 
+const findingTask = {
+  schema_version: 1,
+  task: {
+    schema_version: 2, task_id: 'task_find001', review_id: 'rev_latest', snapshot_id: 'sha256:latest',
+    snapshot_current: false, finding: findingRecord,
+    source_context: { path: 'src/lib.rs', start_line: 40, end_line: 44, classification: 'untrusted_repository_source',
+      content: 'fn handle(input: &str) {\n    if input.is_empty() {\n        return process(input);\n    }\n}' },
+    context_note: null, impact_paths: [], impact_coverage_complete: true,
+    evidence: [{ id: 'ev_1', kind: 'source', classification: 'observed', provenance: 'source_snapshot', source_path: 'src/lib.rs', start_line: 42, end_line: 42, verification: 'unverified', content_digest: 'sha256:abc' }],
+    applicable_standards: [], standards_note: null, ownership: null, ownership_note: null,
+    instructions: 'Fix the finding against the exact snapshot.',
+  },
+  verification_runs: [{ run_id: 'verify_2', profile_id: 'unit', status: 'failed', snapshot_id: 'sha256:latest', created_at: '2026-11-14 13:00:00' }],
+}
+
 test.beforeEach(async ({ page }) => {
   let latestSummary = latest
   let latestDetail = detail(latest)
@@ -113,6 +128,7 @@ test.beforeEach(async ({ page }) => {
       latestDetail.findings = [{ ...latestDetail.findings[0], status: update.status, status_reason: update.reason }]
       body = { schema_version: 1, finding_id: 'FIND-001', ...update, note: 'Lifecycle status is audit metadata. Use the waiver workflow for a scoped gate exception.' }
     }
+    else if (url.pathname === '/api/findings/FIND-001/task') body = findingTask
     else if (url.pathname === '/api/reviews/rev_latest') body = latestDetail
     else if (url.pathname === '/api/reviews/rev_prior') body = detail(prior)
     else if (url.pathname === '/api/reviews/rev_started') body = latestDetail
@@ -735,4 +751,28 @@ test('failed history selection never shows another review result as its own', as
   await page.getByRole('button', { name: /rev_prior/ }).click()
   await expect(page.getByText('The selected review could not be loaded.')).toBeVisible()
   await expect(page.getByText('Action required')).toHaveCount(0)
+})
+
+test('finding drawer shows title, snapshot source, evidence, verification, and copies the work package', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+  await page.goto('/')
+  await page.getByRole('button', { name: /Findings/ }).click()
+  await page.getByRole('button', { name: 'Open details for FIND-001' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Finding details' })
+  await expect(drawer.getByRole('heading', { name: 'The changed branch skips validation.' })).toBeVisible()
+  await expect(drawer.getByText('src/lib.rs:42')).toBeVisible()
+  const highlighted = drawer.locator('.source-line.flagged')
+  await expect(highlighted).toHaveCount(1)
+  await expect(highlighted).toContainText('42')
+  await expect(highlighted).toContainText('return process(input);')
+  await expect(drawer.getByText(/This snapshot no longer matches the working tree/)).toBeVisible()
+  await expect(drawer.getByText('src/lib.rs[42–42]')).toBeVisible()
+  await expect(drawer.getByText(/observed · source_snapshot/)).toBeVisible()
+  await expect(drawer.getByText(/unit · failed/)).toBeVisible()
+  await drawer.getByRole('button', { name: 'Copy work package' }).click()
+  await expect(drawer.getByRole('status')).toHaveText('Work package copied.')
+  const copied = JSON.parse(await page.evaluate(() => navigator.clipboard.readText()))
+  expect(copied.task_id).toBe('task_find001')
+  await drawer.getByRole('button', { name: 'Close finding details' }).click()
+  await expect(drawer).toBeHidden()
 })

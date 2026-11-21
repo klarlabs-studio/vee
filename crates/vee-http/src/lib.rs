@@ -260,6 +260,38 @@ async fn get_review(
         .map(Json)
 }
 
+/// Lines of snapshot source shown on each side of a finding in the UI.
+const FINDING_TASK_CONTEXT_LINES: usize = 8;
+
+/// The finding drawer: the snapshot-bound work package (`vee findings task`)
+/// plus the verification runs recorded for the finding.
+#[derive(Serialize)]
+struct FindingTaskView {
+    schema_version: u32,
+    task: vee_application::finding_task::FindingTask,
+    verification_runs: Vec<vee_core::VerificationRun>,
+}
+
+async fn get_finding_task(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RoutePath(id): RoutePath<String>,
+) -> Result<Json<FindingTaskView>, ApiError> {
+    check_origin(&headers, &state.origin, state.auth_token.as_deref())?;
+    let workspace = state.workspace.clone();
+    blocking(move || {
+        let task = operations::finding_task(&workspace, &id, FINDING_TASK_CONTEXT_LINES)?;
+        let verification_runs = operations::finding_detail(&workspace, &id)?.verification_runs;
+        Ok(FindingTaskView {
+            schema_version: 1,
+            task,
+            verification_runs,
+        })
+    })
+    .await
+    .map(Json)
+}
+
 async fn list_findings(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -431,6 +463,7 @@ fn build_router(
         .route("/api/analytics", get(get_analytics))
         .route("/api/reviews/{id}", get(get_review))
         .route("/api/findings", get(list_findings))
+        .route("/api/findings/{id}/task", get(get_finding_task))
         .route(
             "/api/findings/{id}/status",
             axum::routing::post(update_finding_status),
@@ -1624,6 +1657,121 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         }
+    }
+
+    #[tokio::test]
+    async fn finding_task_route_returns_snapshot_context_and_verification_runs() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "vee@example.invalid"]);
+        git(&["config", "user.name", "Vee test"]);
+        std::fs::write(root.join("src.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "/.vee/\n").unwrap();
+        std::fs::create_dir_all(root.join(".vee")).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "baseline"]);
+        std::fs::write(root.join("src.rs"), "fn a() {}\nfn b() { panic!() }\n").unwrap();
+        let change_set =
+            vee_application::capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
+        let finding = vee_core::Finding {
+            id: "find_drawer".into(),
+            fingerprint: "fingerprint-drawer".into(),
+            category: "correctness".into(),
+            severity: Severity::High,
+            confidence: Some(90),
+            rationale: "b panics on every call. Return an error instead.".into(),
+            path: Some("src.rs".into()),
+            line: Some(2),
+            provenance: "model_inference".into(),
+            reviewer_ids: vec!["correctness".into()],
+            evidence_ids: vec![],
+            rule_attributions: Vec::new(),
+            sample_agreement: None,
+            advisory: false,
+        };
+        let review = ReviewResult {
+            schema_version: 2,
+            review_id: "rev_drawer".into(),
+            snapshot_id: change_set.digest.clone(),
+            status: "block".into(),
+            findings: vec![finding.clone()],
+            policy_findings: None,
+            evidence: Vec::new(),
+            verification_runs: Vec::new(),
+            reviewer_outcomes: Vec::new(),
+            reviewer_arbitration: Vec::new(),
+            analysis_complete: true,
+            reasons: Vec::new(),
+            gate: vee_core::GateDecision {
+                schema_version: 1,
+                decision_id: "gate_drawer".into(),
+                snapshot_id: change_set.digest.clone(),
+                effective_config_digest: "config".into(),
+                policy_digest: "policy".into(),
+                status: vee_core::GateStatus::Block,
+                blocking_findings: vec!["find_drawer".into()],
+                verification_run_ids: Vec::new(),
+                evidence_digest: "evidence".into(),
+                reasons: Vec::new(),
+                replay_inputs: None,
+            },
+            change_set,
+            effective_config_digest: "config".into(),
+            selected_reviewers: Vec::new(),
+            reviewer_context: Vec::new(),
+            policy_profile: None,
+            work_item: None,
+            work_item_token_env: None,
+        };
+        let mut store = open_store(root).unwrap();
+        store
+            .save_review(
+                &review.review_id,
+                &review.snapshot_id,
+                &review.effective_config_digest,
+                &review.status,
+                &serde_json::to_string(&review).unwrap(),
+                &[finding],
+            )
+            .unwrap();
+        drop(store);
+        let app = router(root.to_owned(), "127.0.0.1:7878".parse().unwrap());
+        let get = |uri: &'static str| {
+            app.clone().oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header(header::HOST, "127.0.0.1:7878")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+        };
+        let response = get("/api/findings/find_drawer/task").await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["task"]["review_id"], "rev_drawer");
+        assert_eq!(value["task"]["snapshot_current"], true);
+        assert!(value["task"]["source_context"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("panic!()"));
+        assert_eq!(value["verification_runs"], serde_json::json!([]));
+
+        let missing = get("/api/findings/find_missing/task").await.unwrap();
+        assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
