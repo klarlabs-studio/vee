@@ -498,6 +498,19 @@ fn cli_and_mcp_return_identical_documents_for_shared_operations() {
 }
 
 #[test]
+fn both_transports_record_the_same_work_item_credential_for_later_gate_checks() {
+    let repository = seeded_repository();
+    let root = repository.path();
+    let cli = cli_json(root, &["review", "--working-tree"]);
+    let mut mcp = McpSession::start(root);
+    let via_mcp = mcp.call("review_changes", json!({"scope": "working_tree"}));
+    // A later `gate check` re-fetches the work item with this variable, so a
+    // review started over MCP must record the one the CLI would.
+    assert_eq!(cli["work_item_token_env"], "GH_TOKEN");
+    assert_eq!(via_mcp["work_item_token_env"], cli["work_item_token_env"]);
+}
+
+#[test]
 fn both_transports_reject_waiving_through_a_status_change() {
     let repository = seeded_repository();
     let root = repository.path();

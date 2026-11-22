@@ -22,7 +22,9 @@ use vee_application::imported_history::{
     imported_reviews_dir, parse_portable_review, store_imported_history, MAX_IMPORTED_REVIEW_BYTES,
 };
 use vee_application::proposals::{proposal_directory, read_proposal_file};
-use vee_application::work_items::{effective_work_item_token_env, get_work_item};
+use vee_application::work_items::{
+    effective_work_item_host, effective_work_item_token_env, get_work_item, work_item_api_base,
+};
 mod mcp;
 use vee_application::operations;
 use vee_application::packs;
@@ -1869,68 +1871,6 @@ fn add_resolved_hosting_threads(
     ));
 }
 
-fn effective_work_item_host(provider: &str, host: &str) -> anyhow::Result<String> {
-    match provider {
-        "github" if host == "github.com" => Ok("github.com".into()),
-        "gitlab" if host == "github.com" => Ok("gitlab.com".into()),
-        "azure-devops" if host == "github.com" => Ok("dev.azure.com".into()),
-        "bitbucket" if host == "github.com" => Ok("bitbucket.org".into()),
-        "gerrit" if host == "github.com" => {
-            Err(configuration_failure("Gerrit requires an explicit --host"))
-        }
-        "github" | "gitlab" | "azure-devops" | "bitbucket" | "gerrit" => Ok(host.into()),
-        _ => Err(configuration_failure(format!(
-            "unsupported work item provider `{provider}`"
-        ))),
-    }
-}
-
-fn work_item_api_base(provider: &str, host: &str, configured: &str) -> anyhow::Result<String> {
-    if !configured.trim().is_empty() {
-        return Ok(configured.to_owned());
-    }
-    match provider {
-        "github" if host == "github.com" => Ok("https://api.github.com/".into()),
-        "github" => Ok(format!("https://{host}/api/v3/")),
-        "gitlab" => Ok(format!("https://{host}/api/v4/")),
-        "azure-devops" => Ok(format!("https://{host}/")),
-        "bitbucket" => Ok("https://api.bitbucket.org/2.0/".into()),
-        "gerrit" => Ok(format!("https://{host}/")),
-        _ => Err(configuration_failure(format!(
-            "unsupported work item provider `{provider}`"
-        ))),
-    }
-}
-
-fn fetch_work_item(
-    provider_id: &str,
-    specification: &str,
-    host: &str,
-    api_base: &str,
-    token_env: &str,
-) -> anyhow::Result<vee_hosting::WorkItemSnapshot> {
-    let (repository, number) = specification
-        .rsplit_once('#')
-        .ok_or_else(|| usage_failure("--work-item must use OWNER/REPO#NUMBER"))?;
-    let number = number
-        .parse::<u64>()
-        .map_err(|_| usage_failure("--work-item number must be a positive integer"))?;
-    let token = std::env::var(token_env).with_context(|| {
-        format!("required credential environment variable {token_env} is not set")
-    })?;
-    let host = effective_work_item_host(provider_id, host)?;
-    let reference = vee_hosting::WorkItemRef {
-        repository: vee_hosting::RepositoryRef {
-            host: host.clone(),
-            full_name: repository.to_owned(),
-        },
-        number,
-    };
-    reference.validate().map_err(configuration_failure)?;
-    let api_base = work_item_api_base(provider_id, &host, api_base)?;
-    get_work_item(provider_id, &api_base, token, &reference)
-}
-
 enum ImportedArchive {
     Review(Box<vee_application::ReviewResult>),
     Discussions(vee_hosting::PullRequestReviewIssues),
@@ -3200,38 +3140,6 @@ fn run() -> Result<u8> {
         } => {
             let workspace = operations::Workspace::discover(crate::local_stores())?;
             let scope = operations::ScopeRequest::from_flags(base, commit, staged, working_tree)?;
-            let config = workspace.effective_config(policy_profile.as_deref())?;
-            let hosting_provider = resolve_hosting_setting(
-                hosting_provider,
-                config.hosting.provider.clone(),
-                "github",
-            );
-            let hosting_host =
-                resolve_hosting_setting(hosting_host, config.hosting.host.clone(), "github.com");
-            let hosting_api_base =
-                resolve_hosting_setting(hosting_api_base, config.hosting.api_base.clone(), "");
-            let hosting_token_env = resolve_hosting_setting(
-                hosting_token_env,
-                config.hosting.token_env.clone(),
-                "GH_TOKEN",
-            );
-            if work_item.is_some() && config.offline {
-                return Err(configuration_failure(
-                    "offline mode prevents fetching work item context",
-                ));
-            }
-            let work_item = work_item
-                .as_deref()
-                .map(|spec| {
-                    fetch_work_item(
-                        &hosting_provider,
-                        spec,
-                        &hosting_host,
-                        &hosting_api_base,
-                        effective_work_item_token_env(&hosting_provider, &hosting_token_env),
-                    )
-                })
-                .transpose()?;
             let out = operations::review(
                 &workspace,
                 operations::ReviewRequest {
@@ -3239,11 +3147,13 @@ fn run() -> Result<u8> {
                     reviewer_ids: (!reviewer_ids.is_empty()).then_some(reviewer_ids.as_slice()),
                     policy_profile: policy_profile.as_deref(),
                     effort: effort.map(Into::into),
-                    work_item,
-                    work_item_token_env: Some(
-                        effective_work_item_token_env(&hosting_provider, &hosting_token_env)
-                            .to_owned(),
-                    ),
+                    work_item: work_item.as_deref(),
+                    hosting: vee_application::work_items::HostingOverrides {
+                        provider: hosting_provider,
+                        host: hosting_host,
+                        api_base: hosting_api_base,
+                        token_env: hosting_token_env,
+                    },
                 },
                 None,
             )?;

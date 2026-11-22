@@ -189,9 +189,10 @@ pub struct ReviewRequest<'a> {
     pub policy_profile: Option<&'a str>,
     /// Effort for every reviewer in this review, replacing configured sampling.
     pub effort: Option<vee_core::ReviewEffort>,
-    /// Work item fetched by the caller; requires online configuration.
-    pub work_item: Option<vee_hosting::WorkItemSnapshot>,
-    pub work_item_token_env: Option<String>,
+    /// Work item to fetch as `OWNER/REPO#NUMBER`; requires online configuration.
+    pub work_item: Option<&'a str>,
+    /// Hosting settings for this review; unset values come from `.vee.yaml`.
+    pub hosting: crate::work_items::HostingOverrides,
 }
 
 /// Capture the requested scope, run the configured reviewers, and persist the review.
@@ -213,6 +214,13 @@ pub fn review(
             "offline mode prevents fetching work item context",
         ));
     }
+    // Every transport records the credential variable, so a later gate check
+    // re-fetches the work item the same way whichever transport started the review.
+    let hosting = crate::work_items::resolve_hosting(request.hosting, &config.hosting);
+    let work_item = request
+        .work_item
+        .map(|spec| crate::work_items::fetch_work_item(&hosting, spec))
+        .transpose()?;
     let scope = request.scope.resolve(workspace.root())?;
     let change_set =
         crate::capture_change_set(workspace.root(), scope).map_err(anyhow::Error::msg)?;
@@ -226,8 +234,8 @@ pub fn review(
             provider_adapter: &crate::CliReviewProvider,
             requested_reviewers: request.reviewer_ids,
             cancellation,
-            work_item: request.work_item,
-            work_item_token_env: request.work_item_token_env,
+            work_item,
+            work_item_token_env: Some(hosting.token_env),
         },
     )
     .map_err(anyhow::Error::msg)

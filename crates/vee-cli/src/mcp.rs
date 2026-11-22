@@ -372,6 +372,9 @@ struct StartReviewInput {
     /// Override every reviewer's effort for this review. Higher effort finds more
     /// defects at more provider calls; findings most runs agree on can block.
     effort: Option<ReviewEffortInput>,
+    /// Work item to attach as requirements context, as `OWNER/REPO#NUMBER`.
+    /// Fetched with the repository's `hosting` settings; not allowed offline.
+    work_item: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -474,8 +477,8 @@ fn run_review(
             reviewer_ids: input.reviewer_ids.as_deref(),
             policy_profile: input.policy_profile.as_deref(),
             effort: input.effort.map(Into::into),
-            work_item: None,
-            work_item_token_env: None,
+            work_item: input.work_item.as_deref(),
+            hosting: Default::default(),
         },
         Some(cancellation),
     )
@@ -992,6 +995,7 @@ mod tests {
             reviewer_ids: None,
             policy_profile: None,
             effort: None,
+            work_item: None,
         };
         assert_eq!(
             scope_request(&input(ReviewScope::Base, Some("main"), None)).unwrap(),
@@ -1057,6 +1061,7 @@ mod tests {
                 policy_profile: None,
                 reviewer_ids: None,
                 effort: None,
+                work_item: None,
             },
             &tokio_util::sync::CancellationToken::new(),
         )
