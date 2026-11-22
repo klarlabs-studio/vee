@@ -36,7 +36,7 @@ reqwest = { version = "=0.13.5", default-features = false, features = ["blocking
 roxmltree = "=0.21.2"
 syn = { version = "2", features = ["full", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
-url = "=2.5.8"
+url = "=2.5.9"
 
 [patch.crates-io]
 # Keep the published klarlabs-mcp API while enabling its legacy initialize
