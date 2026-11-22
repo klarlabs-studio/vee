@@ -228,7 +228,10 @@ fn patch_application_view_shows_the_patch_then_the_follow_up_review() {
     assert!(!plain.contains("concurrently"), "{plain}");
     let markdown = md(&applied);
     assert!(markdown.starts_with("## Patch applied"), "{markdown}");
-    assert!(markdown.contains("## Review rev\\_follow\\_up"), "{markdown}");
+    assert!(
+        markdown.contains("## Review rev\\_follow\\_up"),
+        "{markdown}"
+    );
     assert_round_trip(&applied);
 }
 
