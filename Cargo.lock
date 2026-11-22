@@ -2670,6 +2670,7 @@ dependencies = [
  "serde_json",
  "vee-application",
  "vee-core",
+ "vee-hosting",
 ]
 
 [[package]]
