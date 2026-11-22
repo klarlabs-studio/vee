@@ -378,6 +378,20 @@ struct StartReviewInput {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct SnapshotInput {
+    /// Snapshot ID (`sha256:…`), as a review or verification run reports it.
+    snapshot_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct FindingFeedbackListInput {
+    /// Only feedback for this finding; omit for all feedback.
+    finding_id: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ProposePatchInput {
     /// Saved review ID whose current snapshot the patch targets (working-tree, staged, or base scope).
     review_id: String,
@@ -640,6 +654,11 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
             }
         })?;
 
+    viewed_tool!(server, workspace, "list_reviews", "List reviews", read_only_tool(),
+        "reviews-list-v1",
+        "List saved reviews in this repository, newest first. Same document as `vee reviews list --output json`.",
+        |ws, _input: EmptyInput| operations::reviews_list(&ws));
+
     viewed_tool!(
         server,
         workspace,
@@ -703,6 +722,11 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
             reviewer: &input.reviewer,
         }));
 
+    viewed_tool!(server, workspace, "list_finding_feedback", "List finding feedback", read_only_tool(),
+        "finding-feedback-list-v1",
+        "List reviewed accuracy and actionability labels, optionally for one finding. Same document as `vee findings feedback list --output json`.",
+        |ws, input: FindingFeedbackListInput| operations::finding_feedback_list(&ws, input.finding_id.as_deref()));
+
     viewed_tool!(server, workspace, "evaluate_gate", "Evaluate gate", write_tool(false, true, true),
         "gate-check-v1",
         "Recapture the reviewed source and re-evaluate the deterministic gate, persisting the decision. Same document as `vee gate check --output json`.",
@@ -716,6 +740,11 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
             profile_id: &input.profile_id,
             impacted_tests: false,
         }));
+
+    viewed_tool!(server, workspace, "list_verification_runs", "List verification runs", read_only_tool(),
+        "verification-list-v1",
+        "List verification runs recorded for a snapshot, without their logs. Same document as `vee verification list --snapshot <id> --output json`.",
+        |ws, input: SnapshotInput| operations::verification_list(&ws, &input.snapshot_id));
 
     viewed_tool!(server, workspace, "diagnose_verification", "Diagnose verification run", read_only_tool(),
         "verification-diagnosis-v2",

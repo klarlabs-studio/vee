@@ -395,6 +395,24 @@ fn cli_and_mcp_return_identical_documents_for_shared_operations() {
     assert_matches_published_schema(&via_mcp, "verification-run-v1");
     assert_eq!(cli["snapshot_id"], via_mcp["snapshot_id"]);
     assert_eq!(cli["finding_id"], via_mcp["finding_id"]);
+    let verified_snapshot = cli["snapshot_id"].as_str().unwrap().to_owned();
+    let cli = cli_json(
+        root,
+        &["verification", "list", "--snapshot", &verified_snapshot],
+    );
+    let (via_mcp, text) = mcp.call_with_text(
+        "list_verification_runs",
+        json!({"snapshot_id": verified_snapshot}),
+    );
+    assert_same(&cli, &via_mcp, "verification list", "verification-list-v1");
+    // Both transports ran the same command on the same snapshot: one content-addressed run.
+    assert_eq!(cli["runs"].as_array().unwrap().len(), 1, "{cli:#}");
+    assert_same_view::<vee_application::operations::VerificationList>(
+        root,
+        &["verification", "list", "--snapshot", &verified_snapshot],
+        &via_mcp,
+        &text,
+    );
 
     let cli = cli_json(root, &["tests", "recommend", "--review", &review_id]);
     let (via_mcp, text) = mcp.call_with_text("recommend_tests", json!({"review_id": review_id}));
@@ -492,6 +510,50 @@ fn cli_and_mcp_return_identical_documents_for_shared_operations() {
     assert_same_view::<vee_application::analytics::QualityAnalytics>(
         root,
         &["analytics"],
+        &via_mcp,
+        &text,
+    );
+
+    let cli = cli_json(root, &["reviews", "list"]);
+    let (via_mcp, text) = mcp.call_with_text("list_reviews", json!({}));
+    assert_same(&cli, &via_mcp, "reviews list", "reviews-list-v1");
+    assert_eq!(cli["reviews"][0]["review_id"], review_id);
+    assert_same_view::<vee_application::operations::ReviewsList>(
+        root,
+        &["reviews", "list"],
+        &via_mcp,
+        &text,
+    );
+
+    let snapshot_id = review["snapshot_id"].as_str().unwrap();
+    cli_json(
+        root,
+        &[
+            "findings",
+            "feedback",
+            "set",
+            &finding_id,
+            "--snapshot",
+            snapshot_id,
+            "--label",
+            "confirmed",
+            "--reason",
+            "Reproduced the defect.",
+            "--reviewer",
+            "maintainer",
+        ],
+    );
+    let cli = cli_json(
+        root,
+        &["findings", "feedback", "list", "--finding", &finding_id],
+    );
+    let (via_mcp, text) =
+        mcp.call_with_text("list_finding_feedback", json!({"finding_id": finding_id}));
+    assert_same(&cli, &via_mcp, "feedback list", "finding-feedback-list-v1");
+    assert_eq!(cli["feedback"].as_array().unwrap().len(), 1, "{cli:#}");
+    assert_same_view::<vee_application::operations::FindingFeedbackList>(
+        root,
+        &["findings", "feedback", "list", "--finding", &finding_id],
         &via_mcp,
         &text,
     );

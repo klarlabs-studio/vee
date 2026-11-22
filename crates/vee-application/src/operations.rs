@@ -287,6 +287,86 @@ pub fn get_review(workspace: &Workspace, review_id: &str) -> Result<ReviewResult
 }
 
 /// Saved reviews, newest first.
+/// `reviews-list-v1`
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReviewsList {
+    pub schema_version: u32,
+    pub reviews: Vec<vee_core::ReviewSummary>,
+}
+
+pub fn reviews_list(workspace: &Workspace) -> Result<ReviewsList> {
+    Ok(ReviewsList {
+        schema_version: 1,
+        reviews: list_reviews(workspace)?,
+    })
+}
+
+/// `verification-list-v1`: run metadata for one snapshot, without logs.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VerificationList {
+    pub schema_version: u32,
+    pub snapshot_id: String,
+    pub runs: Vec<VerificationRunSummary>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VerificationRunSummary {
+    pub run_id: String,
+    pub snapshot_id: String,
+    pub profile_id: String,
+    pub status: vee_core::VerificationStatus,
+    pub targets: Vec<String>,
+    pub has_stdout_artifact: bool,
+    pub has_stderr_artifact: bool,
+}
+
+pub fn verification_list(workspace: &Workspace, snapshot_id: &str) -> Result<VerificationList> {
+    let runs = workspace
+        .store()?
+        .verifications_for_snapshot(snapshot_id)
+        .map_err(anyhow::Error::msg)?;
+    Ok(VerificationList {
+        schema_version: 1,
+        snapshot_id: snapshot_id.to_owned(),
+        runs: runs
+            .into_iter()
+            .map(|run| VerificationRunSummary {
+                has_stdout_artifact: run.stdout_artifact.is_some(),
+                has_stderr_artifact: run.stderr_artifact.is_some(),
+                run_id: run.run_id,
+                snapshot_id: run.snapshot_id,
+                profile_id: run.profile_id,
+                status: run.status,
+                targets: run.targets,
+            })
+            .collect(),
+    })
+}
+
+/// `finding-feedback-list-v1`
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FindingFeedbackList {
+    pub schema_version: u32,
+    pub feedback: Vec<FindingFeedback>,
+}
+
+pub fn finding_feedback_list(
+    workspace: &Workspace,
+    finding_id: Option<&str>,
+) -> Result<FindingFeedbackList> {
+    let feedback = workspace
+        .store()?
+        .list_finding_feedback()
+        .map_err(anyhow::Error::msg)?
+        .into_iter()
+        .filter(|item| finding_id.is_none_or(|id| item.finding_id == id))
+        .collect();
+    Ok(FindingFeedbackList {
+        schema_version: 1,
+        feedback,
+    })
+}
+
 pub fn list_reviews(workspace: &Workspace) -> Result<Vec<vee_core::ReviewSummary>> {
     workspace
         .store()?

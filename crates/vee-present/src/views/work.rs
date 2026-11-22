@@ -249,7 +249,7 @@ impl ToView for FindingWorkPackage {
     }
 }
 
-fn feedback_label(label: FindingFeedbackLabel) -> Cell {
+pub(crate) fn feedback_label(label: FindingFeedbackLabel) -> Cell {
     let tone = match label {
         FindingFeedbackLabel::Confirmed | FindingFeedbackLabel::Actionable => Tone::Success,
         FindingFeedbackLabel::FalsePositive | FindingFeedbackLabel::NotActionable => Tone::Warning,

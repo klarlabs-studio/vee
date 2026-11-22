@@ -2242,14 +2242,6 @@ enum FeedbackLabelArg {
     Actionable,
     NotActionable,
 }
-fn feedback_label_text(label: vee_core::FindingFeedbackLabel) -> &'static str {
-    match label {
-        vee_core::FindingFeedbackLabel::Confirmed => "confirmed",
-        vee_core::FindingFeedbackLabel::FalsePositive => "false_positive",
-        vee_core::FindingFeedbackLabel::Actionable => "actionable",
-        vee_core::FindingFeedbackLabel::NotActionable => "not_actionable",
-    }
-}
 impl From<FeedbackLabelArg> for vee_core::FindingFeedbackLabel {
     fn from(value: FeedbackLabelArg) -> Self {
         match value {
@@ -4256,41 +4248,13 @@ fn run() -> Result<u8> {
         }
         Command::Verification { command } => match command {
             VerificationCommand::List { snapshot, output } => {
-                let cwd = std::env::current_dir()?;
-                let root = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-                let store =
-                    ReviewStore::open(&root.join(".vee/vee.sqlite")).map_err(anyhow::Error::msg)?;
-                let runs = store
-                    .verifications_for_snapshot(&snapshot)
-                    .map_err(anyhow::Error::msg)?;
+                let list = operations::verification_list(
+                    &operations::Workspace::discover(crate::local_stores())?,
+                    &snapshot,
+                )?;
                 match output {
-                    Output::Json => {
-                        let records: Vec<_> = runs
-                            .iter()
-                            .map(|run| {
-                                serde_json::json!({
-                                    "run_id": run.run_id,
-                                    "snapshot_id": run.snapshot_id,
-                                    "profile_id": run.profile_id,
-                                    "status": run.status,
-                                    "targets": run.targets,
-                                    "has_stdout_artifact": run.stdout_artifact.is_some(),
-                                    "has_stderr_artifact": run.stderr_artifact.is_some(),
-                                })
-                            })
-                            .collect();
-                        serde_json::to_writer(
-                            std::io::stdout().lock(),
-                            &serde_json::json!({ "schema_version": 1, "snapshot_id": snapshot, "runs": records }),
-                        )?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!("Verification runs for snapshot {snapshot}:");
-                        for run in runs {
-                            println!("{}  {}  {:?}", run.run_id, run.profile_id, run.status);
-                        }
-                    }
+                    Output::Json => emit_json(&list)?,
+                    Output::Text => print_view(&list)?,
                 }
                 Ok(0)
             }
@@ -4412,35 +4376,13 @@ fn run() -> Result<u8> {
             };
             match command {
                 ReviewsCommand::List { output } => {
-                    let store =
-                        ReviewStore::open(&std::path::Path::new(&top).join(".vee/vee.sqlite"))
-                            .map_err(anyhow::Error::msg)?;
-                    let records = store.list_reviews().map_err(anyhow::Error::msg)?;
+                    let list = operations::reviews_list(&operations::Workspace::new(
+                        std::path::PathBuf::from(&top),
+                        crate::local_stores(),
+                    ))?;
                     match output {
-                        Output::Json => {
-                            serde_json::to_writer(
-                                std::io::stdout().lock(),
-                                &serde_json::json!({
-                                    "schema_version": 1,
-                                    "reviews": records,
-                                }),
-                            )?;
-                            println!();
-                        }
-                        Output::Text => {
-                            if records.is_empty() {
-                                println!("No reviews");
-                            }
-                            for record in records {
-                                println!(
-                                    "{}  {}  {}  {}",
-                                    record.review_id,
-                                    record.status,
-                                    record.snapshot_id,
-                                    record.created_at
-                                );
-                            }
-                        }
+                        Output::Json => emit_json(&list)?,
+                        Output::Text => print_view(&list)?,
                     }
                     Ok(0)
                 }
@@ -6764,36 +6706,11 @@ fn run() -> Result<u8> {
                         Ok(0)
                     }
                     FindingFeedbackCommand::List { finding, output } => {
-                        let feedback = store.list_finding_feedback().map_err(anyhow::Error::msg)?;
-                        let feedback: Vec<_> = feedback
-                            .into_iter()
-                            .filter(|item| {
-                                finding.as_deref().is_none_or(|id| item.finding_id == id)
-                            })
-                            .collect();
+                        let list =
+                            operations::finding_feedback_list(&workspace, finding.as_deref())?;
                         match output {
-                            Output::Json => {
-                                serde_json::to_writer(
-                                    std::io::stdout().lock(),
-                                    &serde_json::json!({"schema_version": 1, "feedback": feedback}),
-                                )?;
-                                println!();
-                            }
-                            Output::Text => {
-                                if feedback.is_empty() {
-                                    println!("No reviewed feedback");
-                                }
-                                for item in feedback {
-                                    println!(
-                                        "{}  {}  {}  {}  {}",
-                                        item.finding_id,
-                                        item.snapshot_id,
-                                        feedback_label_text(item.label),
-                                        item.reviewer,
-                                        item.reason
-                                    );
-                                }
-                            }
+                            Output::Json => emit_json(&list)?,
+                            Output::Text => print_view(&list)?,
                         }
                         Ok(0)
                     }
