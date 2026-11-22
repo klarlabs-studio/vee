@@ -5635,80 +5635,21 @@ fn run() -> Result<u8> {
                     "VEE_GITHUB_WEBHOOK_SECRET",
                 );
                 let actor_login = resolve_hosting_setting(actor_login, hosting.actor_login, "");
+                // The same re-evaluation as `vee gate check`, so a published
+                // decision is the one the gate would make now.
+                let reevaluated = operations::reevaluate_gate(
+                    &operations::Workspace::new(
+                        std::path::PathBuf::from(&top),
+                        crate::local_stores(),
+                    ),
+                    &review_id,
+                    None,
+                )?;
+                let mut reviewed = reevaluated.review;
+                reviewed.gate = reevaluated.decision;
                 let mut store =
                     ReviewStore::open(&std::path::Path::new(&top).join(".vee/vee.sqlite"))
                         .map_err(anyhow::Error::msg)?;
-                let payload = store
-                    .get(&review_id)
-                    .map_err(anyhow::Error::msg)?
-                    .with_context(|| format!("review {review_id} was not found"))?;
-                let mut reviewed = vee_application::deserialize_review_result(&payload)
-                    .map_err(anyhow::Error::msg)?;
-                let current_snapshot = vee_application::capture_current_change_set(
-                    std::path::Path::new(&top),
-                    &reviewed.change_set,
-                )
-                .map_err(anyhow::Error::msg)?;
-                let mut current_config = load_repository_config(std::path::Path::new(&top))?;
-                current_config
-                    .select_policy_profile(reviewed.policy_profile.as_deref())
-                    .map_err(configuration_failure)?;
-                apply_protected_policy(std::path::Path::new(&top), &mut current_config)?;
-                let current_work_item = if let Some(item) = reviewed.work_item.as_ref() {
-                    anyhow::ensure!(
-                        !current_config.offline,
-                        "offline mode prevents revalidating the work item used by this review"
-                    );
-                    let configured_token_env = reviewed
-                        .work_item_token_env
-                        .as_deref()
-                        .or(current_config.hosting.token_env.as_deref())
-                        .unwrap_or("GH_TOKEN");
-                    let token_env =
-                        effective_work_item_token_env(&item.provider, configured_token_env);
-                    let token = std::env::var(token_env).with_context(|| {
-                        format!("{token_env} is required to revalidate the external work item used by this review")
-                    })?;
-                    Some(get_work_item(
-                        &item.provider,
-                        &item.api_base,
-                        token,
-                        &item.reference,
-                    )?)
-                } else {
-                    None
-                };
-                let current_config_digest =
-                    vee_application::effective_review_config_digest_with_work_item(
-                        &current_config,
-                        std::path::Path::new(&top),
-                        &reviewed.selected_reviewers,
-                        &vee_application::active_rule_approvals(&store)
-                            .map_err(anyhow::Error::msg)?,
-                        current_work_item.as_ref(),
-                    )
-                    .map_err(anyhow::Error::msg)?;
-                let current_verifications = store
-                    .verifications_for_snapshot(&current_snapshot.digest)
-                    .map_err(anyhow::Error::msg)?;
-                reviewed.gate = vee_application::evaluate_and_persist_gate(
-                    &mut store,
-                    vee_application::GateEvaluation {
-                        review_id: &review_id,
-                        reviewed_snapshot_id: &reviewed.snapshot_id,
-                        current: &current_snapshot,
-                        repository_root: std::path::Path::new(&top),
-                        reviewed_config_digest: &reviewed.effective_config_digest,
-                        effective_config_digest: &current_config_digest,
-                        config: &current_config,
-                        findings: &reviewed.findings,
-                        policy_findings: reviewed.policy_findings.as_deref(),
-                        reviewer_outcomes: &reviewed.reviewer_outcomes,
-                        analysis_complete: reviewed.analysis_complete,
-                        verification_runs: &current_verifications,
-                    },
-                )
-                .map_err(anyhow::Error::msg)?;
                 anyhow::ensure!(
                     reviewed.analysis_complete,
                     "cannot publish an incomplete review"
@@ -6622,45 +6563,19 @@ fn run() -> Result<u8> {
                             == Some(saved.effective_config_digest.as_str()),
                         "proposal configuration digest does not match its saved review"
                     );
-                    let mut config = load_repository_config(std::path::Path::new(&top))?;
-                    config
-                        .select_policy_profile(saved.policy_profile.as_deref())
-                        .map_err(configuration_failure)?;
-                    apply_protected_policy(std::path::Path::new(&top), &mut config)?;
-                    let current_work_item = if let Some(item) = saved.work_item.as_ref() {
-                        anyhow::ensure!(
-                            !config.offline,
-                            "offline mode prevents revalidating the work item used by this review"
-                        );
-                        let configured_token_env = saved
-                            .work_item_token_env
-                            .as_deref()
-                            .or(config.hosting.token_env.as_deref())
-                            .unwrap_or("GH_TOKEN");
-                        let token_env =
-                            effective_work_item_token_env(&item.provider, configured_token_env);
-                        let token = std::env::var(token_env).with_context(|| {
-                            format!("{token_env} is required to revalidate the external work item used by this review")
-                        })?;
-                        Some(get_work_item(
-                            &item.provider,
-                            &item.api_base,
-                            token,
-                            &item.reference,
-                        )?)
-                    } else {
-                        None
-                    };
-                    let current_config_digest =
-                        vee_application::effective_review_config_digest_with_work_item(
-                            &config,
-                            std::path::Path::new(&top),
-                            &saved.selected_reviewers,
-                            &vee_application::active_rule_approvals(&store)
-                                .map_err(anyhow::Error::msg)?,
-                            current_work_item.as_ref(),
-                        )
-                        .map_err(anyhow::Error::msg)?;
+                    let operations::CurrentReviewConfig {
+                        config,
+                        digest: current_config_digest,
+                        work_item: current_work_item,
+                    } = operations::current_review_config(
+                        &operations::Workspace::new(
+                            std::path::PathBuf::from(&top),
+                            crate::local_stores(),
+                        ),
+                        &store,
+                        &saved,
+                        None,
+                    )?;
                     anyhow::ensure!(
                         current_config_digest == saved.effective_config_digest,
                         "effective review configuration changed; patch was not applied"

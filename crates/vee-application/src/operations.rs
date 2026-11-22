@@ -688,15 +688,23 @@ pub fn record_finding_feedback(
 /// The work-item token variable resolves as: explicit override, the variable saved
 /// with the review, `hosting.token_env` in `.vee.yaml`, then `GH_TOKEN` (mapped to
 /// the provider's conventional default).
-pub fn gate_check(
+/// The configuration a saved review would be evaluated under now.
+pub struct CurrentReviewConfig {
+    pub config: RepositoryConfig,
+    /// Digest of the configuration, bound to the re-fetched work item.
+    pub digest: String,
+    /// The review's work item as it reads now, when the review used one.
+    pub work_item: Option<vee_hosting::WorkItemSnapshot>,
+}
+
+/// A review that used a work item re-fetches it, because the configuration
+/// digest binds the item's content.
+pub fn current_review_config(
     workspace: &Workspace,
-    review_id: &str,
+    store: &dyn Repositories,
+    review: &ReviewResult,
     token_env_override: Option<&str>,
-) -> Result<GateCheckResult> {
-    let mut store = workspace.store()?;
-    let review = workspace.saved_review(&*store, review_id)?;
-    let current = crate::capture_current_change_set(workspace.root(), &review.change_set)
-        .map_err(anyhow::Error::msg)?;
+) -> Result<CurrentReviewConfig> {
     let config = workspace.effective_config(review.policy_profile.as_deref())?;
     let current_work_item = match review.work_item.as_ref() {
         None => None,
@@ -723,8 +731,8 @@ pub fn gate_check(
             )?)
         }
     };
-    let active_approvals = crate::active_rule_approvals(&*store).map_err(anyhow::Error::msg)?;
-    let config_digest = crate::effective_review_config_digest_with_work_item(
+    let active_approvals = crate::active_rule_approvals(store).map_err(anyhow::Error::msg)?;
+    let digest = crate::effective_review_config_digest_with_work_item(
         &config,
         workspace.root(),
         &review.selected_reviewers,
@@ -732,6 +740,35 @@ pub fn gate_check(
         current_work_item.as_ref(),
     )
     .map_err(anyhow::Error::msg)?;
+    Ok(CurrentReviewConfig {
+        config,
+        digest,
+        work_item: current_work_item,
+    })
+}
+
+/// A saved review's gate, re-evaluated against the current source,
+/// configuration and verification evidence, and persisted.
+pub struct GateReevaluation {
+    pub review: ReviewResult,
+    pub current: vee_core::ChangeSet,
+    pub decision: vee_core::GateDecision,
+}
+
+pub fn reevaluate_gate(
+    workspace: &Workspace,
+    review_id: &str,
+    token_env_override: Option<&str>,
+) -> Result<GateReevaluation> {
+    let mut store = workspace.store()?;
+    let review = workspace.saved_review(&*store, review_id)?;
+    let current = crate::capture_current_change_set(workspace.root(), &review.change_set)
+        .map_err(anyhow::Error::msg)?;
+    let CurrentReviewConfig {
+        config,
+        digest: config_digest,
+        ..
+    } = current_review_config(workspace, &*store, &review, token_env_override)?;
     let verification_runs = store
         .verifications_for_snapshot(&current.digest)
         .map_err(anyhow::Error::msg)?;
@@ -753,11 +790,24 @@ pub fn gate_check(
         },
     )
     .map_err(anyhow::Error::msg)?;
+    Ok(GateReevaluation {
+        review,
+        current,
+        decision,
+    })
+}
+
+pub fn gate_check(
+    workspace: &Workspace,
+    review_id: &str,
+    token_env_override: Option<&str>,
+) -> Result<GateCheckResult> {
+    let reevaluated = reevaluate_gate(workspace, review_id, token_env_override)?;
     Ok(GateCheckResult::from_decision(
         review_id.to_owned(),
-        review.snapshot_id,
-        current.digest,
-        decision,
+        reevaluated.review.snapshot_id,
+        reevaluated.current.digest,
+        reevaluated.decision,
     ))
 }
 
