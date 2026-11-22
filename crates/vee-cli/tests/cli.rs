@@ -5150,6 +5150,14 @@ fn assert_matches_schema(value: &serde_json::Value, schema_json: &str, contract:
         )
         .unwrap()
         .add(
+            "https://vee.klarlabs.de/schemas/rule-approval-v2.schema.json",
+            serde_json::from_str::<serde_json::Value>(include_str!(
+                "../../../schemas/rule-approval-v2.schema.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap()
+        .add(
             "https://vee.klarlabs.de/schemas/review-output-v2.schema.json",
             serde_json::from_str::<serde_json::Value>(include_str!(
                 "../../../schemas/review-output-v2.schema.json"
@@ -5838,7 +5846,7 @@ fn rule_candidate_report_uses_versioned_schema_and_does_not_mutate_policy() {
     );
     assert_matches_schema(
         &approval,
-        include_str!("../../../schemas/rule-approvals-v2.schema.json"),
+        include_str!("../../../schemas/rule-approval-v2.schema.json"),
         "rule approval",
     );
     let approval_id = approval["approval_id"].as_str().unwrap();
@@ -5848,7 +5856,13 @@ fn rule_candidate_report_uses_versioned_schema_and_does_not_mutate_policy() {
         .output()
         .unwrap();
     let listed: serde_json::Value = serde_json::from_slice(&list_output.stdout).unwrap();
-    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(listed["schema_version"], 1);
+    assert_eq!(listed["approvals"].as_array().unwrap().len(), 1);
+    assert_matches_schema(
+        &listed,
+        include_str!("../../../schemas/rule-approval-list-v1.schema.json"),
+        "rule approval list",
+    );
     let replacement_output = vee()
         .args([
             "rules",
@@ -5886,7 +5900,7 @@ fn rule_candidate_report_uses_versioned_schema_and_does_not_mutate_policy() {
     assert!(replacement["expires_at_unix"].as_i64().is_some());
     assert_matches_schema(
         &replacement,
-        include_str!("../../../schemas/rule-approvals-v2.schema.json"),
+        include_str!("../../../schemas/rule-approval-v2.schema.json"),
         "replacement rule approval",
     );
     std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -7221,7 +7235,7 @@ fn mcp_stdio_exposes_findings_tool_over_the_pinned_protocol() {
         })).await.unwrap();
         assert_eq!(approved["status"], "active");
         let approvals: serde_json::Value = client.call("list_rule_approvals", &serde_json::json!({})).await.unwrap();
-        assert_eq!(approvals.as_array().unwrap().len(), 1);
+        assert_eq!(approvals["approvals"].as_array().unwrap().len(), 1);
         let effectiveness: serde_json::Value = client.call("rule_effectiveness", &serde_json::json!({ "approval_id": approved["approval_id"] })).await.unwrap();
         assert_eq!(effectiveness["schema_version"], 1);
         assert_eq!(effectiveness["approvals"].as_array().unwrap().len(), 1);
@@ -10063,6 +10077,9 @@ fn mcp_tools_declare_titles_safety_annotations_and_documented_inputs() {
     let tools = listed["result"]["tools"].as_array().unwrap();
     let read_only: std::collections::BTreeSet<&str> = [
         "list_findings",
+        "list_reviews",
+        "list_finding_feedback",
+        "list_verification_runs",
         "get_quality_analytics",
         "get_finding",
         "get_finding_task",

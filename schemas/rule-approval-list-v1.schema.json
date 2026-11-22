@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vee.klarlabs.de/schemas/rule-approval-list-v1.schema.json",
+  "title": "Vee rule guidance approval list v1",
+  "description": "Every saved reviewer guidance approval, active or not, in creation order.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "approvals"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "approvals": {
+      "type": "array",
+      "items": {
+        "$ref": "rule-approval-v2.schema.json"
+      }
+    }
+  }
+}

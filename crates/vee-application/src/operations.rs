@@ -1039,6 +1039,99 @@ pub fn quality_analytics(workspace: &Workspace) -> Result<crate::analytics::Qual
 }
 
 // ---------------------------------------------------------------------------
+// Repository context
+
+/// Largest source read `repository_context` returns, and its default.
+pub const MAX_REPOSITORY_CONTEXT_BYTES: usize = 32 * 1024;
+
+/// A bounded source read from a saved review's immutable snapshot.
+pub struct RepositoryContextRequest<'a> {
+    pub review_id: &'a str,
+    /// Repository-relative file path.
+    pub path: &'a str,
+    /// Report the line numbers containing this text.
+    pub symbol: Option<&'a str>,
+    /// Bytes to return, clamped to 1..=[`MAX_REPOSITORY_CONTEXT_BYTES`].
+    pub max_bytes: Option<usize>,
+}
+
+/// Source text from a review snapshot, labeled as untrusted repository content.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RepositoryContext {
+    pub schema_version: u32,
+    pub path: String,
+    pub snapshot_id: String,
+    pub content_digest: String,
+    pub returned_bytes: usize,
+    pub total_bytes: usize,
+    pub matching_line_count: usize,
+    /// The returned bytes as text, or `None` when they are not valid UTF-8.
+    pub content: Option<String>,
+    /// One-based line numbers containing the requested symbol.
+    pub matching_lines: Vec<usize>,
+    pub truncated: bool,
+    pub classification: String,
+    pub note: Option<String>,
+}
+
+pub fn repository_context(
+    workspace: &Workspace,
+    request: RepositoryContextRequest<'_>,
+) -> Result<RepositoryContext> {
+    let review = get_review(workspace, request.review_id)?;
+    let relative = PathBuf::from(request.path);
+    if relative.components().any(|component| {
+        matches!(component, std::path::Component::Normal(name) if name == ".git" || name == ".vee")
+    }) {
+        return Err(usage_failure(
+            "repository metadata paths are not available through this tool",
+        ));
+    }
+    let bytes = vee_git::read_snapshot_tree_file(workspace.root(), &review.change_set, &relative)
+        .map_err(anyhow::Error::msg)?
+        .ok_or_else(|| usage_failure(format!("repository path {} was not found", request.path)))?;
+    let limit = request
+        .max_bytes
+        .unwrap_or(MAX_REPOSITORY_CONTEXT_BYTES)
+        .clamp(1, MAX_REPOSITORY_CONTEXT_BYTES);
+    let truncated = bytes.len() > limit;
+    let visible = &bytes[..bytes.len().min(limit)];
+    let (content, note, matching_lines) = match std::str::from_utf8(visible) {
+        Ok(text) => {
+            let matching_lines = request
+                .symbol
+                .map(|symbol| {
+                    text.lines()
+                        .enumerate()
+                        .filter_map(|(index, line)| line.contains(symbol).then_some(index + 1))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (Some(text.to_owned()), None, matching_lines)
+        }
+        Err(_) => (
+            None,
+            Some("file is binary or contains non-UTF8 bytes".into()),
+            Vec::new(),
+        ),
+    };
+    Ok(RepositoryContext {
+        schema_version: 2,
+        path: request.path.to_owned(),
+        snapshot_id: review.snapshot_id,
+        content_digest: vee_core::digest(&bytes),
+        returned_bytes: visible.len(),
+        total_bytes: bytes.len(),
+        matching_line_count: matching_lines.len(),
+        content,
+        matching_lines,
+        truncated,
+        classification: "untrusted_repository_source".into(),
+        note,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Imported review history
 
 pub fn search_imported_history(
@@ -1050,11 +1143,11 @@ pub fn search_imported_history(
 }
 
 /// Envelope for a recorded human label on an imported provider comment.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ExternalFeedbackRecorded {
     pub schema_version: u32,
     pub feedback: crate::imported_history::ExternalReviewFeedback,
-    pub trust: &'static str,
+    pub trust: String,
     pub gate_eligible: bool,
 }
 
@@ -1089,13 +1182,13 @@ pub fn record_external_feedback(
     Ok(ExternalFeedbackRecorded {
         schema_version: 1,
         feedback,
-        trust: "human_labeled_external_context",
+        trust: "human_labeled_external_context".into(),
         gate_eligible: false,
     })
 }
 
 /// Envelope for listed human labels on imported provider comments.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ExternalFeedbackList {
     pub schema_version: u32,
     pub feedback: Vec<crate::imported_history::ExternalReviewFeedback>,
@@ -1249,11 +1342,22 @@ fn saved_approval(store: &dyn Repositories, approval_id: &str) -> Result<vee_cor
         .ok_or_else(|| anyhow::anyhow!("approval {approval_id} could not be read back"))
 }
 
-pub fn list_rule_approvals(workspace: &Workspace) -> Result<Vec<vee_core::RuleApproval>> {
-    match workspace.existing_store()? {
-        Some(store) => store.list_rule_approvals().map_err(anyhow::Error::msg),
-        None => Ok(Vec::new()),
-    }
+/// Every saved rule guidance approval, in creation order.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RuleApprovalList {
+    pub schema_version: u32,
+    pub approvals: Vec<vee_core::RuleApproval>,
+}
+
+pub fn list_rule_approvals(workspace: &Workspace) -> Result<RuleApprovalList> {
+    let approvals = match workspace.existing_store()? {
+        Some(store) => store.list_rule_approvals().map_err(anyhow::Error::msg)?,
+        None => Vec::new(),
+    };
+    Ok(RuleApprovalList {
+        schema_version: 1,
+        approvals,
+    })
 }
 
 pub fn revoke_rule(

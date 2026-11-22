@@ -3018,7 +3018,10 @@ fn run() -> Result<u8> {
                         expires_in_days,
                     },
                 )?;
-                match output { Output::Json => emit_json(&result)?, Output::Text => println!("Approved {} ({}) for scope {}. Guidance is recorded and does not alter gate policy.", result.approval_id, result.candidate_id, result.scope) }
+                match output {
+                    Output::Json => emit_json(&result)?,
+                    Output::Text => print_view(&result)?,
+                }
                 Ok(0)
             }
             RulesCommand::List { output } => {
@@ -3027,20 +3030,7 @@ fn run() -> Result<u8> {
                 )?)?;
                 match output {
                     Output::Json => emit_json(&approvals)?,
-                    Output::Text => {
-                        if approvals.is_empty() {
-                            println!("No rule guidance approvals.");
-                        }
-                        for approval in approvals {
-                            println!(
-                                "{}  {}  {}  {}",
-                                approval.approval_id,
-                                approval.status.as_str(),
-                                approval.category,
-                                approval.scope
-                            );
-                        }
-                    }
+                    Output::Text => print_view(&approvals)?,
                 }
                 Ok(0)
             }
@@ -3058,9 +3048,7 @@ fn run() -> Result<u8> {
                 )?;
                 match output {
                     Output::Json => emit_json(&result)?,
-                    Output::Text => {
-                        println!("Revoked {}. Audit history retained.", result.approval_id)
-                    }
+                    Output::Text => print_view(&result)?,
                 }
                 Ok(0)
             }
@@ -4843,10 +4831,9 @@ fn run() -> Result<u8> {
                                     reviewer: &reviewer,
                                 },
                             )?;
-                            let feedback = &recorded.feedback;
                             match output {
                                 Output::Json => emit_json(&recorded)?,
-                                Output::Text => println!("Recorded {} feedback for external comment {} in {} (human label; never gate eligible).", feedback.label_text(), feedback.external_id, feedback.archive_digest),
+                                Output::Text => print_view(&recorded)?,
                             }
                             Ok(0)
                         }
@@ -4862,21 +4849,9 @@ fn run() -> Result<u8> {
                                 &workspace,
                                 archive_digest.as_deref(),
                             )?;
-                            let feedback = &listed.feedback;
                             match output {
                                 Output::Json => emit_json(&listed)?,
-                                Output::Text => {
-                                    for item in feedback {
-                                        println!(
-                                            "{} {} {} {} — {}",
-                                            item.archive_digest,
-                                            item.external_id,
-                                            item.label_text(),
-                                            item.reviewer,
-                                            item.reason
-                                        );
-                                    }
-                                }
+                                Output::Text => print_view(&listed)?,
                             }
                             Ok(0)
                         }

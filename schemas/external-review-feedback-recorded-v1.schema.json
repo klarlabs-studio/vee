@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vee.klarlabs.de/schemas/external-review-feedback-recorded-v1.schema.json",
+  "title": "Vee External Review Feedback Recorded v1",
+  "description": "The result of recording an explicit human label on an archived provider comment. The label is advisory history and is never gate evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "feedback", "trust", "gate_eligible"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "feedback": { "$ref": "external-review-feedback-v1.schema.json" },
+    "trust": { "const": "human_labeled_external_context" },
+    "gate_eligible": { "const": false }
+  }
+}

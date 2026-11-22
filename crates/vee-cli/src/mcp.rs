@@ -13,8 +13,6 @@ use std::{path::PathBuf, time::Duration};
 use vee_core::paths::CanonicalPath as _;
 use vee_core::{FindingFeedbackLabel, FindingStatus, Severity};
 
-const MAX_REPOSITORY_CONTEXT_BYTES: usize = 32 * 1024;
-
 const SERVER_INSTRUCTIONS: &str = "Vee reviews local Git changes and decides merge readiness with a deterministic gate. \
 Typical loop: get_applicable_standards before editing; review_changes (or start_review as a task) to review the working tree, staged changes, a base ref, or a commit; \
 list_findings and get_finding_task or get_finding_work_package to investigate; fix the code; verify_finding to run a trusted verification profile; \
@@ -431,23 +429,6 @@ struct VerificationRunInput {
     run_id: String,
 }
 
-/// MCP-only: bounded source read from a review snapshot (the CLI has no equivalent).
-#[derive(Serialize, JsonSchema)]
-struct RepositoryContextOutput {
-    schema_version: u32,
-    path: String,
-    snapshot_id: String,
-    content_digest: String,
-    returned_bytes: usize,
-    total_bytes: usize,
-    matching_line_count: usize,
-    content: Option<String>,
-    matching_lines: Vec<usize>,
-    truncated: bool,
-    classification: String,
-    note: Option<String>,
-}
-
 fn scope_request(input: &StartReviewInput) -> anyhow::Result<ScopeRequest> {
     let kind = match input.scope {
         ReviewScope::WorkingTree => operations::ScopeKind::WorkingTree,
@@ -477,89 +458,8 @@ fn run_review(
     )
 }
 
-fn repository_context(
-    workspace: &Workspace,
-    input: RepositoryContextInput,
-) -> anyhow::Result<RepositoryContextOutput> {
-    let review = operations::get_review(workspace, &input.review_id)?;
-    let relative = PathBuf::from(&input.path);
-    if relative.components().any(|component| {
-        matches!(component, std::path::Component::Normal(name) if name == ".git" || name == ".vee")
-    }) {
-        return Err(crate::usage_failure(
-            "repository metadata paths are not available through this tool",
-        ));
-    }
-    let bytes = vee_git::read_snapshot_tree_file(workspace.root(), &review.change_set, &relative)
-        .map_err(anyhow::Error::msg)?
-        .ok_or_else(|| {
-            crate::usage_failure(format!("repository path {} was not found", input.path))
-        })?;
-    let limit = input
-        .max_bytes
-        .unwrap_or(MAX_REPOSITORY_CONTEXT_BYTES)
-        .clamp(1, MAX_REPOSITORY_CONTEXT_BYTES);
-    let truncated = bytes.len() > limit;
-    let visible = &bytes[..bytes.len().min(limit)];
-    let (content, note, matching_lines) = match std::str::from_utf8(visible) {
-        Ok(text) => {
-            let matching_lines = input
-                .symbol
-                .as_deref()
-                .map(|symbol| {
-                    text.lines()
-                        .enumerate()
-                        .filter_map(|(index, line)| line.contains(symbol).then_some(index + 1))
-                        .collect()
-                })
-                .unwrap_or_default();
-            (Some(text.to_owned()), None, matching_lines)
-        }
-        Err(_) => (
-            None,
-            Some("file is binary or contains non-UTF8 bytes".into()),
-            Vec::new(),
-        ),
-    };
-    Ok(RepositoryContextOutput {
-        schema_version: 2,
-        path: input.path,
-        snapshot_id: review.snapshot_id,
-        content_digest: vee_core::digest(&bytes),
-        returned_bytes: visible.len(),
-        total_bytes: bytes.len(),
-        matching_line_count: matching_lines.len(),
-        content,
-        matching_lines,
-        truncated,
-        classification: "untrusted_repository_source".into(),
-        note,
-    })
-}
-
 /// Consumer checkouts must be relative Git roots beneath the server's repository,
 /// so an MCP client cannot point analysis at arbitrary local paths.
-/// Register a tool whose handler runs one blocking operation.
-macro_rules! operation_tool {
-    ($server:expr, $workspace:expr, $name:literal, $title:literal, $annotations:expr,
-     $schema:expr, $description:literal, |$ws:ident, $input:ident: $input_type:ty| $body:expr) => {{
-        let workspace = $workspace.clone();
-        let builder = $server
-            .tool($name)
-            .title($title)
-            .annotations($annotations)
-            .description($description);
-        let builder = match $schema {
-            Some(schema) => builder.output_schema_json(crate::contracts::bundled(schema))?,
-            None => builder,
-        };
-        builder.handler(move |_ctx, $input: $input_type| {
-            let $ws = workspace.clone();
-            run_blocking(move || $body)
-        })?;
-    }};
-}
-
 /// A tool result whose text is the shared view of `document`, rendered as
 /// Markdown: the same view the CLI prints. Structured content carries the
 /// document itself, validated against the tool's declared output schema.
@@ -576,7 +476,8 @@ where
     Ok(result)
 }
 
-/// Like `operation_tool!`, for operations whose document has a shared view.
+/// Register a tool whose handler runs one blocking operation and returns its
+/// document with the shared view (see [`view_result`]).
 macro_rules! viewed_tool {
     ($server:expr, $workspace:expr, $name:literal, $title:literal, $annotations:expr,
      $schema:literal, $description:literal, |$ws:ident, $input:ident: $input_type:ty| $body:expr) => {{
@@ -787,10 +688,15 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         "Summarize local reviews, gate decisions, finding lifecycle and severity, verification outcomes, feedback labels, and provider latency and cost. Same document as `vee analytics --output json`.",
         |ws, _input: EmptyInput| operations::quality_analytics(&ws));
 
-    operation_tool!(server, workspace, "get_repository_context", "Get repository context", read_only_tool(),
-        None::<&str>,
-        "Read bounded source from an immutable review snapshot by path and optionally find lines matching a symbol query.",
-        |ws, input: RepositoryContextInput| repository_context(&ws, input));
+    viewed_tool!(server, workspace, "get_repository_context", "Get repository context", read_only_tool(),
+        "repository-context-v2",
+        "Read bounded source from an immutable review snapshot by path and optionally find lines matching a symbol query. MCP only; the CLI has no equivalent.",
+        |ws, input: RepositoryContextInput| operations::repository_context(&ws, operations::RepositoryContextRequest {
+            review_id: &input.review_id,
+            path: &input.path,
+            symbol: input.symbol.as_deref(),
+            max_bytes: input.max_bytes,
+        }));
 
     viewed_tool!(server, workspace, "search_imported_review_history", "Search imported review history", read_only_tool(),
         "imported-review-search-v3",
@@ -799,8 +705,8 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
             &ws, &input.query, input.limit.unwrap_or(operations::DEFAULT_SEARCH_LIMIT),
         ));
 
-    operation_tool!(server, workspace, "record_external_review_feedback", "Record external review feedback", write_tool(false, false, false),
-        None::<&str>,
+    viewed_tool!(server, workspace, "record_external_review_feedback", "Record external review feedback", write_tool(false, false, false),
+        "external-review-feedback-recorded-v1",
         "Append an explicit human label to a comment in an integrity-checked provider review archive; never gate eligible. Same document as `vee reviews imported feedback set --output json`.",
         |ws, input: ExternalReviewFeedbackInput| operations::record_external_feedback(&ws, operations::ExternalFeedbackRequest {
             archive_digest: &input.archive_digest,
@@ -811,8 +717,8 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
             reviewer: &input.reviewer,
         }));
 
-    operation_tool!(server, workspace, "list_external_review_feedback", "List external review feedback", read_only_tool(),
-        None::<&str>,
+    viewed_tool!(server, workspace, "list_external_review_feedback", "List external review feedback", read_only_tool(),
+        "external-review-feedback-list-v1",
         "List append-only human labels for archived provider comments; never gate eligible. Same document as `vee reviews imported feedback list --output json`.",
         |ws, input: ListExternalReviewFeedbackInput| operations::list_external_feedback(&ws, input.archive_digest.as_deref()));
 
@@ -821,8 +727,8 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         "Mine repeated explicit feedback into candidate reviewer guidance without changing policy. Same document as `vee rules candidates --output json`.",
         |ws, _input: EmptyInput| operations::rule_candidates(&ws));
 
-    operation_tool!(server, workspace, "approve_rule_candidate", "Approve rule candidate", write_tool(false, false, false),
-        None::<&str>,
+    viewed_tool!(server, workspace, "approve_rule_candidate", "Approve rule candidate", write_tool(false, false, false),
+        "rule-approval-v2",
         "Approve scoped reviewer guidance for a current feedback candidate and its exact evidence digest. Same document as `vee rules approve --output json`.",
         |ws, input: ApproveRuleCandidateInput| operations::approve_rule(&ws, operations::ApproveRuleRequest {
             candidate_id: input.candidate_id,
@@ -835,13 +741,13 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
             expires_in_days: input.expires_in_days,
         }));
 
-    operation_tool!(server, workspace, "list_rule_approvals", "List rule approvals", read_only_tool(),
-        None::<&str>,
+    viewed_tool!(server, workspace, "list_rule_approvals", "List rule approvals", read_only_tool(),
+        "rule-approval-list-v1",
         "List active and revoked scoped reviewer guidance with audit events. Same document as `vee rules list --output json`.",
         |ws, _input: EmptyInput| operations::list_rule_approvals(&ws));
 
-    operation_tool!(server, workspace, "revoke_rule_approval", "Revoke rule approval", write_tool(true, true, false),
-        None::<&str>,
+    viewed_tool!(server, workspace, "revoke_rule_approval", "Revoke rule approval", write_tool(true, true, false),
+        "rule-approval-v2",
         "Revoke scoped reviewer guidance by appending an auditable event. Same document as `vee rules revoke --output json`.",
         |ws, input: RevokeRuleApprovalInput| operations::revoke_rule(&ws, &input.approval_id, &input.actor, &input.reason));
 

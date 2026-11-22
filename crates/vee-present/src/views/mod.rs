@@ -1,6 +1,7 @@
 //! `ToView` implementations, one module per bounded context.
 
 mod analysis;
+mod context;
 mod findings;
 mod gate;
 mod governance;

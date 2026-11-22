@@ -676,3 +676,332 @@ fn both_transports_reject_waiving_through_a_status_change() {
         .unwrap()
         .contains("waiver workflow"));
 }
+
+/// The CLI's `--color never` text for `args`.
+fn cli_text(root: &Path, args: &[&str]) -> String {
+    let output = vee()
+        .args(args)
+        .args(["--color", "never"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "vee {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// The MCP text of a write operation is the Markdown view of its own document.
+fn assert_mcp_view<T>(document: &Value, mcp_text: &str, operation: &str)
+where
+    T: serde::de::DeserializeOwned + vee_present::ToView,
+{
+    let typed: T = serde_json::from_value(document.clone())
+        .unwrap_or_else(|error| panic!("{operation}: document does not deserialize: {error}"));
+    assert_eq!(
+        mcp_text,
+        vee_present::markdown::render(&typed.to_view()),
+        "{operation}: MCP text is not the shared view"
+    );
+}
+
+/// The terminal view of `document`, as `--color never` prints it.
+fn terminal_view<T>(document: Value) -> String
+where
+    T: serde::de::DeserializeOwned + vee_present::ToView,
+{
+    let typed: T = serde_json::from_value(document).unwrap();
+    vee_present::ansi::render(&typed.to_view(), false)
+}
+
+/// A repository holding one archived provider discussion with three comments.
+fn repository_with_provider_discussion() -> (tempfile::TempDir, String) {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    git(root, &["init", "-q"]);
+    fs::write(root.join(".vee.yaml"), "version: 1\n").unwrap();
+    let issue = |id: &str, line: u64| {
+        json!({
+            "external_id": id,
+            "author": "reviewer",
+            "body": "Check the retry bound",
+            "path": "src/retry.rs",
+            "line": line,
+            "side": null,
+            "source_url": null,
+            "created_at": null,
+            "updated_at": null,
+            "classification": "untrusted_external_review"
+        })
+    };
+    let discussion = json!({
+        "schema_version": 1,
+        "provider": "github",
+        "pull_request": {
+            "repository": {"host": "github.com", "full_name": "example/service"},
+            "number": 9
+        },
+        "revision": "b".repeat(40),
+        "complete": true,
+        "gate_eligible": false,
+        "issues": [issue("42", 18), issue("43", 19), issue("44", 20)]
+    });
+    let digest = vee_application::imported_history::store_imported_history(
+        root,
+        &serde_json::to_vec(&discussion).unwrap(),
+    )
+    .unwrap();
+    (directory, digest)
+}
+
+/// Recording a label or an approval creates a new timestamped record on each
+/// call, so for those writes each transport's document is checked against the
+/// schema and its own view rather than against the other transport's. The
+/// CLI text of a write is compared with the view of the record it saved, read
+/// back through the list command.
+#[test]
+fn cli_and_mcp_share_external_feedback_and_rule_guidance_documents() {
+    let (repository, archive_digest) = repository_with_provider_discussion();
+    let root = repository.path();
+    let archive_digest = archive_digest.as_str();
+    let mut mcp = McpSession::start(root);
+    let reason = "The retry bound is enforced by the caller.";
+    let feedback_list = ["reviews", "imported", "feedback", "list"];
+
+    let cli = cli_json(root, &feedback_list);
+    let (via_mcp, text) = mcp.call_with_text("list_external_review_feedback", json!({}));
+    assert_same(
+        &cli,
+        &via_mcp,
+        "empty external feedback list",
+        "external-review-feedback-list-v1",
+    );
+    assert_same_view::<vee_application::operations::ExternalFeedbackList>(
+        root,
+        &feedback_list,
+        &via_mcp,
+        &text,
+    );
+
+    let set = |external_id: &'static str| {
+        [
+            "reviews",
+            "imported",
+            "feedback",
+            "set",
+            archive_digest,
+            external_id,
+            "--category",
+            "correctness",
+            "--label",
+            "false-positive",
+            "--reason",
+            reason,
+            "--reviewer",
+            "maintainer",
+        ]
+    };
+    let cli = cli_json(root, &set("42"));
+    assert_matches_published_schema(&cli, "external-review-feedback-recorded-v1");
+    let (via_mcp, text) = mcp.call_with_text(
+        "record_external_review_feedback",
+        json!({"archive_digest": archive_digest, "external_id": "43", "category": "correctness",
+            "label": "false_positive", "reason": reason, "reviewer": "maintainer"}),
+    );
+    assert_matches_published_schema(&via_mcp, "external-review-feedback-recorded-v1");
+    assert_mcp_view::<vee_application::operations::ExternalFeedbackRecorded>(
+        &via_mcp,
+        &text,
+        "record external feedback",
+    );
+    let printed = cli_text(root, &set("44"));
+
+    let filtered = [
+        "reviews",
+        "imported",
+        "feedback",
+        "list",
+        "--archive-digest",
+        archive_digest,
+    ];
+    let cli = cli_json(root, &filtered);
+    let (via_mcp, text) = mcp.call_with_text(
+        "list_external_review_feedback",
+        json!({"archive_digest": archive_digest}),
+    );
+    assert_same(
+        &cli,
+        &via_mcp,
+        "external feedback list",
+        "external-review-feedback-list-v1",
+    );
+    assert_eq!(cli["feedback"].as_array().unwrap().len(), 3, "{cli:#}");
+    assert_same_view::<vee_application::operations::ExternalFeedbackList>(
+        root, &filtered, &via_mcp, &text,
+    );
+    let saved = cli["feedback"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["external_id"] == "44")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        printed,
+        terminal_view::<vee_application::operations::ExternalFeedbackRecorded>(json!({
+            "schema_version": 1,
+            "feedback": saved,
+            "trust": "human_labeled_external_context",
+            "gate_eligible": false
+        })),
+        "CLI text of feedback set is not the shared view"
+    );
+
+    let candidates = cli_json(root, &["rules", "candidates"]);
+    assert_eq!(
+        candidates["candidates"].as_array().unwrap().len(),
+        1,
+        "{candidates:#}"
+    );
+    let candidate_id = candidates["candidates"][0]["candidate_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let evidence_digest = candidates["candidates"][0]["evidence_digest"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // One active approval per candidate and scope, so each approval gets its own scope.
+    let approve = |scope: &'static str| {
+        [
+            "rules",
+            "approve",
+            candidate_id.as_str(),
+            "--evidence-digest",
+            evidence_digest.as_str(),
+            "--scope",
+            scope,
+            "--instruction",
+            "Ask for the caller's retry bound before reporting this pattern.",
+            "--approver",
+            "maintainer",
+            "--reason",
+            "Reviewed the three archived discussion labels.",
+        ]
+    };
+    let cli_approval = cli_json(root, &approve("src/cli.rs"));
+    assert_matches_published_schema(&cli_approval, "rule-approval-v2");
+    assert_eq!(cli_approval["status"], "active");
+    let (mcp_approval, text) = mcp.call_with_text(
+        "approve_rule_candidate",
+        json!({"candidate_id": candidate_id, "evidence_digest": evidence_digest,
+            "scope": "src/mcp.rs",
+            "instruction": "Ask for the caller's retry bound before reporting this pattern.",
+            "approver": "maintainer", "reason": "Reviewed the three archived discussion labels."}),
+    );
+    assert_matches_published_schema(&mcp_approval, "rule-approval-v2");
+    assert_mcp_view::<vee_core::RuleApproval>(&mcp_approval, &text, "approve rule");
+    let printed = cli_text(root, &approve("src/text.rs"));
+
+    let cli = cli_json(root, &["rules", "list"]);
+    let (via_mcp, text) = mcp.call_with_text("list_rule_approvals", json!({}));
+    assert_same(&cli, &via_mcp, "rule approvals", "rule-approval-list-v1");
+    assert_same_view::<vee_application::operations::RuleApprovalList>(
+        root,
+        &["rules", "list"],
+        &via_mcp,
+        &text,
+    );
+    let approval_with_scope = |list: &Value, scope: &str| {
+        list["approvals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|approval| approval["scope"] == scope)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(approval_with_scope(&cli, "src/cli.rs"), cli_approval);
+    assert_eq!(approval_with_scope(&cli, "src/mcp.rs"), mcp_approval);
+    let text_approval = approval_with_scope(&cli, "src/text.rs");
+    assert_eq!(
+        printed,
+        terminal_view::<vee_core::RuleApproval>(text_approval.clone()),
+        "CLI text of rules approve is not the shared view"
+    );
+
+    let revoke = |approval: &Value| -> Vec<String> {
+        let approval_id = approval["approval_id"].as_str().unwrap();
+        ["rules", "revoke", approval_id, "--actor", "maintainer"]
+            .into_iter()
+            .chain(["--reason", "Superseded by repository policy."])
+            .map(str::to_owned)
+            .collect()
+    };
+    let args = revoke(&cli_approval);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let revoked = cli_json(root, &args);
+    assert_matches_published_schema(&revoked, "rule-approval-v2");
+    assert_eq!(revoked["status"], "revoked");
+    let (via_mcp, text) = mcp.call_with_text(
+        "revoke_rule_approval",
+        json!({"approval_id": mcp_approval["approval_id"], "actor": "maintainer",
+            "reason": "Superseded by repository policy."}),
+    );
+    assert_matches_published_schema(&via_mcp, "rule-approval-v2");
+    assert_eq!(via_mcp["status"], "revoked");
+    assert_mcp_view::<vee_core::RuleApproval>(&via_mcp, &text, "revoke rule");
+    let args = revoke(&text_approval);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let printed = cli_text(root, &args);
+
+    let cli = cli_json(root, &["rules", "list"]);
+    let (via_mcp, text) = mcp.call_with_text("list_rule_approvals", json!({}));
+    assert_same(
+        &cli,
+        &via_mcp,
+        "revoked rule approvals",
+        "rule-approval-list-v1",
+    );
+    assert!(cli["approvals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|approval| approval["status"] == "revoked"));
+    assert_same_view::<vee_application::operations::RuleApprovalList>(
+        root,
+        &["rules", "list"],
+        &via_mcp,
+        &text,
+    );
+    assert_eq!(
+        printed,
+        terminal_view::<vee_core::RuleApproval>(approval_with_scope(&cli, "src/text.rs")),
+        "CLI text of rules revoke is not the shared view"
+    );
+}
+
+/// `get_repository_context` has no CLI command, so only the MCP side is checked.
+#[test]
+fn repository_context_text_is_the_shared_view_of_its_document() {
+    let repository = seeded_repository();
+    let root = repository.path();
+    let review = cli_json(root, &["review", "--working-tree"]);
+    let review_id = review["review_id"].as_str().unwrap();
+    let mut mcp = McpSession::start(root);
+    let (document, text) = mcp.call_with_text(
+        "get_repository_context",
+        json!({"review_id": review_id, "path": "tracked.rs", "symbol": "unsafe"}),
+    );
+    assert_matches_published_schema(&document, "repository-context-v2");
+    assert_eq!(document["matching_lines"], json!([1]));
+    assert_eq!(document["snapshot_id"], review["snapshot_id"]);
+    assert_mcp_view::<vee_application::operations::RepositoryContext>(
+        &document,
+        &text,
+        "repository context",
+    );
+    assert!(text.contains("`fn main() { unsafe {} }`"), "{text}");
+}
