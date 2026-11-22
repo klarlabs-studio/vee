@@ -14,7 +14,6 @@ use vee_core::paths::CanonicalPath as _;
 use vee_core::{FindingFeedbackLabel, FindingStatus, Severity};
 
 const MAX_REPOSITORY_CONTEXT_BYTES: usize = 32 * 1024;
-const MAX_CROSS_REPOSITORY_CONSUMERS: usize = 128;
 const DEFAULT_SEARCH_LIMIT: usize = 20;
 
 const SERVER_INSTRUCTIONS: &str = "Vee reviews local Git changes and decides merge readiness with a deterministic gate. \
@@ -527,51 +526,6 @@ fn repository_context(
 
 /// Consumer checkouts must be relative Git roots beneath the server's repository,
 /// so an MCP client cannot point analysis at arbitrary local paths.
-fn confined_consumers(workspace: &Workspace, supplied: &[String]) -> anyhow::Result<Vec<PathBuf>> {
-    if supplied.is_empty() || supplied.len() > MAX_CROSS_REPOSITORY_CONSUMERS {
-        return Err(crate::usage_failure(format!(
-            "consumer_paths must contain between 1 and {MAX_CROSS_REPOSITORY_CONSUMERS} repository paths"
-        )));
-    }
-    let root = workspace.root().canonical()?;
-    supplied
-        .iter()
-        .map(|path| {
-            let relative = std::path::Path::new(path);
-            if relative.is_absolute()
-                || relative.as_os_str().is_empty()
-                || relative
-                    .components()
-                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
-            {
-                return Err(crate::usage_failure(format!(
-                    "consumer path `{path}` must be a relative path without `.` or `..` components"
-                )));
-            }
-            let canonical = root.join(relative).canonical().map_err(|error| {
-                crate::usage_failure(format!("cannot resolve consumer path `{path}`: {error}"))
-            })?;
-            if !canonical.starts_with(&root) {
-                return Err(crate::usage_failure(format!(
-                    "consumer path `{path}` escapes the configured repository root"
-                )));
-            }
-            if !canonical.is_dir() {
-                return Err(crate::usage_failure(format!(
-                    "consumer path `{path}` is not a directory"
-                )));
-            }
-            let git_root = vee_git::repository_root(&canonical).map_err(anyhow::Error::msg)?;
-            if git_root.canonical()? != canonical {
-                return Err(crate::usage_failure(format!(
-                    "consumer path `{path}` must name a Git checkout root"
-                )));
-            }
-            Ok(canonical)
-        })
-        .collect()
-}
-
 /// Register a tool whose handler runs one blocking operation.
 macro_rules! operation_tool {
     ($server:expr, $workspace:expr, $name:literal, $title:literal, $annotations:expr,
@@ -783,13 +737,10 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         .handler(move |_ctx, input: CrossRepositoryImpactInput| {
             let workspace = state.clone();
             run_blocking(move || {
-                if input.base_ref.trim().is_empty() || input.base_ref.len() > 256 {
-                    return Err(crate::usage_failure("base_ref must contain 1 to 256 characters"));
-                }
-                let consumers = confined_consumers(&workspace, &input.consumer_paths)?;
+                // MCP confines consumers beneath the server's root; the bounds are shared.
+                let consumers = operations::confine_consumers(&workspace, &input.consumer_paths)?;
                 let producer = workspace.root().canonical()?;
-                crate::repository_map::analyze_cross_impact(&producer, &input.base_ref, &consumers)
-                    .map_err(anyhow::Error::msg)
+                operations::cross_repository_impact(&producer, &input.base_ref, &consumers)
             })
         })?;
 

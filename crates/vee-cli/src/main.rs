@@ -5211,8 +5211,7 @@ fn run() -> Result<u8> {
                 base,
                 output,
             } => {
-                let result = repository_map::analyze_cross_impact(&producer, &base, &consumers)
-                    .map_err(anyhow::Error::msg)?;
+                let result = operations::cross_repository_impact(&producer, &base, &consumers)?;
                 match output {
                     Output::Json => {
                         serde_json::to_writer(std::io::stdout().lock(), &result)?;

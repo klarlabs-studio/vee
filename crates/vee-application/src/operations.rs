@@ -1531,3 +1531,77 @@ pub fn analyzer_findings(workspace: &Workspace, run_id: &str) -> Result<vee_core
         &run,
     ))
 }
+
+pub const MAX_CROSS_REPOSITORY_CONSUMERS: usize = 128;
+const MAX_BASE_REF_CHARS: usize = 256;
+
+/// Analyze changed symbols of `producer` across local consumer checkouts.
+/// Input bounds apply to every transport; callers that must confine consumer
+/// paths (MCP) resolve them with [`confine_consumers`] first.
+pub fn cross_repository_impact(
+    producer: &Path,
+    base_ref: &str,
+    consumers: &[PathBuf],
+) -> Result<crate::repository_map::CrossRepositoryImpact> {
+    if base_ref.trim().is_empty() || base_ref.chars().count() > MAX_BASE_REF_CHARS {
+        return Err(usage_failure(format!(
+            "base_ref must contain 1 to {MAX_BASE_REF_CHARS} characters"
+        )));
+    }
+    if consumers.is_empty() || consumers.len() > MAX_CROSS_REPOSITORY_CONSUMERS {
+        return Err(usage_failure(format!(
+            "consumer repositories must number between 1 and {MAX_CROSS_REPOSITORY_CONSUMERS}"
+        )));
+    }
+    crate::repository_map::analyze_cross_impact(producer, base_ref, consumers)
+        .map_err(anyhow::Error::msg)
+}
+
+/// Resolve consumer paths relative to the workspace root, rejecting any that
+/// leave it or do not name a Git checkout root.
+pub fn confine_consumers(workspace: &Workspace, supplied: &[String]) -> Result<Vec<PathBuf>> {
+    if supplied.is_empty() || supplied.len() > MAX_CROSS_REPOSITORY_CONSUMERS {
+        return Err(usage_failure(format!(
+            "consumer_paths must contain between 1 and {MAX_CROSS_REPOSITORY_CONSUMERS} repository paths"
+        )));
+    }
+    use vee_core::paths::CanonicalPath as _;
+    let canonical = |path: &Path| path.canonical();
+    let root = canonical(workspace.root())?;
+    supplied
+        .iter()
+        .map(|path| {
+            let relative = Path::new(path);
+            if relative.is_absolute()
+                || relative.as_os_str().is_empty()
+                || relative
+                    .components()
+                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            {
+                return Err(usage_failure(format!(
+                    "consumer path `{path}` must be a relative path without `.` or `..` components"
+                )));
+            }
+            let resolved = canonical(&root.join(relative)).map_err(|error| {
+                usage_failure(format!("cannot resolve consumer path `{path}`: {error}"))
+            })?;
+            if !resolved.starts_with(&root) {
+                return Err(usage_failure(format!(
+                    "consumer path `{path}` escapes the configured repository root"
+                )));
+            }
+            if !resolved.is_dir() {
+                return Err(usage_failure(format!(
+                    "consumer path `{path}` is not a directory"
+                )));
+            }
+            let git_root = vee_git::repository_root(&resolved).map_err(anyhow::Error::msg)?;
+            if canonical(&git_root)? != resolved {
+                return Err(usage_failure(format!(
+                    "consumer path `{path}` must name a Git checkout root"
+                )));
+            }
+            Ok(resolved)
+        })
+        .collect()
+}

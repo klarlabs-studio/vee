@@ -10854,3 +10854,32 @@ fn a_finding_task_shows_the_reviewed_source_after_the_file_changes() {
         "{task}"
     );
 }
+
+#[test]
+fn cross_repository_impact_rejects_unbounded_input_like_the_mcp_tool() {
+    let directory = tempfile::tempdir().unwrap();
+    let long_base = "b".repeat(257);
+    let output = vee()
+        .args(["repos", "impact", ".", "consumer", "--base", &long_base])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("base_ref must contain 1 to 256 characters"),
+        "{output:?}"
+    );
+    let consumers: Vec<String> = (0..129).map(|index| format!("consumer-{index}")).collect();
+    let output = vee()
+        .args(["repos", "impact", ".", "--base", "main"])
+        .args(&consumers)
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("between 1 and 128"),
+        "{output:?}"
+    );
+}
