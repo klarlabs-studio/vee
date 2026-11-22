@@ -52,6 +52,8 @@ First source release. Install from a checkout with
 
 - MCP stdio server and coding-agent skills for review, context, finding
   resolution, patch proposals, missing-test recommendations and PR drafts.
+  Every MCP tool declares an output schema, and saved reviews, verification
+  runs and finding feedback can be listed over MCP as on the CLI.
 - Finding lifecycle, feedback, feedback-mined rule candidates with human
   approval, and local quality analytics.
 - Local web dashboard on a loopback address, with a review queue that names
@@ -64,6 +66,18 @@ First source release. Install from a checkout with
 - Optional hosting adapters for GitHub, GitLab, Bitbucket, Azure DevOps and
   Gerrit (context and publication). They are tested against mock servers;
   live installation acceptance is still open.
+
+### CLI and MCP output
+
+- The CLI and the MCP server run the same operations and show the same view
+  of each result ([ADR 0011](docs/adr/0011-shared-presentation-for-cli-and-mcp.md)).
+  The terminal gets aligned, colored text; MCP gets that view as Markdown,
+  with the full JSON document as structured content.
+- `--color auto|always|never` on every command. `auto` colors only a
+  terminal and honors `NO_COLOR`, `CLICOLOR` and `CLICOLOR_FORCE`. Status
+  symbols (`✔ ✖ ▲ ● ·`) keep the meaning visible without color.
+- `--output json` follows the published schemas in [schemas/](schemas/).
+  Text output is for people and is not a stable interface.
 
 ### Measured quality
 
