@@ -7,7 +7,6 @@ use vee_core::{GateStatus, RepositoryConfig, Severity, VerificationStatus};
 use vee_store_sqlite::ReviewStore;
 
 use vee_application::attestation;
-use vee_application::attestation::committed_snapshot_matches_review;
 mod contracts;
 use vee_application::evidence_bundle;
 use vee_application::failure::{
@@ -97,24 +96,13 @@ fn set_color(choice: ColorArg) {
     let _ = COLOR.set(enabled);
 }
 
-/// Prints the shared view of a result document: the same view MCP returns as Markdown.
 /// The current repository's root, or the current directory outside a checkout.
 fn hosting_config_root() -> Result<std::path::PathBuf> {
     let cwd = std::env::current_dir()?;
     Ok(vee_git::repository_root(&cwd).unwrap_or(cwd))
 }
 
-fn print_publication(
-    publication: &vee_application::hosting::ReviewPublication,
-    output: Output,
-) -> Result<()> {
-    match output {
-        // Sorted keys, as the document has always been printed.
-        Output::Json => emit_json(&serde_json::to_value(publication)?),
-        Output::Text => print_view(publication),
-    }
-}
-
+/// Prints the shared view of a result document: the same view MCP returns as Markdown.
 fn print_view(document: &impl vee_present::ToView) -> Result<()> {
     let text = vee_present::ansi::render(&document.to_view(), *COLOR.get().unwrap_or(&false));
     let mut stdout = std::io::stdout().lock();
@@ -1138,192 +1126,6 @@ enum ReportFormat {
     VeeJson,
 }
 
-fn diff_contains_added_line(patch: Option<&str>, wanted: u32) -> bool {
-    let Some(patch) = patch else {
-        return false;
-    };
-    let mut new_line = 0u32;
-    let mut in_hunk = false;
-    for row in patch.lines() {
-        if row.starts_with("@@") {
-            let Some(range) = row.split_whitespace().find(|part| part.starts_with('+')) else {
-                in_hunk = false;
-                continue;
-            };
-            new_line = range
-                .trim_start_matches('+')
-                .split(',')
-                .next()
-                .and_then(|n| n.parse().ok())
-                .unwrap_or(0);
-            in_hunk = new_line > 0;
-            continue;
-        }
-        if !in_hunk {
-            continue;
-        }
-        if row.starts_with('+') {
-            if new_line == wanted {
-                return true;
-            }
-            new_line = new_line.saturating_add(1);
-        } else if row.starts_with(' ') {
-            new_line = new_line.saturating_add(1);
-        }
-    }
-    false
-}
-
-fn build_hosting_threads(
-    findings: &[vee_core::Finding],
-    pull_request: &vee_hosting::PullRequestRef,
-    changed_files: &[vee_hosting::PullRequestFile],
-    _review_id: &str,
-    snapshot_id: &str,
-    delivery_key: &str,
-) -> Vec<vee_hosting::ReviewThread> {
-    findings
-        .iter()
-        .filter_map(|finding| {
-            if matches!(finding.severity, Severity::Info) {
-                return None;
-            }
-            let (Some(path), Some(line)) = (&finding.path, finding.line) else {
-                return None;
-            };
-            if !changed_files.iter().any(|file| {
-                file.path == *path && diff_contains_added_line(file.patch.as_deref(), line)
-            }) {
-                return None;
-            }
-            Some(vee_hosting::ReviewThread {
-                pull_request: pull_request.clone(),
-                fingerprint: finding.fingerprint.clone(),
-                path: path.clone(),
-                line: u64::from(line),
-                side: vee_hosting::DiffSide::New,
-                body: format!(
-                    "**{:?} · {}** (confidence: {}%)\n\n{}\n\nVee finding `{}` · snapshot `{}`",
-                    finding.severity,
-                    finding.category,
-                    finding.confidence.unwrap_or(0),
-                    finding.rationale,
-                    finding.id,
-                    snapshot_id
-                ),
-                resolution: vee_hosting::ThreadResolution::Open,
-                snapshot_id: snapshot_id.to_owned(),
-                idempotency_key: format!("{delivery_key}:{}", finding.fingerprint),
-            })
-        })
-        .collect()
-}
-
-fn build_resolved_hosting_threads(
-    records: &[vee_core::FindingRecord],
-    active_fingerprints: &std::collections::BTreeSet<String>,
-    previously_published_fingerprints: &std::collections::BTreeSet<String>,
-    pull_request: &vee_hosting::PullRequestRef,
-    review_id: &str,
-    snapshot_id: &str,
-) -> Vec<vee_hosting::ReviewThread> {
-    records
-        .iter()
-        .filter_map(|record| {
-            let finding = &record.finding;
-            if record.status != vee_core::FindingStatus::Resolved
-                || active_fingerprints.contains(&finding.fingerprint)
-                || !previously_published_fingerprints.contains(&finding.fingerprint)
-                || matches!(finding.severity, Severity::Info)
-            {
-                return None;
-            }
-            let (Some(path), Some(line)) = (&finding.path, finding.line) else {
-                return None;
-            };
-            Some(vee_hosting::ReviewThread {
-                pull_request: pull_request.clone(),
-                fingerprint: finding.fingerprint.clone(),
-                path: path.clone(),
-                line: u64::from(line),
-                side: vee_hosting::DiffSide::New,
-                body: format!(
-                    "**Resolved finding**\n\n{}\n\nVee finding `{}` · previously reviewed snapshot `{}`",
-                    record.status_reason.as_deref().unwrap_or("Marked resolved locally"),
-                    finding.id,
-                    snapshot_id
-                ),
-                resolution: vee_hosting::ThreadResolution::Resolved,
-                snapshot_id: snapshot_id.to_owned(),
-                idempotency_key: format!("{review_id}:{}:resolved", finding.fingerprint),
-            })
-        })
-        .collect()
-}
-
-fn hosting_thread_target_key(
-    provider_id: &str,
-    pull_request: &vee_hosting::PullRequestRef,
-) -> Result<String, String> {
-    let identity = serde_json::to_string(pull_request).map_err(|error| error.to_string())?;
-    Ok(format!("{provider_id}:{identity}"))
-}
-
-fn updated_hosted_finding_fingerprints(
-    previously_published: &std::collections::BTreeSet<String>,
-    desired_threads: &[vee_hosting::ReviewThread],
-) -> std::collections::BTreeSet<String> {
-    let mut retained = previously_published.clone();
-    for thread in desired_threads {
-        match thread.resolution {
-            vee_hosting::ThreadResolution::Open => {
-                retained.insert(thread.fingerprint.clone());
-            }
-            vee_hosting::ThreadResolution::Resolved => {
-                retained.remove(&thread.fingerprint);
-            }
-        }
-    }
-    retained
-}
-
-/// Persist a recoverable superset before publishing. A provider may accept a
-/// thread update while its response is lost, so the next run must still know
-/// every fingerprint that could exist remotely until publication completes.
-fn hosting_thread_intent_fingerprints(
-    previously_published: &std::collections::BTreeSet<String>,
-    desired_threads: &[vee_hosting::ReviewThread],
-) -> std::collections::BTreeSet<String> {
-    previously_published
-        .iter()
-        .cloned()
-        .chain(
-            desired_threads
-                .iter()
-                .map(|thread| thread.fingerprint.clone()),
-        )
-        .collect()
-}
-
-fn add_resolved_hosting_threads(
-    threads: &mut Vec<vee_hosting::ReviewThread>,
-    records: &[vee_core::FindingRecord],
-    active_fingerprints: &std::collections::BTreeSet<String>,
-    previously_published_fingerprints: &std::collections::BTreeSet<String>,
-    pull_request: &vee_hosting::PullRequestRef,
-    review_id: &str,
-    snapshot_id: &str,
-) {
-    threads.extend(build_resolved_hosting_threads(
-        records,
-        active_fingerprints,
-        previously_published_fingerprints,
-        pull_request,
-        review_id,
-        snapshot_id,
-    ));
-}
-
 #[derive(Subcommand)]
 enum GateCommand {
     /// Re-evaluate the gate for a saved review against the current source.
@@ -1713,80 +1515,45 @@ impl vee_http::WebhookEventHandler for HostingWebhookReviewer {
         {
             return Err("review result does not match webhook commit range".into());
         }
-        let (conclusion, title) = match review.gate.status {
-            GateStatus::Pass => (vee_hosting::CheckConclusion::Success, "Vee passed"),
-            GateStatus::Block => (vee_hosting::CheckConclusion::Failure, "Vee blocked"),
-            GateStatus::Incomplete => (
-                vee_hosting::CheckConclusion::ActionRequired,
-                "Vee incomplete",
-            ),
-        };
-        let summary = if review.gate.reasons.is_empty() {
-            format!("Gate status: {:?}", review.gate.status)
-        } else {
-            review
-                .gate
-                .reasons
-                .iter()
-                .map(|reason| format!("- {reason}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
         let changed = self
             .provider
             .list_changed_files(pull_request, &remote.revision)
             .map_err(|error| error.to_string())?;
         let delivery_key = vee_core::digest(event.event_id.as_bytes());
-        let mut threads = build_hosting_threads(
+        let threads = vee_application::publication::build_hosting_threads(
             &review.findings,
             pull_request,
             &changed,
-            &review.review_id,
             &review.snapshot_id,
             &delivery_key,
         );
-        let active_fingerprints = review
-            .findings
-            .iter()
-            .map(|finding| finding.fingerprint.clone())
-            .collect();
-        let resolved_findings =
-            store.list_findings(None, Some(vee_core::FindingStatus::Resolved), None)?;
-        let thread_target = hosting_thread_target_key(self.provider.provider_id(), pull_request)?;
-        let previously_published = store.hosted_finding_threads(&thread_target)?;
-        add_resolved_hosting_threads(
-            &mut threads,
-            &resolved_findings,
-            &active_fingerprints,
-            &previously_published,
+        let check = vee_application::publication::gate_check_run(
+            &review.gate,
             pull_request,
-            &review.review_id,
+            format!("webhook:{delivery_key}"),
             &review.snapshot_id,
         );
-        let published_fingerprints =
-            updated_hosted_finding_fingerprints(&previously_published, &threads);
-        let intent_fingerprints =
-            hosting_thread_intent_fingerprints(&previously_published, &threads);
-        store.replace_hosted_finding_threads(&thread_target, &intent_fingerprints)?;
-        self.provider
-            .publish_review(vee_hosting::ReviewPublication {
-                pull_request: pull_request.clone(),
-                expected_revision: remote.revision,
-                check: vee_hosting::CheckRun {
-                    pull_request: pull_request.clone(),
-                    external_id: format!("webhook:{delivery_key}"),
-                    name: "Vee".into(),
-                    status: vee_hosting::CheckStatus::Completed,
-                    conclusion: Some(conclusion),
-                    title: title.into(),
-                    summary,
-                    snapshot_id: review.snapshot_id,
-                    idempotency_key: format!("webhook:{delivery_key}"),
-                },
-                threads,
-            })
-            .map_err(|error| error.to_string())?;
-        store.replace_hosted_finding_threads(&thread_target, &published_fingerprints)?;
+        vee_application::publication::publish_with_thread_ledger(
+            &mut store,
+            self.provider.provider_id(),
+            pull_request,
+            &vee_application::publication::PublishedReview {
+                review_id: &review.review_id,
+                snapshot_id: &review.snapshot_id,
+                findings: &review.findings,
+            },
+            threads,
+            |threads| {
+                self.provider
+                    .publish_review(vee_hosting::ReviewPublication {
+                        pull_request: pull_request.clone(),
+                        expected_revision: remote.revision,
+                        check,
+                        threads,
+                    })
+                    .map_err(|error| error.to_string())
+            },
+        )?;
         Ok(())
     }
 }
@@ -3091,508 +2858,31 @@ fn run() -> Result<u8> {
                 output,
             } => {
                 let cwd = std::env::current_dir()?;
-                let top = vee_git::repository_root(&cwd)
-                    .map_err(anyhow::Error::msg)?
-                    .to_string_lossy()
-                    .to_string();
-                let (offline, hosting) = load_hosting_config(std::path::Path::new(&top))?;
-                anyhow::ensure!(
-                    !offline,
-                    "offline mode prevents publishing to a Git hosting provider"
-                );
-                let provider_id = resolve_hosting_setting(provider, hosting.provider, "github");
-                let host = resolve_hosting_setting(host, hosting.host, "github.com");
-                let api_base = resolve_hosting_setting(api_base, hosting.api_base, "");
-                let token_env = resolve_hosting_setting(token_env, hosting.token_env, "");
-                let username = resolve_hosting_setting(username, hosting.username, "");
-                let webhook_secret_env = resolve_hosting_setting(
-                    webhook_secret_env,
-                    hosting.webhook_secret_env,
-                    "VEE_GITHUB_WEBHOOK_SECRET",
-                );
-                let actor_login = resolve_hosting_setting(actor_login, hosting.actor_login, "");
-                // The same re-evaluation as `vee gate check`, so a published
-                // decision is the one the gate would make now.
-                let reevaluated = operations::reevaluate_gate(
-                    &operations::Workspace::new(
-                        std::path::PathBuf::from(&top),
-                        crate::local_stores(),
-                    ),
-                    &review_id,
-                    None,
-                )?;
-                let mut reviewed = reevaluated.review;
-                reviewed.gate = reevaluated.decision;
-                let mut store =
-                    ReviewStore::open(&std::path::Path::new(&top).join(".vee/vee.sqlite"))
-                        .map_err(anyhow::Error::msg)?;
-                anyhow::ensure!(
-                    reviewed.analysis_complete,
-                    "cannot publish an incomplete review"
-                );
-                anyhow::ensure!(
-                    reviewed.snapshot_id == reviewed.change_set.digest,
-                    "review snapshot digest is invalid"
-                );
-                anyhow::ensure!(
-                    !matches!(
-                        reviewed.change_set.scope.as_str(),
-                        "staged" | "working_tree"
-                    ),
-                    "cannot publish a staged-only or working-tree-only snapshot to a pull request"
-                );
-                if reviewed.change_set.scope == "base_and_worktree" {
-                    anyhow::ensure!(
-                        committed_snapshot_matches_review(
-                            std::path::Path::new(&top),
-                            &reviewed.change_set,
-                        )
-                        .map_err(anyhow::Error::msg)?,
-                        "cannot publish a review whose captured worktree content differs from the committed PR diff"
-                    );
-                    let status = std::process::Command::new("git")
-                        .args(["status", "--porcelain", "--untracked-files=all"])
-                        .current_dir(&top)
-                        .output()?;
-                    anyhow::ensure!(
-                        status.status.success(),
-                        "could not verify the local worktree state"
-                    );
-                    anyhow::ensure!(status.stdout.is_empty(), "cannot publish a snapshot while the local worktree or index has uncommitted changes");
-                }
-                let token_env = if token_env.is_empty() {
-                    match provider_id.as_str() {
-                        "gitlab" => "GL_TOKEN",
-                        "bitbucket" => "BB_TOKEN",
-                        "azure-devops" => "AZURE_DEVOPS_EXT_PAT",
-                        "gerrit" => "GERRIT_TOKEN",
-                        _ => "GH_TOKEN",
-                    }
-                } else {
-                    &token_env
-                };
-                let token = std::env::var(token_env).with_context(|| {
-                    format!("required credential environment variable {token_env} is not set")
-                })?;
-                let secret_env = if webhook_secret_env == "VEE_GITHUB_WEBHOOK_SECRET"
-                    && provider_id == "bitbucket"
-                {
-                    "VEE_BITBUCKET_WEBHOOK_SECRET"
-                } else {
-                    &webhook_secret_env
-                };
-                let webhook_secret = std::env::var(secret_env).unwrap_or_default();
-                let host = effective_work_item_host(&provider_id, &host)?;
-                let api_base = work_item_api_base(&provider_id, &host, &api_base)?;
-                if provider_id == "azure-devops" {
-                    let provider = vee_hosting::azure_devops::AzureDevOpsAdapter::new(
-                        vee_hosting::azure_devops::AzureDevOpsConfig::new(&api_base, token)
-                            .map_err(anyhow::Error::msg)?,
-                    )
-                    .map_err(anyhow::Error::msg)?;
-                    let pull_request = vee_hosting::PullRequestRef {
-                        repository: vee_hosting::RepositoryRef {
-                            host: host.clone(),
-                            full_name: repository.clone(),
-                        },
+                let top = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
+                let publication = vee_application::hosting::publish_review(
+                    &operations::Workspace::new(top, crate::local_stores()),
+                    vee_application::hosting::PublishRequest {
+                        review_id: &review_id,
+                        repository: &repository,
                         number,
-                    };
-                    let remote = vee_hosting::PullRequestContextProvider::get_pull_request_context(
-                        &provider,
-                        &pull_request,
-                    )
-                    .map_err(anyhow::Error::msg)?;
-                    anyhow::ensure!(
-                        remote.state == vee_hosting::PullRequestState::Open,
-                        "pull request is not open"
-                    );
-                    anyhow::ensure!(reviewed.change_set.head_oid.as_deref() == Some(remote.head_oid.as_str()), "reviewed head does not match the current pull request head; rerun Vee against the PR head");
-                    anyhow::ensure!(reviewed.change_set.base_oid.as_deref() == Some(remote.base_oid.as_str()), "reviewed base does not match the current pull request base; rerun Vee against the current PR diff");
-                    // Equal to the provider's commits (checked above), but captured
-                    // from local Git, so these are what reach git as arguments.
-                    let reviewed_base = reviewed.change_set.base_oid.clone().unwrap_or_default();
-                    let reviewed_head = reviewed.change_set.head_oid.clone().unwrap_or_default();
-                    let (conclusion, title) = match reviewed.gate.status {
-                        vee_core::GateStatus::Pass => {
-                            (vee_hosting::CheckConclusion::Success, "Vee passed")
-                        }
-                        vee_core::GateStatus::Block => {
-                            (vee_hosting::CheckConclusion::Failure, "Vee blocked")
-                        }
-                        vee_core::GateStatus::Incomplete => (
-                            vee_hosting::CheckConclusion::ActionRequired,
-                            "Vee incomplete",
-                        ),
-                    };
-                    let summary = if reviewed.gate.reasons.is_empty() {
-                        format!("Gate status: {:?}", reviewed.gate.status)
-                    } else {
-                        reviewed
-                            .gate
-                            .reasons
-                            .iter()
-                            .map(|reason| format!("- {reason}"))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    };
-                    let mut threads = Vec::new();
-                    for finding in &reviewed.findings {
-                        if matches!(finding.severity, Severity::Info) {
-                            continue;
-                        }
-                        let (Some(path), Some(line)) = (&finding.path, finding.line) else {
-                            continue;
-                        };
-                        let relative = std::path::Path::new(path);
-                        if relative.is_absolute()
-                            || relative.components().any(|component| {
-                                matches!(
-                                    component,
-                                    std::path::Component::ParentDir
-                                        | std::path::Component::RootDir
-                                        | std::path::Component::Prefix(_)
-                                )
-                            })
-                        {
-                            continue;
-                        }
-                        let diff = std::process::Command::new("git")
-                            .args([
-                                "--literal-pathspecs",
-                                "diff",
-                                "--no-ext-diff",
-                                "--unified=0",
-                            ])
-                            .arg(&reviewed_base)
-                            .arg(&reviewed_head)
-                            .arg("--")
-                            .arg(path)
-                            .current_dir(&top)
-                            .output()?;
-                        anyhow::ensure!(diff.status.success(), "could not verify Azure DevOps finding locations against the local PR diff");
-                        if !diff_contains_added_line(Some(std::str::from_utf8(&diff.stdout)?), line)
-                        {
-                            continue;
-                        }
-                        threads.push(vee_hosting::ReviewThread {
-                            pull_request: pull_request.clone(),
-                            fingerprint: finding.fingerprint.clone(),
-                            path: path.clone(),
-                            line: u64::from(line),
-                            side: vee_hosting::DiffSide::New,
-                            body: format!("**{:?} · {}** (confidence: {}%)\n\n{}\n\nVee finding `{}` · snapshot `{}`", finding.severity, finding.category, finding.confidence.unwrap_or(0), finding.rationale, finding.id, reviewed.snapshot_id),
-                            resolution: vee_hosting::ThreadResolution::Open,
-                            snapshot_id: reviewed.snapshot_id.clone(),
-                            idempotency_key: format!("{}:{}", reviewed.review_id, finding.fingerprint),
-                        });
-                    }
-                    let active_fingerprints = reviewed
-                        .findings
-                        .iter()
-                        .map(|finding| finding.fingerprint.clone())
-                        .collect();
-                    let resolved_findings = store
-                        .list_findings(None, Some(vee_core::FindingStatus::Resolved), None)
-                        .map_err(anyhow::Error::msg)?;
-                    let thread_target = hosting_thread_target_key(&provider_id, &pull_request)
-                        .map_err(anyhow::Error::msg)?;
-                    let previously_published = store
-                        .hosted_finding_threads(&thread_target)
-                        .map_err(anyhow::Error::msg)?;
-                    add_resolved_hosting_threads(
-                        &mut threads,
-                        &resolved_findings,
-                        &active_fingerprints,
-                        &previously_published,
-                        &pull_request,
-                        &reviewed.review_id,
-                        &reviewed.snapshot_id,
-                    );
-                    let published_fingerprints =
-                        updated_hosted_finding_fingerprints(&previously_published, &threads);
-                    let intent_fingerprints =
-                        hosting_thread_intent_fingerprints(&previously_published, &threads);
-                    store
-                        .replace_hosted_finding_threads(&thread_target, &intent_fingerprints)
-                        .map_err(anyhow::Error::msg)?;
-                    let thread_ids = if threads.is_empty() {
-                        std::collections::BTreeMap::new()
-                    } else {
-                        provider
-                            .publish_threads(&pull_request, &remote.revision, &threads)
-                            .map_err(anyhow::Error::msg)?
-                    };
-                    let check = vee_hosting::CheckRun {
-                        pull_request: pull_request.clone(),
-                        external_id: reviewed.review_id.clone(),
-                        name: "Vee".into(),
-                        status: vee_hosting::CheckStatus::Completed,
-                        conclusion: Some(conclusion),
-                        title: title.into(),
-                        summary,
-                        snapshot_id: reviewed.snapshot_id.clone(),
-                        idempotency_key: reviewed.review_id.clone(),
-                    };
-                    let check_id = provider
-                        .publish_check(&pull_request, &remote.revision, &check)
-                        .map_err(anyhow::Error::msg)?;
-                    store
-                        .replace_hosted_finding_threads(&thread_target, &published_fingerprints)
-                        .map_err(anyhow::Error::msg)?;
-                    print_publication(
-                        &vee_application::hosting::ReviewPublication {
-                            schema_version:
-                                vee_application::hosting::REVIEW_PUBLICATION_SCHEMA_VERSION,
-                            review_id: reviewed.review_id,
-                            snapshot_id: reviewed.snapshot_id,
-                            provider_check_id: check_id,
-                            thread_ids,
-                            revision: remote.revision,
-                            destination: Some(vee_application::hosting::PublicationDestination {
-                                provider: provider_id,
-                                pull_request,
-                            }),
-                        },
-                        output,
-                    )?;
-                    return Ok(0);
-                }
-                let provider: Box<dyn vee_hosting::GitHostingProvider> = match provider_id.as_str()
-                {
-                    "github" => Box::new(
-                        vee_hosting::github::GitHubAdapter::new(
-                            vee_hosting::github::GitHubConfig::new(
-                                &api_base,
-                                token,
-                                webhook_secret,
-                            )
-                            .map_err(anyhow::Error::msg)?
-                            .with_actor_login(actor_login),
-                        )
-                        .map_err(anyhow::Error::msg)?,
-                    ),
-                    "gitlab" => {
-                        let secret_env = if webhook_secret_env == "VEE_GITHUB_WEBHOOK_SECRET" {
-                            "VEE_GITLAB_WEBHOOK_SECRET"
-                        } else {
-                            &webhook_secret_env
-                        };
-                        let webhook_secret = std::env::var(secret_env).unwrap_or_default();
-                        Box::new(
-                            vee_hosting::gitlab::GitLabAdapter::new(
-                                vee_hosting::gitlab::GitLabConfig::new(&api_base, token)
-                                    .map_err(anyhow::Error::msg)?
-                                    .with_webhook_secret(webhook_secret)
-                                    .with_actor_login(actor_login),
-                            )
-                            .map_err(anyhow::Error::msg)?,
-                        )
-                    }
-                    "bitbucket" => Box::new(
-                        vee_hosting::bitbucket::BitbucketAdapter::new(
-                            vee_hosting::bitbucket::BitbucketConfig::new(&api_base, token)
-                                .map_err(anyhow::Error::msg)?
-                                .with_webhook_secret(webhook_secret),
-                        )
-                        .map_err(anyhow::Error::msg)?,
-                    ),
-                    "gerrit" => {
-                        let mut config = vee_hosting::gerrit::GerritConfig::new(&api_base, token)
-                            .map_err(anyhow::Error::msg)?;
-                        if !username.is_empty() {
-                            config = config.with_username(username);
-                        }
-                        Box::new(
-                            vee_hosting::gerrit::GerritAdapter::new(config)
-                                .map_err(anyhow::Error::msg)?,
-                        )
-                    }
-                    _ => {
-                        return Err(configuration_failure(format!(
-                            "unsupported hosting provider `{provider_id}`"
-                        )))
-                    }
-                };
-                let pull_request = vee_hosting::PullRequestRef {
-                    repository: vee_hosting::RepositoryRef {
-                        host: host.clone(),
-                        full_name: repository.clone(),
-                    },
-                    number,
-                };
-                let remote = provider
-                    .get_pull_request(&pull_request)
-                    .map_err(anyhow::Error::msg)?;
-                anyhow::ensure!(
-                    remote.state == vee_hosting::PullRequestState::Open,
-                    "pull request is not open"
-                );
-                anyhow::ensure!(reviewed.change_set.head_oid.as_deref() == Some(remote.head_oid.as_str()), "reviewed head does not match the current pull request head; rerun Vee against the PR head");
-                anyhow::ensure!(reviewed.change_set.base_oid.as_deref() == Some(remote.base_oid.as_str()), "reviewed base does not match the current pull request base; rerun Vee against the current PR diff");
-                // Equal to the provider's commits (checked above), but captured
-                // from local Git, so these are what reach git as arguments.
-                let reviewed_base = reviewed.change_set.base_oid.clone().unwrap_or_default();
-                let reviewed_head = reviewed.change_set.head_oid.clone().unwrap_or_default();
-                let changed = provider
-                    .list_changed_files(&pull_request, &remote.revision)
-                    .map_err(anyhow::Error::msg)?;
-                let changed_paths: std::collections::BTreeSet<_> =
-                    changed.iter().map(|file| file.path.as_str()).collect();
-                let mut threads = Vec::new();
-                for finding in &reviewed.findings {
-                    if matches!(finding.severity, vee_core::Severity::Info) {
-                        continue;
-                    }
-                    let (Some(path), Some(line)) = (&finding.path, finding.line) else {
-                        continue;
-                    };
-                    anyhow::ensure!(
-                        changed_paths.contains(path.as_str()),
-                        "finding {} is outside the current pull request diff",
-                        finding.id
-                    );
-                    let on_added_line = if provider_id == "gerrit" {
-                        let diff = std::process::Command::new("git")
-                            .args([
-                                "--literal-pathspecs",
-                                "diff",
-                                "--no-ext-diff",
-                                "--unified=0",
-                            ])
-                            .arg(&reviewed_base)
-                            .arg(&reviewed_head)
-                            .arg("--")
-                            .arg(path)
-                            .current_dir(&top)
-                            .output()?;
-                        anyhow::ensure!(diff.status.success(), "could not verify Gerrit finding locations against the local base-to-head Git diff");
-                        diff_contains_added_line(Some(std::str::from_utf8(&diff.stdout)?), line)
-                    } else {
-                        changed.iter().any(|file| {
-                            file.path == *path
-                                && diff_contains_added_line(file.patch.as_deref(), line)
-                        })
-                    };
-                    if !on_added_line {
-                        continue;
-                    }
-                    let resolution = vee_hosting::ThreadResolution::Open;
-                    let body = format!(
-                        "**{:?} · {}** (confidence: {}%)\n\n{}\n\nVee finding `{}` · snapshot `{}`",
-                        finding.severity,
-                        finding.category,
-                        finding.confidence.unwrap_or(0),
-                        finding.rationale,
-                        finding.id,
-                        reviewed.snapshot_id
-                    );
-                    threads.push(vee_hosting::ReviewThread {
-                        pull_request: pull_request.clone(),
-                        fingerprint: finding.fingerprint.clone(),
-                        path: path.clone(),
-                        line: u64::from(line),
-                        side: vee_hosting::DiffSide::New,
-                        body,
-                        resolution,
-                        snapshot_id: reviewed.snapshot_id.clone(),
-                        idempotency_key: format!("{}:{}", reviewed.review_id, finding.fingerprint),
-                    });
-                }
-                let active_fingerprints = reviewed
-                    .findings
-                    .iter()
-                    .map(|finding| finding.fingerprint.clone())
-                    .collect();
-                let resolved_findings = store
-                    .list_findings(None, Some(vee_core::FindingStatus::Resolved), None)
-                    .map_err(anyhow::Error::msg)?;
-                let thread_target = hosting_thread_target_key(&provider_id, &pull_request)
-                    .map_err(anyhow::Error::msg)?;
-                let previously_published = store
-                    .hosted_finding_threads(&thread_target)
-                    .map_err(anyhow::Error::msg)?;
-                add_resolved_hosting_threads(
-                    &mut threads,
-                    &resolved_findings,
-                    &active_fingerprints,
-                    &previously_published,
-                    &pull_request,
-                    &reviewed.review_id,
-                    &reviewed.snapshot_id,
-                );
-                let (conclusion, title) = match reviewed.gate.status {
-                    vee_core::GateStatus::Pass => {
-                        (vee_hosting::CheckConclusion::Success, "Vee passed")
-                    }
-                    vee_core::GateStatus::Block => {
-                        (vee_hosting::CheckConclusion::Failure, "Vee blocked")
-                    }
-                    vee_core::GateStatus::Incomplete => (
-                        vee_hosting::CheckConclusion::ActionRequired,
-                        "Vee incomplete",
-                    ),
-                };
-                let summary = reviewed
-                    .gate
-                    .reasons
-                    .iter()
-                    .map(|reason| format!("- {reason}"))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let published_fingerprints =
-                    updated_hosted_finding_fingerprints(&previously_published, &threads);
-                let intent_fingerprints =
-                    hosting_thread_intent_fingerprints(&previously_published, &threads);
-                store
-                    .replace_hosted_finding_threads(&thread_target, &intent_fingerprints)
-                    .map_err(anyhow::Error::msg)?;
-                let publication = vee_hosting::ReviewPublication {
-                    pull_request: pull_request.clone(),
-                    expected_revision: remote.revision.clone(),
-                    check: vee_hosting::CheckRun {
-                        pull_request,
-                        external_id: reviewed.review_id.clone(),
-                        name: "Vee".into(),
-                        status: vee_hosting::CheckStatus::Completed,
-                        conclusion: Some(conclusion),
-                        title: title.into(),
-                        summary: if summary.is_empty() {
-                            format!("Gate status: {:?}", reviewed.gate.status)
-                        } else {
-                            summary
-                        },
-                        snapshot_id: reviewed.snapshot_id.clone(),
-                        idempotency_key: reviewed.review_id.clone(),
-                    },
-                    threads,
-                };
-                let receipt = provider
-                    .publish_review(publication)
-                    .map_err(anyhow::Error::msg)?;
-                store
-                    .replace_hosted_finding_threads(&thread_target, &published_fingerprints)
-                    .map_err(anyhow::Error::msg)?;
-                print_publication(
-                    &vee_application::hosting::ReviewPublication {
-                        schema_version: vee_application::hosting::REVIEW_PUBLICATION_SCHEMA_VERSION,
-                        review_id: reviewed.review_id,
-                        snapshot_id: reviewed.snapshot_id,
-                        provider_check_id: receipt.provider_check_id,
-                        thread_ids: receipt.thread_ids,
-                        revision: receipt.resulting_revision,
-                        destination: Some(vee_application::hosting::PublicationDestination {
-                            provider: provider_id,
-                            pull_request: vee_hosting::PullRequestRef {
-                                repository: vee_hosting::RepositoryRef {
-                                    host,
-                                    full_name: repository,
-                                },
-                                number,
+                        flags: vee_application::hosting::PublishFlags {
+                            hosting: vee_application::hosting::HostingFlags {
+                                provider,
+                                host,
+                                api_base,
+                                token_env,
+                                username,
                             },
-                        }),
+                            webhook_secret_env,
+                            actor_login,
+                        },
                     },
-                    output,
                 )?;
+                match output {
+                    // Sorted keys, as the document has always been printed.
+                    Output::Json => emit_json(&serde_json::to_value(&publication)?)?,
+                    Output::Text => print_view(&publication)?,
+                }
                 Ok(0)
             }
             HostingCommand::WebhookServe {
@@ -4311,14 +3601,11 @@ mod tests {
     #[cfg(unix)]
     use super::install_agent_skills;
     use super::{
-        build_hosting_threads, committed_snapshot_matches_review, diff_contains_added_line,
         json_output_requested, read_proposal_file, work_item_api_base, write_markdown_report, Cli,
         Command, HostingCommand, Output,
     };
     use clap::Parser;
-    use std::collections::BTreeSet;
-    use vee_core::ports::HostedDeliveryRepository;
-    use vee_core::Severity;
+    use vee_application::attestation::committed_snapshot_matches_review;
 
     fn undocumented_cli_items(command: &clap::Command, path: &str, problems: &mut Vec<String>) {
         if command.get_about().is_none() && !path.is_empty() {
@@ -4552,17 +3839,6 @@ mod tests {
     }
 
     #[test]
-    fn azure_review_location_must_be_on_an_added_line() {
-        let patch = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -2,2 +2,3 @@\n context\n+added line\n more context\n";
-        assert!(diff_contains_added_line(Some(patch), 3));
-        let plus_prefixed_addition = "@@ -1,0 +1,1 @@\n+++ valid added source\n";
-        assert!(diff_contains_added_line(Some(plus_prefixed_addition), 1));
-        assert!(!diff_contains_added_line(Some(patch), 4));
-        assert!(!diff_contains_added_line(Some(patch), 2));
-        assert!(!diff_contains_added_line(None, 3));
-    }
-
-    #[test]
     fn publish_snapshot_rejects_uncommitted_content_in_base_and_worktree_review() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
@@ -4635,250 +3911,6 @@ mod tests {
             "review files: {:?}",
             clean_review.files
         );
-    }
-
-    #[test]
-    fn hosting_threads_only_target_findings_on_added_diff_lines() {
-        let pull_request = vee_hosting::PullRequestRef {
-            repository: vee_hosting::RepositoryRef {
-                host: "github.com".into(),
-                full_name: "example/repo".into(),
-            },
-            number: 12,
-        };
-        let finding = |id: &str, line: u32, severity| vee_core::Finding {
-            id: id.into(),
-            fingerprint: format!("sha256:{id}"),
-            category: "correctness".into(),
-            severity,
-            confidence: Some(90),
-            rationale: "A concrete issue".into(),
-            path: Some("src/lib.rs".into()),
-            line: Some(line),
-            provenance: "model_inference".into(),
-            reviewer_ids: Vec::new(),
-            evidence_ids: Vec::new(),
-            rule_attributions: Vec::new(),
-            sample_agreement: None,
-            advisory: false,
-        };
-        let findings = vec![
-            finding("added", 3, vee_core::Severity::High),
-            finding("context", 4, vee_core::Severity::High),
-            finding("informational", 3, vee_core::Severity::Info),
-        ];
-        let changed_files = vec![vee_hosting::PullRequestFile {
-            path: "src/lib.rs".into(),
-            change: vee_hosting::FileChange::Modified,
-            previous_path: None,
-            patch: Some("@@ -2,2 +2,3 @@\n context\n+added\n more context\n".into()),
-            additions: 1,
-            deletions: 0,
-        }];
-
-        let threads = build_hosting_threads(
-            &findings,
-            &pull_request,
-            &changed_files,
-            "review-1",
-            "sha256:snapshot",
-            "sha256:delivery",
-        );
-
-        assert_eq!(threads.len(), 1);
-        assert_eq!(threads[0].fingerprint, "sha256:added");
-        assert_eq!(threads[0].line, 3);
-        assert_eq!(threads[0].side, vee_hosting::DiffSide::New);
-        assert_eq!(threads[0].snapshot_id, "sha256:snapshot");
-        assert_eq!(threads[0].idempotency_key, "sha256:delivery:sha256:added");
-    }
-
-    #[test]
-    fn hosted_finding_ledger_retains_unmentioned_threads_until_resolved() {
-        let pull_request = vee_hosting::PullRequestRef {
-            repository: vee_hosting::RepositoryRef {
-                host: "github.com".into(),
-                full_name: "example/repo".into(),
-            },
-            number: 12,
-        };
-        let thread = |fingerprint: &str, resolution| vee_hosting::ReviewThread {
-            pull_request: pull_request.clone(),
-            fingerprint: fingerprint.into(),
-            path: "src/lib.rs".into(),
-            line: 10,
-            side: vee_hosting::DiffSide::New,
-            body: "finding".into(),
-            resolution,
-            snapshot_id: "sha256:snapshot".into(),
-            idempotency_key: format!("key:{fingerprint}"),
-        };
-        let previous = BTreeSet::from(["sha256:stale".into(), "sha256:resolved".into()]);
-        let updated = super::updated_hosted_finding_fingerprints(
-            &previous,
-            &[
-                thread("sha256:new", vee_hosting::ThreadResolution::Open),
-                thread("sha256:resolved", vee_hosting::ThreadResolution::Resolved),
-            ],
-        );
-        assert_eq!(
-            updated,
-            BTreeSet::from(["sha256:new".into(), "sha256:stale".into()])
-        );
-        let intent = super::hosting_thread_intent_fingerprints(
-            &previous,
-            &[
-                thread("sha256:new", vee_hosting::ThreadResolution::Open),
-                thread("sha256:resolved", vee_hosting::ThreadResolution::Resolved),
-            ],
-        );
-        assert_eq!(
-            intent,
-            BTreeSet::from([
-                "sha256:new".into(),
-                "sha256:resolved".into(),
-                "sha256:stale".into(),
-            ]),
-            "pending publication must retain prior and all possibly written fingerprints"
-        );
-
-        // Model a provider accepting the write while Vee exits before it can
-        // store the final publication receipt. The prewritten intent survives
-        // restart and still allows the next review to resolve that thread.
-        let directory = tempfile::tempdir().unwrap();
-        let database = directory.path().join("hosted-threads.sqlite");
-        let target = "github:example/repo#12";
-        let mut store = vee_store_sqlite::ReviewStore::open(&database).unwrap();
-        store
-            .replace_hosted_finding_threads(target, &intent)
-            .unwrap();
-        drop(store);
-
-        let reopened = vee_store_sqlite::ReviewStore::open(&database).unwrap();
-        let recovered = reopened.hosted_finding_threads(target).unwrap();
-        assert_eq!(recovered, intent);
-
-        let records = vec![vee_core::FindingRecord {
-            assessments: Vec::new(),
-            finding: vee_core::Finding {
-                id: "recovered".into(),
-                fingerprint: "sha256:new".into(),
-                category: "correctness".into(),
-                severity: Severity::High,
-                confidence: Some(90),
-                rationale: "Concrete issue".into(),
-                path: Some("src/lib.rs".into()),
-                line: Some(10),
-                provenance: "model_inference".into(),
-                reviewer_ids: Vec::new(),
-                evidence_ids: Vec::new(),
-                rule_attributions: Vec::new(),
-                sample_agreement: None,
-                advisory: false,
-            },
-            status: vee_core::FindingStatus::Resolved,
-            status_reason: Some("fixed and verified".into()),
-            occurrence_count: 1,
-            first_seen: "2026-11-14T00:00:00Z".into(),
-            last_seen: "2026-11-14T00:00:00Z".into(),
-            occurrences: Vec::new(),
-        }];
-        let resolved = super::build_resolved_hosting_threads(
-            &records,
-            &BTreeSet::new(),
-            &recovered,
-            &pull_request,
-            "review-after-restart",
-            "sha256:next-snapshot",
-        );
-        assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].fingerprint, "sha256:new");
-        assert_eq!(
-            resolved[0].resolution,
-            vee_hosting::ThreadResolution::Resolved
-        );
-    }
-
-    #[test]
-    fn resolved_hosting_threads_exclude_active_and_non_resolved_findings() {
-        let pull_request = vee_hosting::PullRequestRef {
-            repository: vee_hosting::RepositoryRef {
-                host: "github.com".into(),
-                full_name: "example/repo".into(),
-            },
-            number: 12,
-        };
-        let record = |id: &str, status| vee_core::FindingRecord {
-            assessments: Vec::new(),
-            finding: vee_core::Finding {
-                id: id.into(),
-                fingerprint: format!("sha256:{id}"),
-                category: "correctness".into(),
-                severity: Severity::High,
-                confidence: Some(90),
-                rationale: "Concrete issue".into(),
-                path: Some("src/lib.rs".into()),
-                line: Some(10),
-                provenance: "model_inference".into(),
-                reviewer_ids: Vec::new(),
-                evidence_ids: Vec::new(),
-                rule_attributions: Vec::new(),
-                sample_agreement: None,
-                advisory: false,
-            },
-            status,
-            status_reason: Some("fixed and verified".into()),
-            occurrence_count: 1,
-            first_seen: "2026-11-14T00:00:00Z".into(),
-            last_seen: "2026-11-14T00:00:00Z".into(),
-            occurrences: Vec::new(),
-        };
-        let records = vec![
-            record("resolved", vee_core::FindingStatus::Resolved),
-            record("active", vee_core::FindingStatus::Resolved),
-            record("refuted", vee_core::FindingStatus::Refuted),
-        ];
-        let active = BTreeSet::from(["sha256:active".to_owned()]);
-        let threads = super::build_resolved_hosting_threads(
-            &records,
-            &active,
-            &BTreeSet::from(["sha256:resolved".to_owned()]),
-            &pull_request,
-            "review-2",
-            "sha256:snapshot",
-        );
-        assert_eq!(threads.len(), 1);
-        assert_eq!(threads[0].fingerprint, "sha256:resolved");
-        assert_eq!(
-            threads[0].resolution,
-            vee_hosting::ThreadResolution::Resolved
-        );
-        assert_eq!(
-            threads[0].idempotency_key,
-            "review-2:sha256:resolved:resolved"
-        );
-
-        let mut publication = vec![vee_hosting::ReviewThread {
-            pull_request: pull_request.clone(),
-            fingerprint: "sha256:active".into(),
-            path: "src/lib.rs".into(),
-            line: 10,
-            side: vee_hosting::DiffSide::New,
-            body: "still present".into(),
-            resolution: vee_hosting::ThreadResolution::Open,
-            snapshot_id: "sha256:snapshot".into(),
-            idempotency_key: "review-2:sha256:active".into(),
-        }];
-        super::add_resolved_hosting_threads(
-            &mut publication,
-            &records,
-            &BTreeSet::from(["sha256:active".to_owned(), "sha256:resolved".to_owned()]),
-            &BTreeSet::from(["sha256:resolved".to_owned()]),
-            &pull_request,
-            "review-2",
-            "sha256:snapshot",
-        );
-        assert_eq!(publication.len(), 1);
     }
 
     #[cfg(unix)]
