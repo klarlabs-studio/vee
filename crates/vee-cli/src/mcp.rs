@@ -656,22 +656,15 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         "Analyze files and tests likely affected by a saved review's snapshot, with evidence paths and uncertainty. Same document as `vee impact --review <id> --output json`.",
         |ws, input: ReviewInput| operations::impact(&ws, operations::ChangeTarget::Review(input.review_id)));
 
-    let state = workspace.clone();
-    server
-        .tool("analyze_cross_repository_impact")
-        .title("Analyze cross-repository impact")
-        .annotations(read_only_tool())
-        .description("Analyze changed symbols across local consumer checkouts beneath this server's repository root; consumer paths must be relative and stay within that root. Same document as `vee repos impact --output json`.")
-        .output_schema_json(crate::contracts::bundled("cross-repository-impact-v16"))?
-        .handler(move |_ctx, input: CrossRepositoryImpactInput| {
-            let workspace = state.clone();
-            run_blocking(move || {
-                // MCP confines consumers beneath the server's root; the bounds are shared.
-                let consumers = operations::confine_consumers(&workspace, &input.consumer_paths)?;
-                let producer = workspace.root().canonical()?;
-                operations::cross_repository_impact(&producer, &input.base_ref, &consumers)
-            })
-        })?;
+    // MCP confines consumers beneath the server's root; the input bounds are shared.
+    viewed_tool!(server, workspace, "analyze_cross_repository_impact", "Analyze cross-repository impact", read_only_tool(),
+        "cross-repository-impact-v16",
+        "Analyze changed symbols across local consumer checkouts beneath this server's repository root; consumer paths must be relative and stay within that root. Same document as `vee repos impact --output json`.",
+        |ws, input: CrossRepositoryImpactInput| {
+            let consumers = operations::confine_consumers(&ws, &input.consumer_paths)?;
+            let producer = ws.root().canonical()?;
+            operations::cross_repository_impact(&producer, &input.base_ref, &consumers)
+        });
 
     viewed_tool!(server, workspace, "acceptance_traceability", "Acceptance traceability", read_only_tool(),
         "acceptance-traceability-v1",
