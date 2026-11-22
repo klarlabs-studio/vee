@@ -1582,6 +1582,93 @@ pub fn list_waivers(workspace: &Workspace, review_id: &str) -> Result<WaiverList
     })
 }
 
+/// What a person supplies to waive one finding of a saved review.
+pub struct WaiverRequest<'a> {
+    pub review_id: &'a str,
+    pub finding_id: &'a str,
+    pub reason: &'a str,
+    pub author: &'a str,
+    pub expires_in_days: u32,
+}
+
+/// Record a waiver for one finding fingerprint in the review's immutable snapshot.
+/// The finding may be a reviewer finding or one reported by a deterministic analyzer
+/// that the review's gate evaluated. Waivers expire; they are never open-ended.
+pub fn create_waiver(
+    workspace: &Workspace,
+    request: &WaiverRequest<'_>,
+) -> Result<vee_core::Waiver> {
+    if request.expires_in_days == 0 {
+        return Err(usage_failure("--expires-in-days must be positive"));
+    }
+    let mut store = workspace.store()?;
+    let review = workspace.saved_review(&*store, request.review_id)?;
+    let fingerprint = match review
+        .findings
+        .iter()
+        .find(|finding| finding.id == request.finding_id)
+    {
+        Some(finding) => finding.fingerprint.clone(),
+        None => analyzer_finding_fingerprint(&*store, &review, request.finding_id)?.ok_or_else(
+            || {
+                usage_failure(format!(
+                    "finding {} was not observed in review {}",
+                    request.finding_id, request.review_id
+                ))
+            },
+        )?,
+    };
+    let reason = vee_core::Reason::new(request.reason).map_err(usage_failure)?;
+    let author = vee_core::ActorName::new("author", request.author).map_err(usage_failure)?;
+    let created_at_unix = crate::current_unix_time().map_err(anyhow::Error::msg)?;
+    let expires_at_unix = created_at_unix
+        .checked_add(i64::from(request.expires_in_days) * 86_400)
+        .context("waiver expiry exceeds supported timestamp")?;
+    let id = format!(
+        "waiver_{}",
+        &vee_core::digest(&serde_json::to_vec(&(
+            fingerprint.as_str(),
+            review.snapshot_id.as_str(),
+            reason.as_str(),
+            author.as_str(),
+            created_at_unix,
+            expires_at_unix,
+        ))?)[..20]
+    );
+    let waiver = vee_core::Waiver {
+        schema_version: 1,
+        id,
+        finding_fingerprint: fingerprint,
+        snapshot_id: review.snapshot_id,
+        reason: reason.as_str().to_owned(),
+        author: author.as_str().to_owned(),
+        provenance: "local_cli".into(),
+        created_at_unix,
+        expires_at_unix,
+    };
+    store.create_waiver(&waiver).map_err(anyhow::Error::msg)?;
+    Ok(waiver)
+}
+
+/// The fingerprint of an analyzer finding the review's gate evaluated for its snapshot.
+fn analyzer_finding_fingerprint(
+    store: &dyn Repositories,
+    review: &ReviewResult,
+    finding_id: &str,
+) -> Result<Option<String>> {
+    let decisions = store
+        .gate_decisions_for_review(&review.review_id)
+        .map_err(anyhow::Error::msg)?;
+    Ok(std::iter::once(&review.gate)
+        .chain(decisions.iter())
+        .filter(|decision| decision.snapshot_id == review.snapshot_id)
+        .filter_map(|decision| decision.replay_inputs.as_ref())
+        .flat_map(|inputs| &inputs.analyzer_reports)
+        .flat_map(|report| &report.findings)
+        .find(|finding| finding.id == finding_id)
+        .map(|finding| finding.fingerprint.clone()))
+}
+
 pub const MAX_PATCH_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PROPOSAL_RECORD_BYTES: usize = 128 * 1024;
 
@@ -1589,6 +1676,18 @@ const MAX_PROPOSAL_RECORD_BYTES: usize = 128 * 1024;
 /// and save it as a digest-bound proposal (`patch-proposal-v1`). No repository file
 /// is changed; applying requires explicit human approval of the digest through
 /// `vee findings apply-patch`.
+/// The result of applying a human-approved patch proposal: the follow-up review
+/// of the changed working tree, and whether the target changed while applying.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PatchApplication {
+    pub schema_version: u32,
+    pub proposal_digest: String,
+    pub approved: bool,
+    pub application: String,
+    pub concurrent_mutation_detected: bool,
+    pub review: ReviewResult,
+}
+
 /// `patch-proposal-v1` for a newly validated, unapplied patch.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PatchProposal {

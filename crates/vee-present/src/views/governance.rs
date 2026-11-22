@@ -9,7 +9,7 @@ use crate::views::work::feedback_label;
 use vee_application::acceptance::AcceptanceReport;
 use vee_application::operations::RuleApprovalList;
 use vee_application::ownership::OwnershipReport;
-use vee_application::packs::PackList;
+use vee_application::packs::{PackList, PackSummary};
 use vee_application::rule_candidates::{
     CandidateReport, EffectivenessWindow, RuleEffectivenessReport,
 };
@@ -704,5 +704,46 @@ impl ToView for RuleApprovalList {
             "rule_effectiveness",
             serde_json::json!({}),
         )
+    }
+}
+
+impl ToView for PackSummary {
+    fn to_view(&self) -> View {
+        let list = |items: &[String]| {
+            if items.is_empty() {
+                Cell::muted("none")
+            } else {
+                Cell::plain(items.join(", "))
+            }
+        };
+        let mut view = View::new()
+            .title(
+                format!("Pack {} {}", self.name, self.version),
+                Some(if self.pinned {
+                    Cell::badge(Tone::Success, "pinned")
+                } else {
+                    Cell::badge(Tone::Info, "exported")
+                }),
+            )
+            .fields(vec![
+                ("Location".into(), Cell::code(&self.path)),
+                ("Digest".into(), Cell::id(&self.digest)),
+                ("Reviewers".into(), list(&self.reviewers)),
+                ("Verification".into(), list(&self.verification_profiles)),
+                ("Policy profiles".into(), list(&self.policy_profiles)),
+                (
+                    "Policy".into(),
+                    if self.includes_policy {
+                        Cell::plain("included")
+                    } else {
+                        Cell::muted("not included")
+                    },
+                ),
+                ("Approved rules".into(), Cell::plain(self.rules.to_string())),
+            ]);
+        for warning in &self.warnings {
+            view = view.note(Tone::Warning, warning.as_str());
+        }
+        view.next_step("vee packs list")
     }
 }

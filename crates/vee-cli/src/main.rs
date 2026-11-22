@@ -2552,24 +2552,6 @@ fn review_to_sarif(review: &vee_application::ReviewResult) -> Result<serde_json:
 
 /// Fingerprint of an analyzer finding recorded in one of the review's gate
 /// decisions (at review time or a later `gate check`) on the review's snapshot.
-fn analyzer_finding_fingerprint(
-    store: &dyn Repositories,
-    review: &vee_application::ReviewResult,
-    finding_id: &str,
-) -> Result<Option<String>> {
-    let decisions = store
-        .gate_decisions_for_review(&review.review_id)
-        .map_err(anyhow::Error::msg)?;
-    Ok(std::iter::once(&review.gate)
-        .chain(decisions.iter())
-        .filter(|decision| decision.snapshot_id == review.snapshot_id)
-        .filter_map(|decision| decision.replay_inputs.as_ref())
-        .flat_map(|inputs| &inputs.analyzer_reports)
-        .flat_map(|report| &report.findings)
-        .find(|finding| finding.id == finding_id)
-        .map(|finding| finding.fingerprint.clone()))
-}
-
 fn run_packs(command: PacksCommand) -> Result<u8> {
     match command {
         PacksCommand::Export {
@@ -2598,7 +2580,7 @@ fn run_packs(command: PacksCommand) -> Result<u8> {
             )?;
             match output {
                 Output::Json => emit_json(&summary)?,
-                Output::Text => print_pack_summary("Exported", &summary),
+                Output::Text => print_view(&summary)?,
             }
             Ok(0)
         }
@@ -2616,7 +2598,7 @@ fn run_packs(command: PacksCommand) -> Result<u8> {
             )?;
             match output {
                 Output::Json => emit_json(&summary)?,
-                Output::Text => print_pack_summary("Pinned", &summary),
+                Output::Text => print_view(&summary)?,
             }
             Ok(0)
         }
@@ -2639,43 +2621,6 @@ fn run_packs(command: PacksCommand) -> Result<u8> {
             );
             Ok(0)
         }
-    }
-}
-
-fn print_pack_summary(action: &str, summary: &packs::PackSummary) {
-    println!(
-        "{action} pack {} {} at {}",
-        summary.name, summary.version, summary.path
-    );
-    println!("Digest: {}", summary.digest);
-    println!(
-        "Reviewers: {}",
-        if summary.reviewers.is_empty() {
-            "none".into()
-        } else {
-            summary.reviewers.join(", ")
-        }
-    );
-    if !summary.verification_profiles.is_empty() {
-        println!(
-            "Verification profiles: {}",
-            summary.verification_profiles.join(", ")
-        );
-    }
-    if !summary.policy_profiles.is_empty() {
-        println!("Policy profiles: {}", summary.policy_profiles.join(", "));
-    }
-    println!(
-        "Policy: {}  Approved rules: {}",
-        if summary.includes_policy {
-            "included"
-        } else {
-            "not included"
-        },
-        summary.rules
-    );
-    for warning in &summary.warnings {
-        println!("Warning: {warning}");
     }
 }
 
@@ -2841,28 +2786,7 @@ fn run() -> Result<u8> {
             let report = operations::init(&workspace, provider.as_deref(), model.as_deref())?;
             match output {
                 Output::Json => emit_json(&report)?,
-                Output::Text => {
-                    if report.repository_config_status == "written" {
-                        println!("Created {}", report.repository_config);
-                    }
-                    if report.reviewer_instructions_created {
-                        println!("Created {}", report.reviewer_instructions);
-                    }
-                    match (
-                        report.provider_status.as_str(),
-                        report.candidate_id.as_deref(),
-                    ) {
-                        ("written", Some(candidate)) => println!(
-                            "Configured provider `{}` ({candidate}, {} egress) in {}",
-                            report.provider_id, report.egress, report.user_config
-                        ),
-                        _ => println!(
-                            "Using existing provider `{}` from {}",
-                            report.provider_id, report.user_config
-                        ),
-                    }
-                    println!("Next: run `vee doctor`, then `vee review`.");
-                }
+                Output::Text => print_view(&report)?,
             }
             Ok(0)
         }
@@ -6218,8 +6142,6 @@ fn run() -> Result<u8> {
         Command::Waivers { command } => {
             let cwd = std::env::current_dir()?;
             let top = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-            let database = top.join(".vee/vee.sqlite");
-            let mut store = ReviewStore::open(&database).map_err(anyhow::Error::msg)?;
             match command {
                 WaiversCommand::Create {
                     finding_id,
@@ -6229,65 +6151,19 @@ fn run() -> Result<u8> {
                     expires_in_days,
                     output,
                 } => {
-                    if expires_in_days == 0 {
-                        anyhow::bail!("--expires-in-days must be positive");
-                    }
-                    let payload = store
-                        .get(&review)
-                        .map_err(anyhow::Error::msg)?
-                        .with_context(|| format!("review {review} was not found"))?;
-                    let reviewed = vee_application::deserialize_review_result(&payload)
-                        .map_err(anyhow::Error::msg)?;
-                    let fingerprint = match reviewed
-                        .findings
-                        .iter()
-                        .find(|finding| finding.id == finding_id)
-                    {
-                        Some(finding) => finding.fingerprint.clone(),
-                        None => analyzer_finding_fingerprint(&store, &reviewed, &finding_id)?
-                            .with_context(|| {
-                                format!("finding {finding_id} was not observed in review {review}")
-                            })?,
-                    };
-                    let reason = vee_core::Reason::new(&reason).map_err(usage_failure)?;
-                    let author =
-                        vee_core::ActorName::new("author", &author).map_err(usage_failure)?;
-                    let created_at_unix = current_unix_time()?;
-                    let expires_at_unix = created_at_unix
-                        .checked_add(i64::from(expires_in_days) * 86_400)
-                        .context("waiver expiry exceeds supported timestamp")?;
-                    let id = format!(
-                        "waiver_{}",
-                        &vee_core::digest(&serde_json::to_vec(&(
-                            fingerprint.as_str(),
-                            reviewed.snapshot_id.as_str(),
-                            reason.as_str(),
-                            author.as_str(),
-                            created_at_unix,
-                            expires_at_unix,
-                        ))?)[..20]
-                    );
-                    let waiver = vee_core::Waiver {
-                        schema_version: 1,
-                        id,
-                        finding_fingerprint: fingerprint,
-                        snapshot_id: reviewed.snapshot_id,
-                        reason: reason.as_str().to_owned(),
-                        author: author.as_str().to_owned(),
-                        provenance: "local_cli".into(),
-                        created_at_unix,
-                        expires_at_unix,
-                    };
-                    store.create_waiver(&waiver).map_err(anyhow::Error::msg)?;
+                    let waiver = operations::create_waiver(
+                        &operations::Workspace::new(top.clone(), crate::local_stores()),
+                        &operations::WaiverRequest {
+                            review_id: &review,
+                            finding_id: &finding_id,
+                            reason: &reason,
+                            author: &author,
+                            expires_in_days,
+                        },
+                    )?;
                     match output {
-                        Output::Json => {
-                            serde_json::to_writer(std::io::stdout().lock(), &waiver)?;
-                            println!();
-                        }
-                        Output::Text => println!(
-                            "Created {} for {} through {}",
-                            waiver.id, finding_id, waiver.expires_at_unix
-                        ),
+                        Output::Json => emit_json(&waiver)?,
+                        Output::Text => print_view(&waiver)?,
                     }
                     Ok(0)
                 }
@@ -6585,30 +6461,23 @@ fn run() -> Result<u8> {
                     proposal["follow_up_snapshot_id"] =
                         serde_json::Value::String(review.snapshot_id.clone());
                     write_proposal_file(&record_path, &serde_json::to_vec_pretty(&proposal)?)?;
+                    let applied = operations::PatchApplication {
+                        schema_version: 1,
+                        proposal_digest: digest,
+                        approved: true,
+                        application: "applied".into(),
+                        concurrent_mutation_detected,
+                        review,
+                    };
                     match output {
-                        Output::Json => {
-                            serde_json::to_writer(
-                                std::io::stdout().lock(),
-                                &serde_json::json!({"schema_version":1,"proposal_digest":digest,"approved":true,"application":"applied","concurrent_mutation_detected":concurrent_mutation_detected,"review":review}),
-                            )?;
-                            println!();
-                        }
-                        Output::Text => {
-                            println!("Applied approved patch {digest}");
-                            if concurrent_mutation_detected {
-                                println!("Warning: patch target changed concurrently; inspect the re-reviewed result.");
-                            }
-                            println!("Follow-up review: {}", review.review_id);
-                            println!(
-                                "Snapshot: {}  Gate: {:?}",
-                                review.snapshot_id, review.gate.status
-                            );
-                        }
+                        // Sorted keys, as this command has always emitted.
+                        Output::Json => emit_json(&serde_json::to_value(&applied)?)?,
+                        Output::Text => print_view(&applied)?,
                     }
-                    Ok(if concurrent_mutation_detected {
+                    Ok(if applied.concurrent_mutation_detected {
                         2
                     } else {
-                        match review.gate.status {
+                        match applied.review.gate.status {
                             GateStatus::Pass => 0,
                             GateStatus::Block => 1,
                             GateStatus::Incomplete => 2,

@@ -1,7 +1,7 @@
 //! Views for patch proposals.
 
 use crate::view::{Cell, ToView, Tone, View};
-use vee_application::operations::PatchProposal;
+use vee_application::operations::{PatchApplication, PatchProposal};
 
 impl ToView for PatchProposal {
     fn to_view(&self) -> View {
@@ -42,5 +42,27 @@ impl ToView for PatchProposal {
                 "vee findings apply-patch {digest} --approve {digest}",
                 digest = self.patch_digest
             ))
+    }
+}
+
+impl ToView for PatchApplication {
+    fn to_view(&self) -> View {
+        let mut view = View::new()
+            .title(
+                "Patch applied",
+                Some(if self.concurrent_mutation_detected {
+                    Cell::badge(Tone::Warning, "target changed concurrently")
+                } else {
+                    Cell::badge(Tone::Success, &self.application)
+                }),
+            )
+            .fields(vec![("Patch".into(), Cell::id(&self.proposal_digest))]);
+        if self.concurrent_mutation_detected {
+            view = view.note(
+                Tone::Warning,
+                "Files changed while the patch was applied; inspect the follow-up review.",
+            );
+        }
+        view.extend(self.review.to_view())
     }
 }
