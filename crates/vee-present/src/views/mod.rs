@@ -4,6 +4,7 @@ mod analysis;
 mod findings;
 mod gate;
 mod governance;
+mod history;
 mod insights;
 mod lists;
 pub mod review;

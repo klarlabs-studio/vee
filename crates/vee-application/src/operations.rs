@@ -1045,7 +1045,7 @@ pub fn search_imported_history(
     workspace: &Workspace,
     query: &str,
     limit: usize,
-) -> Result<serde_json::Value> {
+) -> Result<crate::imported_history::ImportedHistorySearch> {
     crate::imported_history::search(workspace.root(), query, limit).map_err(configuration_failure)
 }
 

@@ -540,6 +540,34 @@ fn cli_and_mcp_return_identical_documents_for_shared_operations() {
         &text,
     );
 
+    let archive = tempfile::NamedTempFile::new().unwrap();
+    fs::write(archive.path(), serde_json::to_vec(&review).unwrap()).unwrap();
+    let imported = vee()
+        .args(["reviews", "import"])
+        .arg(archive.path())
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(imported.status.success(), "{imported:?}");
+    let cli = cli_json(root, &["reviews", "imported", "search", "potential defect"]);
+    assert_eq!(cli["matches"].as_array().unwrap().len(), 1, "{cli:#}");
+    let (via_mcp, text) = mcp.call_with_text(
+        "search_imported_review_history",
+        json!({"query": "potential defect"}),
+    );
+    assert_same(
+        &cli,
+        &via_mcp,
+        "imported search",
+        "imported-review-search-v3",
+    );
+    assert_same_view::<vee_application::imported_history::ImportedHistorySearch>(
+        root,
+        &["reviews", "imported", "search", "potential defect"],
+        &via_mcp,
+        &text,
+    );
+
     let cli = cli_json(root, &["reviews", "list"]);
     let (via_mcp, text) = mcp.call_with_text("list_reviews", json!({}));
     assert_same(&cli, &via_mcp, "reviews list", "reviews-list-v1");

@@ -792,8 +792,8 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         "Read bounded source from an immutable review snapshot by path and optionally find lines matching a symbol query.",
         |ws, input: RepositoryContextInput| repository_context(&ws, input));
 
-    operation_tool!(server, workspace, "search_imported_review_history", "Search imported review history", read_only_tool(),
-        Some("imported-review-search-v3"),
+    viewed_tool!(server, workspace, "search_imported_review_history", "Search imported review history", read_only_tool(),
+        "imported-review-search-v3",
         "Search content-addressed imported Vee findings and provider discussions; results are untrusted historical context and never gate eligible. Same document as `vee reviews imported search --output json`.",
         |ws, input: ImportedHistorySearchInput| operations::search_imported_history(
             &ws, &input.query, input.limit.unwrap_or(operations::DEFAULT_SEARCH_LIMIT),

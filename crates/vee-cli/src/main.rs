@@ -4812,23 +4812,9 @@ fn run() -> Result<u8> {
                         let report =
                             operations::search_imported_history(&workspace, &query, limit)?;
                         match output {
-                            Output::Json => emit_json(&report)?,
-                            Output::Text => {
-                                for item in report["matches"].as_array().into_iter().flatten() {
-                                    println!(
-                                        "{}  {}  {}  {}:{}  untrusted_external (not gate eligible)",
-                                        item["archive_digest"],
-                                        item["review_id"],
-                                        item["finding"]["severity"],
-                                        item["finding"]["path"].as_str().unwrap_or("<unknown>"),
-                                        item["finding"]["line"].as_u64().unwrap_or(0)
-                                    );
-                                    println!(
-                                        "  {}",
-                                        item["finding"]["rationale"].as_str().unwrap_or("")
-                                    );
-                                }
-                            }
+                            // Through a Value, as before: keys stay sorted, as MCP emits them.
+                            Output::Json => emit_json(&serde_json::to_value(&report)?)?,
+                            Output::Text => print_view(&report)?,
                         }
                         Ok(0)
                     }
