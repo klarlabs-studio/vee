@@ -82,7 +82,7 @@ pub struct CriterionAssessment {
     pub verification_run_ids: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AcceptanceValidation {
     pub schema_version: u32,
     pub review_id: String,
@@ -99,7 +99,7 @@ pub struct AcceptanceValidation {
     pub limitations: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ValidatedCriterion {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -672,47 +672,6 @@ fn criterion_id_with_source(
     hash.update(text.trim().as_bytes());
     let encoded = format!("{:x}", hash.finalize());
     format!("AC-{}", &encoded[..12])
-}
-
-pub fn render_validation_text(report: &AcceptanceValidation) {
-    println!("Acceptance assessment for review {}", report.review_id);
-    println!("Snapshot: {}", report.snapshot_id);
-    println!("Result: {} (human attestation)", report.result);
-    println!("Gate: {}", report.gate_status);
-    println!("Policy: {}", report.policy_digest);
-    for criterion in &report.criteria {
-        println!(
-            "{}: {}",
-            criterion.id,
-            criterion.assessment.as_deref().unwrap_or("unassessed")
-        );
-        println!("  {}", criterion.text);
-        if let Some(rationale) = &criterion.rationale {
-            println!("  Rationale: {rationale}");
-        }
-        if !criterion.changed_paths.is_empty() {
-            println!("  Paths: {}", criterion.changed_paths.join(", "));
-        }
-        if !criterion.verification_runs.is_empty() {
-            println!(
-                "  Verification runs: {}",
-                criterion
-                    .verification_runs
-                    .iter()
-                    .map(|run| run.run_id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
-        if !criterion.evidence_satisfied {
-            for reason in &criterion.evidence_reasons {
-                println!("  Evidence required: {reason}");
-            }
-        }
-    }
-    for limitation in &report.limitations {
-        println!("Limitation: {limitation}");
-    }
 }
 
 #[cfg(test)]

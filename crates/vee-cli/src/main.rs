@@ -1,26 +1,23 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use sha2::{Digest, Sha256};
-use std::{
-    io::{Read, Write},
-    process::ExitCode,
-};
+use std::{io::Write, process::ExitCode};
 use vee_core::ports::*;
 use vee_core::{
     ChangeSet, GateStatus, RepositoryConfig, Severity, VerificationRun, VerificationStatus,
 };
 use vee_store_sqlite::ReviewStore;
 
-use vee_application::acceptance;
 use vee_application::attestation;
+use vee_application::attestation::committed_snapshot_matches_review;
 mod contracts;
 use vee_application::coverage;
+use vee_application::evidence_bundle;
 use vee_application::failure::{
     configuration_failure, usage_failure, ConfigurationFailure, UsageFailure,
 };
-use vee_application::imported_history::{
-    imported_reviews_dir, parse_portable_review, store_imported_history, MAX_IMPORTED_REVIEW_BYTES,
-};
+use vee_application::imported_history;
+use vee_application::imported_history::store_imported_history;
 use vee_application::proposals::{proposal_directory, read_proposal_file};
 use vee_application::work_items::{
     effective_work_item_host, effective_work_item_token_env, get_work_item, work_item_api_base,
@@ -30,6 +27,7 @@ use vee_application::operations;
 use vee_application::packs;
 use vee_application::patch_sandbox;
 use vee_application::repository_map;
+use vee_application::signing;
 use vee_application::standards;
 use vee_application::test_effectiveness;
 use vee_application::test_generation;
@@ -1352,339 +1350,6 @@ enum ReportFormat {
     VeeJson,
 }
 
-/// A saved review with its `gate` replaced by the selected persisted decision
-/// (default: the latest), checked to belong to the same snapshot, configuration,
-/// and replay inputs. Shared by evidence bundles and attestations.
-fn review_with_decision(
-    root: &std::path::Path,
-    id: &str,
-    decision_id: Option<&str>,
-) -> Result<vee_application::ReviewResult> {
-    let store = ReviewStore::open(&root.join(".vee/vee.sqlite")).map_err(anyhow::Error::msg)?;
-    let payload = store
-        .get(id)
-        .map_err(anyhow::Error::msg)?
-        .with_context(|| format!("review {id} was not found"))?;
-    let mut review = vee_application::deserialize_review_result(&payload)
-        .map_err(|error| anyhow::anyhow!(error))?;
-    let decisions = store
-        .gate_decisions_for_review(id)
-        .map_err(anyhow::Error::msg)?;
-    let selected = match decision_id {
-        Some(wanted) => decisions
-            .into_iter()
-            .find(|decision| decision.decision_id == wanted)
-            .ok_or_else(|| {
-                usage_failure("requested gate decision was not found for this review")
-            })?,
-        None => decisions
-            .into_iter()
-            .last()
-            .unwrap_or_else(|| review.gate.clone()),
-    };
-    if selected.snapshot_id != review.snapshot_id {
-        return Err(configuration_failure("selected gate decision belongs to a different snapshot and cannot be exported with this review"));
-    }
-    if selected.effective_config_digest != review.effective_config_digest
-        || selected.replay_inputs != review.gate.replay_inputs
-    {
-        return Err(configuration_failure("selected gate decision uses configuration or replay inputs not retained by the original review; export the original review decision or create a new review"));
-    }
-    review.effective_config_digest = selected.effective_config_digest.clone();
-    review.status = match selected.status {
-        GateStatus::Pass => "pass",
-        GateStatus::Block => "block",
-        GateStatus::Incomplete => "incomplete",
-    }
-    .into();
-    review.gate = selected;
-    Ok(review)
-}
-
-/// The commit an attestation can name as its subject: only when the reviewed
-/// snapshot is exactly that commit's change, so a verifier binding the
-/// attestation to a revision attests what was actually reviewed.
-fn attested_commit(root: &std::path::Path, change_set: &ChangeSet) -> Result<Option<String>> {
-    Ok(match change_set.scope.as_str() {
-        scope if scope.starts_with("commit:") || scope.starts_with("commit_range:") => {
-            change_set.head_oid.clone()
-        }
-        "base_and_worktree" => committed_snapshot_matches_review(root, change_set)
-            .map_err(anyhow::Error::msg)?
-            .then(|| change_set.head_oid.clone())
-            .flatten(),
-        _ => None,
-    })
-}
-
-fn evidence_bundle(review: &vee_application::ReviewResult) -> Result<serde_json::Value> {
-    let review_value = serde_json::to_value(review)?;
-    let review_bytes = serde_json::to_vec(&review_value)?;
-    let review_digest = vee_core::digest(&review_bytes);
-    let manifest = serde_json::json!({
-        "schema_version": 1,
-        "review_id": review.review_id,
-        "snapshot_id": review.snapshot_id,
-        "effective_config_digest": review.gate.effective_config_digest,
-        "policy_digest": review.gate.policy_digest,
-        "decision_id": review.gate.decision_id,
-        "gate_status": review.gate.status,
-        "review_digest": review_digest,
-        "finding_count": review.findings.len(),
-        "evidence_count": review.evidence.len(),
-        "verification_count": review.verification_runs.len(),
-    });
-    let manifest_digest = vee_core::digest(&serde_json::to_vec(&manifest)?);
-    Ok(serde_json::json!({
-        "schema_version": 1,
-        "manifest": manifest,
-        "manifest_digest": manifest_digest,
-        "review": review_value,
-        "limitations": [
-            "The bundle proves integrity and internal consistency, not that the source or provider output is correct.",
-            "Unsigned bundles do not provide cryptographic tamper protection; use sign-bundle and verify-bundle with a trusted key for authenticity.",
-            "Gate replay checks deterministic policy evaluation against retained inputs; it does not rerun providers or verification commands."
-        ]
-    }))
-}
-
-fn verify_evidence_bundle(
-    bundle: &serde_json::Value,
-    public_key_path: Option<&std::path::Path>,
-) -> serde_json::Value {
-    let invalid = |message: &str| serde_json::json!({ "schema_version": 1, "valid": false, "message": message });
-    if bundle["schema_version"] != 1 {
-        return invalid("unsupported evidence bundle schema version");
-    }
-    let Some(manifest) = bundle.get("manifest") else {
-        return invalid("bundle manifest is missing");
-    };
-    let Some(review) = bundle.get("review") else {
-        return invalid("bundled review is missing");
-    };
-    if !manifest.is_object() || !review.is_object() {
-        return invalid("bundle manifest and review must be JSON objects");
-    }
-    for key in [
-        "review_id",
-        "snapshot_id",
-        "effective_config_digest",
-        "policy_digest",
-        "decision_id",
-        "gate_status",
-        "review_digest",
-    ] {
-        if manifest
-            .get(key)
-            .and_then(serde_json::Value::as_str)
-            .is_none()
-        {
-            return invalid("bundle manifest is missing a required identity or digest field");
-        }
-    }
-    for key in ["finding_count", "evidence_count", "verification_count"] {
-        if manifest
-            .get(key)
-            .and_then(serde_json::Value::as_u64)
-            .is_none()
-        {
-            return invalid("bundle manifest is missing a required record count");
-        }
-    }
-    if serde_json::from_value::<vee_application::ReviewResult>(review.clone()).is_err() {
-        return invalid("bundled review does not match the Vee review contract");
-    }
-    let review_snapshot = review["snapshot_id"].as_str();
-    if review_snapshot.is_none()
-        || review["change_set"]["digest"].as_str() != review_snapshot
-        || review["gate"]["snapshot_id"].as_str() != review_snapshot
-    {
-        return invalid("review, change set, and gate must reference the same snapshot");
-    }
-    let Ok(manifest_bytes) = serde_json::to_vec(manifest) else {
-        return invalid("manifest could not be canonicalized");
-    };
-    if bundle["manifest_digest"].as_str() != Some(vee_core::digest(&manifest_bytes).as_str()) {
-        return invalid("manifest digest does not match");
-    }
-    let Ok(review_bytes) = serde_json::to_vec(review) else {
-        return invalid("review could not be canonicalized");
-    };
-    if manifest["review_digest"].as_str() != Some(vee_core::digest(&review_bytes).as_str()) {
-        return invalid("review digest does not match");
-    }
-    for (manifest_key, review_value) in [
-        ("review_id", review["review_id"].clone()),
-        ("snapshot_id", review["snapshot_id"].clone()),
-        (
-            "effective_config_digest",
-            review["effective_config_digest"].clone(),
-        ),
-        ("policy_digest", review["gate"]["policy_digest"].clone()),
-        ("decision_id", review["gate"]["decision_id"].clone()),
-        ("gate_status", review["gate"]["status"].clone()),
-    ] {
-        if manifest[manifest_key] != review_value {
-            return invalid("manifest and review identity fields do not agree");
-        }
-    }
-    for (manifest_key, review_key) in [
-        ("finding_count", "findings"),
-        ("evidence_count", "evidence"),
-        ("verification_count", "verification_runs"),
-    ] {
-        if manifest[manifest_key].as_u64()
-            != review[review_key]
-                .as_array()
-                .map(|values| values.len() as u64)
-        {
-            return invalid("manifest record counts do not agree with bundled review");
-        }
-    }
-    let signature = bundle.get("signature");
-    let signature_valid = match (signature, public_key_path) {
-        (Some(signature), Some(path)) => {
-            let key = match std::fs::read(path) {
-                Ok(value) if value.len() == 32 => value,
-                _ => return invalid("Ed25519 public key must be a readable raw 32-byte key"),
-            };
-            let encoded = match signature["signature"].as_str() {
-                Some(value) => value,
-                None => return invalid("bundle signature is malformed"),
-            };
-            let signature_bytes =
-                match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded) {
-                    Ok(value) => value,
-                    Err(_) => return invalid("bundle signature is not valid base64"),
-                };
-            let message = match bundle["manifest_digest"].as_str() {
-                Some(value) => value.as_bytes(),
-                None => return invalid("manifest digest is missing"),
-            };
-            if signature["algorithm"] != "ed25519" {
-                return invalid("unsupported bundle signature algorithm");
-            }
-            if ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key)
-                .verify(message, &signature_bytes)
-                .is_err()
-            {
-                return invalid("bundle signature verification failed");
-            }
-            true
-        }
-        (Some(_), None) => {
-            return invalid("bundle is signed; provide --public-key to verify its signer")
-        }
-        (None, Some(_)) => return invalid("bundle has no signature"),
-        (None, None) => false,
-    };
-    let replay_status = replay_gate(review);
-    serde_json::json!({ "schema_version": 1, "valid": true, "signature_valid": signature_valid, "replay_status": replay_status["status"], "replay_matches": replay_status["matches"], "replay_message": replay_status["message"], "message": if signature_valid { "bundle digests and signature are valid; signer trust is determined by the supplied public key" } else { "bundle internal bindings are consistent but it is unsigned; this is not cryptographic tamper protection" }, "review_id": manifest["review_id"], "snapshot_id": manifest["snapshot_id"], "gate_status": manifest["gate_status"], "manifest_digest": bundle["manifest_digest"] })
-}
-
-fn committed_snapshot_matches_review(
-    root: &std::path::Path,
-    reviewed: &ChangeSet,
-) -> Result<bool, String> {
-    let base_oid = reviewed
-        .base_oid
-        .as_deref()
-        .ok_or("base-and-worktree review is missing its captured base OID")?;
-    let head_oid = reviewed
-        .head_oid
-        .as_deref()
-        .ok_or("base-and-worktree review is missing its captured head OID")?;
-    let committed = vee_application::capture_change_set(
-        root,
-        vee_git::ChangeScope::CommitRange {
-            from: base_oid.to_owned(),
-            to: head_oid.to_owned(),
-        },
-    )?;
-    let normalize_mode = |mode: u32| {
-        if mode & 0o170000 == 0o100000 {
-            mode & 0o777
-        } else {
-            mode
-        }
-    };
-    Ok(reviewed.files.len() == committed.files.len()
-        && reviewed
-            .files
-            .iter()
-            .zip(&committed.files)
-            .all(|(left, right)| {
-                left.path == right.path
-                    && normalize_mode(left.mode) == normalize_mode(right.mode)
-                    && left.content_digest == right.content_digest
-                    && left.status == right.status
-            }))
-}
-
-fn replay_gate(review_value: &serde_json::Value) -> serde_json::Value {
-    let review: vee_application::ReviewResult = match serde_json::from_value(review_value.clone()) {
-        Ok(review) => review,
-        Err(error) => {
-            return serde_json::json!({"status":"unavailable","matches":null,"message":format!("review cannot be decoded for replay: {error}")})
-        }
-    };
-    let Some(inputs) = review.gate.replay_inputs.as_ref() else {
-        return serde_json::json!({"status":"unavailable","matches":null,"message":"bundle does not contain retained deterministic gate inputs"});
-    };
-    if inputs.schema_version != 1 {
-        return serde_json::json!({"status":"unavailable","matches":null,"message":"unsupported retained gate replay schema"});
-    }
-    let findings = review
-        .policy_findings
-        .as_deref()
-        .unwrap_or(&review.findings);
-    let mut replayed = vee_core::evaluate_gate_with_waivers_and_reviewer_policies(
-        &review.snapshot_id,
-        vee_core::GateDigests {
-            effective_config_digest: &review.effective_config_digest,
-            policy_digest: &review.gate.policy_digest,
-        },
-        findings,
-        &inputs.policy,
-        inputs.complete,
-        vee_core::GateEvidence {
-            verification_runs: &inputs.verification_runs,
-            source_evidence: &inputs.evidence,
-            analyzer_reports: &inputs.analyzer_reports,
-        },
-        vee_core::GateEvaluationOptions {
-            waiver_evaluation: vee_core::WaiverEvaluation {
-                records: &inputs.waivers,
-                evaluation_time_unix: inputs.evaluation_time_unix,
-            },
-            reviewer_policies: &inputs.reviewer_policies,
-        },
-    );
-    replayed.blocking_findings = vee_application::visible_blocking_findings(
-        &replayed.blocking_findings,
-        findings,
-        &review.findings,
-    );
-    let matches = replayed == review.gate;
-    serde_json::json!({"status":"replayed","matches":matches,"message":if matches {"deterministic gate replay matches the stored decision"} else {"replayed gate decision differs from the stored decision"},"replayed_decision":replayed})
-}
-
-fn write_private_key(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("creating private key {}", path.display()))?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(())
-}
-
 fn diff_contains_added_line(patch: Option<&str>, wanted: u32) -> bool {
     let Some(patch) = patch else {
         return false;
@@ -1869,92 +1534,6 @@ fn add_resolved_hosting_threads(
         review_id,
         snapshot_id,
     ));
-}
-
-enum ImportedArchive {
-    Review(Box<vee_application::ReviewResult>),
-    Discussions(vee_hosting::PullRequestReviewIssues),
-}
-
-fn parse_imported_archive(bytes: &[u8]) -> Result<ImportedArchive> {
-    let payload: serde_json::Value =
-        serde_json::from_slice(bytes).context("imported archive is not valid JSON")?;
-    match payload
-        .get("schema_version")
-        .and_then(serde_json::Value::as_u64)
-    {
-        Some(2) => Ok(ImportedArchive::Review(Box::new(parse_portable_review(
-            bytes,
-        )?))),
-        Some(1) => {
-            let discussion: vee_hosting::PullRequestReviewIssues =
-                serde_json::from_slice(bytes).context("invalid provider discussion archive")?;
-            anyhow::ensure!(
-                !discussion.gate_eligible,
-                "provider discussion archive must remain gate-ineligible"
-            );
-            discussion
-                .pull_request
-                .validate()
-                .map_err(anyhow::Error::msg)?;
-            anyhow::ensure!(
-                discussion
-                    .issues
-                    .iter()
-                    .all(|issue| issue.classification == "untrusted_external_review"),
-                "provider discussion archive contains an unsupported issue classification"
-            );
-            Ok(ImportedArchive::Discussions(discussion))
-        }
-        _ => anyhow::bail!("unsupported imported archive schema"),
-    }
-}
-
-fn import_review_archive(
-    root: &std::path::Path,
-    source: &std::path::Path,
-) -> Result<(String, vee_application::ReviewResult)> {
-    let source_metadata = std::fs::symlink_metadata(source)
-        .with_context(|| format!("could not inspect import file {}", source.display()))?;
-    anyhow::ensure!(
-        source_metadata.file_type().is_file(),
-        "import path must be a regular, non-symlink file"
-    );
-    #[cfg(unix)]
-    let file = {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(source)
-    };
-    #[cfg(not(unix))]
-    let file = std::fs::File::open(source);
-    let file =
-        file.with_context(|| format!("could not inspect import file {}", source.display()))?;
-    let metadata = file
-        .metadata()
-        .context("could not inspect opened import file")?;
-    anyhow::ensure!(metadata.is_file(), "import path must be a regular file");
-    anyhow::ensure!(
-        metadata.len() <= MAX_IMPORTED_REVIEW_BYTES,
-        "import file exceeds 10 MiB limit"
-    );
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(MAX_IMPORTED_REVIEW_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .context("could not read import file")?;
-    anyhow::ensure!(
-        bytes.len() as u64 <= MAX_IMPORTED_REVIEW_BYTES,
-        "import file exceeds 10 MiB limit"
-    );
-    let review = parse_portable_review(&bytes)?;
-    let digest = store_imported_history(root, &bytes)?;
-    Ok((digest, review))
-}
-
-fn hex_digest(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[derive(Subcommand)]
@@ -2441,113 +2020,6 @@ impl vee_http::WebhookEventHandler for HostingWebhookReviewer {
         store.replace_hosted_finding_threads(&thread_target, &published_fingerprints)?;
         Ok(())
     }
-}
-
-fn sarif_uri_reference(path: &str) -> String {
-    let mut encoded = String::with_capacity(path.len());
-    for byte in path.bytes() {
-        if byte.is_ascii_alphanumeric()
-            || matches!(
-                byte,
-                b'-' | b'.'
-                    | b'_'
-                    | b'~'
-                    | b'/'
-                    | b'!'
-                    | b'$'
-                    | b'&'
-                    | b'\''
-                    | b'('
-                    | b')'
-                    | b'*'
-                    | b'+'
-                    | b','
-                    | b';'
-                    | b'='
-                    | b':'
-                    | b'@'
-            )
-        {
-            encoded.push(char::from(byte));
-        } else {
-            use std::fmt::Write;
-            write!(encoded, "%{byte:02X}").expect("writing into String cannot fail");
-        }
-    }
-    encoded
-}
-
-fn review_to_sarif(review: &vee_application::ReviewResult) -> Result<serde_json::Value> {
-    let mut rules = std::collections::BTreeMap::<String, serde_json::Value>::new();
-    let mut findings: Vec<_> = review.findings.iter().collect();
-    findings.sort_by(|left, right| {
-        left.fingerprint
-            .cmp(&right.fingerprint)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    let results = findings
-        .into_iter()
-        .map(|finding| {
-            rules.entry(finding.category.clone()).or_insert_with(|| {
-                serde_json::json!({
-                    "id": finding.category,
-                    "name": finding.category,
-                    "shortDescription": {"text": finding.category}
-                })
-            });
-            let level = match finding.severity {
-                Severity::Critical | Severity::High => "error",
-                Severity::Medium => "warning",
-                Severity::Low | Severity::Info => "note",
-            };
-            let locations = match (finding.path.as_deref(), finding.line) {
-                (Some(path), Some(line)) => serde_json::json!([{
-                    "physicalLocation": {
-                        "artifactLocation": {"uri": sarif_uri_reference(path)},
-                        "region": {"startLine": line}
-                    }
-                }]),
-                (Some(path), None) => serde_json::json!([{
-                    "physicalLocation": {"artifactLocation": {"uri": sarif_uri_reference(path)}}
-                }]),
-                _ => serde_json::Value::Array(Vec::new()),
-            };
-            serde_json::json!({
-                "ruleId": finding.category,
-                "level": level,
-                "message": {"text": finding.rationale},
-                "partialFingerprints": {"vee/v1": finding.fingerprint},
-                "locations": locations,
-                "properties": {
-                    "veeFindingId": finding.id,
-                    "confidence": finding.confidence,
-                    "provenance": finding.provenance,
-                    "evidenceIds": finding.evidence_ids
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-    let rules = rules.into_values().collect::<Vec<_>>();
-    Ok(serde_json::json!({
-        "$schema": "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json",
-        "version": "2.1.0",
-        "runs": [{
-            "tool": {"driver": {
-                "name": "Vee",
-                "semanticVersion": env!("CARGO_PKG_VERSION"),
-                "rules": rules
-            }},
-            "results": results,
-            "invocations": [{
-                "executionSuccessful": review.analysis_complete,
-                "properties": {
-                    "veeReviewId": review.review_id,
-                    "veeSnapshotId": review.snapshot_id,
-                    "veeGateStatus": review.status
-                }
-            }]
-        }]
-    }))
 }
 
 /// Fingerprint of an analyzer finding recorded in one of the review's gate
@@ -4113,48 +3585,11 @@ fn run() -> Result<u8> {
                 gate,
                 output,
             } => {
-                let cwd = std::env::current_dir()?;
-                let root = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-                let store =
-                    ReviewStore::open(&root.join(".vee/vee.sqlite")).map_err(anyhow::Error::msg)?;
-                let payload = store
-                    .get(&review)
-                    .map_err(anyhow::Error::msg)?
-                    .ok_or_else(|| usage_failure(format!("review {review} was not found")))?;
-                let review_result = vee_application::deserialize_review_result(&payload)
-                    .map_err(anyhow::Error::msg)?;
-                let mut repository_config = load_repository_config(&root)?;
-                repository_config
-                    .select_policy_profile(review_result.policy_profile.as_deref())
-                    .map_err(configuration_failure)?;
-                apply_protected_policy(&root, &mut repository_config)?;
-                let metadata = std::fs::symlink_metadata(&mapping).map_err(|error| {
-                    configuration_failure(format!("cannot read mapping file: {error}"))
-                })?;
-                if !metadata.file_type().is_file() || metadata.len() > 1_048_576 {
-                    return Err(configuration_failure(
-                        "mapping must be a regular file no larger than 1 MiB",
-                    ));
-                }
-                let contents = std::fs::read(&mapping).map_err(|error| {
-                    configuration_failure(format!("cannot read mapping file: {error}"))
-                })?;
-                let mapping: acceptance::AcceptanceMapping = serde_json::from_slice(&contents)
-                    .map_err(|error| {
-                        configuration_failure(format!("invalid acceptance mapping: {error}"))
-                    })?;
-                let report = acceptance::validate_mapping(
-                    &review_result,
-                    &mapping,
-                    &repository_config.policy.acceptance,
-                )
-                .map_err(configuration_failure)?;
+                let workspace = operations::Workspace::discover(crate::local_stores())?;
+                let report = operations::acceptance_validate(&workspace, &review, &mapping)?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &report)?;
-                        println!();
-                    }
-                    Output::Text => acceptance::render_validation_text(&report),
+                    Output::Json => emit_json(&report)?,
+                    Output::Text => print_view(&report)?,
                 }
                 if !gate {
                     Ok(0)
@@ -4250,29 +3685,11 @@ fn run() -> Result<u8> {
                 Ok(0)
             }
             VerificationCommand::Show { run_id, output } => {
-                let cwd = std::env::current_dir()?;
-                let top = vee_git::repository_root(&cwd)
-                    .map_err(anyhow::Error::msg)?
-                    .to_string_lossy()
-                    .to_string();
-                let db_path = std::path::Path::new(&top).join(".vee/vee.sqlite");
-                let store = ReviewStore::open(&db_path).map_err(anyhow::Error::msg)?;
-                let run = store
-                    .verification(&run_id)
-                    .map_err(anyhow::Error::msg)?
-                    .with_context(|| format!("verification run {run_id} was not found"))?;
+                let workspace = operations::Workspace::discover(crate::local_stores())?;
+                let run = operations::verification_show(&workspace, &run_id)?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &run)?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!(
-                            "Verification {}: {:?} on {}",
-                            run.profile_id, run.status, run.snapshot_id
-                        );
-                        print_verification_artifacts(&run);
-                    }
+                    Output::Json => emit_json(&run)?,
+                    Output::Text => print_view(&run)?,
                 }
                 Ok(0)
             }
@@ -4301,51 +3718,15 @@ fn run() -> Result<u8> {
                 stream,
                 output,
             } => {
-                let cwd = std::env::current_dir()?;
-                let top = vee_git::repository_root(&cwd)
-                    .map_err(anyhow::Error::msg)?
-                    .to_string_lossy()
-                    .to_string();
-                let root = std::path::Path::new(&top);
-                let store =
-                    ReviewStore::open(&root.join(".vee/vee.sqlite")).map_err(anyhow::Error::msg)?;
-                let run = store
-                    .verification(&run_id)
-                    .map_err(anyhow::Error::msg)?
-                    .with_context(|| format!("verification run {run_id} was not found"))?;
-                let report = coverage::report(
-                    root,
-                    &store,
-                    &run,
-                    match stream {
-                        CoverageStream::Stdout => "stdout",
-                        CoverageStream::Stderr => "stderr",
-                    },
-                )
-                .map_err(anyhow::Error::msg)?;
+                let workspace = operations::Workspace::discover(crate::local_stores())?;
+                let stream = match stream {
+                    CoverageStream::Stdout => "stdout",
+                    CoverageStream::Stderr => "stderr",
+                };
+                let report = operations::verification_coverage(&workspace, &run_id, stream)?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &report)?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!(
-                            "Coverage for changed files: {} ({})",
-                            report.profile_id, report.snapshot_id
-                        );
-                        for file in &report.files {
-                            match file.percent {
-                                Some(percent) => println!(
-                                    "{}: {:.1}% ({}/{})",
-                                    file.path, percent, file.covered_lines, file.executable_lines
-                                ),
-                                None => println!("{}: no executable lines", file.path),
-                            }
-                        }
-                        for limitation in &report.limitations {
-                            println!("Note: {limitation}");
-                        }
-                    }
+                    Output::Json => emit_json(&report)?,
+                    Output::Text => print_view(&report)?,
                 }
                 Ok(0)
             }
@@ -4391,38 +3772,26 @@ fn run() -> Result<u8> {
                     Ok(0)
                 }
                 ReviewsCommand::Export { id, format } => {
-                    let store =
-                        ReviewStore::open(&std::path::Path::new(&top).join(".vee/vee.sqlite"))
-                            .map_err(anyhow::Error::msg)?;
-                    let payload = store
-                        .get(&id)
-                        .map_err(anyhow::Error::msg)?
-                        .with_context(|| format!("review {id} was not found"))?;
-                    let review = vee_application::deserialize_review_result(&payload)
-                        .map_err(anyhow::Error::msg)?;
-                    let report = match format {
-                        ReportFormat::Sarif => review_to_sarif(&review)?,
-                        ReportFormat::VeeJson => serde_json::to_value(&review)?,
+                    let workspace = operations::Workspace::new(
+                        std::path::PathBuf::from(&top),
+                        crate::local_stores(),
+                    );
+                    let format = match format {
+                        ReportFormat::Sarif => operations::ReviewExportFormat::Sarif,
+                        ReportFormat::VeeJson => operations::ReviewExportFormat::VeeJson,
                     };
-                    serde_json::to_writer(std::io::stdout().lock(), &report)?;
-                    println!();
+                    emit_json(&operations::export_review(&workspace, &id, format)?)?;
                     Ok(0)
                 }
                 ReviewsCommand::Bundle { id, decision_id } => {
-                    let review = review_with_decision(
-                        std::path::Path::new(&top),
-                        &id,
-                        decision_id.as_deref(),
-                    )?;
-                    let bundle = evidence_bundle(&review)?;
-                    let bytes = serde_json::to_vec(&bundle)?;
-                    anyhow::ensure!(
-                        bytes.len() as u64 <= MAX_IMPORTED_REVIEW_BYTES,
-                        "evidence bundle exceeds 10 MiB and cannot be verified by Vee"
+                    let workspace = operations::Workspace::new(
+                        std::path::PathBuf::from(&top),
+                        crate::local_stores(),
                     );
-                    let mut stdout = std::io::stdout().lock();
-                    stdout.write_all(&bytes)?;
-                    stdout.write_all(b"\n")?;
+                    let bundle =
+                        evidence_bundle::export_bundle(&workspace, &id, decision_id.as_deref())?;
+                    // Through a Value: the manifest digests cover the sorted-key form.
+                    emit_json(&serde_json::to_value(&bundle)?)?;
                     Ok(0)
                 }
                 ReviewsCommand::Attest {
@@ -4432,33 +3801,19 @@ fn run() -> Result<u8> {
                     private_key,
                     key_id,
                 } => {
-                    let root = std::path::Path::new(&top);
-                    let review = review_with_decision(root, &id, decision_id.as_deref())?;
-                    let bundle = evidence_bundle(&review)?;
-                    let manifest_digest = bundle["manifest_digest"].as_str().unwrap_or_default();
-                    let commit = attested_commit(root, &review.change_set)?;
-                    let statement =
-                        attestation::statement(&review, manifest_digest, commit.as_deref())?;
-                    let document = match format {
-                        AttestationFormat::Statement => statement,
-                        AttestationFormat::Dsse => {
-                            let key_id = key_id.unwrap_or_default();
-                            if key_id.trim().is_empty() {
-                                return Err(usage_failure("--key-id cannot be empty"));
-                            }
-                            let private_key = private_key.unwrap_or_default();
-                            let key_bytes = std::fs::read(&private_key).with_context(|| {
-                                format!("reading private key {}", private_key.display())
-                            })?;
-                            let key = ring::signature::Ed25519KeyPair::from_pkcs8(&key_bytes)
-                                .map_err(|_| {
-                                    configuration_failure(
-                                        "private key must be a valid Ed25519 PKCS#8 DER file",
-                                    )
-                                })?;
-                            attestation::sign(&statement, &key, &key_id)?
-                        }
+                    let workspace = operations::Workspace::new(
+                        std::path::PathBuf::from(&top),
+                        crate::local_stores(),
+                    );
+                    let format = match format {
+                        AttestationFormat::Statement => attestation::AttestationFormat::Statement,
+                        AttestationFormat::Dsse => attestation::AttestationFormat::Dsse {
+                            private_key: private_key.as_deref().unwrap_or(std::path::Path::new("")),
+                            key_id: key_id.as_deref().unwrap_or_default(),
+                        },
                     };
+                    let document =
+                        attestation::attest(&workspace, &id, decision_id.as_deref(), format)?;
                     emit_json(&document)?;
                     Ok(0)
                 }
@@ -4467,325 +3822,68 @@ fn run() -> Result<u8> {
                     public_key,
                     output,
                 } => {
-                    let file = std::fs::File::open(&path)
-                        .with_context(|| format!("opening attestation {}", path.display()))?;
-                    let mut bytes = Vec::new();
-                    file.take(MAX_IMPORTED_REVIEW_BYTES + 1)
-                        .read_to_end(&mut bytes)
-                        .with_context(|| format!("reading attestation {}", path.display()))?;
-                    anyhow::ensure!(
-                        bytes.len() as u64 <= MAX_IMPORTED_REVIEW_BYTES,
-                        "attestation exceeds 10 MiB"
-                    );
-                    let envelope: serde_json::Value = serde_json::from_slice(&bytes)
-                        .map_err(|_| usage_failure("attestation is not valid JSON"))?;
-                    let key = std::fs::read(&public_key)
-                        .with_context(|| format!("reading public key {}", public_key.display()))?;
-                    let report = attestation::verify(&envelope, &key);
+                    let report = attestation::verify_file(&path, &public_key)?;
                     match output {
-                        Output::Json => emit_json(&report)?,
-                        Output::Text => {
-                            if report["valid"] == true {
-                                println!(
-                                    "Valid: gate {} (decision {}) signed by {}",
-                                    report["gate_status"].as_str().unwrap_or("?"),
-                                    report["decision_id"].as_str().unwrap_or("?"),
-                                    report["key_id"].as_str().unwrap_or("?")
-                                );
-                                for subject in report["subjects"].as_array().into_iter().flatten() {
-                                    println!(
-                                        "Subject: {}",
-                                        subject["name"].as_str().unwrap_or("?")
-                                    );
-                                }
-                            } else {
-                                println!(
-                                    "Invalid: {}",
-                                    report["message"].as_str().unwrap_or("verification failed")
-                                );
-                            }
-                        }
+                        // Through a Value, as before: keys stay sorted.
+                        Output::Json => emit_json(&serde_json::to_value(&report)?)?,
+                        Output::Text => print_view(&report)?,
                     }
-                    Ok(if report["valid"] == true { 0 } else { 2 })
+                    Ok(if report.valid { 0 } else { 2 })
                 }
                 ReviewsCommand::VerifyBundle {
                     path,
                     public_key,
                     output,
                 } => {
-                    let file = std::fs::File::open(&path)
-                        .with_context(|| format!("opening evidence bundle {}", path.display()))?;
-                    let mut bytes = Vec::new();
-                    file.take(MAX_IMPORTED_REVIEW_BYTES + 1)
-                        .read_to_end(&mut bytes)
-                        .with_context(|| format!("reading evidence bundle {}", path.display()))?;
-                    anyhow::ensure!(
-                        bytes.len() as u64 <= MAX_IMPORTED_REVIEW_BYTES,
-                        "evidence bundle exceeds 10 MiB"
-                    );
-                    let bundle: serde_json::Value = serde_json::from_slice(&bytes)
-                        .context("evidence bundle is not valid JSON")?;
-                    let report = verify_evidence_bundle(&bundle, public_key.as_deref());
+                    let report = evidence_bundle::verify_file(&path, public_key.as_deref())?;
                     match output {
-                        Output::Json => {
-                            serde_json::to_writer(std::io::stdout().lock(), &report)?;
-                            println!();
-                        }
-                        Output::Text => println!(
-                            "{}: {}",
-                            if report["valid"] == true && report["replay_matches"] != false {
-                                "Valid"
-                            } else {
-                                "Invalid"
-                            },
-                            report["message"]
-                                .as_str()
-                                .unwrap_or("bundle verification failed")
-                        ),
+                        // Through a Value, as before: keys stay sorted.
+                        Output::Json => emit_json(&serde_json::to_value(&report)?)?,
+                        Output::Text => print_view(&report)?,
                     }
-                    if report["valid"] == true && report["replay_matches"] != false {
-                        Ok(0)
-                    } else {
-                        Ok(2)
-                    }
+                    Ok(if report.passed() { 0 } else { 2 })
                 }
                 ReviewsCommand::SignBundle {
                     path,
                     private_key,
                     key_id,
                 } => {
-                    if key_id.trim().is_empty() {
-                        return Err(usage_failure("--key-id cannot be empty"));
-                    }
-                    let file = std::fs::File::open(&path)
-                        .with_context(|| format!("reading evidence bundle {}", path.display()))?;
-                    anyhow::ensure!(
-                        file.metadata()?.len() <= MAX_IMPORTED_REVIEW_BYTES,
-                        "evidence bundle exceeds 10 MiB"
-                    );
-                    let mut bytes = Vec::new();
-                    file.take(MAX_IMPORTED_REVIEW_BYTES + 1)
-                        .read_to_end(&mut bytes)
-                        .context("reading evidence bundle")?;
-                    anyhow::ensure!(
-                        bytes.len() as u64 <= MAX_IMPORTED_REVIEW_BYTES,
-                        "evidence bundle exceeds 10 MiB"
-                    );
-                    let mut bundle: serde_json::Value = serde_json::from_slice(&bytes)
-                        .context("evidence bundle is not valid JSON")?;
-                    let integrity = verify_evidence_bundle(&bundle, None);
-                    if integrity["valid"] != true || integrity["replay_matches"] == false {
-                        return Err(configuration_failure(
-                            "cannot sign an invalid evidence bundle",
-                        ));
-                    }
-                    if bundle.get("signature").is_some() {
-                        return Err(usage_failure("bundle is already signed; export a fresh bundle to create another signature"));
-                    }
-                    let key_bytes = std::fs::read(&private_key).with_context(|| {
-                        format!("reading private key {}", private_key.display())
-                    })?;
-                    let key =
-                        ring::signature::Ed25519KeyPair::from_pkcs8(&key_bytes).map_err(|_| {
-                            configuration_failure(
-                                "private key must be a valid Ed25519 PKCS#8 DER file",
-                            )
-                        })?;
-                    let digest = bundle["manifest_digest"].as_str().ok_or_else(|| {
-                        configuration_failure("bundle manifest digest is missing")
-                    })?;
-                    let signature = key.sign(digest.as_bytes());
-                    bundle["signature"] = serde_json::json!({ "algorithm": "ed25519", "key_id": key_id, "signature": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, signature.as_ref()) });
-                    let mut output = serde_json::to_vec_pretty(&bundle)?;
-                    output.push(b'\n');
-                    anyhow::ensure!(
-                        output.len() as u64 <= MAX_IMPORTED_REVIEW_BYTES,
-                        "signed evidence bundle exceeds 10 MiB and cannot be verified by Vee"
-                    );
-                    std::fs::write(&path, output).with_context(|| {
-                        format!("writing signed evidence bundle {}", path.display())
-                    })?;
-                    println!("Signed evidence bundle with Ed25519 key {key_id}.");
+                    print_view(&evidence_bundle::sign_file(&path, &private_key, &key_id)?)?;
                     Ok(0)
                 }
                 ReviewsCommand::Keygen {
                     private_key,
                     public_key,
                 } => {
-                    let resolve_target = |path: &std::path::Path| -> Result<std::path::PathBuf> {
-                        let name = path
-                            .file_name()
-                            .context("key output path must name a file")?;
-                        let parent = path
-                            .parent()
-                            .filter(|parent| !parent.as_os_str().is_empty())
-                            .unwrap_or(std::path::Path::new("."));
-                        std::fs::create_dir_all(parent)?;
-                        Ok(vee_core::paths::canonicalize(parent)?.join(name))
-                    };
-                    let private_target = resolve_target(&private_key)?;
-                    let public_target = resolve_target(&public_key)?;
-                    if private_target == public_target {
-                        return Err(usage_failure(
-                            "private and public key output paths must differ",
-                        ));
-                    }
-                    if private_target.exists() || public_target.exists() {
-                        return Err(usage_failure("key output paths must not already exist"));
-                    }
-                    let rng = ring::rand::SystemRandom::new();
-                    let document =
-                        ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).map_err(|_| {
-                            configuration_failure("could not generate Ed25519 key pair")
-                        })?;
-                    let pair = ring::signature::Ed25519KeyPair::from_pkcs8(document.as_ref())
-                        .map_err(|_| {
-                            configuration_failure("generated Ed25519 key pair could not be loaded")
-                        })?;
-                    write_private_key(&private_target, document.as_ref())?;
-                    std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&public_target)?
-                        .write_all(ring::signature::KeyPair::public_key(&pair).as_ref())?;
-                    println!("Generated Ed25519 key pair; keep {} private and distribute {} to verifiers.", private_key.display(), public_key.display());
+                    print_view(&signing::generate_key_pair(&private_key, &public_key)?)?;
                     Ok(0)
                 }
                 ReviewsCommand::Import { path, output } => {
-                    let (digest, review) =
-                        import_review_archive(std::path::Path::new(&top), &path)?;
+                    let imported =
+                        imported_history::import_review_archive(std::path::Path::new(&top), &path)?;
                     match output {
-                        Output::Json => {
-                            serde_json::to_writer(std::io::stdout().lock(), &serde_json::json!({
-                                "schema_version": 1,
-                                "archive_digest": digest,
-                                "review_id": review.review_id,
-                                "snapshot_id": review.snapshot_id,
-                                "status": review.status,
-                                "trust": "untrusted_external",
-                                "gate_eligible": false
-                            }))?;
-                            println!();
-                        }
-                        Output::Text => println!("Imported {} ({}) as untrusted external history; excluded from gate evaluation.", review.review_id, digest),
+                        // Through a Value, as before: keys stay sorted.
+                        Output::Json => emit_json(&serde_json::to_value(&imported)?)?,
+                        Output::Text => print_view(&imported)?,
                     }
                     Ok(0)
                 }
                 ReviewsCommand::Imported { command } => match command {
                     ImportedCommand::List { output } => {
-                        let archive = imported_reviews_dir(std::path::Path::new(&top), true)?;
-                        let mut records = Vec::new();
-                        if archive.exists() {
-                            for entry in std::fs::read_dir(&archive)? {
-                                let entry = entry?;
-                                if entry.path().extension().and_then(|ext| ext.to_str())
-                                    != Some("json")
-                                {
-                                    continue;
-                                }
-                                let metadata = entry.metadata()?;
-                                if !metadata.is_file() || metadata.len() > MAX_IMPORTED_REVIEW_BYTES
-                                {
-                                    continue;
-                                }
-                                let bytes = std::fs::read(entry.path())?;
-                                let imported = match parse_imported_archive(&bytes) {
-                                    Ok(imported) => imported,
-                                    Err(_) => continue,
-                                };
-                                let hash = hex_digest(&Sha256::digest(&bytes));
-                                if entry.file_name().to_string_lossy() != format!("{hash}.json") {
-                                    continue;
-                                }
-                                records.push(match imported {
-                                    ImportedArchive::Review(review) => serde_json::json!({
-                                        "archive_digest": format!("sha256:{hash}"),
-                                        "archive_type": "review",
-                                        "review_id": review.review_id,
-                                        "snapshot_id": review.snapshot_id,
-                                        "status": review.status,
-                                        "trust": "untrusted_external",
-                                        "gate_eligible": false
-                                    }),
-                                    ImportedArchive::Discussions(discussion) => serde_json::json!({
-                                        "archive_digest": format!("sha256:{hash}"),
-                                        "archive_type": "provider_discussions",
-                                        "provider": discussion.provider,
-                                        "pull_request": discussion.pull_request,
-                                        "revision": discussion.revision,
-                                        "complete": discussion.complete,
-                                        "issue_count": discussion.issues.len(),
-                                        "trust": "untrusted_external",
-                                        "gate_eligible": false
-                                    }),
-                                });
-                            }
-                        }
-                        records.sort_by(|a, b| {
-                            a["archive_digest"]
-                                .as_str()
-                                .cmp(&b["archive_digest"].as_str())
-                        });
+                        let list =
+                            imported_history::list_imported_archives(std::path::Path::new(&top))?;
                         match output {
-                            Output::Json => {
-                                serde_json::to_writer(
-                                    std::io::stdout().lock(),
-                                    &serde_json::json!({"schema_version": 1, "reviews": records}),
-                                )?;
-                                println!();
-                            }
-                            Output::Text => {
-                                for record in records {
-                                    if record["archive_type"] == "provider_discussions" {
-                                        println!("{}  {}  {} issues  untrusted_external (not gate eligible)", record["archive_digest"], record["pull_request"]["number"], record["issue_count"]);
-                                    } else {
-                                        println!(
-                                            "{}  {}  {}  untrusted_external",
-                                            record["archive_digest"],
-                                            record["review_id"],
-                                            record["status"]
-                                        );
-                                    }
-                                }
-                            }
+                            // Through a Value, as before: keys stay sorted.
+                            Output::Json => emit_json(&serde_json::to_value(&list)?)?,
+                            Output::Text => print_view(&list)?,
                         }
                         Ok(0)
                     }
                     ImportedCommand::Show { digest } => {
-                        let archive = imported_reviews_dir(std::path::Path::new(&top), false)?;
-                        let raw_digest = digest.strip_prefix("sha256:").unwrap_or(&digest);
-                        anyhow::ensure!(
-                            raw_digest.len() == 64
-                                && raw_digest.bytes().all(|b| b.is_ascii_hexdigit()),
-                            "digest must be a SHA-256 hex digest"
-                        );
-                        let normalized_digest = raw_digest.to_ascii_lowercase();
-                        let path = archive.join(format!("{normalized_digest}.json"));
-                        let metadata =
-                            std::fs::metadata(&path).context("imported review not found")?;
-                        anyhow::ensure!(
-                            metadata.is_file() && metadata.len() <= MAX_IMPORTED_REVIEW_BYTES,
-                            "invalid imported review archive entry"
-                        );
-                        let bytes = std::fs::read(&path)?;
-                        anyhow::ensure!(
-                            format!("sha256:{}", hex_digest(&Sha256::digest(&bytes)))
-                                == format!("sha256:{normalized_digest}"),
-                            "imported archive entry failed integrity check"
-                        );
-                        let (mut value, archive_type) = match parse_imported_archive(&bytes)? {
-                            ImportedArchive::Review(review) => {
-                                (serde_json::to_value(review)?, "review")
-                            }
-                            ImportedArchive::Discussions(discussion) => {
-                                (serde_json::to_value(discussion)?, "provider_discussions")
-                            }
-                        };
-                        value["archive_type"] = serde_json::json!(archive_type);
-                        value["trust"] = serde_json::json!("untrusted_external");
-                        value["gate_eligible"] = serde_json::json!(false);
-                        serde_json::to_writer(std::io::stdout().lock(), &value)?;
-                        println!();
+                        emit_json(&imported_history::show_imported_archive(
+                            std::path::Path::new(&top),
+                            &digest,
+                        )?)?;
                         Ok(0)
                     }
                     ImportedCommand::Search {
@@ -6810,8 +5908,8 @@ mod tests {
     use super::install_agent_skills;
     use super::{
         build_hosting_threads, committed_snapshot_matches_review, diff_contains_added_line,
-        json_output_requested, read_proposal_file, sarif_uri_reference, work_item_api_base,
-        write_markdown_report, Cli, Command, HostingCommand, Output,
+        json_output_requested, read_proposal_file, work_item_api_base, write_markdown_report, Cli,
+        Command, HostingCommand, Output,
     };
     use clap::Parser;
     use std::collections::BTreeSet;
@@ -7047,15 +6145,6 @@ mod tests {
             .unwrap(),
             "https://proxy.example/api/"
         );
-    }
-
-    #[test]
-    fn sarif_uri_encodes_spaces_and_uri_delimiters() {
-        assert_eq!(
-            sarif_uri_reference("src/my file#1?.rs"),
-            "src/my%20file%231%3F.rs"
-        );
-        assert_eq!(sarif_uri_reference("src/naïve.rs"), "src/na%C3%AFve.rs");
     }
 
     #[test]

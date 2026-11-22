@@ -974,6 +974,31 @@ pub fn diagnose_verification(
         .map_err(anyhow::Error::msg)
 }
 
+fn saved_verification(store: &dyn Repositories, run_id: &str) -> Result<VerificationRun> {
+    store
+        .verification(run_id)
+        .map_err(anyhow::Error::msg)?
+        .with_context(|| format!("verification run {run_id} was not found"))
+}
+
+/// `vee verification show`: one saved verification run.
+pub fn verification_show(workspace: &Workspace, run_id: &str) -> Result<VerificationRun> {
+    saved_verification(workspace.store()?.as_ref(), run_id)
+}
+
+/// `vee verification coverage`: changed-file coverage from a run's LCOV `stream`
+/// (`stdout` or `stderr`).
+pub fn verification_coverage(
+    workspace: &Workspace,
+    run_id: &str,
+    stream: &str,
+) -> Result<crate::coverage::CoverageReport> {
+    let store = workspace.store()?;
+    let run = saved_verification(store.as_ref(), run_id)?;
+    crate::coverage::report(workspace.root(), store.as_ref(), &run, stream)
+        .map_err(anyhow::Error::msg)
+}
+
 // ---------------------------------------------------------------------------
 // Impact, acceptance, standards, analytics
 
@@ -1024,6 +1049,34 @@ pub fn acceptance_report(
         impact.as_ref(),
         impact_problem.as_deref(),
     ))
+}
+
+/// Largest acceptance mapping file `acceptance_validate` reads.
+const MAX_ACCEPTANCE_MAPPING_BYTES: u64 = 1_048_576;
+
+/// `vee acceptance validate`: check a human-authored acceptance mapping against
+/// a saved review and the repository's acceptance policy.
+pub fn acceptance_validate(
+    workspace: &Workspace,
+    review_id: &str,
+    mapping: &Path,
+) -> Result<crate::acceptance::AcceptanceValidation> {
+    let store = workspace.store()?;
+    let review = workspace.saved_review(&*store, review_id)?;
+    let config = workspace.effective_config(review.policy_profile.as_deref())?;
+    let metadata = std::fs::symlink_metadata(mapping)
+        .map_err(|error| configuration_failure(format!("cannot read mapping file: {error}")))?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_ACCEPTANCE_MAPPING_BYTES {
+        return Err(configuration_failure(
+            "mapping must be a regular file no larger than 1 MiB",
+        ));
+    }
+    let contents = std::fs::read(mapping)
+        .map_err(|error| configuration_failure(format!("cannot read mapping file: {error}")))?;
+    let mapping: crate::acceptance::AcceptanceMapping = serde_json::from_slice(&contents)
+        .map_err(|error| configuration_failure(format!("invalid acceptance mapping: {error}")))?;
+    crate::acceptance::validate_mapping(&review, &mapping, &config.policy.acceptance)
+        .map_err(configuration_failure)
 }
 
 pub fn applicable_standards(
@@ -1128,6 +1181,37 @@ pub fn repository_context(
         truncated,
         classification: "untrusted_repository_source".into(),
         note,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Review records
+
+/// The formats `vee reviews export` writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewExportFormat {
+    /// A SARIF 2.1.0 log of the review's findings.
+    Sarif,
+    /// The portable Vee review document (`review-output-v2`).
+    VeeJson,
+}
+
+/// `vee reviews export`: a saved review as an exchange payload. Both formats are
+/// JSON values with sorted keys, written exactly as returned.
+pub fn export_review(
+    workspace: &Workspace,
+    review_id: &str,
+    format: ReviewExportFormat,
+) -> Result<serde_json::Value> {
+    let payload = workspace
+        .store()?
+        .get(review_id)
+        .map_err(anyhow::Error::msg)?
+        .with_context(|| format!("review {review_id} was not found"))?;
+    let review = crate::deserialize_review_result(&payload).map_err(anyhow::Error::msg)?;
+    Ok(match format {
+        ReviewExportFormat::Sarif => crate::sarif::review_log(&review),
+        ReviewExportFormat::VeeJson => serde_json::to_value(&review)?,
     })
 }
 

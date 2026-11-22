@@ -9,6 +9,7 @@ mod history;
 mod insights;
 mod lists;
 mod patch;
+mod records;
 pub mod review;
 mod setup;
 pub(crate) mod verification;

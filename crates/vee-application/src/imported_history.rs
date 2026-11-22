@@ -616,6 +616,233 @@ pub fn imported_reviews_dir(
     Ok(archive)
 }
 
+/// One archived entry: a portable Vee review or a provider discussion export.
+pub enum ImportedArchive {
+    Review(Box<crate::ReviewResult>),
+    Discussions(vee_hosting::PullRequestReviewIssues),
+}
+
+/// Parse an archive entry by its schema version, validating that it stays gate-ineligible.
+pub fn parse_imported_archive(bytes: &[u8]) -> anyhow::Result<ImportedArchive> {
+    let payload: serde_json::Value =
+        serde_json::from_slice(bytes).context("imported archive is not valid JSON")?;
+    match payload
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+    {
+        Some(2) => Ok(ImportedArchive::Review(Box::new(parse_portable_review(
+            bytes,
+        )?))),
+        Some(1) => {
+            let discussion: vee_hosting::PullRequestReviewIssues =
+                serde_json::from_slice(bytes).context("invalid provider discussion archive")?;
+            anyhow::ensure!(
+                !discussion.gate_eligible,
+                "provider discussion archive must remain gate-ineligible"
+            );
+            discussion
+                .pull_request
+                .validate()
+                .map_err(anyhow::Error::msg)?;
+            anyhow::ensure!(
+                discussion
+                    .issues
+                    .iter()
+                    .all(|issue| issue.classification == "untrusted_external_review"),
+                "provider discussion archive contains an unsupported issue classification"
+            );
+            Ok(ImportedArchive::Discussions(discussion))
+        }
+        _ => anyhow::bail!("unsupported imported archive schema"),
+    }
+}
+
+/// The result of `vee reviews import`: the archived review and its trust level.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ImportedReview {
+    pub schema_version: u32,
+    pub archive_digest: String,
+    pub review_id: String,
+    pub snapshot_id: String,
+    pub status: String,
+    pub trust: String,
+    pub gate_eligible: bool,
+}
+
+/// `vee reviews import`: archive a portable review file as untrusted history.
+pub fn import_review_archive(root: &Path, source: &Path) -> anyhow::Result<ImportedReview> {
+    use std::io::Read;
+    let source_metadata = std::fs::symlink_metadata(source)
+        .with_context(|| format!("could not inspect import file {}", source.display()))?;
+    anyhow::ensure!(
+        source_metadata.file_type().is_file(),
+        "import path must be a regular, non-symlink file"
+    );
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(source)
+    };
+    #[cfg(not(unix))]
+    let file = std::fs::File::open(source);
+    let file =
+        file.with_context(|| format!("could not inspect import file {}", source.display()))?;
+    let metadata = file
+        .metadata()
+        .context("could not inspect opened import file")?;
+    anyhow::ensure!(metadata.is_file(), "import path must be a regular file");
+    anyhow::ensure!(
+        metadata.len() <= MAX_IMPORTED_REVIEW_BYTES,
+        "import file exceeds 10 MiB limit"
+    );
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_IMPORTED_REVIEW_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .context("could not read import file")?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_IMPORTED_REVIEW_BYTES,
+        "import file exceeds 10 MiB limit"
+    );
+    let review = parse_portable_review(&bytes)?;
+    let archive_digest = store_imported_history(root, &bytes)?;
+    Ok(ImportedReview {
+        schema_version: 1,
+        archive_digest,
+        review_id: review.review_id,
+        snapshot_id: review.snapshot_id,
+        status: review.status,
+        trust: UNTRUSTED_EXTERNAL.to_owned(),
+        gate_eligible: false,
+    })
+}
+
+/// The result of `vee reviews imported list`, ordered by archive digest.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ImportedArchiveList {
+    pub schema_version: u32,
+    pub reviews: Vec<ImportedArchiveEntry>,
+}
+
+/// One archive entry's identity; never gate eligible.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "archive_type", rename_all = "snake_case")]
+pub enum ImportedArchiveEntry {
+    Review {
+        archive_digest: String,
+        review_id: String,
+        snapshot_id: String,
+        status: String,
+        trust: String,
+        gate_eligible: bool,
+    },
+    ProviderDiscussions {
+        archive_digest: String,
+        provider: String,
+        pull_request: vee_hosting::PullRequestRef,
+        revision: String,
+        complete: bool,
+        issue_count: usize,
+        trust: String,
+        gate_eligible: bool,
+    },
+}
+
+impl ImportedArchiveEntry {
+    pub fn archive_digest(&self) -> &str {
+        match self {
+            Self::Review { archive_digest, .. }
+            | Self::ProviderDiscussions { archive_digest, .. } => archive_digest,
+        }
+    }
+}
+
+/// `vee reviews imported list`: every intact archive entry. Entries that are
+/// oversized, unparsable or not named by their content digest are skipped.
+pub fn list_imported_archives(root: &Path) -> anyhow::Result<ImportedArchiveList> {
+    let archive = imported_reviews_dir(root, true)?;
+    let mut reviews = Vec::new();
+    for entry in std::fs::read_dir(&archive)? {
+        let entry = entry?;
+        if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let metadata = entry.metadata()?;
+        if !metadata.is_file() || metadata.len() > MAX_IMPORTED_REVIEW_BYTES {
+            continue;
+        }
+        let bytes = std::fs::read(entry.path())?;
+        let Ok(imported) = parse_imported_archive(&bytes) else {
+            continue;
+        };
+        let hash = hex_digest(&Sha256::digest(&bytes));
+        if entry.file_name().to_string_lossy() != format!("{hash}.json") {
+            continue;
+        }
+        let archive_digest = format!("sha256:{hash}");
+        reviews.push(match imported {
+            ImportedArchive::Review(review) => ImportedArchiveEntry::Review {
+                archive_digest,
+                review_id: review.review_id,
+                snapshot_id: review.snapshot_id,
+                status: review.status,
+                trust: UNTRUSTED_EXTERNAL.to_owned(),
+                gate_eligible: false,
+            },
+            ImportedArchive::Discussions(discussion) => ImportedArchiveEntry::ProviderDiscussions {
+                archive_digest,
+                provider: discussion.provider,
+                pull_request: discussion.pull_request,
+                revision: discussion.revision,
+                complete: discussion.complete,
+                issue_count: discussion.issues.len(),
+                trust: UNTRUSTED_EXTERNAL.to_owned(),
+                gate_eligible: false,
+            },
+        });
+    }
+    reviews.sort_by(|left, right| left.archive_digest().cmp(right.archive_digest()));
+    Ok(ImportedArchiveList {
+        schema_version: 1,
+        reviews,
+    })
+}
+
+/// `vee reviews imported show`: one integrity-checked archive entry as stored,
+/// annotated with its archive type and untrusted, gate-ineligible status.
+pub fn show_imported_archive(root: &Path, digest: &str) -> anyhow::Result<serde_json::Value> {
+    let archive = imported_reviews_dir(root, false)?;
+    let raw_digest = digest.strip_prefix("sha256:").unwrap_or(digest);
+    anyhow::ensure!(
+        raw_digest.len() == 64 && raw_digest.bytes().all(|b| b.is_ascii_hexdigit()),
+        "digest must be a SHA-256 hex digest"
+    );
+    let normalized_digest = raw_digest.to_ascii_lowercase();
+    let path = archive.join(format!("{normalized_digest}.json"));
+    let metadata = std::fs::metadata(&path).context("imported review not found")?;
+    anyhow::ensure!(
+        metadata.is_file() && metadata.len() <= MAX_IMPORTED_REVIEW_BYTES,
+        "invalid imported review archive entry"
+    );
+    let bytes = std::fs::read(&path)?;
+    anyhow::ensure!(
+        hex_digest(&Sha256::digest(&bytes)) == normalized_digest,
+        "imported archive entry failed integrity check"
+    );
+    let (mut value, archive_type) = match parse_imported_archive(&bytes)? {
+        ImportedArchive::Review(review) => (serde_json::to_value(review)?, "review"),
+        ImportedArchive::Discussions(discussion) => {
+            (serde_json::to_value(discussion)?, "provider_discussions")
+        }
+    };
+    value["archive_type"] = serde_json::json!(archive_type);
+    value["trust"] = serde_json::json!(UNTRUSTED_EXTERNAL);
+    value["gate_eligible"] = serde_json::json!(false);
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
