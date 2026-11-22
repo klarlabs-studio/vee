@@ -18,18 +18,16 @@ use vee_application::coverage;
 use vee_application::failure::{
     configuration_failure, usage_failure, ConfigurationFailure, UsageFailure,
 };
+use vee_application::hosting::{load_hosting_config, resolve_hosting_setting};
 use vee_application::imported_history::{
     imported_reviews_dir, parse_portable_review, store_imported_history, MAX_IMPORTED_REVIEW_BYTES,
 };
 use vee_application::proposals::{proposal_directory, read_proposal_file};
-use vee_application::work_items::{
-    effective_work_item_host, effective_work_item_token_env, get_work_item, work_item_api_base,
-};
+use vee_application::work_items::{effective_work_item_host, work_item_api_base};
 mod mcp;
 use vee_application::operations;
 use vee_application::packs;
 use vee_application::patch_sandbox;
-use vee_application::repository_map;
 use vee_application::standards;
 use vee_application::test_effectiveness;
 use vee_application::test_generation;
@@ -257,24 +255,6 @@ fn acquire_proposal_apply_lock(directory: &std::path::Path) -> Result<ProposalAp
     Ok(ProposalApplyLock(path))
 }
 
-fn resolve_hosting_setting(
-    command_line: Option<String>,
-    repository: Option<String>,
-    fallback: &str,
-) -> String {
-    command_line
-        .or(repository)
-        .unwrap_or_else(|| fallback.to_owned())
-}
-
-fn load_hosting_config(root: &std::path::Path) -> Result<(bool, vee_core::HostingConfig)> {
-    if !root.join(".vee.yaml").exists() {
-        return Ok((false, vee_core::HostingConfig::default()));
-    }
-    let config = load_repository_config(root)?;
-    Ok((config.offline, config.hosting))
-}
-
 fn apply_protected_policy(root: &std::path::Path, config: &mut RepositoryConfig) -> Result<()> {
     vee_application::apply_protected_policy(root, config).map_err(configuration_failure)
 }
@@ -329,6 +309,23 @@ fn set_color(choice: ColorArg) {
 }
 
 /// Prints the shared view of a result document: the same view MCP returns as Markdown.
+/// The current repository's root, or the current directory outside a checkout.
+fn hosting_config_root() -> Result<std::path::PathBuf> {
+    let cwd = std::env::current_dir()?;
+    Ok(vee_git::repository_root(&cwd).unwrap_or(cwd))
+}
+
+fn print_publication(
+    publication: &vee_application::hosting::ReviewPublication,
+    output: Output,
+) -> Result<()> {
+    match output {
+        // Sorted keys, as the document has always been printed.
+        Output::Json => emit_json(&serde_json::to_value(publication)?),
+        Output::Text => print_view(publication),
+    }
+}
+
 fn print_view(document: &impl vee_present::ToView) -> Result<()> {
     let text = vee_present::ansi::render(&document.to_view(), *COLOR.get().unwrap_or(&false));
     let mut stdout = std::io::stdout().lock();
@@ -4873,32 +4870,10 @@ fn run() -> Result<u8> {
                 repositories,
                 output,
             } => {
-                let result = repository_map::build(&repositories).map_err(anyhow::Error::msg)?;
+                let result = operations::repository_map(&repositories)?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &result)?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!(
-                            "Local repository dependency map ({} repositories, {} direct edges)",
-                            result.repositories.len(),
-                            result.dependencies.len()
-                        );
-                        for repo in &result.repositories {
-                            println!("  {} [{}] {}", repo.id, repo.ecosystem, repo.root);
-                        }
-                        for edge in &result.dependencies {
-                            println!(
-                                "  {} -> {} ({}, {}) [{}]",
-                                edge.from, edge.to, edge.package, edge.kind, edge.evidence_digest
-                            );
-                        }
-                        for limitation in &result.limitations {
-                            println!("Limitation: {limitation}");
-                        }
-                        println!("Map digest: {}", result.digest);
-                    }
+                    Output::Json => emit_json(&result)?,
+                    Output::Text => print_view(&result)?,
                 }
                 Ok(0)
             }
@@ -4910,204 +4885,19 @@ fn run() -> Result<u8> {
                 base,
                 output,
             } => {
-                let mut explicit_links =
-                    std::collections::BTreeMap::<String, Vec<vee_hosting::PullRequestRef>>::new();
-                for value in pull_requests {
-                    let (repository_id, reference) =
-                        repository_map::parse_pull_request_link(&value).map_err(usage_failure)?;
-                    let entry = explicit_links.entry(repository_id).or_default();
-                    if entry.contains(&reference) {
-                        return Err(usage_failure("pull request link is repeated"));
-                    }
-                    entry.push(reference);
-                }
-                let mut links = explicit_links.clone();
-                let mut discovered_links =
-                    std::collections::BTreeMap::<String, Vec<vee_hosting::PullRequestRef>>::new();
-                if discover_linked_prs {
-                    discovered_links = repository_map::discover_linked_pull_requests(&repositories)
-                        .map_err(anyhow::Error::msg)?;
-                    for (repository_id, references) in &discovered_links {
-                        let entry = links.entry(repository_id.clone()).or_default();
-                        for reference in references {
-                            if !entry.contains(reference) {
-                                entry.push(reference.clone());
-                            }
-                        }
-                    }
-                }
-                if refresh_pr_links && links.is_empty() {
-                    return Err(usage_failure(
-                        "--refresh-pr-links requires at least one --link-pr",
-                    ));
-                }
-                let mut remote_states = std::collections::BTreeMap::new();
-                if refresh_pr_links {
-                    let local = repository_map::build(&repositories).map_err(anyhow::Error::msg)?;
-                    for entry in &local.repositories {
-                        let Some(references) = links.get(&entry.id) else {
-                            continue;
-                        };
-                        let root = std::path::Path::new(&entry.root);
-                        let local_head_oid = repository_map::repository_head_oid(root)
-                            .map_err(anyhow::Error::msg)?;
-                        let (offline, hosting) = load_hosting_config(root)?;
-                        if offline {
-                            return Err(configuration_failure(format!(
-                                "offline mode prevents refreshing linked pull requests in {}",
-                                root.display()
-                            )));
-                        }
-                        let provider_id =
-                            hosting.provider.clone().unwrap_or_else(|| "github".into());
-                        let host = hosting.host.clone().unwrap_or_else(|| "github.com".into());
-                        let api_base = hosting.api_base.clone().unwrap_or_default();
-                        let token_env = hosting.token_env.clone().unwrap_or_else(|| {
-                            match provider_id.as_str() {
-                                "gitlab" => "GL_TOKEN",
-                                "bitbucket" => "BB_TOKEN",
-                                "azure-devops" => "AZURE_DEVOPS_EXT_PAT",
-                                "gerrit" => "GERRIT_TOKEN",
-                                _ => "GH_TOKEN",
-                            }
-                            .into()
-                        });
-                        let token = std::env::var(&token_env).with_context(|| {
-                            format!(
-                                "required credential environment variable {token_env} is not set"
-                            )
-                        })?;
-                        let host = effective_work_item_host(&provider_id, &host)?;
-                        let api_base = work_item_api_base(&provider_id, &host, &api_base)?;
-                        let username = hosting.username.unwrap_or_default();
-                        let adapter: Box<dyn vee_hosting::PullRequestContextProvider> =
-                            match provider_id.as_str() {
-                                "github" => Box::new(
-                                    vee_hosting::github::GitHubAdapter::new(
-                                        vee_hosting::github::GitHubConfig::new(
-                                            &api_base,
-                                            token,
-                                            String::new(),
-                                        )
-                                        .map_err(configuration_failure)?,
-                                    )
-                                    .map_err(configuration_failure)?,
-                                ),
-                                "gitlab" => Box::new(
-                                    vee_hosting::gitlab::GitLabAdapter::new(
-                                        vee_hosting::gitlab::GitLabConfig::new(&api_base, token)
-                                            .map_err(configuration_failure)?,
-                                    )
-                                    .map_err(configuration_failure)?,
-                                ),
-                                "bitbucket" => Box::new(
-                                    vee_hosting::bitbucket::BitbucketAdapter::new(
-                                        vee_hosting::bitbucket::BitbucketConfig::new(
-                                            &api_base, token,
-                                        )
-                                        .map_err(configuration_failure)?,
-                                    )
-                                    .map_err(configuration_failure)?,
-                                ),
-                                "azure-devops" => Box::new(
-                                    vee_hosting::azure_devops::AzureDevOpsAdapter::new(
-                                        vee_hosting::azure_devops::AzureDevOpsConfig::new(
-                                            &api_base, token,
-                                        )
-                                        .map_err(configuration_failure)?,
-                                    )
-                                    .map_err(configuration_failure)?,
-                                ),
-                                "gerrit" => {
-                                    let mut config =
-                                        vee_hosting::gerrit::GerritConfig::new(&api_base, token)
-                                            .map_err(configuration_failure)?;
-                                    if !username.is_empty() {
-                                        config = config.with_username(username);
-                                    }
-                                    Box::new(
-                                        vee_hosting::gerrit::GerritAdapter::new(config)
-                                            .map_err(configuration_failure)?,
-                                    )
-                                }
-                                _ => {
-                                    return Err(configuration_failure(format!(
-                                        "unsupported hosting provider `{provider_id}`"
-                                    )))
-                                }
-                            };
-                        let mut states = Vec::new();
-                        for reference in references {
-                            let snapshot = adapter
-                                .get_pull_request_context(reference)
-                                .map_err(anyhow::Error::msg)?;
-                            states.push(repository_map::RemotePullRequestState {
-                                pull_request: reference.clone(),
-                                provider: provider_id.clone(),
-                                state: format!("{:?}", snapshot.state).to_ascii_lowercase(),
-                                base_oid: snapshot.base_oid,
-                                local_head_matches: snapshot.head_oid == local_head_oid,
-                                head_oid: snapshot.head_oid,
-                                revision: snapshot.revision,
-                            });
-                        }
-                        remote_states.insert(entry.id.clone(), states);
-                    }
-                }
-                let package = repository_map::change_package_with_pull_requests(
-                    &repositories,
-                    base.as_deref(),
-                    &links,
-                    &discovered_links,
-                    &remote_states,
+                let package = operations::change_package(
+                    operations::ChangePackageRequest {
+                        repositories: &repositories,
+                        pull_request_links: &pull_requests,
+                        discover_linked_prs,
+                        refresh_pr_links,
+                        base: base.as_deref(),
+                    },
                     &vee_store_sqlite::SqliteRepositoryStores,
-                )
-                .map_err(|error| {
-                    if error.starts_with("pull request link") {
-                        usage_failure(error)
-                    } else {
-                        anyhow::Error::msg(error)
-                    }
-                })?;
+                )?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &package)?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!(
-                            "Change package {} ({} repositories)",
-                            package.package_id,
-                            package.repositories.len()
-                        );
-                        for repository in &package.repositories {
-                            println!(
-                                "  {} [{}] {} — {} changed files — gate: {}",
-                                repository.repository_id,
-                                repository.branch.as_deref().unwrap_or("detached"),
-                                repository.root,
-                                repository.changed_files.len(),
-                                repository.saved_gate_status
-                            );
-                            for file in &repository.changed_files {
-                                println!("    {} ({})", file.path, file.status);
-                            }
-                            for remote in &repository.remote_pull_requests {
-                                println!(
-                                    "    PR {}#{}: {} — provider revision {} — local head match: {}",
-                                    remote.pull_request.repository.full_name,
-                                    remote.pull_request.number,
-                                    remote.state,
-                                    remote.revision,
-                                    remote.local_head_matches
-                                );
-                            }
-                        }
-                        println!("Local dependency edges: {}", package.dependency_edges.len());
-                        for limitation in &package.limitations {
-                            println!("Limitation: {limitation}");
-                        }
-                    }
+                    Output::Json => emit_json(&package)?,
+                    Output::Text => print_view(&package)?,
                 }
                 Ok(0)
             }
@@ -5119,36 +4909,8 @@ fn run() -> Result<u8> {
             } => {
                 let result = operations::cross_repository_impact(&producer, &base, &consumers)?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &result)?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!(
-                            "Cross-repository impact for producer snapshot: {}",
-                            result.producer_snapshot_id
-                        );
-                        println!("Changed symbols: {}", result.changed_symbols.join(", "));
-                        for path in &result.dependency_paths {
-                            println!("  package path: {}", path.packages.join(" -> "));
-                            println!("    manifest digests: {}", path.manifest_digests.join(", "));
-                        }
-                        for reference in &result.references {
-                            println!(
-                                "  {}:{}:{} may reference {} ({})",
-                                reference.consumer_repository,
-                                reference.path,
-                                reference.line,
-                                reference.symbol,
-                                reference.certainty
-                            );
-                        }
-                        println!("Coverage complete: {}", result.coverage_complete);
-                        for limitation in &result.limitations {
-                            println!("Limitation: {limitation}");
-                        }
-                        println!("Impact digest: {}", result.digest);
-                    }
+                    Output::Json => emit_json(&result)?,
+                    Output::Text => print_view(&result)?,
                 }
                 Ok(0)
             }
@@ -5165,150 +4927,24 @@ fn run() -> Result<u8> {
                 output,
                 archive,
             } => {
-                let cwd = std::env::current_dir()?;
-                let config_root = vee_git::repository_root(&cwd).unwrap_or(cwd);
-                let (offline, hosting) = load_hosting_config(&config_root)?;
-                if offline {
-                    return Err(configuration_failure(
-                        "offline mode prevents fetching pull request review issues",
-                    ));
-                }
-                let provider_id = resolve_hosting_setting(provider, hosting.provider, "github");
-                if !matches!(
-                    provider_id.as_str(),
-                    "github" | "gitlab" | "bitbucket" | "azure-devops" | "gerrit"
-                ) {
-                    return Err(configuration_failure(format!(
-                        "unsupported hosting provider `{provider_id}`"
-                    )));
-                }
-                let host = resolve_hosting_setting(host, hosting.host, "github.com");
-                let api_base = resolve_hosting_setting(api_base, hosting.api_base, "");
-                let token_env = resolve_hosting_setting(token_env, hosting.token_env, "GH_TOKEN");
-                let username = resolve_hosting_setting(username, hosting.username, "");
-                let token_env = effective_work_item_token_env(&provider_id, &token_env);
-                let token = std::env::var(token_env).with_context(|| {
-                    format!("required credential environment variable {token_env} is not set")
-                })?;
-                let host = effective_work_item_host(&provider_id, &host)?;
-                let api_base = work_item_api_base(&provider_id, &host, &api_base)?;
-                let reference = vee_hosting::PullRequestRef {
-                    repository: vee_hosting::RepositoryRef {
+                let issues = vee_application::hosting::pull_request_issues(
+                    &hosting_config_root()?,
+                    vee_application::hosting::HostingFlags {
+                        provider,
                         host,
-                        full_name: repository,
+                        api_base,
+                        token_env,
+                        username,
                     },
-                    number,
-                };
-                reference.validate().map_err(configuration_failure)?;
-                if provider_id != "gerrit" && !username.is_empty() {
-                    return Err(configuration_failure(
-                        "--username is only supported with the Gerrit provider",
-                    ));
-                }
-                let adapter: Box<dyn vee_hosting::PullRequestReviewIssuesProvider> =
-                    match provider_id.as_str() {
-                        "github" => Box::new(
-                            vee_hosting::github::GitHubAdapter::new(
-                                vee_hosting::github::GitHubConfig::new(
-                                    &api_base,
-                                    token,
-                                    String::new(),
-                                )
-                                .map_err(configuration_failure)?,
-                            )
-                            .map_err(configuration_failure)?,
-                        ),
-                        "gitlab" => Box::new(
-                            vee_hosting::gitlab::GitLabAdapter::new(
-                                vee_hosting::gitlab::GitLabConfig::new(&api_base, token)
-                                    .map_err(configuration_failure)?,
-                            )
-                            .map_err(configuration_failure)?,
-                        ),
-                        "bitbucket" => Box::new(
-                            vee_hosting::bitbucket::BitbucketAdapter::new(
-                                vee_hosting::bitbucket::BitbucketConfig::new(&api_base, token)
-                                    .map_err(configuration_failure)?,
-                            )
-                            .map_err(configuration_failure)?,
-                        ),
-                        "azure-devops" => Box::new(
-                            vee_hosting::azure_devops::AzureDevOpsAdapter::new(
-                                vee_hosting::azure_devops::AzureDevOpsConfig::new(&api_base, token)
-                                    .map_err(configuration_failure)?,
-                            )
-                            .map_err(configuration_failure)?,
-                        ),
-                        "gerrit" => {
-                            let mut config =
-                                vee_hosting::gerrit::GerritConfig::new(&api_base, token)
-                                    .map_err(configuration_failure)?;
-                            if !username.is_empty() {
-                                config = config.with_username(username);
-                            }
-                            Box::new(
-                                vee_hosting::gerrit::GerritAdapter::new(config)
-                                    .map_err(configuration_failure)?,
-                            )
-                        }
-                        _ => {
-                            return Err(configuration_failure(format!(
-                                "unsupported hosting provider `{provider_id}`"
-                            )))
-                        }
-                    };
-                let report = adapter
-                    .list_pull_request_review_issues(&reference)
-                    .map_err(anyhow::Error::msg)?;
-                let archive_digest = if archive {
-                    anyhow::ensure!(
-                        !report.gate_eligible,
-                        "provider review discussions must remain non-gating"
-                    );
-                    let bytes = serde_json::to_vec(&report)?;
-                    Some(store_imported_history(&config_root, &bytes)?)
-                } else {
-                    None
-                };
+                    vee_application::hosting::PullRequestTarget { repository, number },
+                    archive,
+                )?;
                 match output {
-                    Output::Json => {
-                        let mut value = serde_json::to_value(&report)?;
-                        if let Some(digest) = &archive_digest {
-                            value["archive_digest"] = serde_json::Value::String(digest.clone());
-                        }
-                        serde_json::to_writer(std::io::stdout().lock(), &value)?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!(
-                            "{} #{} — {} external review issue(s){}",
-                            report.pull_request.repository.full_name,
-                            report.pull_request.number,
-                            report.issues.len(),
-                            if report.complete {
-                                ""
-                            } else {
-                                " (incomplete pagination)"
-                            }
-                        );
-                        if let Some(digest) = &archive_digest {
-                            println!("Archived as {digest}");
-                        }
-                        for issue in &report.issues {
-                            println!(
-                                "- {} {}:{} — {}",
-                                issue.external_id,
-                                issue.path.as_deref().unwrap_or("(general comment)"),
-                                issue
-                                    .line
-                                    .map(|line| line.to_string())
-                                    .unwrap_or_else(|| "?".into()),
-                                issue.body.lines().next().unwrap_or_default()
-                            );
-                        }
-                    }
+                    // Sorted keys, as the document has always been printed.
+                    Output::Json => emit_json(&serde_json::to_value(&issues)?)?,
+                    Output::Text => print_view(&issues)?,
                 }
-                Ok(if report.complete { 0 } else { 2 })
+                Ok(if issues.report.complete { 0 } else { 2 })
             }
             HostingCommand::PrContext {
                 repository,
@@ -5320,127 +4956,20 @@ fn run() -> Result<u8> {
                 username,
                 output,
             } => {
-                let cwd = std::env::current_dir()?;
-                let config_root = vee_git::repository_root(&cwd).unwrap_or(cwd);
-                let (offline, hosting) = load_hosting_config(&config_root)?;
-                if offline {
-                    return Err(configuration_failure(
-                        "offline mode prevents fetching pull request context",
-                    ));
-                }
-                let provider_id =
-                    resolve_hosting_setting(provider, hosting.provider, "azure-devops");
-                let host = resolve_hosting_setting(host, hosting.host, "github.com");
-                let api_base = resolve_hosting_setting(api_base, hosting.api_base, "");
-                let token_env =
-                    resolve_hosting_setting(token_env, hosting.token_env, "AZURE_DEVOPS_EXT_PAT");
-                let username = resolve_hosting_setting(username, hosting.username, "");
-                let token_env = match provider_id.as_str() {
-                    "github" if token_env == "AZURE_DEVOPS_EXT_PAT" => "GH_TOKEN",
-                    "gitlab" if token_env == "AZURE_DEVOPS_EXT_PAT" => "GL_TOKEN",
-                    "bitbucket" if token_env == "AZURE_DEVOPS_EXT_PAT" => "BB_TOKEN",
-                    "gerrit" if token_env == "AZURE_DEVOPS_EXT_PAT" => "GERRIT_TOKEN",
-                    _ => &token_env,
-                };
-                let token = std::env::var(token_env).with_context(|| {
-                    format!("required credential environment variable {token_env} is not set")
-                })?;
-                let host = effective_work_item_host(&provider_id, &host)?;
-                let api_base = work_item_api_base(&provider_id, &host, &api_base)?;
-                let reference = vee_hosting::PullRequestRef {
-                    repository: vee_hosting::RepositoryRef {
-                        host: host.clone(),
-                        full_name: repository,
+                let report = vee_application::hosting::pull_request_context(
+                    &hosting_config_root()?,
+                    vee_application::hosting::HostingFlags {
+                        provider,
+                        host,
+                        api_base,
+                        token_env,
+                        username,
                     },
-                    number,
-                };
-                reference.validate().map_err(configuration_failure)?;
-                let provider: Box<dyn vee_hosting::PullRequestContextProvider> = match provider_id
-                    .as_str()
-                {
-                    "github" => Box::new(
-                        vee_hosting::github::GitHubAdapter::new(
-                            vee_hosting::github::GitHubConfig::new(&api_base, token, String::new())
-                                .map_err(configuration_failure)?,
-                        )
-                        .map_err(configuration_failure)?,
-                    ),
-                    "gitlab" => Box::new(
-                        vee_hosting::gitlab::GitLabAdapter::new(
-                            vee_hosting::gitlab::GitLabConfig::new(&api_base, token)
-                                .map_err(configuration_failure)?,
-                        )
-                        .map_err(configuration_failure)?,
-                    ),
-                    "bitbucket" => Box::new(
-                        vee_hosting::bitbucket::BitbucketAdapter::new(
-                            vee_hosting::bitbucket::BitbucketConfig::new(&api_base, token)
-                                .map_err(configuration_failure)?,
-                        )
-                        .map_err(configuration_failure)?,
-                    ),
-                    "azure-devops" => Box::new(
-                        vee_hosting::azure_devops::AzureDevOpsAdapter::new(
-                            vee_hosting::azure_devops::AzureDevOpsConfig::new(&api_base, token)
-                                .map_err(configuration_failure)?,
-                        )
-                        .map_err(configuration_failure)?,
-                    ),
-                    "gerrit" => {
-                        let mut config = vee_hosting::gerrit::GerritConfig::new(&api_base, token)
-                            .map_err(configuration_failure)?;
-                        if !username.is_empty() {
-                            config = config.with_username(username);
-                        }
-                        Box::new(
-                            vee_hosting::gerrit::GerritAdapter::new(config)
-                                .map_err(configuration_failure)?,
-                        )
-                    }
-                    _ => {
-                        return Err(configuration_failure(format!(
-                            "unsupported pull request provider `{provider_id}`"
-                        )))
-                    }
-                };
-                let snapshot = provider
-                    .get_pull_request_context(&reference)
-                    .map_err(anyhow::Error::msg)?;
-                let changed_files = provider
-                    .list_pull_request_context_files(&reference, &snapshot.revision)
-                    .map_err(anyhow::Error::msg)?;
-                let report = vee_hosting::PullRequestContextReport {
-                    schema_version: 1,
-                    provider: provider_id.clone(),
-                    snapshot,
-                    changed_files,
-                    limitations: match provider_id.as_str() {
-                        "azure-devops" => vec!["Azure DevOps diff metadata does not include line-level patches; file records are context only, not line evidence.".into()],
-                        "bitbucket" => vec!["Bitbucket unified diffs are bounded to 5 MiB; quoted or unsupported paths may lack line-level patch evidence.".into()],
-                        _ => vec![],
-                    },
-                };
+                    vee_application::hosting::PullRequestTarget { repository, number },
+                )?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &report)?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!(
-                            "{} #{} — {} ({:?})\nRevision: {}",
-                            report.snapshot.pull_request.repository.full_name,
-                            report.snapshot.pull_request.number,
-                            report.snapshot.title,
-                            report.snapshot.state,
-                            report.snapshot.revision
-                        );
-                        for file in &report.changed_files {
-                            println!("{:?} {}", file.change, file.path);
-                        }
-                        for limitation in &report.limitations {
-                            println!("Limit: {limitation}");
-                        }
-                    }
+                    Output::Json => emit_json(&report)?,
+                    Output::Text => print_view(&report)?,
                 }
                 Ok(0)
             }
@@ -5453,56 +4982,21 @@ fn run() -> Result<u8> {
                 token_env,
                 output,
             } => {
-                let cwd = std::env::current_dir()?;
-                let config_root = vee_git::repository_root(&cwd).unwrap_or(cwd);
-                let (offline, hosting) = load_hosting_config(&config_root)?;
-                if offline {
-                    return Err(configuration_failure(
-                        "offline mode prevents fetching work item context",
-                    ));
-                }
-                let provider = resolve_hosting_setting(provider, hosting.provider, "github");
-                let host = resolve_hosting_setting(host, hosting.host, "github.com");
-                let api_base = resolve_hosting_setting(api_base, hosting.api_base, "");
-                let token_env = resolve_hosting_setting(token_env, hosting.token_env, "");
-                let token_env = if token_env.is_empty() {
-                    match provider.as_str() {
-                        "gitlab" => "GL_TOKEN",
-                        "azure-devops" => "AZURE_DEVOPS_EXT_PAT",
-                        "gerrit" => "GERRIT_TOKEN",
-                        _ => "GH_TOKEN",
-                    }
-                } else {
-                    &token_env
-                };
-                let token = std::env::var(token_env).with_context(|| {
-                    format!("required credential environment variable {token_env} is not set")
-                })?;
-                let host = effective_work_item_host(&provider, &host)?;
-                let api_base = work_item_api_base(&provider, &host, &api_base)?;
-                let reference = vee_hosting::WorkItemRef {
-                    repository: vee_hosting::RepositoryRef {
-                        host: host.clone(),
-                        full_name: repository,
+                let item = vee_application::hosting::issue_context(
+                    &hosting_config_root()?,
+                    vee_application::hosting::HostingFlags {
+                        provider,
+                        host,
+                        api_base,
+                        token_env,
+                        username: None,
                     },
+                    repository,
                     number,
-                };
-                reference.validate().map_err(configuration_failure)?;
-                let item = get_work_item(&provider, &api_base, token, &reference)?;
+                )?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &item)?;
-                        println!();
-                    }
-                    Output::Text => println!(
-                        "{} #{} — {} ({})\n{}\nContent digest: {}",
-                        reference.repository.full_name,
-                        reference.number,
-                        item.title,
-                        item.state,
-                        item.url,
-                        item.content_digest
-                    ),
+                    Output::Json => emit_json(&item)?,
+                    Output::Text => print_view(&item)?,
                 }
                 Ok(0)
             }
@@ -5768,10 +5262,22 @@ fn run() -> Result<u8> {
                     store
                         .replace_hosted_finding_threads(&thread_target, &published_fingerprints)
                         .map_err(anyhow::Error::msg)?;
-                    match output {
-                        Output::Json => { serde_json::to_writer(std::io::stdout().lock(), &serde_json::json!({"schema_version":1,"review_id":reviewed.review_id,"snapshot_id":reviewed.snapshot_id,"provider_check_id":check_id,"thread_ids":thread_ids,"revision":remote.revision}))?; println!(); }
-                        Output::Text => println!("Published Vee review for {} to {}/{}#{} on Azure DevOps (status {}, {} finding threads)", reviewed.review_id, host, repository, number, check_id, thread_ids.len()),
-                    }
+                    print_publication(
+                        &vee_application::hosting::ReviewPublication {
+                            schema_version:
+                                vee_application::hosting::REVIEW_PUBLICATION_SCHEMA_VERSION,
+                            review_id: reviewed.review_id,
+                            snapshot_id: reviewed.snapshot_id,
+                            provider_check_id: check_id,
+                            thread_ids,
+                            revision: remote.revision,
+                            destination: Some(vee_application::hosting::PublicationDestination {
+                                provider: provider_id,
+                                pull_request,
+                            }),
+                        },
+                        output,
+                    )?;
                     return Ok(0);
                 }
                 let provider: Box<dyn vee_hosting::GitHostingProvider> = match provider_id.as_str()
@@ -5989,24 +5495,27 @@ fn run() -> Result<u8> {
                 store
                     .replace_hosted_finding_threads(&thread_target, &published_fingerprints)
                     .map_err(anyhow::Error::msg)?;
-                match output {
-                    Output::Json => {
-                        serde_json::to_writer(
-                            std::io::stdout().lock(),
-                            &serde_json::json!({"schema_version":1,"review_id":reviewed.review_id,"snapshot_id":reviewed.snapshot_id,"provider_check_id":receipt.provider_check_id,"thread_ids":receipt.thread_ids,"revision":receipt.resulting_revision}),
-                        )?;
-                        println!();
-                    }
-                    Output::Text => println!(
-                        "Published review {} to {}/{}#{} on {} (check {})",
-                        reviewed.review_id,
-                        host,
-                        repository,
-                        number,
-                        provider_id,
-                        receipt.provider_check_id
-                    ),
-                }
+                print_publication(
+                    &vee_application::hosting::ReviewPublication {
+                        schema_version: vee_application::hosting::REVIEW_PUBLICATION_SCHEMA_VERSION,
+                        review_id: reviewed.review_id,
+                        snapshot_id: reviewed.snapshot_id,
+                        provider_check_id: receipt.provider_check_id,
+                        thread_ids: receipt.thread_ids,
+                        revision: receipt.resulting_revision,
+                        destination: Some(vee_application::hosting::PublicationDestination {
+                            provider: provider_id,
+                            pull_request: vee_hosting::PullRequestRef {
+                                repository: vee_hosting::RepositoryRef {
+                                    host,
+                                    full_name: repository,
+                                },
+                                number,
+                            },
+                        }),
+                    },
+                    output,
+                )?;
                 Ok(0)
             }
             HostingCommand::WebhookServe {
@@ -6181,36 +5690,16 @@ fn run() -> Result<u8> {
                 apply,
                 output,
             } => {
-                let cwd = std::env::current_dir()?;
-                let root = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-                let database = root.join(".vee/vee.sqlite");
-                let mut store = ReviewStore::open(&database).map_err(anyhow::Error::msg)?;
-                let now = current_unix_time()?;
-                let retention_seconds = i64::from(older_than_days)
-                    .checked_mul(86_400)
-                    .context("webhook retention period exceeds supported timestamp")?;
-                let cutoff = now
-                    .checked_sub(retention_seconds)
-                    .context("webhook retention cutoff is outside the supported range")?;
-                let eligible = store
-                    .prune_processed_webhook_deliveries_before(cutoff, apply)
-                    .map_err(anyhow::Error::msg)?;
+                let workspace = operations::Workspace::discover(crate::local_stores())?;
+                let retention = vee_application::hosting::prune_webhook_deliveries(
+                    &workspace,
+                    older_than_days,
+                    apply,
+                )?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(
-                            std::io::stdout().lock(),
-                            &serde_json::json!({
-                                "schema_version": 1,
-                                "retention_days": older_than_days,
-                                "eligible_receipts": eligible,
-                                "deleted_receipts": if apply { eligible } else { 0 },
-                                "dry_run": !apply
-                            }),
-                        )?;
-                        println!();
-                    }
-                    Output::Text if apply => println!("Deleted {eligible} completed webhook receipts older than {older_than_days} days."),
-                    Output::Text => println!("{eligible} completed webhook receipts are eligible for deletion; rerun with --apply to remove them."),
+                    // Sorted keys, as the document has always been printed.
+                    Output::Json => emit_json(&serde_json::to_value(&retention)?)?,
+                    Output::Text => print_view(&retention)?,
                 }
                 Ok(0)
             }
