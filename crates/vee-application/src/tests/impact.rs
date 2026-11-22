@@ -1292,12 +1292,27 @@ fn crate_private_and_cross_language_matches_are_not_impact() {
     git(&["config", "user.email", "vee@example.invalid"]);
     git(&["config", "user.name", "Vee test"]);
     for (path, contents) in [
-        ("cli/Cargo.toml", "[package]\nname='cli'\nversion='0.1.0'\nedition='2021'\n"),
-        ("cli/src/main.rs", "fn run() -> u8 { 1 }\npub fn shared() -> u8 { 1 }\nfn main() { run(); }\n"),
+        (
+            "cli/Cargo.toml",
+            "[package]\nname='cli'\nversion='0.1.0'\nedition='2021'\n",
+        ),
+        (
+            "cli/src/main.rs",
+            "fn run() -> u8 { 1 }\npub fn shared() -> u8 { 1 }\nfn main() { run(); }\n",
+        ),
         ("cli/src/commands.rs", "fn dispatch() { super::run(); }\n"),
-        ("other/Cargo.toml", "[package]\nname='other'\nversion='0.1.0'\nedition='2021'\n"),
-        ("other/src/lib.rs", "pub fn run() {}\npub fn caller() { run(); cli::shared(); }\n"),
-        ("scripts/tool.py", "import subprocess\nsubprocess.run(['true'])\n"),
+        (
+            "other/Cargo.toml",
+            "[package]\nname='other'\nversion='0.1.0'\nedition='2021'\n",
+        ),
+        (
+            "other/src/lib.rs",
+            "pub fn run() {}\npub fn caller() { run(); cli::shared(); }\n",
+        ),
+        (
+            "scripts/tool.py",
+            "import subprocess\nsubprocess.run(['true'])\n",
+        ),
     ] {
         let path = root.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
