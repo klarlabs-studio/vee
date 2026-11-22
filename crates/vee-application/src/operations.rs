@@ -21,6 +21,10 @@ use vee_core::{
 pub const DEFAULT_PAGE_SIZE: usize = 50;
 pub const MAX_PAGE_SIZE: usize = 100;
 pub const DEFAULT_CONTEXT_LINES: usize = 20;
+/// Results returned by imported-history search when no limit is given.
+pub const DEFAULT_SEARCH_LIMIT: usize = 20;
+/// Reviewer that drafts tests and PR descriptions when none is named.
+pub const DEFAULT_DRAFTING_REVIEWER: &str = "correctness";
 const MAX_SCOPE_CHARS: usize = 1_024;
 const MAX_INSTRUCTION_BYTES: usize = 20_000;
 /// Upper bound on findings scanned when mining rule candidates.

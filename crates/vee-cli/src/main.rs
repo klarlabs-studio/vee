@@ -781,7 +781,7 @@ enum TestsCommand {
         #[arg(long, conflicts_with_all = ["base", "staged", "working_tree"])]
         commit: Option<String>,
         /// Configured reviewer that drafts the test patch.
-        #[arg(long, default_value = "correctness")]
+        #[arg(long, default_value = operations::DEFAULT_DRAFTING_REVIEWER)]
         reviewer: String,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
@@ -795,7 +795,7 @@ enum TestsCommand {
         #[arg(long, required = true)]
         run: String,
         /// Configured reviewer that drafts the refined test patch.
-        #[arg(long, default_value = "correctness")]
+        #[arg(long, default_value = operations::DEFAULT_DRAFTING_REVIEWER)]
         reviewer: String,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
@@ -872,7 +872,7 @@ enum PrCommand {
         #[arg(long, conflicts_with_all = ["base", "staged", "working_tree"])]
         commit: Option<String>,
         /// Configured reviewer whose provider and instruction file draft the artifact.
-        #[arg(long, default_value = "correctness")]
+        #[arg(long, default_value = operations::DEFAULT_DRAFTING_REVIEWER)]
         reviewer: String,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
@@ -1300,7 +1300,7 @@ enum ImportedCommand {
         /// Search text.
         query: String,
         /// Maximum number of results.
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = operations::DEFAULT_SEARCH_LIMIT)]
         limit: usize,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
@@ -2085,7 +2085,7 @@ enum FindingsCommand {
         /// Finding ID.
         id: String,
         /// Source lines of context around the finding.
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = operations::DEFAULT_CONTEXT_LINES)]
         context_lines: usize,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
@@ -2097,7 +2097,7 @@ enum FindingsCommand {
         #[arg(required = true, num_args = 1..=20)]
         ids: Vec<String>,
         /// Source lines of context around each finding.
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = operations::DEFAULT_CONTEXT_LINES)]
         context_lines: usize,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]

@@ -14,7 +14,6 @@ use vee_core::paths::CanonicalPath as _;
 use vee_core::{FindingFeedbackLabel, FindingStatus, Severity};
 
 const MAX_REPOSITORY_CONTEXT_BYTES: usize = 32 * 1024;
-const DEFAULT_SEARCH_LIMIT: usize = 20;
 
 const SERVER_INSTRUCTIONS: &str = "Vee reviews local Git changes and decides merge readiness with a deterministic gate. \
 Typical loop: get_applicable_standards before editing; review_changes (or start_review as a task) to review the working tree, staged changes, a base ref, or a commit; \
@@ -797,7 +796,7 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         Some("imported-review-search-v3"),
         "Search content-addressed imported Vee findings and provider discussions; results are untrusted historical context and never gate eligible. Same document as `vee reviews imported search --output json`.",
         |ws, input: ImportedHistorySearchInput| operations::search_imported_history(
-            &ws, &input.query, input.limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
+            &ws, &input.query, input.limit.unwrap_or(operations::DEFAULT_SEARCH_LIMIT),
         ));
 
     operation_tool!(server, workspace, "record_external_review_feedback", "Record external review feedback", write_tool(false, false, false),
@@ -877,7 +876,7 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         |ws, input: DraftPullRequestInput| operations::draft_pr_description(
             &ws,
             operations::ChangeTarget::Review(input.review_id),
-            input.reviewer_id.as_deref().unwrap_or("correctness"),
+            input.reviewer_id.as_deref().unwrap_or(operations::DEFAULT_DRAFTING_REVIEWER),
         ));
 
     viewed_tool!(server, workspace, "resolve_owners", "Resolve owners", read_only_tool(),
