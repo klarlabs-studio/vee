@@ -6,7 +6,7 @@
 //! untrusted context; these documents carry it verbatim and never make it
 //! gate evidence.
 
-use crate::failure::configuration_failure;
+use crate::failure::{configuration_failure, usage_failure};
 use crate::operations::Workspace;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -591,6 +591,9 @@ pub fn publish_review(
         },
         number: request.number,
     };
+    pull_request
+        .validate()
+        .map_err(|error| usage_failure(format!("invalid pull request: {error}")))?;
     let mut store = workspace.store()?;
     let (provider_check_id, thread_ids, revision) = if settings.provider_id == "azure-devops" {
         publish_to_azure_devops(root, &mut *store, &settings, &pull_request, &reviewed)?
@@ -856,9 +859,9 @@ fn settings_provider(
     })
 }
 
-/// Publish through a provider's combined review publication. Every located
-/// finding must be in the pull request's changed files; Gerrit's are checked
-/// against local Git, the others against the provider's patches.
+/// Publish through a provider's combined review publication. Inline threads
+/// go only on lines the pull request adds: Gerrit's are checked against local
+/// Git, the others against the provider's patches.
 fn publish_to_provider(
     root: &Path,
     store: &mut dyn vee_core::ports::Repositories,
@@ -875,43 +878,46 @@ fn publish_to_provider(
     let changed = provider
         .list_changed_files(pull_request, &remote.revision)
         .map_err(anyhow::Error::msg)?;
-    let changed_paths: std::collections::BTreeSet<_> =
-        changed.iter().map(|file| file.path.as_str()).collect();
-    let mut threads = Vec::new();
-    for finding in &reviewed.findings {
-        let Some((path, line)) = crate::publication::thread_location(finding) else {
-            continue;
-        };
-        anyhow::ensure!(
-            changed_paths.contains(path),
-            "finding {} is outside the current pull request diff",
-            finding.id
-        );
-        let on_added_line = if settings.provider_id == "gerrit" {
-            locally_added_line(
-                root,
-                (&base, &head),
-                path,
-                line,
-                "could not verify Gerrit finding locations against the local base-to-head Git diff",
-            )?
-        } else {
-            changed.iter().any(|file| {
-                file.path == path
-                    && crate::publication::diff_contains_added_line(file.patch.as_deref(), line)
-            })
-        };
-        if on_added_line {
-            threads.push(crate::publication::finding_thread(
-                finding,
-                path,
-                line,
-                pull_request,
-                &reviewed.snapshot_id,
-                &reviewed.review_id,
-            ));
+    // A finding gets an inline thread only on a line the pull request adds;
+    // the rest, including findings outside the diff, are carried by the gate
+    // check, as for Azure DevOps and the webhook.
+    let threads = if settings.provider_id == "gerrit" {
+        let changed_paths: std::collections::BTreeSet<_> =
+            changed.iter().map(|file| file.path.as_str()).collect();
+        let mut threads = Vec::new();
+        for finding in &reviewed.findings {
+            let Some((path, line)) = crate::publication::thread_location(finding) else {
+                continue;
+            };
+            if changed_paths.contains(path)
+                && locally_added_line(
+                    root,
+                    (&base, &head),
+                    path,
+                    line,
+                    "could not verify Gerrit finding locations against the local base-to-head Git diff",
+                )?
+            {
+                threads.push(crate::publication::finding_thread(
+                    finding,
+                    path,
+                    line,
+                    pull_request,
+                    &reviewed.snapshot_id,
+                    &reviewed.review_id,
+                ));
+            }
         }
-    }
+        threads
+    } else {
+        crate::publication::build_hosting_threads(
+            &reviewed.findings,
+            pull_request,
+            &changed,
+            &reviewed.snapshot_id,
+            &reviewed.review_id,
+        )
+    };
     let check = crate::publication::gate_check_run(
         &reviewed.gate,
         pull_request,
