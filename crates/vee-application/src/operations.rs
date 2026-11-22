@@ -1815,3 +1815,81 @@ pub fn confine_consumers(workspace: &Workspace, supplied: &[String]) -> Result<V
         })
         .collect()
 }
+
+/// What to capture in a cross-repository change package.
+#[derive(Clone, Debug, Default)]
+pub struct ChangePackageRequest<'a> {
+    pub repositories: &'a [PathBuf],
+    /// `REPOSITORY_ID=HOST/OWNER/REPO#NUMBER` links the caller named.
+    pub pull_request_links: &'a [String],
+    /// Also link pull requests discovered from each checkout's branch.
+    pub discover_linked_prs: bool,
+    /// Read each linked pull request's state from its hosting provider.
+    pub refresh_pr_links: bool,
+    pub base: Option<&'a str>,
+}
+
+/// Capture a deterministic local change package across related checkouts,
+/// with their linked pull requests and, when asked, their provider state.
+pub fn change_package(
+    request: ChangePackageRequest<'_>,
+    stores: &dyn RepositoryStores,
+) -> Result<crate::repository_map::ChangePackage> {
+    use crate::repository_map;
+    use std::collections::BTreeMap;
+    let mut explicit_links = BTreeMap::<String, Vec<vee_hosting::PullRequestRef>>::new();
+    for value in request.pull_request_links {
+        let (repository_id, reference) =
+            repository_map::parse_pull_request_link(value).map_err(usage_failure)?;
+        let entry = explicit_links.entry(repository_id).or_default();
+        if entry.contains(&reference) {
+            return Err(usage_failure("pull request link is repeated"));
+        }
+        entry.push(reference);
+    }
+    let mut links = explicit_links;
+    let mut discovered_links = BTreeMap::<String, Vec<vee_hosting::PullRequestRef>>::new();
+    if request.discover_linked_prs {
+        discovered_links = repository_map::discover_linked_pull_requests(request.repositories)
+            .map_err(anyhow::Error::msg)?;
+        for (repository_id, references) in &discovered_links {
+            let entry = links.entry(repository_id.clone()).or_default();
+            for reference in references {
+                if !entry.contains(reference) {
+                    entry.push(reference.clone());
+                }
+            }
+        }
+    }
+    if request.refresh_pr_links && links.is_empty() {
+        return Err(usage_failure(
+            "--refresh-pr-links requires at least one --link-pr",
+        ));
+    }
+    let remote_states = if request.refresh_pr_links {
+        let local = repository_map::build(request.repositories).map_err(anyhow::Error::msg)?;
+        crate::hosting::refresh_linked_pull_requests(&local, &links)?
+    } else {
+        BTreeMap::new()
+    };
+    repository_map::change_package_with_pull_requests(
+        request.repositories,
+        request.base,
+        &links,
+        &discovered_links,
+        &remote_states,
+        stores,
+    )
+    .map_err(|error| {
+        if error.starts_with("pull request link") {
+            usage_failure(error)
+        } else {
+            anyhow::Error::msg(error)
+        }
+    })
+}
+
+/// The direct package dependencies between explicitly selected local checkouts.
+pub fn repository_map(repositories: &[PathBuf]) -> Result<crate::repository_map::RepositoryMap> {
+    crate::repository_map::build(repositories).map_err(anyhow::Error::msg)
+}
