@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 use vee_core::{ChangeSet, VerificationProfile, VerificationStatus};
 
@@ -33,7 +33,7 @@ struct MutantCorpusEntry {
     patch_digest: String,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CorpusMutantResult {
     pub id: String,
     pub patch_digest: String,
@@ -48,7 +48,7 @@ pub struct CorpusMutantResult {
     pub changed_line_coverage: Vec<MutantFileCoverage>,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CorpusEffectivenessReport {
     pub schema_version: u32,
     pub proposal_id: String,
@@ -68,7 +68,7 @@ pub struct CorpusEffectivenessReport {
     pub limitations: Vec<String>,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CorpusProvenance {
     pub dataset_kind: String,
     pub source: Option<String>,
@@ -76,7 +76,7 @@ pub struct CorpusProvenance {
     pub license: Option<String>,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EffectivenessReport {
     pub schema_version: u32,
     pub proposal_id: String,
@@ -100,7 +100,7 @@ pub struct EffectivenessReport {
     pub limitations: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CoverageRunProvenance {
     pub run_id: String,
     pub snapshot_id: String,
@@ -108,7 +108,7 @@ pub struct CoverageRunProvenance {
     pub stream: String,
 }
 
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MutantFileCoverage {
     pub path: String,
     pub changed_line_count: Option<u64>,
