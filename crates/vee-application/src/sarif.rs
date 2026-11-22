@@ -394,9 +394,127 @@ pub fn read_verification_artifact(
     Ok(bytes)
 }
 
+/// Percent-encode a repository path as a SARIF artifact URI reference.
+fn sarif_uri_reference(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'-' | b'.'
+                    | b'_'
+                    | b'~'
+                    | b'/'
+                    | b'!'
+                    | b'$'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b'+'
+                    | b','
+                    | b';'
+                    | b'='
+                    | b':'
+                    | b'@'
+            )
+        {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write;
+            write!(encoded, "%{byte:02X}").expect("writing into String cannot fail");
+        }
+    }
+    encoded
+}
+
+/// A saved review as a SARIF 2.1.0 log, for `vee reviews export --format sarif`.
+pub fn review_log(review: &crate::ReviewResult) -> serde_json::Value {
+    let mut rules = std::collections::BTreeMap::<String, serde_json::Value>::new();
+    let mut findings: Vec<_> = review.findings.iter().collect();
+    findings.sort_by(|left, right| {
+        left.fingerprint
+            .cmp(&right.fingerprint)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let results = findings
+        .into_iter()
+        .map(|finding| {
+            rules.entry(finding.category.clone()).or_insert_with(|| {
+                serde_json::json!({
+                    "id": finding.category,
+                    "name": finding.category,
+                    "shortDescription": {"text": finding.category}
+                })
+            });
+            let level = match finding.severity {
+                vee_core::Severity::Critical | vee_core::Severity::High => "error",
+                vee_core::Severity::Medium => "warning",
+                vee_core::Severity::Low | vee_core::Severity::Info => "note",
+            };
+            let locations = match (finding.path.as_deref(), finding.line) {
+                (Some(path), Some(line)) => serde_json::json!([{
+                    "physicalLocation": {
+                        "artifactLocation": {"uri": sarif_uri_reference(path)},
+                        "region": {"startLine": line}
+                    }
+                }]),
+                (Some(path), None) => serde_json::json!([{
+                    "physicalLocation": {"artifactLocation": {"uri": sarif_uri_reference(path)}}
+                }]),
+                _ => serde_json::Value::Array(Vec::new()),
+            };
+            serde_json::json!({
+                "ruleId": finding.category,
+                "level": level,
+                "message": {"text": finding.rationale},
+                "partialFingerprints": {"vee/v1": finding.fingerprint},
+                "locations": locations,
+                "properties": {
+                    "veeFindingId": finding.id,
+                    "confidence": finding.confidence,
+                    "provenance": finding.provenance,
+                    "evidenceIds": finding.evidence_ids
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let rules = rules.into_values().collect::<Vec<_>>();
+    serde_json::json!({
+        "$schema": "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {"driver": {
+                "name": "Vee",
+                "semanticVersion": env!("CARGO_PKG_VERSION"),
+                "rules": rules
+            }},
+            "results": results,
+            "invocations": [{
+                "executionSuccessful": review.analysis_complete,
+                "properties": {
+                    "veeReviewId": review.review_id,
+                    "veeSnapshotId": review.snapshot_id,
+                    "veeGateStatus": review.status
+                }
+            }]
+        }]
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sarif_uri_encodes_spaces_and_uri_delimiters() {
+        assert_eq!(
+            sarif_uri_reference("src/my file#1?.rs"),
+            "src/my%20file%231%3F.rs"
+        );
+        assert_eq!(sarif_uri_reference("src/naïve.rs"), "src/na%C3%AFve.rs");
+    }
 
     #[test]
     fn uris_resolve_inside_the_repository_only() {

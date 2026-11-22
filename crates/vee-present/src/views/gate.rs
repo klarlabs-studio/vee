@@ -97,3 +97,32 @@ impl ToView for WaiverList {
         )
     }
 }
+
+impl ToView for vee_core::Waiver {
+    fn to_view(&self) -> View {
+        View::new()
+            .title(
+                format!("Waiver {}", self.id),
+                Some(Cell::badge(Tone::Warning, "waived")),
+            )
+            .fields(vec![
+                ("Finding".into(), Cell::id(&self.finding_fingerprint)),
+                ("Snapshot".into(), Cell::code(&self.snapshot_id)),
+                ("Author".into(), Cell::plain(&self.author)),
+                ("Reason".into(), Cell::plain(&self.reason)),
+                (
+                    "Created (unix)".into(),
+                    Cell::plain(self.created_at_unix.to_string()),
+                ),
+                (
+                    "Expires (unix)".into(),
+                    Cell::plain(self.expires_at_unix.to_string()),
+                ),
+                ("Provenance".into(), Cell::muted(&self.provenance)),
+            ])
+            .note(
+                Tone::Info,
+                "The waiver covers only this finding in this snapshot, until it expires.",
+            )
+    }
+}

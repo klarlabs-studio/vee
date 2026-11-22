@@ -6,11 +6,15 @@ mod findings;
 mod gate;
 mod governance;
 mod history;
+mod hosting;
 mod insights;
 mod lists;
 mod patch;
+mod records;
+mod repos;
 pub mod review;
 mod setup;
+mod tests_gen;
 pub(crate) mod verification;
 pub(crate) mod work;
 

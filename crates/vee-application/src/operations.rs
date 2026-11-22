@@ -974,6 +974,31 @@ pub fn diagnose_verification(
         .map_err(anyhow::Error::msg)
 }
 
+fn saved_verification(store: &dyn Repositories, run_id: &str) -> Result<VerificationRun> {
+    store
+        .verification(run_id)
+        .map_err(anyhow::Error::msg)?
+        .with_context(|| format!("verification run {run_id} was not found"))
+}
+
+/// `vee verification show`: one saved verification run.
+pub fn verification_show(workspace: &Workspace, run_id: &str) -> Result<VerificationRun> {
+    saved_verification(workspace.store()?.as_ref(), run_id)
+}
+
+/// `vee verification coverage`: changed-file coverage from a run's LCOV `stream`
+/// (`stdout` or `stderr`).
+pub fn verification_coverage(
+    workspace: &Workspace,
+    run_id: &str,
+    stream: &str,
+) -> Result<crate::coverage::CoverageReport> {
+    let store = workspace.store()?;
+    let run = saved_verification(store.as_ref(), run_id)?;
+    crate::coverage::report(workspace.root(), store.as_ref(), &run, stream)
+        .map_err(anyhow::Error::msg)
+}
+
 // ---------------------------------------------------------------------------
 // Impact, acceptance, standards, analytics
 
@@ -1024,6 +1049,34 @@ pub fn acceptance_report(
         impact.as_ref(),
         impact_problem.as_deref(),
     ))
+}
+
+/// Largest acceptance mapping file `acceptance_validate` reads.
+const MAX_ACCEPTANCE_MAPPING_BYTES: u64 = 1_048_576;
+
+/// `vee acceptance validate`: check a human-authored acceptance mapping against
+/// a saved review and the repository's acceptance policy.
+pub fn acceptance_validate(
+    workspace: &Workspace,
+    review_id: &str,
+    mapping: &Path,
+) -> Result<crate::acceptance::AcceptanceValidation> {
+    let store = workspace.store()?;
+    let review = workspace.saved_review(&*store, review_id)?;
+    let config = workspace.effective_config(review.policy_profile.as_deref())?;
+    let metadata = std::fs::symlink_metadata(mapping)
+        .map_err(|error| configuration_failure(format!("cannot read mapping file: {error}")))?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_ACCEPTANCE_MAPPING_BYTES {
+        return Err(configuration_failure(
+            "mapping must be a regular file no larger than 1 MiB",
+        ));
+    }
+    let contents = std::fs::read(mapping)
+        .map_err(|error| configuration_failure(format!("cannot read mapping file: {error}")))?;
+    let mapping: crate::acceptance::AcceptanceMapping = serde_json::from_slice(&contents)
+        .map_err(|error| configuration_failure(format!("invalid acceptance mapping: {error}")))?;
+    crate::acceptance::validate_mapping(&review, &mapping, &config.policy.acceptance)
+        .map_err(configuration_failure)
 }
 
 pub fn applicable_standards(
@@ -1128,6 +1181,37 @@ pub fn repository_context(
         truncated,
         classification: "untrusted_repository_source".into(),
         note,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Review records
+
+/// The formats `vee reviews export` writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewExportFormat {
+    /// A SARIF 2.1.0 log of the review's findings.
+    Sarif,
+    /// The portable Vee review document (`review-output-v2`).
+    VeeJson,
+}
+
+/// `vee reviews export`: a saved review as an exchange payload. Both formats are
+/// JSON values with sorted keys, written exactly as returned.
+pub fn export_review(
+    workspace: &Workspace,
+    review_id: &str,
+    format: ReviewExportFormat,
+) -> Result<serde_json::Value> {
+    let payload = workspace
+        .store()?
+        .get(review_id)
+        .map_err(anyhow::Error::msg)?
+        .with_context(|| format!("review {review_id} was not found"))?;
+    let review = crate::deserialize_review_result(&payload).map_err(anyhow::Error::msg)?;
+    Ok(match format {
+        ReviewExportFormat::Sarif => crate::sarif::review_log(&review),
+        ReviewExportFormat::VeeJson => serde_json::to_value(&review)?,
     })
 }
 
@@ -1582,6 +1666,93 @@ pub fn list_waivers(workspace: &Workspace, review_id: &str) -> Result<WaiverList
     })
 }
 
+/// What a person supplies to waive one finding of a saved review.
+pub struct WaiverRequest<'a> {
+    pub review_id: &'a str,
+    pub finding_id: &'a str,
+    pub reason: &'a str,
+    pub author: &'a str,
+    pub expires_in_days: u32,
+}
+
+/// Record a waiver for one finding fingerprint in the review's immutable snapshot.
+/// The finding may be a reviewer finding or one reported by a deterministic analyzer
+/// that the review's gate evaluated. Waivers expire; they are never open-ended.
+pub fn create_waiver(
+    workspace: &Workspace,
+    request: &WaiverRequest<'_>,
+) -> Result<vee_core::Waiver> {
+    if request.expires_in_days == 0 {
+        return Err(usage_failure("--expires-in-days must be positive"));
+    }
+    let mut store = workspace.store()?;
+    let review = workspace.saved_review(&*store, request.review_id)?;
+    let fingerprint = match review
+        .findings
+        .iter()
+        .find(|finding| finding.id == request.finding_id)
+    {
+        Some(finding) => finding.fingerprint.clone(),
+        None => analyzer_finding_fingerprint(&*store, &review, request.finding_id)?.ok_or_else(
+            || {
+                usage_failure(format!(
+                    "finding {} was not observed in review {}",
+                    request.finding_id, request.review_id
+                ))
+            },
+        )?,
+    };
+    let reason = vee_core::Reason::new(request.reason).map_err(usage_failure)?;
+    let author = vee_core::ActorName::new("author", request.author).map_err(usage_failure)?;
+    let created_at_unix = crate::current_unix_time().map_err(anyhow::Error::msg)?;
+    let expires_at_unix = created_at_unix
+        .checked_add(i64::from(request.expires_in_days) * 86_400)
+        .context("waiver expiry exceeds supported timestamp")?;
+    let id = format!(
+        "waiver_{}",
+        &vee_core::digest(&serde_json::to_vec(&(
+            fingerprint.as_str(),
+            review.snapshot_id.as_str(),
+            reason.as_str(),
+            author.as_str(),
+            created_at_unix,
+            expires_at_unix,
+        ))?)[..20]
+    );
+    let waiver = vee_core::Waiver {
+        schema_version: 1,
+        id,
+        finding_fingerprint: fingerprint,
+        snapshot_id: review.snapshot_id,
+        reason: reason.as_str().to_owned(),
+        author: author.as_str().to_owned(),
+        provenance: "local_cli".into(),
+        created_at_unix,
+        expires_at_unix,
+    };
+    store.create_waiver(&waiver).map_err(anyhow::Error::msg)?;
+    Ok(waiver)
+}
+
+/// The fingerprint of an analyzer finding the review's gate evaluated for its snapshot.
+fn analyzer_finding_fingerprint(
+    store: &dyn Repositories,
+    review: &ReviewResult,
+    finding_id: &str,
+) -> Result<Option<String>> {
+    let decisions = store
+        .gate_decisions_for_review(&review.review_id)
+        .map_err(anyhow::Error::msg)?;
+    Ok(std::iter::once(&review.gate)
+        .chain(decisions.iter())
+        .filter(|decision| decision.snapshot_id == review.snapshot_id)
+        .filter_map(|decision| decision.replay_inputs.as_ref())
+        .flat_map(|inputs| &inputs.analyzer_reports)
+        .flat_map(|report| &report.findings)
+        .find(|finding| finding.id == finding_id)
+        .map(|finding| finding.fingerprint.clone()))
+}
+
 pub const MAX_PATCH_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PROPOSAL_RECORD_BYTES: usize = 128 * 1024;
 
@@ -1589,6 +1760,18 @@ const MAX_PROPOSAL_RECORD_BYTES: usize = 128 * 1024;
 /// and save it as a digest-bound proposal (`patch-proposal-v1`). No repository file
 /// is changed; applying requires explicit human approval of the digest through
 /// `vee findings apply-patch`.
+/// The result of applying a human-approved patch proposal: the follow-up review
+/// of the changed working tree, and whether the target changed while applying.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PatchApplication {
+    pub schema_version: u32,
+    pub proposal_digest: String,
+    pub approved: bool,
+    pub application: String,
+    pub concurrent_mutation_detected: bool,
+    pub review: ReviewResult,
+}
+
 /// `patch-proposal-v1` for a newly validated, unapplied patch.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PatchProposal {
@@ -1814,4 +1997,82 @@ pub fn confine_consumers(workspace: &Workspace, supplied: &[String]) -> Result<V
             Ok(resolved)
         })
         .collect()
+}
+
+/// What to capture in a cross-repository change package.
+#[derive(Clone, Debug, Default)]
+pub struct ChangePackageRequest<'a> {
+    pub repositories: &'a [PathBuf],
+    /// `REPOSITORY_ID=HOST/OWNER/REPO#NUMBER` links the caller named.
+    pub pull_request_links: &'a [String],
+    /// Also link pull requests discovered from each checkout's branch.
+    pub discover_linked_prs: bool,
+    /// Read each linked pull request's state from its hosting provider.
+    pub refresh_pr_links: bool,
+    pub base: Option<&'a str>,
+}
+
+/// Capture a deterministic local change package across related checkouts,
+/// with their linked pull requests and, when asked, their provider state.
+pub fn change_package(
+    request: ChangePackageRequest<'_>,
+    stores: &dyn RepositoryStores,
+) -> Result<crate::repository_map::ChangePackage> {
+    use crate::repository_map;
+    use std::collections::BTreeMap;
+    let mut explicit_links = BTreeMap::<String, Vec<vee_hosting::PullRequestRef>>::new();
+    for value in request.pull_request_links {
+        let (repository_id, reference) =
+            repository_map::parse_pull_request_link(value).map_err(usage_failure)?;
+        let entry = explicit_links.entry(repository_id).or_default();
+        if entry.contains(&reference) {
+            return Err(usage_failure("pull request link is repeated"));
+        }
+        entry.push(reference);
+    }
+    let mut links = explicit_links;
+    let mut discovered_links = BTreeMap::<String, Vec<vee_hosting::PullRequestRef>>::new();
+    if request.discover_linked_prs {
+        discovered_links = repository_map::discover_linked_pull_requests(request.repositories)
+            .map_err(anyhow::Error::msg)?;
+        for (repository_id, references) in &discovered_links {
+            let entry = links.entry(repository_id.clone()).or_default();
+            for reference in references {
+                if !entry.contains(reference) {
+                    entry.push(reference.clone());
+                }
+            }
+        }
+    }
+    if request.refresh_pr_links && links.is_empty() {
+        return Err(usage_failure(
+            "--refresh-pr-links requires at least one --link-pr",
+        ));
+    }
+    let remote_states = if request.refresh_pr_links {
+        let local = repository_map::build(request.repositories).map_err(anyhow::Error::msg)?;
+        crate::hosting::refresh_linked_pull_requests(&local, &links)?
+    } else {
+        BTreeMap::new()
+    };
+    repository_map::change_package_with_pull_requests(
+        request.repositories,
+        request.base,
+        &links,
+        &discovered_links,
+        &remote_states,
+        stores,
+    )
+    .map_err(|error| {
+        if error.starts_with("pull request link") {
+            usage_failure(error)
+        } else {
+            anyhow::Error::msg(error)
+        }
+    })
+}
+
+/// The direct package dependencies between explicitly selected local checkouts.
+pub fn repository_map(repositories: &[PathBuf]) -> Result<crate::repository_map::RepositoryMap> {
+    crate::repository_map::build(repositories).map_err(anyhow::Error::msg)
 }

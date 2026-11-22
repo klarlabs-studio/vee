@@ -12,3 +12,4 @@ serde.workspace = true
 serde_json.workspace = true
 vee-core = { path = "../vee-core" }
 vee-application = { path = "../vee-application" }
+vee-hosting = { path = "../vee-hosting" }

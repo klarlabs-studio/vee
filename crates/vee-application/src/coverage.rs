@@ -1,7 +1,7 @@
 //! Snapshot-bound file and changed-line coverage summaries from LCOV output.
 //! Changed executable-line metrics are emitted only when a bounded textual diff
 //! can be computed from the exact captured base and current snapshot contents.
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use vee_core::{ArtifactReference, ChangeSet, SnapshotFile, VerificationRun};
@@ -11,7 +11,7 @@ const MAX_RECORDS: usize = 100_000;
 const MAX_DIFF_INPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DIFF_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CoverageReport {
     pub schema_version: u32,
     pub run_id: String,
@@ -23,7 +23,7 @@ pub struct CoverageReport {
     pub limitations: Vec<String>,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FileCoverage {
     pub path: String,
     pub covered_lines: u64,

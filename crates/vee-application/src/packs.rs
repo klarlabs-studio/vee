@@ -13,7 +13,7 @@ use vee_core::packs::{self, PackReviewer, PolicyPack, PACK_MANIFEST};
 pub const PACKS_DIRECTORY: &str = ".vee/packs";
 
 /// `pack-summary-v1`: the result of exporting or adding a pack.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PackSummary {
     pub schema_version: u32,
     pub name: String,

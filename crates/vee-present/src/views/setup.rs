@@ -1,5 +1,5 @@
 use crate::view::{Cell, Span, Style, ToView, Tone, View};
-use vee_application::setup::{DetectionReport, DoctorReport};
+use vee_application::setup::{DetectionReport, DoctorReport, InitReport};
 
 impl ToView for DetectionReport {
     fn to_view(&self) -> View {
@@ -150,5 +150,52 @@ impl ToView for DoctorReport {
             view = view.next_step(step.as_str());
         }
         view
+    }
+}
+
+impl ToView for InitReport {
+    fn to_view(&self) -> View {
+        let created = |written: bool, path: &str| {
+            Cell::code(path).then(if written {
+                Span::new("created", Style::Badge(Tone::Success))
+            } else {
+                Span::new("already present", Style::Muted)
+            })
+        };
+        let provider = match (self.provider_status.as_str(), self.candidate_id.as_deref()) {
+            ("written", Some(candidate)) => Cell::strong(&self.provider_id)
+                .then(Span::new("configured", Style::Badge(Tone::Success)))
+                .then(Span::new(format!("from {candidate}"), Style::Muted)),
+            _ => {
+                Cell::strong(&self.provider_id).then(Span::new("already configured", Style::Muted))
+            }
+        };
+        View::new()
+            .title("Vee initialized", Some(Cell::badge(Tone::Success, "ready")))
+            .fields(vec![
+                (
+                    "Repository config".into(),
+                    created(
+                        self.repository_config_status == "written",
+                        &self.repository_config,
+                    ),
+                ),
+                (
+                    "Reviewer guide".into(),
+                    created(
+                        self.reviewer_instructions_created,
+                        &self.reviewer_instructions,
+                    ),
+                ),
+                ("Provider".into(), provider),
+                ("Egress".into(), Cell::plain(&self.egress)),
+                ("User config".into(), Cell::code(&self.user_config)),
+            ])
+            .next_action("vee doctor", "check_setup", serde_json::json!({}))
+            .next_action(
+                "vee review",
+                "review_changes",
+                serde_json::json!({"scope": "working_tree"}),
+            )
     }
 }
