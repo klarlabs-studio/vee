@@ -129,7 +129,7 @@ fn candidate(id: &str, suggestion: &str) -> RuleCandidate {
             reviewer: "dana".into(),
             reason: "the error is handled by the caller".into(),
         }],
-        approval_status: "requires_human_review",
+        approval_status: "requires_human_review".to_string(),
     }
 }
 
@@ -437,7 +437,7 @@ fn acceptance_view_traces_criteria_to_paths_tests_and_runs() {
             evidence_line: 30,
             certainty: "inferred".into(),
         }],
-        status: "needs_human_review",
+        status: "needs_human_review".to_string(),
     }]);
     let text = text(&report);
     assert!(
@@ -487,4 +487,119 @@ fn acceptance_view_says_when_no_criteria_or_runs_exist() {
         "{text}"
     );
     assert!(!text.contains("→"), "{text}");
+}
+
+fn approval(status: &str, events: serde_json::Value) -> vee_core::RuleApproval {
+    serde_json::from_value(json!({
+        "schema_version": 2,
+        "approval_id": "rule-approval:sha256:approval",
+        "version": 2,
+        "candidate_id": "candidate-1",
+        "evidence_digest": "sha256:evidence",
+        "source_feedback_ids": ["fb_1", "fb_2", "fb_3"],
+        "activated_at_unix": 1_700_000_000,
+        "category": "error_handling",
+        "feedback_label": "false_positive",
+        "scope": "src/retry.rs",
+        "instruction": "Ask for the caller's retry bound before reporting this pattern.",
+        "approver": "maintainer",
+        "approval_reason": "Reviewed three examples.",
+        "supersedes_approval_id": "rule-approval:sha256:previous",
+        "expires_at_unix": null,
+        "created_at": "2026-11-20 10:00:00",
+        "status": status,
+        "events": events
+    }))
+    .unwrap()
+}
+
+fn activated() -> serde_json::Value {
+    json!({
+        "event_id": "sha256:event-1",
+        "event": "activated",
+        "actor": "maintainer",
+        "reason": "Reviewed three examples.",
+        "created_at": "2026-11-20 10:00:00"
+    })
+}
+
+#[test]
+fn rule_approval_view_shows_guidance_audit_events_and_effectiveness_step() {
+    let approval = approval("active", json!([activated()]));
+    let text = text(&approval);
+    assert!(
+        text.starts_with("Rule guidance v2 for error_handling  ✔ active\n"),
+        "{text}"
+    );
+    assert!(text.contains("Scope"), "{text}");
+    assert!(text.contains("src/retry.rs"), "{text}");
+    assert!(text.contains("never"), "{text}");
+    assert!(text.contains("rule-approval:sha256:previous"), "{text}");
+    assert!(
+        text.contains(
+            "Instruction\n\nAsk for the caller's retry bound before reporting this pattern.\n"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("Audit events (1)\n"), "{text}");
+    assert!(text.contains("✔ activated  maintainer"), "{text}");
+    assert!(
+        text.contains("→ vee rules effectiveness --approval-id rule-approval:sha256:approval"),
+        "{text}"
+    );
+    let markdown = md(&approval);
+    assert!(markdown.contains("`rule_effectiveness`"), "{markdown}");
+    assert!(markdown.contains("`src/retry.rs`"), "{markdown}");
+    assert_round_trip(&approval);
+}
+
+#[test]
+fn revoked_rule_approval_view_points_back_to_the_list() {
+    let approval = approval(
+        "revoked",
+        json!([activated(), {
+            "event_id": "sha256:event-2",
+            "event": "revoked",
+            "actor": "maintainer",
+            "reason": "Superseded by repository policy.",
+            "created_at": "2026-11-21 10:00:00"
+        }]),
+    );
+    let text = text(&approval);
+    assert!(text.contains("· revoked"), "{text}");
+    assert!(text.contains("Audit events (2)\n"), "{text}");
+    assert!(text.contains("Superseded by repository policy."), "{text}");
+    assert!(text.ends_with("→ vee rules list\n"), "{text}");
+    assert!(md(&approval).contains("`list_rule_approvals`"));
+}
+
+#[test]
+fn rule_approval_list_view_tabulates_approvals_and_says_when_none_exist() {
+    let list = vee_application::operations::RuleApprovalList {
+        schema_version: 1,
+        approvals: vec![approval("active", json!([activated()]))],
+    };
+    let rendered = text(&list);
+    assert!(
+        rendered.starts_with("Rule approvals (1)  ✔ 1 active\n"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("v2"), "{rendered}");
+    assert!(rendered.contains("false_positive"), "{rendered}");
+    assert!(
+        rendered.contains("→ vee rules effectiveness\n"),
+        "{rendered}"
+    );
+    assert!(md(&list).contains("| `rule-approval:sha256:approval` | v2 | 🟢 **active** |"));
+    assert_round_trip(&list);
+
+    let empty = vee_application::operations::RuleApprovalList {
+        schema_version: 1,
+        approvals: Vec::new(),
+    };
+    assert_eq!(
+        text(&empty),
+        "Rule approvals (0)\n\nNo rule guidance approvals.\n\n→ vee rules candidates\n"
+    );
+    assert!(md(&empty).contains("`list_rule_candidates`"));
 }

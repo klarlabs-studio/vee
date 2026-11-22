@@ -1,10 +1,87 @@
 use anyhow::Context;
-use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{io::Write, path::Path};
 use vee_core::FindingFeedbackLabel;
 
 const MAX_RESULTS: usize = 100;
+
+/// `imported-review-search-v3`: imported history matching a query. Every
+/// match is untrusted historical context and never gate eligible.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ImportedHistorySearch {
+    pub schema_version: u32,
+    pub query: String,
+    pub matches: Vec<ImportedMatch>,
+    pub trust: String,
+    pub gate_eligible: bool,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum ImportedMatch {
+    Finding(ImportedFindingMatch),
+    Discussion(ImportedDiscussionMatch),
+}
+
+/// A finding from an imported Vee review.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportedFindingMatch {
+    pub archive_digest: String,
+    pub review_id: String,
+    pub snapshot_id: String,
+    pub finding: vee_core::Finding,
+    pub relevance_score: u32,
+    pub matched_fields: Vec<String>,
+    pub trust: String,
+    pub gate_eligible: bool,
+}
+
+/// A comment from an archived provider pull-request discussion.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportedDiscussionMatch {
+    pub archive_digest: String,
+    pub provider: String,
+    pub pull_request: vee_hosting::PullRequestRef,
+    pub revision: String,
+    pub issue: vee_hosting::PullRequestReviewIssue,
+    pub relevance_score: u32,
+    pub matched_fields: Vec<String>,
+    pub trust: String,
+    pub gate_eligible: bool,
+}
+
+impl ImportedMatch {
+    pub fn relevance_score(&self) -> u32 {
+        match self {
+            Self::Finding(item) => item.relevance_score,
+            Self::Discussion(item) => item.relevance_score,
+        }
+    }
+
+    pub fn archive_digest(&self) -> &str {
+        match self {
+            Self::Finding(item) => &item.archive_digest,
+            Self::Discussion(item) => &item.archive_digest,
+        }
+    }
+
+    fn order_key(&self) -> (std::cmp::Reverse<u32>, &str, Option<&str>, Option<&str>) {
+        let (fingerprint, external_id) = match self {
+            Self::Finding(item) => (Some(item.finding.fingerprint.as_str()), None),
+            Self::Discussion(item) => (None, Some(item.issue.external_id.as_str())),
+        };
+        (
+            std::cmp::Reverse(self.relevance_score()),
+            self.archive_digest(),
+            fingerprint,
+            external_id,
+        )
+    }
+}
+
+const UNTRUSTED_EXTERNAL: &str = "untrusted_external";
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -258,7 +335,7 @@ fn feedback_dir(root: &Path, create: bool) -> Result<std::path::PathBuf, String>
     Ok(directory)
 }
 
-pub fn search(root: &Path, query: &str, limit: usize) -> Result<Value, String> {
+pub fn search(root: &Path, query: &str, limit: usize) -> Result<ImportedHistorySearch, String> {
     let terms = query
         .to_lowercase()
         .split(|character: char| !character.is_alphanumeric())
@@ -335,16 +412,19 @@ pub fn search(root: &Path, query: &str, limit: usize) -> Result<Value, String> {
                     }
                     if all_terms_matched {
                         matched_fields.sort_unstable();
-                        matches.push(json!({
-                            "archive_digest": format!("sha256:{hash}"),
-                            "provider": discussion.provider,
-                            "pull_request": discussion.pull_request,
-                            "revision": discussion.revision,
-                            "issue": issue,
-                            "relevance_score": score,
-                            "matched_fields": matched_fields,
-                            "trust": "untrusted_external",
-                            "gate_eligible": false
+                        matches.push(ImportedMatch::Discussion(ImportedDiscussionMatch {
+                            archive_digest: format!("sha256:{hash}"),
+                            provider: discussion.provider.clone(),
+                            pull_request: discussion.pull_request.clone(),
+                            revision: discussion.revision.clone(),
+                            issue,
+                            relevance_score: score,
+                            matched_fields: matched_fields
+                                .iter()
+                                .map(|field| (*field).to_owned())
+                                .collect(),
+                            trust: UNTRUSTED_EXTERNAL.to_owned(),
+                            gate_eligible: false,
                         }));
                     }
                 }
@@ -388,47 +468,31 @@ pub fn search(root: &Path, query: &str, limit: usize) -> Result<Value, String> {
             }
             if all_terms_matched {
                 matched_fields.sort_unstable();
-                matches.push(json!({
-                    "archive_digest": format!("sha256:{hash}"),
-                    "review_id": review.review_id,
-                    "snapshot_id": review.snapshot_id,
-                    "finding": finding,
-                    "relevance_score": score,
-                    "matched_fields": matched_fields,
-                    "trust": "untrusted_external",
-                    "gate_eligible": false
+                matches.push(ImportedMatch::Finding(ImportedFindingMatch {
+                    archive_digest: format!("sha256:{hash}"),
+                    review_id: review.review_id.clone(),
+                    snapshot_id: review.snapshot_id.clone(),
+                    finding: finding.clone(),
+                    relevance_score: score,
+                    matched_fields: matched_fields
+                        .iter()
+                        .map(|field| (*field).to_owned())
+                        .collect(),
+                    trust: UNTRUSTED_EXTERNAL.to_owned(),
+                    gate_eligible: false,
                 }));
             }
         }
     }
-    matches.sort_by(|left, right| {
-        right["relevance_score"]
-            .as_u64()
-            .cmp(&left["relevance_score"].as_u64())
-            .then_with(|| {
-                left["archive_digest"]
-                    .as_str()
-                    .cmp(&right["archive_digest"].as_str())
-                    .then_with(|| {
-                        left["finding"]["fingerprint"]
-                            .as_str()
-                            .cmp(&right["finding"]["fingerprint"].as_str())
-                            .then_with(|| {
-                                left["issue"]["external_id"]
-                                    .as_str()
-                                    .cmp(&right["issue"]["external_id"].as_str())
-                            })
-                    })
-            })
-    });
+    matches.sort_by(|left, right| left.order_key().cmp(&right.order_key()));
     matches.truncate(limit);
-    Ok(json!({
-        "schema_version": 3,
-        "query": terms.join(" "),
-        "matches": matches,
-        "trust": "untrusted_external",
-        "gate_eligible": false
-    }))
+    Ok(ImportedHistorySearch {
+        schema_version: 3,
+        query: terms.join(" "),
+        matches,
+        trust: UNTRUSTED_EXTERNAL.to_owned(),
+        gate_eligible: false,
+    })
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -555,6 +619,7 @@ pub fn imported_reviews_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     #[test]
     fn searches_archived_provider_discussions_as_non_gating_context() {
@@ -588,7 +653,8 @@ mod tests {
         let bytes = serde_json::to_vec(&report).unwrap();
         super::store_imported_history(root.path(), &bytes).unwrap();
 
-        let result = search(root.path(), "null response", 10).unwrap();
+        let result =
+            serde_json::to_value(search(root.path(), "null response", 10).unwrap()).unwrap();
         assert_eq!(result["matches"][0]["provider"], "github");
         assert_eq!(result["matches"][0]["revision"], "abc123");
         assert_eq!(result["matches"][0]["issue"]["external_id"], "comment-7");

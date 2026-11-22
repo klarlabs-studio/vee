@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use vee_core::VerificationStatus;
 use vee_hosting::WorkItemSnapshot;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AcceptanceReport {
     pub schema_version: u32,
     pub review_id: String,
@@ -25,7 +25,7 @@ pub struct WorkItemReference {
     pub content_digest: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AcceptanceCriterion {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -36,7 +36,7 @@ pub struct AcceptanceCriterion {
     pub candidate_changed_paths: Vec<String>,
     /// Analyzer-derived changed-source -> likely-test links; these remain inferred candidates.
     pub candidate_test_references: Vec<TestReferenceCandidate>,
-    pub status: &'static str,
+    pub status: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -406,7 +406,7 @@ pub fn report_with_impact(
                 text,
                 candidate_changed_paths: candidates,
                 candidate_test_references,
-                status: "needs_human_review",
+                status: "needs_human_review".to_string(),
             }
         })
         .collect();

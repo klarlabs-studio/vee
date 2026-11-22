@@ -21,6 +21,10 @@ use vee_core::{
 pub const DEFAULT_PAGE_SIZE: usize = 50;
 pub const MAX_PAGE_SIZE: usize = 100;
 pub const DEFAULT_CONTEXT_LINES: usize = 20;
+/// Results returned by imported-history search when no limit is given.
+pub const DEFAULT_SEARCH_LIMIT: usize = 20;
+/// Reviewer that drafts tests and PR descriptions when none is named.
+pub const DEFAULT_DRAFTING_REVIEWER: &str = "correctness";
 const MAX_SCOPE_CHARS: usize = 1_024;
 const MAX_INSTRUCTION_BYTES: usize = 20_000;
 /// Upper bound on findings scanned when mining rule candidates.
@@ -127,6 +131,15 @@ fn require_text(field: &str, value: &str, max_chars: usize) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Change scope and review
 
+/// The scope kinds a tool input names explicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScopeKind {
+    WorkingTree,
+    Staged,
+    Base,
+    Commit,
+}
+
 /// Which changes to capture.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScopeRequest {
@@ -167,6 +180,37 @@ impl ScopeRequest {
         })
     }
 
+    /// Build a scope from an explicit kind and its ref, as tool inputs give it.
+    /// Unlike the CLI's default, `Base` requires a ref.
+    pub fn from_kind(
+        kind: ScopeKind,
+        base: Option<String>,
+        commit: Option<String>,
+    ) -> Result<Self> {
+        let invalid = |message: &str| usage_failure(message.to_owned());
+        match kind {
+            ScopeKind::Staged | ScopeKind::WorkingTree if base.is_some() || commit.is_some() => {
+                Err(invalid(
+                    "staged/working_tree scope cannot be combined with base or commit",
+                ))
+            }
+            ScopeKind::Staged => Ok(Self::Staged),
+            ScopeKind::WorkingTree => Ok(Self::WorkingTree),
+            ScopeKind::Base if commit.is_some() => {
+                Err(invalid("base scope cannot be combined with commit"))
+            }
+            ScopeKind::Base => base
+                .map(|base| Self::BaseAndWorktree { base: Some(base) })
+                .ok_or_else(|| invalid("base scope requires a base ref")),
+            ScopeKind::Commit if base.is_some() => {
+                Err(invalid("commit scope cannot be combined with base"))
+            }
+            ScopeKind::Commit => commit
+                .map(Self::Commit)
+                .ok_or_else(|| invalid("commit scope requires a commit ref")),
+        }
+    }
+
     pub fn resolve(&self, root: &Path) -> Result<vee_git::ChangeScope> {
         match self {
             Self::BaseAndWorktree { base } => Ok(vee_git::ChangeScope::BaseAndWorktree {
@@ -189,9 +233,10 @@ pub struct ReviewRequest<'a> {
     pub policy_profile: Option<&'a str>,
     /// Effort for every reviewer in this review, replacing configured sampling.
     pub effort: Option<vee_core::ReviewEffort>,
-    /// Work item fetched by the caller; requires online configuration.
-    pub work_item: Option<vee_hosting::WorkItemSnapshot>,
-    pub work_item_token_env: Option<String>,
+    /// Work item to fetch as `OWNER/REPO#NUMBER`; requires online configuration.
+    pub work_item: Option<&'a str>,
+    /// Hosting settings for this review; unset values come from `.vee.yaml`.
+    pub hosting: crate::work_items::HostingOverrides,
 }
 
 /// Capture the requested scope, run the configured reviewers, and persist the review.
@@ -213,6 +258,13 @@ pub fn review(
             "offline mode prevents fetching work item context",
         ));
     }
+    // Every transport records the credential variable, so a later gate check
+    // re-fetches the work item the same way whichever transport started the review.
+    let hosting = crate::work_items::resolve_hosting(request.hosting, &config.hosting);
+    let work_item = request
+        .work_item
+        .map(|spec| crate::work_items::fetch_work_item(&hosting, spec))
+        .transpose()?;
     let scope = request.scope.resolve(workspace.root())?;
     let change_set =
         crate::capture_change_set(workspace.root(), scope).map_err(anyhow::Error::msg)?;
@@ -226,8 +278,8 @@ pub fn review(
             provider_adapter: &crate::CliReviewProvider,
             requested_reviewers: request.reviewer_ids,
             cancellation,
-            work_item: request.work_item,
-            work_item_token_env: request.work_item_token_env,
+            work_item,
+            work_item_token_env: Some(hosting.token_env),
         },
     )
     .map_err(anyhow::Error::msg)
@@ -239,6 +291,86 @@ pub fn get_review(workspace: &Workspace, review_id: &str) -> Result<ReviewResult
 }
 
 /// Saved reviews, newest first.
+/// `reviews-list-v1`
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReviewsList {
+    pub schema_version: u32,
+    pub reviews: Vec<vee_core::ReviewSummary>,
+}
+
+pub fn reviews_list(workspace: &Workspace) -> Result<ReviewsList> {
+    Ok(ReviewsList {
+        schema_version: 1,
+        reviews: list_reviews(workspace)?,
+    })
+}
+
+/// `verification-list-v1`: run metadata for one snapshot, without logs.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VerificationList {
+    pub schema_version: u32,
+    pub snapshot_id: String,
+    pub runs: Vec<VerificationRunSummary>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VerificationRunSummary {
+    pub run_id: String,
+    pub snapshot_id: String,
+    pub profile_id: String,
+    pub status: vee_core::VerificationStatus,
+    pub targets: Vec<String>,
+    pub has_stdout_artifact: bool,
+    pub has_stderr_artifact: bool,
+}
+
+pub fn verification_list(workspace: &Workspace, snapshot_id: &str) -> Result<VerificationList> {
+    let runs = workspace
+        .store()?
+        .verifications_for_snapshot(snapshot_id)
+        .map_err(anyhow::Error::msg)?;
+    Ok(VerificationList {
+        schema_version: 1,
+        snapshot_id: snapshot_id.to_owned(),
+        runs: runs
+            .into_iter()
+            .map(|run| VerificationRunSummary {
+                has_stdout_artifact: run.stdout_artifact.is_some(),
+                has_stderr_artifact: run.stderr_artifact.is_some(),
+                run_id: run.run_id,
+                snapshot_id: run.snapshot_id,
+                profile_id: run.profile_id,
+                status: run.status,
+                targets: run.targets,
+            })
+            .collect(),
+    })
+}
+
+/// `finding-feedback-list-v1`
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FindingFeedbackList {
+    pub schema_version: u32,
+    pub feedback: Vec<FindingFeedback>,
+}
+
+pub fn finding_feedback_list(
+    workspace: &Workspace,
+    finding_id: Option<&str>,
+) -> Result<FindingFeedbackList> {
+    let feedback = workspace
+        .store()?
+        .list_finding_feedback()
+        .map_err(anyhow::Error::msg)?
+        .into_iter()
+        .filter(|item| finding_id.is_none_or(|id| item.finding_id == id))
+        .collect();
+    Ok(FindingFeedbackList {
+        schema_version: 1,
+        feedback,
+    })
+}
+
 pub fn list_reviews(workspace: &Workspace) -> Result<Vec<vee_core::ReviewSummary>> {
     workspace
         .store()?
@@ -640,15 +772,23 @@ pub fn record_finding_feedback(
 /// The work-item token variable resolves as: explicit override, the variable saved
 /// with the review, `hosting.token_env` in `.vee.yaml`, then `GH_TOKEN` (mapped to
 /// the provider's conventional default).
-pub fn gate_check(
+/// The configuration a saved review would be evaluated under now.
+pub struct CurrentReviewConfig {
+    pub config: RepositoryConfig,
+    /// Digest of the configuration, bound to the re-fetched work item.
+    pub digest: String,
+    /// The review's work item as it reads now, when the review used one.
+    pub work_item: Option<vee_hosting::WorkItemSnapshot>,
+}
+
+/// A review that used a work item re-fetches it, because the configuration
+/// digest binds the item's content.
+pub fn current_review_config(
     workspace: &Workspace,
-    review_id: &str,
+    store: &dyn Repositories,
+    review: &ReviewResult,
     token_env_override: Option<&str>,
-) -> Result<GateCheckResult> {
-    let mut store = workspace.store()?;
-    let review = workspace.saved_review(&*store, review_id)?;
-    let current = crate::capture_current_change_set(workspace.root(), &review.change_set)
-        .map_err(anyhow::Error::msg)?;
+) -> Result<CurrentReviewConfig> {
     let config = workspace.effective_config(review.policy_profile.as_deref())?;
     let current_work_item = match review.work_item.as_ref() {
         None => None,
@@ -675,8 +815,8 @@ pub fn gate_check(
             )?)
         }
     };
-    let active_approvals = crate::active_rule_approvals(&*store).map_err(anyhow::Error::msg)?;
-    let config_digest = crate::effective_review_config_digest_with_work_item(
+    let active_approvals = crate::active_rule_approvals(store).map_err(anyhow::Error::msg)?;
+    let digest = crate::effective_review_config_digest_with_work_item(
         &config,
         workspace.root(),
         &review.selected_reviewers,
@@ -684,6 +824,35 @@ pub fn gate_check(
         current_work_item.as_ref(),
     )
     .map_err(anyhow::Error::msg)?;
+    Ok(CurrentReviewConfig {
+        config,
+        digest,
+        work_item: current_work_item,
+    })
+}
+
+/// A saved review's gate, re-evaluated against the current source,
+/// configuration and verification evidence, and persisted.
+pub struct GateReevaluation {
+    pub review: ReviewResult,
+    pub current: vee_core::ChangeSet,
+    pub decision: vee_core::GateDecision,
+}
+
+pub fn reevaluate_gate(
+    workspace: &Workspace,
+    review_id: &str,
+    token_env_override: Option<&str>,
+) -> Result<GateReevaluation> {
+    let mut store = workspace.store()?;
+    let review = workspace.saved_review(&*store, review_id)?;
+    let current = crate::capture_current_change_set(workspace.root(), &review.change_set)
+        .map_err(anyhow::Error::msg)?;
+    let CurrentReviewConfig {
+        config,
+        digest: config_digest,
+        ..
+    } = current_review_config(workspace, &*store, &review, token_env_override)?;
     let verification_runs = store
         .verifications_for_snapshot(&current.digest)
         .map_err(anyhow::Error::msg)?;
@@ -705,11 +874,24 @@ pub fn gate_check(
         },
     )
     .map_err(anyhow::Error::msg)?;
+    Ok(GateReevaluation {
+        review,
+        current,
+        decision,
+    })
+}
+
+pub fn gate_check(
+    workspace: &Workspace,
+    review_id: &str,
+    token_env_override: Option<&str>,
+) -> Result<GateCheckResult> {
+    let reevaluated = reevaluate_gate(workspace, review_id, token_env_override)?;
     Ok(GateCheckResult::from_decision(
         review_id.to_owned(),
-        review.snapshot_id,
-        current.digest,
-        decision,
+        reevaluated.review.snapshot_id,
+        reevaluated.current.digest,
+        reevaluated.decision,
     ))
 }
 
@@ -857,22 +1039,115 @@ pub fn quality_analytics(workspace: &Workspace) -> Result<crate::analytics::Qual
 }
 
 // ---------------------------------------------------------------------------
+// Repository context
+
+/// Largest source read `repository_context` returns, and its default.
+pub const MAX_REPOSITORY_CONTEXT_BYTES: usize = 32 * 1024;
+
+/// A bounded source read from a saved review's immutable snapshot.
+pub struct RepositoryContextRequest<'a> {
+    pub review_id: &'a str,
+    /// Repository-relative file path.
+    pub path: &'a str,
+    /// Report the line numbers containing this text.
+    pub symbol: Option<&'a str>,
+    /// Bytes to return, clamped to 1..=[`MAX_REPOSITORY_CONTEXT_BYTES`].
+    pub max_bytes: Option<usize>,
+}
+
+/// Source text from a review snapshot, labeled as untrusted repository content.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RepositoryContext {
+    pub schema_version: u32,
+    pub path: String,
+    pub snapshot_id: String,
+    pub content_digest: String,
+    pub returned_bytes: usize,
+    pub total_bytes: usize,
+    pub matching_line_count: usize,
+    /// The returned bytes as text, or `None` when they are not valid UTF-8.
+    pub content: Option<String>,
+    /// One-based line numbers containing the requested symbol.
+    pub matching_lines: Vec<usize>,
+    pub truncated: bool,
+    pub classification: String,
+    pub note: Option<String>,
+}
+
+pub fn repository_context(
+    workspace: &Workspace,
+    request: RepositoryContextRequest<'_>,
+) -> Result<RepositoryContext> {
+    let review = get_review(workspace, request.review_id)?;
+    let relative = PathBuf::from(request.path);
+    if relative.components().any(|component| {
+        matches!(component, std::path::Component::Normal(name) if name == ".git" || name == ".vee")
+    }) {
+        return Err(usage_failure(
+            "repository metadata paths are not available through this tool",
+        ));
+    }
+    let bytes = vee_git::read_snapshot_tree_file(workspace.root(), &review.change_set, &relative)
+        .map_err(anyhow::Error::msg)?
+        .ok_or_else(|| usage_failure(format!("repository path {} was not found", request.path)))?;
+    let limit = request
+        .max_bytes
+        .unwrap_or(MAX_REPOSITORY_CONTEXT_BYTES)
+        .clamp(1, MAX_REPOSITORY_CONTEXT_BYTES);
+    let truncated = bytes.len() > limit;
+    let visible = &bytes[..bytes.len().min(limit)];
+    let (content, note, matching_lines) = match std::str::from_utf8(visible) {
+        Ok(text) => {
+            let matching_lines = request
+                .symbol
+                .map(|symbol| {
+                    text.lines()
+                        .enumerate()
+                        .filter_map(|(index, line)| line.contains(symbol).then_some(index + 1))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (Some(text.to_owned()), None, matching_lines)
+        }
+        Err(_) => (
+            None,
+            Some("file is binary or contains non-UTF8 bytes".into()),
+            Vec::new(),
+        ),
+    };
+    Ok(RepositoryContext {
+        schema_version: 2,
+        path: request.path.to_owned(),
+        snapshot_id: review.snapshot_id,
+        content_digest: vee_core::digest(&bytes),
+        returned_bytes: visible.len(),
+        total_bytes: bytes.len(),
+        matching_line_count: matching_lines.len(),
+        content,
+        matching_lines,
+        truncated,
+        classification: "untrusted_repository_source".into(),
+        note,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Imported review history
 
 pub fn search_imported_history(
     workspace: &Workspace,
     query: &str,
     limit: usize,
-) -> Result<serde_json::Value> {
+) -> Result<crate::imported_history::ImportedHistorySearch> {
     crate::imported_history::search(workspace.root(), query, limit).map_err(configuration_failure)
 }
 
 /// Envelope for a recorded human label on an imported provider comment.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ExternalFeedbackRecorded {
     pub schema_version: u32,
     pub feedback: crate::imported_history::ExternalReviewFeedback,
-    pub trust: &'static str,
+    pub trust: String,
     pub gate_eligible: bool,
 }
 
@@ -907,13 +1182,13 @@ pub fn record_external_feedback(
     Ok(ExternalFeedbackRecorded {
         schema_version: 1,
         feedback,
-        trust: "human_labeled_external_context",
+        trust: "human_labeled_external_context".into(),
         gate_eligible: false,
     })
 }
 
 /// Envelope for listed human labels on imported provider comments.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ExternalFeedbackList {
     pub schema_version: u32,
     pub feedback: Vec<crate::imported_history::ExternalReviewFeedback>,
@@ -1067,11 +1342,22 @@ fn saved_approval(store: &dyn Repositories, approval_id: &str) -> Result<vee_cor
         .ok_or_else(|| anyhow::anyhow!("approval {approval_id} could not be read back"))
 }
 
-pub fn list_rule_approvals(workspace: &Workspace) -> Result<Vec<vee_core::RuleApproval>> {
-    match workspace.existing_store()? {
-        Some(store) => store.list_rule_approvals().map_err(anyhow::Error::msg),
-        None => Ok(Vec::new()),
-    }
+/// Every saved rule guidance approval, in creation order.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RuleApprovalList {
+    pub schema_version: u32,
+    pub approvals: Vec<vee_core::RuleApproval>,
+}
+
+pub fn list_rule_approvals(workspace: &Workspace) -> Result<RuleApprovalList> {
+    let approvals = match workspace.existing_store()? {
+        Some(store) => store.list_rule_approvals().map_err(anyhow::Error::msg)?,
+        None => Vec::new(),
+    };
+    Ok(RuleApprovalList {
+        schema_version: 1,
+        approvals,
+    })
 }
 
 pub fn revoke_rule(
@@ -1303,11 +1589,29 @@ const MAX_PROPOSAL_RECORD_BYTES: usize = 128 * 1024;
 /// and save it as a digest-bound proposal (`patch-proposal-v1`). No repository file
 /// is changed; applying requires explicit human approval of the digest through
 /// `vee findings apply-patch`.
+/// `patch-proposal-v1` for a newly validated, unapplied patch.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PatchProposal {
+    pub schema_version: u32,
+    pub review_id: String,
+    pub snapshot_id: String,
+    pub effective_config_digest: String,
+    pub patch_digest: String,
+    pub patch_bytes: usize,
+    pub patch_inputs: Vec<vee_core::SnapshotFile>,
+    pub patch_input_digest: String,
+    pub patch_sandbox_result_digest: String,
+    pub validated: bool,
+    pub application: String,
+    pub approval_instruction: String,
+    pub patch_path: String,
+}
+
 pub fn propose_patch(
     workspace: &Workspace,
     review_id: &str,
     patch: &[u8],
-) -> Result<serde_json::Value> {
+) -> Result<PatchProposal> {
     use sha2::Digest as _;
     use std::io::Write as _;
     let root = workspace.root();
@@ -1373,22 +1677,26 @@ pub fn propose_patch(
     let directory = crate::proposals::proposal_directory(root)?;
     let saved_patch = directory.join(format!("{}.patch", &digest[7..]));
     let record_path = directory.join(format!("{}.json", &digest[7..]));
-    let proposal = serde_json::json!({
-        "schema_version": 1,
-        "review_id": review_id,
-        "snapshot_id": saved.snapshot_id,
-        "effective_config_digest": saved.effective_config_digest,
-        "patch_digest": digest,
-        "patch_bytes": patch.len(),
-        "patch_inputs": sandbox.input_files,
-        "patch_input_digest": input_digest,
-        "patch_sandbox_result_digest": sandbox.result_digest,
-        "validated": true,
-        "application": "not_applied",
-        "approval_instruction": format!("Review the diff, then apply only with explicit approval of digest {digest}."),
-        "patch_path": saved_patch.to_string_lossy(),
-    });
-    let record = serde_json::to_vec_pretty(&proposal)?;
+    let proposal = PatchProposal {
+        schema_version: 1,
+        review_id: review_id.to_owned(),
+        snapshot_id: saved.snapshot_id.clone(),
+        effective_config_digest: saved.effective_config_digest.clone(),
+        approval_instruction: format!(
+            "Review the diff, then apply only with explicit approval of digest {digest}."
+        ),
+        patch_digest: digest,
+        patch_bytes: patch.len(),
+        patch_inputs: sandbox.input_files,
+        patch_input_digest: input_digest,
+        patch_sandbox_result_digest: sandbox.result_digest,
+        validated: true,
+        application: "not_applied".to_owned(),
+        patch_path: saved_patch.to_string_lossy().into_owned(),
+    };
+    // Through a Value so the record keeps its sorted keys: apply-patch reads
+    // and extends it as JSON.
+    let record = serde_json::to_vec_pretty(&serde_json::to_value(&proposal)?)?;
     if record.len() > MAX_PROPOSAL_RECORD_BYTES {
         return Err(usage_failure(
             "patch proposal metadata exceeds the 128 KiB apply limit",
@@ -1432,4 +1740,78 @@ pub fn analyzer_findings(workspace: &Workspace, run_id: &str) -> Result<vee_core
         &change_set,
         &run,
     ))
+}
+
+pub const MAX_CROSS_REPOSITORY_CONSUMERS: usize = 128;
+const MAX_BASE_REF_CHARS: usize = 256;
+
+/// Analyze changed symbols of `producer` across local consumer checkouts.
+/// Input bounds apply to every transport; callers that must confine consumer
+/// paths (MCP) resolve them with [`confine_consumers`] first.
+pub fn cross_repository_impact(
+    producer: &Path,
+    base_ref: &str,
+    consumers: &[PathBuf],
+) -> Result<crate::repository_map::CrossRepositoryImpact> {
+    if base_ref.trim().is_empty() || base_ref.chars().count() > MAX_BASE_REF_CHARS {
+        return Err(usage_failure(format!(
+            "base_ref must contain 1 to {MAX_BASE_REF_CHARS} characters"
+        )));
+    }
+    if consumers.is_empty() || consumers.len() > MAX_CROSS_REPOSITORY_CONSUMERS {
+        return Err(usage_failure(format!(
+            "consumer repositories must number between 1 and {MAX_CROSS_REPOSITORY_CONSUMERS}"
+        )));
+    }
+    crate::repository_map::analyze_cross_impact(producer, base_ref, consumers)
+        .map_err(anyhow::Error::msg)
+}
+
+/// Resolve consumer paths relative to the workspace root, rejecting any that
+/// leave it or do not name a Git checkout root.
+pub fn confine_consumers(workspace: &Workspace, supplied: &[String]) -> Result<Vec<PathBuf>> {
+    if supplied.is_empty() || supplied.len() > MAX_CROSS_REPOSITORY_CONSUMERS {
+        return Err(usage_failure(format!(
+            "consumer_paths must contain between 1 and {MAX_CROSS_REPOSITORY_CONSUMERS} repository paths"
+        )));
+    }
+    use vee_core::paths::CanonicalPath as _;
+    let canonical = |path: &Path| path.canonical();
+    let root = canonical(workspace.root())?;
+    supplied
+        .iter()
+        .map(|path| {
+            let relative = Path::new(path);
+            if relative.is_absolute()
+                || relative.as_os_str().is_empty()
+                || relative
+                    .components()
+                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            {
+                return Err(usage_failure(format!(
+                    "consumer path `{path}` must be a relative path without `.` or `..` components"
+                )));
+            }
+            let resolved = canonical(&root.join(relative)).map_err(|error| {
+                usage_failure(format!("cannot resolve consumer path `{path}`: {error}"))
+            })?;
+            if !resolved.starts_with(&root) {
+                return Err(usage_failure(format!(
+                    "consumer path `{path}` escapes the configured repository root"
+                )));
+            }
+            if !resolved.is_dir() {
+                return Err(usage_failure(format!(
+                    "consumer path `{path}` is not a directory"
+                )));
+            }
+            let git_root = vee_git::repository_root(&resolved).map_err(anyhow::Error::msg)?;
+            if canonical(&git_root)? != resolved {
+                return Err(usage_failure(format!(
+                    "consumer path `{path}` must name a Git checkout root"
+                )));
+            }
+            Ok(resolved)
+        })
+        .collect()
 }

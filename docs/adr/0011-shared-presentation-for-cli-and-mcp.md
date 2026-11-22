@@ -62,11 +62,22 @@ each transport *showed* still differed, and neither was readable:
 - **CLI text output is not a stable interface.** Scripts should use
   `--output json`.
 - **Covered documents derive `Deserialize`,** so the parity test can rebuild
-  them. Documents that cannot yet be rebuilt (the setup report and provider
-  detection borrow `&'static str`) still have views, but parity compares only
-  their JSON for now.
+  them. Fields that were `&'static str` (setup, finding task and package, rule
+  candidate and acceptance statuses) are now `String`; they serialize the
+  same.
 - **Alignment counts characters,** so wide East Asian characters can misalign
   a column. The text itself is unaffected. No width dependency was added.
+- **Two input differences are deliberate.** Both transports run the same
+  operations, but MCP clients get a narrower set of inputs:
+  - MCP cannot choose which environment variable supplies a credential. The
+    CLI's `--token-env` lets the local user pick one; over MCP, a gate check
+    uses the variable recorded with the review.
+  - MCP analysis tools (verify, impact, test recommendations, PR drafts) take
+    a saved review or finding rather than an ad hoc scope, so their results
+    stay bound to an auditable snapshot. `review_changes` captures new scopes.
+  - Cross-repository consumers must stay beneath the server's repository root
+    over MCP; the CLI's local user may name any checkout. Input bounds apply
+    to both.
 - **Coverage is staged.**
   - PR 1 covers the operations both transports share.
   - PR 2 routes the remaining divergent CLI paths through `operations`, types

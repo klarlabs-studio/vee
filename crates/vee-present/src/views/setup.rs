@@ -25,13 +25,14 @@ fn backends_table(report: &DetectionReport) -> View {
             .candidates
             .iter()
             .map(|candidate| {
-                let state = if report.recommended == Some(candidate.candidate_id) {
-                    Cell::badge(Tone::Success, "recommended")
-                } else if candidate.available {
-                    Cell::badge(Tone::Info, "available")
-                } else {
-                    Cell::badge(Tone::Neutral, "unavailable")
-                };
+                let state =
+                    if report.recommended.as_deref() == Some(candidate.candidate_id.as_str()) {
+                        Cell::badge(Tone::Success, "recommended")
+                    } else if candidate.available {
+                        Cell::badge(Tone::Info, "available")
+                    } else {
+                        Cell::badge(Tone::Neutral, "unavailable")
+                    };
                 let detail = if candidate.available {
                     let mut parts: Vec<String> = candidate.detail.iter().cloned().collect();
                     if !candidate.models.is_empty() {
@@ -46,15 +47,15 @@ fn backends_table(report: &DetectionReport) -> View {
                 };
                 vec![
                     state,
-                    Cell::strong(candidate.candidate_id),
-                    Cell::plain(candidate.kind),
-                    Cell::plain(candidate.egress),
+                    Cell::strong(&candidate.candidate_id),
+                    Cell::plain(&candidate.kind),
+                    Cell::plain(&candidate.egress),
                     detail,
                 ]
             })
             .collect(),
     );
-    view = match report.recommended {
+    view = match &report.recommended {
         Some(recommended) => view.next_step(format!("vee init --provider {recommended}")),
         None => view.paragraph(Cell::muted("No backend can be configured automatically.")),
     };

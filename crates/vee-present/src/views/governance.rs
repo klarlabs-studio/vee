@@ -5,13 +5,16 @@ use crate::tone;
 use crate::view::{summary, Cell, Span, Style, ToView, Tone, View};
 use crate::views::serde_name;
 use crate::views::verification::verification_status;
+use crate::views::work::feedback_label;
 use vee_application::acceptance::AcceptanceReport;
+use vee_application::operations::RuleApprovalList;
 use vee_application::ownership::OwnershipReport;
 use vee_application::packs::PackList;
 use vee_application::rule_candidates::{
     CandidateReport, EffectivenessWindow, RuleEffectivenessReport,
 };
 use vee_application::standards::StandardsReport;
+use vee_core::{RuleApproval, RuleApprovalStatus};
 
 const SUMMARY_WIDTH: usize = 56;
 
@@ -129,7 +132,7 @@ impl ToView for CandidateReport {
                                 Cell::plain(&candidate.category),
                                 Cell::plain(serde_name(&candidate.feedback_label)),
                                 Cell::plain(&candidate.source_kind),
-                                tone::status_text(candidate.approval_status),
+                                tone::status_text(&candidate.approval_status),
                                 Cell::plain(summary(&candidate.suggestion, SUMMARY_WIDTH)),
                             ]
                         })
@@ -453,7 +456,7 @@ impl ToView for AcceptanceReport {
                         vec![
                             Cell::id(&criterion.id),
                             Cell::plain(criterion.source_line.to_string()),
-                            tone::status_text(criterion.status),
+                            tone::status_text(&criterion.status),
                             Cell::plain(criterion.candidate_changed_paths.len().to_string()),
                             Cell::plain(criterion.candidate_test_references.len().to_string()),
                             Cell::plain(summary(&criterion.text, SUMMARY_WIDTH)),
@@ -545,5 +548,161 @@ impl ToView for AcceptanceReport {
             ));
         }
         view
+    }
+}
+
+const GUIDANCE_NOTE: &str =
+    "Approved guidance is an advisory reviewer input; it never changes gate policy.";
+
+/// A unix timestamp, or `fallback` when there is none.
+fn unix_or(value: Option<i64>, fallback: &str) -> Cell {
+    value.map_or_else(
+        || Cell::muted(fallback),
+        |value| Cell::plain(value.to_string()),
+    )
+}
+
+fn approval_event(event: &str) -> Cell {
+    let tone = match event {
+        "activated" => Tone::Success,
+        _ => Tone::Neutral,
+    };
+    Cell::badge(tone, event)
+}
+
+impl ToView for RuleApproval {
+    fn to_view(&self) -> View {
+        let mut view = View::new()
+            .title(
+                format!("Rule guidance v{} for {}", self.version, self.category),
+                Some(approval_status(self.status.as_str())),
+            )
+            .fields(vec![
+                ("Approval".into(), Cell::id(&self.approval_id)),
+                ("Candidate".into(), Cell::id(&self.candidate_id)),
+                ("Scope".into(), Cell::code(&self.scope)),
+                ("Feedback label".into(), feedback_label(self.feedback_label)),
+                ("Approver".into(), Cell::plain(&self.approver)),
+                ("Reason".into(), Cell::plain(&self.approval_reason)),
+                ("Created".into(), Cell::plain(&self.created_at)),
+                (
+                    "Activated (unix)".into(),
+                    unix_or(self.activated_at_unix, "not activated"),
+                ),
+                (
+                    "Expires (unix)".into(),
+                    unix_or(self.expires_at_unix, "never"),
+                ),
+                (
+                    "Supersedes".into(),
+                    self.supersedes_approval_id
+                        .clone()
+                        .map(Cell::id)
+                        .unwrap_or_default(),
+                ),
+                ("Evidence digest".into(), Cell::id(&self.evidence_digest)),
+                (
+                    "Source feedback".into(),
+                    Cell::plain(self.source_feedback_ids.len().to_string()),
+                ),
+            ])
+            .section("Instruction")
+            .paragraph(Cell::plain(&self.instruction))
+            .section(format!("Audit events ({})", self.events.len()));
+        if self.events.is_empty() {
+            view = view.paragraph(Cell::muted("No audit events recorded."));
+        } else {
+            view = view.table(
+                &["Event", "Actor", "Recorded", "Reason"],
+                self.events
+                    .iter()
+                    .map(|event| {
+                        vec![
+                            approval_event(&event.event),
+                            Cell::plain(&event.actor),
+                            Cell::plain(&event.created_at),
+                            Cell::plain(summary(&event.reason, SUMMARY_WIDTH)),
+                        ]
+                    })
+                    .collect(),
+            );
+        }
+        view = view.note(Tone::Info, GUIDANCE_NOTE);
+        if self.status == RuleApprovalStatus::Active {
+            view.next_action(
+                format!("vee rules effectiveness --approval-id {}", self.approval_id),
+                "rule_effectiveness",
+                serde_json::json!({"approval_id": self.approval_id}),
+            )
+        } else {
+            view.next_action(
+                "vee rules list",
+                "list_rule_approvals",
+                serde_json::json!({}),
+            )
+        }
+    }
+}
+
+impl ToView for RuleApprovalList {
+    fn to_view(&self) -> View {
+        let active = self
+            .approvals
+            .iter()
+            .filter(|approval| approval.status == RuleApprovalStatus::Active)
+            .count();
+        let badge = (!self.approvals.is_empty()).then(|| {
+            Cell::badge(
+                if active > 0 {
+                    Tone::Success
+                } else {
+                    Tone::Neutral
+                },
+                format!("{active} active"),
+            )
+        });
+        let view = View::new().title(format!("Rule approvals ({})", self.approvals.len()), badge);
+        if self.approvals.is_empty() {
+            return view
+                .paragraph(Cell::muted("No rule guidance approvals."))
+                .next_action(
+                    "vee rules candidates",
+                    "list_rule_candidates",
+                    serde_json::json!({}),
+                );
+        }
+        view.table(
+            &[
+                "Approval",
+                "Version",
+                "Status",
+                "Category",
+                "Label",
+                "Scope",
+                "Approver",
+                "Instruction",
+            ],
+            self.approvals
+                .iter()
+                .map(|approval| {
+                    vec![
+                        Cell::id(&approval.approval_id),
+                        Cell::plain(format!("v{}", approval.version)),
+                        approval_status(approval.status.as_str()),
+                        Cell::plain(&approval.category),
+                        Cell::plain(serde_name(&approval.feedback_label)),
+                        Cell::code(&approval.scope),
+                        Cell::plain(&approval.approver),
+                        Cell::plain(summary(&approval.instruction, SUMMARY_WIDTH)),
+                    ]
+                })
+                .collect(),
+        )
+        .note(Tone::Info, GUIDANCE_NOTE)
+        .next_action(
+            "vee rules effectiveness",
+            "rule_effectiveness",
+            serde_json::json!({}),
+        )
     }
 }

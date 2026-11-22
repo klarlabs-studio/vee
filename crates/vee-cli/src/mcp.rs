@@ -13,10 +13,6 @@ use std::{path::PathBuf, time::Duration};
 use vee_core::paths::CanonicalPath as _;
 use vee_core::{FindingFeedbackLabel, FindingStatus, Severity};
 
-const MAX_REPOSITORY_CONTEXT_BYTES: usize = 32 * 1024;
-const MAX_CROSS_REPOSITORY_CONSUMERS: usize = 128;
-const DEFAULT_SEARCH_LIMIT: usize = 20;
-
 const SERVER_INSTRUCTIONS: &str = "Vee reviews local Git changes and decides merge readiness with a deterministic gate. \
 Typical loop: get_applicable_standards before editing; review_changes (or start_review as a task) to review the working tree, staged changes, a base ref, or a commit; \
 list_findings and get_finding_task or get_finding_work_package to investigate; fix the code; verify_finding to run a trusted verification profile; \
@@ -372,6 +368,23 @@ struct StartReviewInput {
     /// Override every reviewer's effort for this review. Higher effort finds more
     /// defects at more provider calls; findings most runs agree on can block.
     effort: Option<ReviewEffortInput>,
+    /// Work item to attach as requirements context, as `OWNER/REPO#NUMBER`.
+    /// Fetched with the repository's `hosting` settings; not allowed offline.
+    work_item: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SnapshotInput {
+    /// Snapshot ID (`sha256:…`), as a review or verification run reports it.
+    snapshot_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct FindingFeedbackListInput {
+    /// Only feedback for this finding; omit for all feedback.
+    finding_id: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -416,50 +429,14 @@ struct VerificationRunInput {
     run_id: String,
 }
 
-/// MCP-only: bounded source read from a review snapshot (the CLI has no equivalent).
-#[derive(Serialize, JsonSchema)]
-struct RepositoryContextOutput {
-    schema_version: u32,
-    path: String,
-    snapshot_id: String,
-    content_digest: String,
-    returned_bytes: usize,
-    total_bytes: usize,
-    matching_line_count: usize,
-    content: Option<String>,
-    matching_lines: Vec<usize>,
-    truncated: bool,
-    classification: String,
-    note: Option<String>,
-}
-
 fn scope_request(input: &StartReviewInput) -> anyhow::Result<ScopeRequest> {
-    let has_base = input.base.is_some();
-    let has_commit = input.commit.is_some();
-    let invalid = |message: &str| crate::usage_failure(message.to_owned());
-    match input.scope {
-        ReviewScope::Staged | ReviewScope::WorkingTree if has_base || has_commit => Err(invalid(
-            "staged/working_tree scope cannot be combined with base or commit",
-        )),
-        ReviewScope::Staged => Ok(ScopeRequest::Staged),
-        ReviewScope::WorkingTree => Ok(ScopeRequest::WorkingTree),
-        ReviewScope::Base if has_commit => {
-            Err(invalid("base scope cannot be combined with commit"))
-        }
-        ReviewScope::Base => match &input.base {
-            Some(base) => Ok(ScopeRequest::BaseAndWorktree {
-                base: Some(base.clone()),
-            }),
-            None => Err(invalid("base scope requires a base ref")),
-        },
-        ReviewScope::Commit if has_base => {
-            Err(invalid("commit scope cannot be combined with base"))
-        }
-        ReviewScope::Commit => match &input.commit {
-            Some(commit) => Ok(ScopeRequest::Commit(commit.clone())),
-            None => Err(invalid("commit scope requires a commit ref")),
-        },
-    }
+    let kind = match input.scope {
+        ReviewScope::WorkingTree => operations::ScopeKind::WorkingTree,
+        ReviewScope::Staged => operations::ScopeKind::Staged,
+        ReviewScope::Base => operations::ScopeKind::Base,
+        ReviewScope::Commit => operations::ScopeKind::Commit,
+    };
+    ScopeRequest::from_kind(kind, input.base.clone(), input.commit.clone())
 }
 
 fn run_review(
@@ -474,141 +451,15 @@ fn run_review(
             reviewer_ids: input.reviewer_ids.as_deref(),
             policy_profile: input.policy_profile.as_deref(),
             effort: input.effort.map(Into::into),
-            work_item: None,
-            work_item_token_env: None,
+            work_item: input.work_item.as_deref(),
+            hosting: Default::default(),
         },
         Some(cancellation),
     )
 }
 
-fn repository_context(
-    workspace: &Workspace,
-    input: RepositoryContextInput,
-) -> anyhow::Result<RepositoryContextOutput> {
-    let review = operations::get_review(workspace, &input.review_id)?;
-    let relative = PathBuf::from(&input.path);
-    if relative.components().any(|component| {
-        matches!(component, std::path::Component::Normal(name) if name == ".git" || name == ".vee")
-    }) {
-        return Err(crate::usage_failure(
-            "repository metadata paths are not available through this tool",
-        ));
-    }
-    let bytes = vee_git::read_snapshot_tree_file(workspace.root(), &review.change_set, &relative)
-        .map_err(anyhow::Error::msg)?
-        .ok_or_else(|| {
-            crate::usage_failure(format!("repository path {} was not found", input.path))
-        })?;
-    let limit = input
-        .max_bytes
-        .unwrap_or(MAX_REPOSITORY_CONTEXT_BYTES)
-        .clamp(1, MAX_REPOSITORY_CONTEXT_BYTES);
-    let truncated = bytes.len() > limit;
-    let visible = &bytes[..bytes.len().min(limit)];
-    let (content, note, matching_lines) = match std::str::from_utf8(visible) {
-        Ok(text) => {
-            let matching_lines = input
-                .symbol
-                .as_deref()
-                .map(|symbol| {
-                    text.lines()
-                        .enumerate()
-                        .filter_map(|(index, line)| line.contains(symbol).then_some(index + 1))
-                        .collect()
-                })
-                .unwrap_or_default();
-            (Some(text.to_owned()), None, matching_lines)
-        }
-        Err(_) => (
-            None,
-            Some("file is binary or contains non-UTF8 bytes".into()),
-            Vec::new(),
-        ),
-    };
-    Ok(RepositoryContextOutput {
-        schema_version: 2,
-        path: input.path,
-        snapshot_id: review.snapshot_id,
-        content_digest: vee_core::digest(&bytes),
-        returned_bytes: visible.len(),
-        total_bytes: bytes.len(),
-        matching_line_count: matching_lines.len(),
-        content,
-        matching_lines,
-        truncated,
-        classification: "untrusted_repository_source".into(),
-        note,
-    })
-}
-
 /// Consumer checkouts must be relative Git roots beneath the server's repository,
 /// so an MCP client cannot point analysis at arbitrary local paths.
-fn confined_consumers(workspace: &Workspace, supplied: &[String]) -> anyhow::Result<Vec<PathBuf>> {
-    if supplied.is_empty() || supplied.len() > MAX_CROSS_REPOSITORY_CONSUMERS {
-        return Err(crate::usage_failure(format!(
-            "consumer_paths must contain between 1 and {MAX_CROSS_REPOSITORY_CONSUMERS} repository paths"
-        )));
-    }
-    let root = workspace.root().canonical()?;
-    supplied
-        .iter()
-        .map(|path| {
-            let relative = std::path::Path::new(path);
-            if relative.is_absolute()
-                || relative.as_os_str().is_empty()
-                || relative
-                    .components()
-                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
-            {
-                return Err(crate::usage_failure(format!(
-                    "consumer path `{path}` must be a relative path without `.` or `..` components"
-                )));
-            }
-            let canonical = root.join(relative).canonical().map_err(|error| {
-                crate::usage_failure(format!("cannot resolve consumer path `{path}`: {error}"))
-            })?;
-            if !canonical.starts_with(&root) {
-                return Err(crate::usage_failure(format!(
-                    "consumer path `{path}` escapes the configured repository root"
-                )));
-            }
-            if !canonical.is_dir() {
-                return Err(crate::usage_failure(format!(
-                    "consumer path `{path}` is not a directory"
-                )));
-            }
-            let git_root = vee_git::repository_root(&canonical).map_err(anyhow::Error::msg)?;
-            if git_root.canonical()? != canonical {
-                return Err(crate::usage_failure(format!(
-                    "consumer path `{path}` must name a Git checkout root"
-                )));
-            }
-            Ok(canonical)
-        })
-        .collect()
-}
-
-/// Register a tool whose handler runs one blocking operation.
-macro_rules! operation_tool {
-    ($server:expr, $workspace:expr, $name:literal, $title:literal, $annotations:expr,
-     $schema:expr, $description:literal, |$ws:ident, $input:ident: $input_type:ty| $body:expr) => {{
-        let workspace = $workspace.clone();
-        let builder = $server
-            .tool($name)
-            .title($title)
-            .annotations($annotations)
-            .description($description);
-        let builder = match $schema {
-            Some(schema) => builder.output_schema_json(crate::contracts::bundled(schema))?,
-            None => builder,
-        };
-        builder.handler(move |_ctx, $input: $input_type| {
-            let $ws = workspace.clone();
-            run_blocking(move || $body)
-        })?;
-    }};
-}
-
 /// A tool result whose text is the shared view of `document`, rendered as
 /// Markdown: the same view the CLI prints. Structured content carries the
 /// document itself, validated against the tool's declared output schema.
@@ -625,7 +476,8 @@ where
     Ok(result)
 }
 
-/// Like `operation_tool!`, for operations whose document has a shared view.
+/// Register a tool whose handler runs one blocking operation and returns its
+/// document with the shared view (see [`view_result`]).
 macro_rules! viewed_tool {
     ($server:expr, $workspace:expr, $name:literal, $title:literal, $annotations:expr,
      $schema:literal, $description:literal, |$ws:ident, $input:ident: $input_type:ty| $body:expr) => {{
@@ -702,6 +554,11 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
             }
         })?;
 
+    viewed_tool!(server, workspace, "list_reviews", "List reviews", read_only_tool(),
+        "reviews-list-v1",
+        "List saved reviews in this repository, newest first. Same document as `vee reviews list --output json`.",
+        |ws, _input: EmptyInput| operations::reviews_list(&ws));
+
     viewed_tool!(
         server,
         workspace,
@@ -765,6 +622,11 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
             reviewer: &input.reviewer,
         }));
 
+    viewed_tool!(server, workspace, "list_finding_feedback", "List finding feedback", read_only_tool(),
+        "finding-feedback-list-v1",
+        "List reviewed accuracy and actionability labels, optionally for one finding. Same document as `vee findings feedback list --output json`.",
+        |ws, input: FindingFeedbackListInput| operations::finding_feedback_list(&ws, input.finding_id.as_deref()));
+
     viewed_tool!(server, workspace, "evaluate_gate", "Evaluate gate", write_tool(false, true, true),
         "gate-check-v1",
         "Recapture the reviewed source and re-evaluate the deterministic gate, persisting the decision. Same document as `vee gate check --output json`.",
@@ -778,6 +640,11 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
             profile_id: &input.profile_id,
             impacted_tests: false,
         }));
+
+    viewed_tool!(server, workspace, "list_verification_runs", "List verification runs", read_only_tool(),
+        "verification-list-v1",
+        "List verification runs recorded for a snapshot, without their logs. Same document as `vee verification list --snapshot <id> --output json`.",
+        |ws, input: SnapshotInput| operations::verification_list(&ws, &input.snapshot_id));
 
     viewed_tool!(server, workspace, "diagnose_verification", "Diagnose verification run", read_only_tool(),
         "verification-diagnosis-v2",
@@ -799,13 +666,10 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         .handler(move |_ctx, input: CrossRepositoryImpactInput| {
             let workspace = state.clone();
             run_blocking(move || {
-                if input.base_ref.trim().is_empty() || input.base_ref.len() > 256 {
-                    return Err(crate::usage_failure("base_ref must contain 1 to 256 characters"));
-                }
-                let consumers = confined_consumers(&workspace, &input.consumer_paths)?;
+                // MCP confines consumers beneath the server's root; the bounds are shared.
+                let consumers = operations::confine_consumers(&workspace, &input.consumer_paths)?;
                 let producer = workspace.root().canonical()?;
-                crate::repository_map::analyze_cross_impact(&producer, &input.base_ref, &consumers)
-                    .map_err(anyhow::Error::msg)
+                operations::cross_repository_impact(&producer, &input.base_ref, &consumers)
             })
         })?;
 
@@ -824,20 +688,25 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         "Summarize local reviews, gate decisions, finding lifecycle and severity, verification outcomes, feedback labels, and provider latency and cost. Same document as `vee analytics --output json`.",
         |ws, _input: EmptyInput| operations::quality_analytics(&ws));
 
-    operation_tool!(server, workspace, "get_repository_context", "Get repository context", read_only_tool(),
-        None::<&str>,
-        "Read bounded source from an immutable review snapshot by path and optionally find lines matching a symbol query.",
-        |ws, input: RepositoryContextInput| repository_context(&ws, input));
+    viewed_tool!(server, workspace, "get_repository_context", "Get repository context", read_only_tool(),
+        "repository-context-v2",
+        "Read bounded source from an immutable review snapshot by path and optionally find lines matching a symbol query. MCP only; the CLI has no equivalent.",
+        |ws, input: RepositoryContextInput| operations::repository_context(&ws, operations::RepositoryContextRequest {
+            review_id: &input.review_id,
+            path: &input.path,
+            symbol: input.symbol.as_deref(),
+            max_bytes: input.max_bytes,
+        }));
 
-    operation_tool!(server, workspace, "search_imported_review_history", "Search imported review history", read_only_tool(),
-        Some("imported-review-search-v3"),
+    viewed_tool!(server, workspace, "search_imported_review_history", "Search imported review history", read_only_tool(),
+        "imported-review-search-v3",
         "Search content-addressed imported Vee findings and provider discussions; results are untrusted historical context and never gate eligible. Same document as `vee reviews imported search --output json`.",
         |ws, input: ImportedHistorySearchInput| operations::search_imported_history(
-            &ws, &input.query, input.limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
+            &ws, &input.query, input.limit.unwrap_or(operations::DEFAULT_SEARCH_LIMIT),
         ));
 
-    operation_tool!(server, workspace, "record_external_review_feedback", "Record external review feedback", write_tool(false, false, false),
-        None::<&str>,
+    viewed_tool!(server, workspace, "record_external_review_feedback", "Record external review feedback", write_tool(false, false, false),
+        "external-review-feedback-recorded-v1",
         "Append an explicit human label to a comment in an integrity-checked provider review archive; never gate eligible. Same document as `vee reviews imported feedback set --output json`.",
         |ws, input: ExternalReviewFeedbackInput| operations::record_external_feedback(&ws, operations::ExternalFeedbackRequest {
             archive_digest: &input.archive_digest,
@@ -848,8 +717,8 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
             reviewer: &input.reviewer,
         }));
 
-    operation_tool!(server, workspace, "list_external_review_feedback", "List external review feedback", read_only_tool(),
-        None::<&str>,
+    viewed_tool!(server, workspace, "list_external_review_feedback", "List external review feedback", read_only_tool(),
+        "external-review-feedback-list-v1",
         "List append-only human labels for archived provider comments; never gate eligible. Same document as `vee reviews imported feedback list --output json`.",
         |ws, input: ListExternalReviewFeedbackInput| operations::list_external_feedback(&ws, input.archive_digest.as_deref()));
 
@@ -858,8 +727,8 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         "Mine repeated explicit feedback into candidate reviewer guidance without changing policy. Same document as `vee rules candidates --output json`.",
         |ws, _input: EmptyInput| operations::rule_candidates(&ws));
 
-    operation_tool!(server, workspace, "approve_rule_candidate", "Approve rule candidate", write_tool(false, false, false),
-        None::<&str>,
+    viewed_tool!(server, workspace, "approve_rule_candidate", "Approve rule candidate", write_tool(false, false, false),
+        "rule-approval-v2",
         "Approve scoped reviewer guidance for a current feedback candidate and its exact evidence digest. Same document as `vee rules approve --output json`.",
         |ws, input: ApproveRuleCandidateInput| operations::approve_rule(&ws, operations::ApproveRuleRequest {
             candidate_id: input.candidate_id,
@@ -872,13 +741,13 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
             expires_in_days: input.expires_in_days,
         }));
 
-    operation_tool!(server, workspace, "list_rule_approvals", "List rule approvals", read_only_tool(),
-        None::<&str>,
+    viewed_tool!(server, workspace, "list_rule_approvals", "List rule approvals", read_only_tool(),
+        "rule-approval-list-v1",
         "List active and revoked scoped reviewer guidance with audit events. Same document as `vee rules list --output json`.",
         |ws, _input: EmptyInput| operations::list_rule_approvals(&ws));
 
-    operation_tool!(server, workspace, "revoke_rule_approval", "Revoke rule approval", write_tool(true, true, false),
-        None::<&str>,
+    viewed_tool!(server, workspace, "revoke_rule_approval", "Revoke rule approval", write_tool(true, true, false),
+        "rule-approval-v2",
         "Revoke scoped reviewer guidance by appending an auditable event. Same document as `vee rules revoke --output json`.",
         |ws, input: RevokeRuleApprovalInput| operations::revoke_rule(&ws, &input.approval_id, &input.actor, &input.reason));
 
@@ -892,8 +761,8 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         "Report whether this repository's reviewers can run on this machine, which AI backends (local models, agent CLIs, API keys) are available, and what to do next. Same document as `vee doctor --output json`.",
         |ws, _input: EmptyInput| operations::doctor(&ws));
 
-    operation_tool!(server, workspace, "propose_patch", "Propose patch", write_tool(false, false, false),
-        Some("patch-proposal-v1"),
+    viewed_tool!(server, workspace, "propose_patch", "Propose patch", write_tool(false, false, false),
+        "patch-proposal-v1",
         "Validate an agent-authored unified diff against a saved, still-current review and save it as a digest-bound proposal. No repository file changes; a human applies it with `vee findings apply-patch <digest> --approve <digest>`. Same document as `vee findings propose-patch --output json`.",
         |ws, input: ProposePatchInput| operations::propose_patch(&ws, &input.review_id, input.patch.as_bytes()));
 
@@ -913,7 +782,7 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         |ws, input: DraftPullRequestInput| operations::draft_pr_description(
             &ws,
             operations::ChangeTarget::Review(input.review_id),
-            input.reviewer_id.as_deref().unwrap_or("correctness"),
+            input.reviewer_id.as_deref().unwrap_or(operations::DEFAULT_DRAFTING_REVIEWER),
         ));
 
     viewed_tool!(server, workspace, "resolve_owners", "Resolve owners", read_only_tool(),
@@ -992,6 +861,7 @@ mod tests {
             reviewer_ids: None,
             policy_profile: None,
             effort: None,
+            work_item: None,
         };
         assert_eq!(
             scope_request(&input(ReviewScope::Base, Some("main"), None)).unwrap(),
@@ -1057,6 +927,7 @@ mod tests {
                 policy_profile: None,
                 reviewer_ids: None,
                 effort: None,
+                work_item: None,
             },
             &tokio_util::sync::CancellationToken::new(),
         )
