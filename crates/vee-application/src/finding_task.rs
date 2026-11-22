@@ -487,11 +487,25 @@ fn source_context(
             content,
             classification: "untrusted_repository_source".to_string(),
         }),
-        kept_copy.then(|| {
-            "The file changed after the review; this is the reviewed snapshot's source, kept when the review ran."
-                .to_owned()
-        }),
+        context_notes(kept_copy, line.is_none()),
     )
+}
+
+fn context_notes(kept_copy: bool, file_level: bool) -> Option<String> {
+    let mut note = None;
+    if file_level {
+        append_note(
+            &mut note,
+            "The finding names no line, so this excerpt is the start of the file, not a flagged location.".into(),
+        );
+    }
+    if kept_copy {
+        append_note(
+            &mut note,
+            "The file changed after the review; this is the reviewed snapshot's source, kept when the review ran.".into(),
+        );
+    }
+    note
 }
 
 /// The snapshot bytes of a changed file as kept at review time, verified
