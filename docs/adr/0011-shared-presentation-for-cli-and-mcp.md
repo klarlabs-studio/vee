@@ -83,7 +83,12 @@ each transport *showed* still differed, and neither was readable:
   - PR 2 routes the remaining divergent CLI paths through `operations`, types
     the two operations that still return untyped JSON, and adds output schemas
     to the six MCP tools that lack them.
-  - Later changes give the CLI-only commands views.
+  - PR 3 gives the CLI-only commands views and moves their logic out of
+    `main.rs` into the application layer. Commands whose output is a payload
+    for scripts or files (`packs digest`, `skills list`, `reviews export`,
+    `bundle`, `attest`, `imported show`) still write exactly that payload.
+    `hosting publish` keeps its orchestration in the CLI; only its result is
+    typed.
 
 ## Alternatives considered
 
