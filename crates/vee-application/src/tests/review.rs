@@ -4,62 +4,6 @@ use vee_core::ports::*;
 use vee_store_sqlite::ReviewStore;
 
 #[test]
-fn markdown_report_distinguishes_empty_complete_review_from_incomplete_analysis() {
-    let policy = vee_core::Policy {
-        block_severities: vec![],
-        minimum_confidence: 0,
-        required_review_complete: true,
-        required_verifications: vec![],
-        analyzer_block_levels: Default::default(),
-    };
-    let gate = vee_core::evaluate_gate(
-        "snapshot",
-        "config",
-        "policy",
-        &[],
-        &policy,
-        false,
-        vee_core::GateEvidence {
-            verification_runs: &[],
-            source_evidence: &[],
-            analyzer_reports: &[],
-        },
-    );
-    let mut review = ReviewResult {
-        schema_version: 2,
-        review_id: "rev_markdown_state".into(),
-        snapshot_id: "snapshot".into(),
-        status: "incomplete".into(),
-        findings: vec![],
-        policy_findings: Some(vec![]),
-        evidence: vec![],
-        verification_runs: vec![],
-        reviewer_outcomes: vec![],
-        reviewer_arbitration: vec![],
-        analysis_complete: false,
-        reasons: gate.reasons.clone(),
-        gate,
-        change_set: ChangeSet::from_entries(None, None, "working_tree", vec![]),
-        effective_config_digest: "config".into(),
-        selected_reviewers: vec![],
-        reviewer_context: vec![],
-        unreviewed_paths: Vec::new(),
-        policy_profile: None,
-        work_item: None,
-        work_item_token_env: None,
-    };
-
-    let incomplete = render_review_markdown(&review);
-    assert!(incomplete.contains("Analysis did not complete; findings may be missing."));
-    assert!(!incomplete.contains("No findings were reported."));
-
-    review.analysis_complete = true;
-    let complete = render_review_markdown(&review);
-    assert!(complete.contains("No findings were reported."));
-    assert!(!complete.contains("Analysis did not complete; findings may be missing."));
-}
-
-#[test]
 fn review_prompt_requires_exact_changed_line_anchors() {
     let prompt = provider_request_prompt(
         &serde_json::json!({
@@ -1580,19 +1524,6 @@ fn reviewer_context_manifest_distinguishes_supplied_filtered_and_omitted_paths()
             .artifact_digest
             .as_deref()
             .is_some_and(|digest| digest.starts_with("sha256:"))));
-}
-
-#[test]
-fn markdown_report_escapes_model_text_and_preserves_inline_code() {
-    assert_eq!(
-        markdown_inline("[click](https://example.invalid)"),
-        "\\[click\\]\\(https://example\\.invalid\\)"
-    );
-    assert_eq!(
-        markdown_inline("title\n## forged section"),
-        "title \\#\\# forged section"
-    );
-    assert_eq!(markdown_code("file`name.rs"), "``file`name.rs``");
 }
 
 #[test]

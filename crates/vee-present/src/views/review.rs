@@ -1,0 +1,293 @@
+use crate::tone;
+use crate::view::{summary, Cell, Span, Style, ToView, Tone, View};
+use crate::views::serde_name;
+use vee_application::{ReviewResult, ReviewerOutcome};
+use vee_core::Finding;
+
+const SUMMARY_WIDTH: usize = 56;
+
+impl ToView for ReviewResult {
+    fn to_view(&self) -> View {
+        let mut view = View::new()
+            .title(
+                format!("Review {}", self.review_id),
+                Some(tone::gate(self.gate.status)),
+            )
+            .fields(vec![
+                ("Snapshot".into(), Cell::code(&self.snapshot_id)),
+                (
+                    "Status".into(),
+                    // The title badge already shows the gate status; repeat only a difference.
+                    if self.status == crate::views::serde_name(&self.gate.status) {
+                        Cell::default()
+                    } else {
+                        tone::status_text(&self.status)
+                    },
+                ),
+                (
+                    "Changed files".into(),
+                    Cell::plain(self.change_set.files.len().to_string()),
+                ),
+                (
+                    "Reviewers".into(),
+                    Cell::plain(self.selected_reviewers.join(", ")),
+                ),
+                (
+                    "Policy".into(),
+                    self.policy_profile
+                        .clone()
+                        .map(Cell::plain)
+                        .unwrap_or_default(),
+                ),
+            ]);
+        if !self.analysis_complete {
+            view = view.note(
+                Tone::Warning,
+                "Analysis did not complete; findings may be missing.",
+            );
+        }
+        view = view.extend(reasons_view(&self.gate.reasons));
+        if !self.unreviewed_paths.is_empty() {
+            view = view
+                .section("Not reviewed")
+                .paragraph(Cell::muted(
+                    "No reviewer received these changed files. Add or widen a reviewer, or set policy.on_unreviewed: allow.",
+                ))
+                .list(self.unreviewed_paths.iter().map(Cell::code).collect());
+        }
+        view = view.extend(outcomes_view(&self.reviewer_outcomes));
+        view = view.section(format!("Findings ({})", self.findings.len()));
+        if self.findings.is_empty() {
+            view = view.paragraph(if self.analysis_complete {
+                Cell::muted("No findings were reported.")
+            } else {
+                Cell::muted("No findings; analysis did not complete.")
+            });
+        } else {
+            view = view.extend(findings_table(&self.findings, &self.gate.blocking_findings));
+        }
+        if !self.reviewer_arbitration.is_empty() {
+            view = view.section("Reviewer disagreement").list(
+                self.reviewer_arbitration
+                    .iter()
+                    .filter(|item| {
+                        item.severity_disagreement
+                            || item.confidence_disagreement
+                            || item.rationale_disagreement
+                    })
+                    .map(|item| {
+                        let mut dimensions = Vec::new();
+                        if item.severity_disagreement {
+                            dimensions.push("severity");
+                        }
+                        if item.confidence_disagreement {
+                            dimensions.push("confidence");
+                        }
+                        if item.rationale_disagreement {
+                            dimensions.push("rationale");
+                        }
+                        Cell::id(&item.finding_id).then(Span::new(
+                            format!(
+                                "{} reports disagree on {}",
+                                item.reports.len(),
+                                dimensions.join(", ")
+                            ),
+                            Style::Plain,
+                        ))
+                    })
+                    .collect(),
+            );
+        }
+        if let Some(first) = ranked(&self.findings, &self.gate.blocking_findings).first() {
+            view = view.next_action(
+                format!("vee findings show {}", first.id),
+                "get_finding",
+                serde_json::json!({"finding_id": first.id}),
+            );
+        }
+        view
+    }
+}
+
+pub(crate) fn reasons_view(reasons: &[String]) -> View {
+    if reasons.is_empty() {
+        return View::new();
+    }
+    View::new()
+        .section("Gate reasons")
+        .list(reasons.iter().map(Cell::plain).collect())
+}
+
+fn outcomes_view(outcomes: &[ReviewerOutcome]) -> View {
+    if outcomes.is_empty() {
+        return View::new()
+            .section("Reviewers")
+            .paragraph(Cell::muted("No reviewers ran."));
+    }
+    View::new().section("Reviewers").table(
+        &["Reviewer", "Status", "Provider", "Time", "Tokens in/out"],
+        outcomes
+            .iter()
+            .map(|outcome| {
+                let provider = match &outcome.model {
+                    Some(model) => format!("{} · {model}", serde_name(&outcome.provider_kind)),
+                    None => serde_name(&outcome.provider_kind),
+                };
+                let tokens = outcome.usage.as_ref().map_or_else(
+                    || Cell::muted("–"),
+                    |usage| {
+                        let count = |value: Option<u64>| {
+                            value.map_or_else(|| "?".to_owned(), |value| value.to_string())
+                        };
+                        Cell::plain(format!(
+                            "{}/{}",
+                            count(usage.input_tokens),
+                            count(usage.output_tokens)
+                        ))
+                    },
+                );
+                vec![
+                    Cell::strong(&outcome.reviewer_id),
+                    tone::status_text(&outcome.status),
+                    Cell::plain(provider),
+                    outcome
+                        .duration_ms
+                        .map_or_else(|| Cell::muted("–"), |ms| Cell::plain(duration(ms))),
+                    tokens,
+                ]
+            })
+            .collect(),
+    )
+}
+
+/// The findings table shared by the review and findings views.
+pub(crate) fn findings_table(findings: &[Finding], blocking: &[String]) -> View {
+    View::new().table(
+        &["Severity", "Location", "Category", "Finding", "ID"],
+        ranked(findings, blocking)
+            .into_iter()
+            .map(|finding| {
+                let mut severity = tone::severity(finding.severity);
+                if blocking.contains(&finding.id) {
+                    severity = severity.then(Span::new("blocks", Style::Strong));
+                } else if finding.advisory {
+                    severity = severity.then(Span::new("advisory", Style::Muted));
+                }
+                vec![
+                    severity,
+                    tone::location(finding.path.as_deref(), finding.line),
+                    Cell::plain(&finding.category),
+                    Cell::plain(summary(&finding.rationale, SUMMARY_WIDTH)),
+                    Cell::id(&finding.id),
+                ]
+            })
+            .collect(),
+    )
+}
+
+/// Findings in reading order: blocking first, then by severity, then location.
+pub(crate) fn ranked<'a>(findings: &'a [Finding], blocking: &[String]) -> Vec<&'a Finding> {
+    let mut ranked: Vec<&Finding> = findings.iter().collect();
+    ranked.sort_by_key(|finding| {
+        (
+            !blocking.contains(&finding.id),
+            severity_rank(finding.severity),
+            finding.path.clone(),
+            finding.line,
+        )
+    });
+    ranked
+}
+
+pub(crate) fn severity_rank(severity: vee_core::Severity) -> u8 {
+    match severity {
+        vee_core::Severity::Critical => 0,
+        vee_core::Severity::High => 1,
+        vee_core::Severity::Medium => 2,
+        vee_core::Severity::Low => 3,
+        vee_core::Severity::Info => 4,
+    }
+}
+
+fn duration(milliseconds: u64) -> String {
+    let seconds = milliseconds / 1000;
+    match seconds {
+        0 => format!("{milliseconds} ms"),
+        1..=59 => format!("{seconds} s"),
+        _ => format!("{}m {:02}s", seconds / 60, seconds % 60),
+    }
+}
+
+/// The portable review report written by `vee review --markdown`: the shared
+/// review view, followed by each finding in full and every reviewer's report
+/// on findings they disagree about. Terminal and MCP output stay compact and
+/// point to `vee findings show` / `get_finding` for the same detail.
+pub fn review_report(review: &ReviewResult) -> View {
+    let mut view = review.to_view();
+    // The next step suits an interactive reader, not a shared report.
+    view.blocks
+        .retain(|block| !matches!(block, crate::view::Block::NextStep(_)));
+    if !review.findings.is_empty() {
+        view = view.section("Finding details");
+        for finding in ranked(&review.findings, &review.gate.blocking_findings) {
+            view = view
+                .paragraph(
+                    tone::severity(finding.severity)
+                        .then(Span::new(&finding.category, Style::Strong))
+                        .then(Span::new(
+                            match (&finding.path, finding.line) {
+                                (Some(path), Some(line)) => format!("{path}:{line}"),
+                                (Some(path), None) => path.clone(),
+                                (None, _) => "no location".into(),
+                            },
+                            Style::Code,
+                        )),
+                )
+                .paragraph(Cell::plain(&finding.rationale))
+                .fields(vec![
+                    ("Confidence".into(), tone::confidence(finding.confidence)),
+                    ("Provenance".into(), Cell::code(&finding.provenance)),
+                    (
+                        "Evidence".into(),
+                        Cell::plain(finding.evidence_ids.join(", ")),
+                    ),
+                    ("ID".into(), Cell::id(&finding.id)),
+                ]);
+        }
+    }
+    let disputed: Vec<_> = review
+        .reviewer_arbitration
+        .iter()
+        .filter(|item| item.reports.len() > 1)
+        .collect();
+    if !disputed.is_empty() {
+        view = view.section("Reviewer reports").table(
+            &["Finding", "Reviewer", "Severity", "Confidence", "Rationale"],
+            disputed
+                .iter()
+                .flat_map(|item| {
+                    item.reports.iter().map(|report| {
+                        vec![
+                            Cell::id(&item.finding_id),
+                            Cell::strong(&report.reviewer_id),
+                            tone::severity(report.severity),
+                            tone::confidence(report.confidence),
+                            Cell::plain(&report.rationale),
+                        ]
+                    })
+                })
+                .collect(),
+        );
+    }
+    view
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn durations_read_naturally() {
+        assert_eq!(super::duration(250), "250 ms");
+        assert_eq!(super::duration(12_400), "12 s");
+        assert_eq!(super::duration(1_840_942), "30m 40s");
+    }
+}

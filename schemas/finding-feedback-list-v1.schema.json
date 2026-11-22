@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vee.klarlabs.de/schemas/finding-feedback-list-v1.schema.json",
+  "title": "Vee finding feedback list v1",
+  "description": "Reviewed accuracy and actionability labels recorded for findings, oldest first, optionally for one finding.",
+  "type": "object",
+  "required": ["schema_version", "feedback"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "feedback": {
+      "type": "array",
+      "items": { "$ref": "finding-feedback-v1.schema.json" }
+    }
+  },
+  "additionalProperties": false
+}

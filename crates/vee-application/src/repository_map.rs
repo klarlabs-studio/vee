@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -24,7 +24,7 @@ const CONSUMER_SOURCE_EXTENSIONS: &[&str] = &[
     "rs", "go", "ts", "tsx", "js", "jsx", "mts", "cts", "py", "java",
 ];
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RepositoryMap {
     pub schema_version: u32,
     pub repositories: Vec<RepositoryEntry>,
@@ -33,7 +33,7 @@ pub struct RepositoryMap {
     pub digest: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ChangePackage {
     pub schema_version: u32,
     pub package_id: String,
@@ -47,7 +47,7 @@ pub struct ChangePackage {
     pub limitations: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PullRequestLifecycleSummary {
     pub status: String,
     pub linked_count: usize,
@@ -58,7 +58,7 @@ pub struct PullRequestLifecycleSummary {
     pub local_head_mismatch_count: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ChangePackageRepository {
     pub repository_id: String,
     pub pull_requests: Vec<vee_hosting::PullRequestRef>,
@@ -86,7 +86,7 @@ pub struct ChangePackageRepository {
     pub has_changes: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RemotePullRequestState {
     pub pull_request: vee_hosting::PullRequestRef,
     pub provider: String,
@@ -718,7 +718,7 @@ fn parse_remote_repository(remote: &str) -> Option<(String, String)> {
     Some((host, format!("{owner}/{repository}")))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RepositoryEntry {
     pub id: String,
     pub root: String,
@@ -727,7 +727,7 @@ pub struct RepositoryEntry {
     pub manifest_digest: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DependencyEdge {
     pub from: String,
     pub to: String,
@@ -779,7 +779,7 @@ pub fn parse_pull_request_link(
     Ok((repository_id.to_owned(), pull_request))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CrossRepositoryImpact {
     pub schema_version: u32,
     pub producer_snapshot_id: String,
@@ -794,7 +794,7 @@ pub struct CrossRepositoryImpact {
     pub digest: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApiContractCompatibilityIssue {
     pub producer_path: String,
     pub issue: String,
@@ -805,7 +805,7 @@ pub struct ApiContractCompatibilityIssue {
     pub current_operation_id: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApiContractCoverage {
     pub producer_path: String,
     pub method: String,
@@ -815,7 +815,7 @@ pub struct ApiContractCoverage {
     pub status: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApiContractChange {
     pub producer_path: String,
     pub producer_digest: String,
@@ -824,7 +824,7 @@ pub struct ApiContractChange {
     pub operation_id: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CrossRepositoryDependencyPath {
     pub producer_package: String,
     pub consumer_package: String,
@@ -832,7 +832,7 @@ pub struct CrossRepositoryDependencyPath {
     pub manifest_digests: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ConsumerSymbolReference {
     pub consumer_repository: String,
     pub path: String,

@@ -5150,6 +5150,14 @@ fn assert_matches_schema(value: &serde_json::Value, schema_json: &str, contract:
         )
         .unwrap()
         .add(
+            "https://vee.klarlabs.de/schemas/rule-approval-v2.schema.json",
+            serde_json::from_str::<serde_json::Value>(include_str!(
+                "../../../schemas/rule-approval-v2.schema.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap()
+        .add(
             "https://vee.klarlabs.de/schemas/review-output-v2.schema.json",
             serde_json::from_str::<serde_json::Value>(include_str!(
                 "../../../schemas/review-output-v2.schema.json"
@@ -5838,7 +5846,7 @@ fn rule_candidate_report_uses_versioned_schema_and_does_not_mutate_policy() {
     );
     assert_matches_schema(
         &approval,
-        include_str!("../../../schemas/rule-approvals-v2.schema.json"),
+        include_str!("../../../schemas/rule-approval-v2.schema.json"),
         "rule approval",
     );
     let approval_id = approval["approval_id"].as_str().unwrap();
@@ -5848,7 +5856,13 @@ fn rule_candidate_report_uses_versioned_schema_and_does_not_mutate_policy() {
         .output()
         .unwrap();
     let listed: serde_json::Value = serde_json::from_slice(&list_output.stdout).unwrap();
-    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(listed["schema_version"], 1);
+    assert_eq!(listed["approvals"].as_array().unwrap().len(), 1);
+    assert_matches_schema(
+        &listed,
+        include_str!("../../../schemas/rule-approval-list-v1.schema.json"),
+        "rule approval list",
+    );
     let replacement_output = vee()
         .args([
             "rules",
@@ -5886,7 +5900,7 @@ fn rule_candidate_report_uses_versioned_schema_and_does_not_mutate_policy() {
     assert!(replacement["expires_at_unix"].as_i64().is_some());
     assert_matches_schema(
         &replacement,
-        include_str!("../../../schemas/rule-approvals-v2.schema.json"),
+        include_str!("../../../schemas/rule-approval-v2.schema.json"),
         "replacement rule approval",
     );
     std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -7221,7 +7235,7 @@ fn mcp_stdio_exposes_findings_tool_over_the_pinned_protocol() {
         })).await.unwrap();
         assert_eq!(approved["status"], "active");
         let approvals: serde_json::Value = client.call("list_rule_approvals", &serde_json::json!({})).await.unwrap();
-        assert_eq!(approvals.as_array().unwrap().len(), 1);
+        assert_eq!(approvals["approvals"].as_array().unwrap().len(), 1);
         let effectiveness: serde_json::Value = client.call("rule_effectiveness", &serde_json::json!({ "approval_id": approved["approval_id"] })).await.unwrap();
         assert_eq!(effectiveness["schema_version"], 1);
         assert_eq!(effectiveness["approvals"].as_array().unwrap().len(), 1);
@@ -8262,11 +8276,27 @@ esac
         value["effective_config_digest"]
     );
     let markdown = fs::read_to_string(markdown_report).unwrap();
-    assert!(markdown.contains("# Vee review"));
-    assert!(markdown.contains("Status: **block**"));
-    assert!(markdown.contains("unsafe operation"));
-    assert!(markdown.contains("## Reviewer arbitration"));
-    assert!(markdown.contains("Disagreement: severity, confidence, rationale"));
+    assert!(markdown.starts_with("## Review rev\\_"), "{markdown}");
+    assert!(
+        markdown
+            .lines()
+            .next()
+            .unwrap()
+            .ends_with(" · 🔴 **block**"),
+        "{markdown}"
+    );
+    assert!(markdown.contains("unsafe operation"), "{markdown}");
+    assert!(markdown.contains("### Reviewer disagreement"), "{markdown}");
+    assert!(
+        markdown.contains("disagree on severity, confidence, rationale"),
+        "{markdown}"
+    );
+    assert!(markdown.contains("### Finding details"), "{markdown}");
+    assert!(markdown.contains("### Reviewer reports"), "{markdown}");
+    assert!(
+        !markdown.contains("Next:"),
+        "a shared report has no interactive next step"
+    );
     assert_eq!(
         value["selected_reviewers"],
         serde_json::json!(["correctness", "security"])
@@ -8876,13 +8906,15 @@ fn an_incomplete_follow_up_review_says_why_in_text_output() {
         String::from_utf8_lossy(&applied.stderr)
     );
     let stdout = String::from_utf8_lossy(&applied.stdout);
-    assert!(stdout.contains("Gate: Incomplete"), "{stdout}");
+    assert!(stdout.contains("▲ incomplete"), "{stdout}");
     assert!(
-        stdout.contains("- required review did not complete"),
+        stdout.contains("• required review did not complete"),
         "the text output should say why the gate is incomplete: {stdout}"
     );
     assert!(
-        stdout.contains("Reviewer correctness: failed"),
+        stdout
+            .lines()
+            .any(|line| line.contains("correctness") && line.contains("✖ failed")),
         "the text output should name the reviewer to rerun: {stdout}"
     );
 }
@@ -10147,6 +10179,9 @@ fn mcp_tools_declare_titles_safety_annotations_and_documented_inputs() {
     let tools = listed["result"]["tools"].as_array().unwrap();
     let read_only: std::collections::BTreeSet<&str> = [
         "list_findings",
+        "list_reviews",
+        "list_finding_feedback",
+        "list_verification_runs",
         "get_quality_analytics",
         "get_finding",
         "get_finding_task",
@@ -10310,8 +10345,11 @@ fn mcp_stdio_supports_legacy_initialize_and_read_only_tool_calls() {
     let called = receive(&mut output);
     assert!(called.get("error").is_none(), "tool call failed: {called}");
     let text = called["result"]["content"][0]["text"].as_str().unwrap();
-    let result: serde_json::Value = serde_json::from_str(text).unwrap();
-    assert_eq!(result["total"], 0);
+    assert_eq!(
+        text, "## Findings \\(0\\)\n\n_No findings\\._\n",
+        "the text is the shared view"
+    );
+    assert_eq!(called["result"]["structuredContent"]["total"], 0);
     assert!(directory.path().join(".vee/vee.sqlite").exists());
 
     let _ = child.kill();
@@ -10805,7 +10843,9 @@ fn changed_files_no_reviewer_received_leave_the_gate_incomplete() {
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&text.stdout);
-    assert!(text.contains("Not reviewed: core/lib.rs"), "{text}");
+    assert!(text.contains("Not reviewed\n"), "{text}");
+    assert!(text.contains("• core/lib.rs"), "{text}");
+    assert!(text.contains("policy.on_unreviewed: allow"), "{text}");
 
     configure("  on_unreviewed: allow\n");
     let output = review();
@@ -10931,5 +10971,34 @@ fn a_finding_task_shows_the_reviewed_source_after_the_file_changes() {
             .unwrap_or_default()
             .contains("kept when the review ran"),
         "{task}"
+    );
+}
+
+#[test]
+fn cross_repository_impact_rejects_unbounded_input_like_the_mcp_tool() {
+    let directory = tempfile::tempdir().unwrap();
+    let long_base = "b".repeat(257);
+    let output = vee()
+        .args(["repos", "impact", ".", "consumer", "--base", &long_base])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("base_ref must contain 1 to 256 characters"),
+        "{output:?}"
+    );
+    let consumers: Vec<String> = (0..129).map(|index| format!("consumer-{index}")).collect();
+    let output = vee()
+        .args(["repos", "impact", ".", "--base", "main"])
+        .args(&consumers)
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("between 1 and 128"),
+        "{output:?}"
     );
 }

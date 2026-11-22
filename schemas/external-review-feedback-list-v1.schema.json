@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vee.klarlabs.de/schemas/external-review-feedback-list-v1.schema.json",
+  "title": "Vee External Review Feedback List v1",
+  "description": "Append-only human labels on archived provider comments, ordered by archive digest and external comment ID. Labels are advisory history and are never gate evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "feedback", "gate_eligible"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "feedback": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": { "$ref": "external-review-feedback-v1.schema.json" }
+    },
+    "gate_eligible": { "const": false }
+  }
+}

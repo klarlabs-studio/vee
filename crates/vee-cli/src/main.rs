@@ -1,39 +1,30 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use sha2::{Digest, Sha256};
-use std::{
-    io::{Read, Write},
-    process::ExitCode,
-};
+use std::{io::Write, process::ExitCode};
 use vee_core::ports::*;
-use vee_core::{
-    ChangeSet, GateStatus, RepositoryConfig, Severity, VerificationRun, VerificationStatus,
-};
+use vee_core::{GateStatus, RepositoryConfig, Severity, VerificationStatus};
 use vee_store_sqlite::ReviewStore;
 
-use vee_application::acceptance;
-use vee_application::analytics;
 use vee_application::attestation;
 mod contracts;
-use vee_application::coverage;
+use vee_application::evidence_bundle;
 use vee_application::failure::{
     configuration_failure, usage_failure, ConfigurationFailure, UsageFailure,
 };
-use vee_application::imported_history::{
-    imported_reviews_dir, parse_portable_review, store_imported_history, MAX_IMPORTED_REVIEW_BYTES,
+use vee_application::hosting::{load_hosting_config, resolve_hosting_setting};
+use vee_application::imported_history;
+use vee_application::proposals::{
+    acquire_proposal_apply_lock, proposal_directory, read_proposal_file, write_proposal_file,
 };
-use vee_application::proposals::{proposal_directory, read_proposal_file};
-use vee_application::work_items::{effective_work_item_token_env, get_work_item};
+use vee_application::work_items::{effective_work_item_host, work_item_api_base};
 mod mcp;
 use vee_application::operations;
 use vee_application::packs;
 use vee_application::patch_sandbox;
-use vee_application::repository_map;
-use vee_application::setup;
+use vee_application::signing;
 use vee_application::standards;
-use vee_application::test_effectiveness;
-use vee_application::test_generation;
-use vee_application::verification_diagnosis;
+use vee_application::test_proposals;
 
 /// The local SQLite stores that the CLI and MCP server hand to application services.
 fn local_stores() -> std::sync::Arc<dyn vee_core::ports::RepositoryStores + Send + Sync> {
@@ -48,235 +39,12 @@ fn load_repository_config(root: &std::path::Path) -> Result<RepositoryConfig> {
     vee_application::load_repository_config(root).map_err(configuration_failure)
 }
 
-fn is_sha256_digest(value: &str) -> bool {
-    value.starts_with("sha256:")
-        && value.len() == 71
-        && value[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-struct PreparedEffectiveness {
-    root: std::path::PathBuf,
-    snapshot: ChangeSet,
-    profile: vee_core::VerificationProfile,
-    baseline_run_id: String,
-}
-
-fn prepare_effectiveness(proposal_id: &str, profile_id: &str) -> Result<PreparedEffectiveness> {
-    anyhow::ensure!(
-        is_sha256_digest(proposal_id),
-        "test proposal ID must be a full sha256:<hex> digest"
-    );
+/// The workspace for commands that change the worktree: outside a Git
+/// repository is a usage error.
+fn proposal_workspace() -> Result<operations::Workspace> {
     let cwd = std::env::current_dir()?;
-    let root = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-    let proposal_dir = proposal_directory(&root)?;
-    let record_path = proposal_dir.join(format!("test-{}.json", &proposal_id[7..]));
-    let proposal: serde_json::Value = serde_json::from_slice(
-        &read_proposal_file(&record_path, 2 * 1024 * 1024)
-            .with_context(|| format!("test proposal {proposal_id} was not found"))?,
-    )?;
-    anyhow::ensure!(
-        proposal["schema_version"] == 2,
-        "unsupported test proposal schema"
-    );
-    anyhow::ensure!(
-        proposal["proposal_id"].as_str() == Some(proposal_id),
-        "test proposal ID does not match its record"
-    );
-    anyhow::ensure!(
-        proposal["application"] == "applied"
-            && proposal["approval_digest"].as_str() == Some(proposal_id),
-        "test proposal must be explicitly approved and applied before effectiveness assessment"
-    );
-    anyhow::ensure!(
-        proposal["concurrent_mutation_detected"] == false,
-        "proposal application had concurrent mutations"
-    );
-    let scope = proposal["source_scope"]
-        .as_str()
-        .context("proposal has no source scope")?;
-    let base_oid = proposal["base_oid"].as_str();
-    let root_string = root.to_string_lossy().to_string();
-    let snapshot = current_change_set(&root_string, base_oid, scope)?;
-    anyhow::ensure!(
-        proposal["post_application_snapshot_id"].as_str() == Some(snapshot.digest.as_str()),
-        "worktree no longer matches the proposal's applied snapshot"
-    );
-    let saved_patch = read_proposal_file(
-        &proposal_dir.join(format!("test-{}.patch", &proposal_id[7..])),
-        2 * 1024 * 1024,
-    )?;
-    let patch_digest = vee_core::digest(&saved_patch);
-    anyhow::ensure!(
-        proposal["patch_digest"].as_str() == Some(patch_digest.as_str())
-            && test_proposal_id(
-                proposal["snapshot_id"].as_str().unwrap_or_default(),
-                &patch_digest
-            )? == proposal_id,
-        "test proposal integrity check failed"
-    );
-    let mut config = load_repository_config(&root)?;
-    apply_protected_policy(&root, &mut config)?;
-    let profile = config
-        .verification
-        .get(profile_id)
-        .context("unknown trusted verification profile")?;
-    let expected_command_digest =
-        vee_process::verification_command_digest(profile, &root).map_err(anyhow::Error::msg)?;
-    let store = ReviewStore::open(&root.join(".vee/vee.sqlite")).map_err(anyhow::Error::msg)?;
-    let baseline_run_id = proposal["verification_runs"]
-        .as_array()
-        .context("proposal has no verification history")?
-        .iter()
-        .filter(|entry| {
-            entry["profile_id"].as_str() == Some(profile_id)
-                && entry["snapshot_id"].as_str() == Some(snapshot.digest.as_str())
-                && entry["status"] == "passed"
-        })
-        .filter_map(|entry| entry["run_id"].as_str())
-        .find(|run_id| {
-            store
-                .verification(run_id)
-                .ok()
-                .flatten()
-                .is_some_and(|run| {
-                    run.status == VerificationStatus::Passed
-                        && run.snapshot_id == snapshot.digest
-                        && run.profile_id == profile_id
-                        && run.command_digest == expected_command_digest
-                })
-        })
-        .context("effectiveness assessment requires a passing run for this trusted profile and exact proposal snapshot")?
-        .to_owned();
-    Ok(PreparedEffectiveness {
-        root,
-        snapshot,
-        profile: profile.clone(),
-        baseline_run_id,
-    })
-}
-
-fn effectiveness_coverage(
-    root: &std::path::Path,
-    run_id: &str,
-    snapshot: &ChangeSet,
-) -> (Option<coverage::CoverageReport>, String) {
-    let result = (|| -> Result<coverage::CoverageReport> {
-        let store = ReviewStore::open(&root.join(".vee/vee.sqlite")).map_err(anyhow::Error::msg)?;
-        let run = store
-            .verification(run_id)
-            .map_err(anyhow::Error::msg)?
-            .context("passing verification run was not found")?;
-        coverage::report_for_change_set(root, &run, "stdout", snapshot)
-            .or_else(|_| coverage::report_for_change_set(root, &run, "stderr", snapshot))
-            .map_err(anyhow::Error::msg)
-    })();
-    match result {
-        Ok(report) => (Some(report), String::new()),
-        Err(error) => (
-            None,
-            format!("Changed-line coverage could not be attached: {error}"),
-        ),
-    }
-}
-
-fn test_proposal_id(snapshot_id: &str, patch_digest: &str) -> Result<String> {
-    Ok(vee_core::digest(&serde_json::to_vec(&(
-        "vee-test-patch-proposal-v2",
-        snapshot_id,
-        patch_digest,
-    ))?))
-}
-
-fn write_proposal_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            anyhow::ensure!(
-                metadata.file_type().is_file(),
-                "proposal artifact must be a regular file"
-            );
-            std::fs::write(path, bytes)?;
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)?;
-            file.write_all(bytes)?;
-        }
-        Err(error) => return Err(error.into()),
-    }
-    Ok(())
-}
-
-fn write_new_proposal_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .with_context(|| {
-            format!(
-                "refusing to overwrite existing proposal artifact {}",
-                path.display()
-            )
-        })?;
-    file.write_all(bytes)?;
-    Ok(())
-}
-
-struct ProposalApplyLock(std::path::PathBuf);
-
-impl Drop for ProposalApplyLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-fn acquire_proposal_apply_lock(directory: &std::path::Path) -> Result<ProposalApplyLock> {
-    let path = directory.join("apply.lock");
-    let mut file = match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            anyhow::bail!(
-                "another Vee patch application is in progress ({}); if this lock is stale, verify no apply-patch process is running before removing it",
-                path.display()
-            )
-        }
-        Err(error) => return Err(error.into()),
-    };
-    writeln!(
-        file,
-        "pid={} started_unix={}",
-        std::process::id(),
-        current_unix_time()?
-    )?;
-    file.sync_all()?;
-    Ok(ProposalApplyLock(path))
-}
-
-fn resolve_hosting_setting(
-    command_line: Option<String>,
-    repository: Option<String>,
-    fallback: &str,
-) -> String {
-    command_line
-        .or(repository)
-        .unwrap_or_else(|| fallback.to_owned())
-}
-
-fn load_hosting_config(root: &std::path::Path) -> Result<(bool, vee_core::HostingConfig)> {
-    if !root.join(".vee.yaml").exists() {
-        return Ok((false, vee_core::HostingConfig::default()));
-    }
-    let config = load_repository_config(root)?;
-    Ok((config.offline, config.hosting))
-}
-
-fn apply_protected_policy(root: &std::path::Path, config: &mut RepositoryConfig) -> Result<()> {
-    vee_application::apply_protected_policy(root, config).map_err(configuration_failure)
+    let root = vee_git::repository_root(&cwd).map_err(usage_failure)?;
+    Ok(operations::Workspace::new(root, crate::local_stores()))
 }
 
 fn classify_error(error: &anyhow::Error) -> (&'static str, u8) {
@@ -298,8 +66,48 @@ fn classify_error(error: &anyhow::Error) -> (&'static str, u8) {
 #[derive(Parser)]
 #[command(name = "vee", version, about = "Local-first code change assurance")]
 struct Cli {
+    /// When to color text output: auto (a terminal, unless NO_COLOR is set), always, or never.
+    #[arg(long, global = true, value_enum, default_value_t = ColorArg::Auto)]
+    color: ColorArg,
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum ColorArg {
+    Auto,
+    Always,
+    Never,
+}
+
+/// Whether text output is colored, decided once from `--color` and the environment.
+static COLOR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+fn set_color(choice: ColorArg) {
+    let enabled = match choice {
+        ColorArg::Always => true,
+        ColorArg::Never => false,
+        // Honors NO_COLOR, CLICOLOR, CLICOLOR_FORCE and whether stdout is a terminal.
+        ColorArg::Auto => !matches!(
+            anstream::AutoStream::choice(&std::io::stdout()),
+            anstream::ColorChoice::Never
+        ),
+    };
+    let _ = COLOR.set(enabled);
+}
+
+/// The current repository's root, or the current directory outside a checkout.
+fn hosting_config_root() -> Result<std::path::PathBuf> {
+    let cwd = std::env::current_dir()?;
+    Ok(vee_git::repository_root(&cwd).unwrap_or(cwd))
+}
+
+/// Prints the shared view of a result document: the same view MCP returns as Markdown.
+fn print_view(document: &impl vee_present::ToView) -> Result<()> {
+    let text = vee_present::ansi::render(&document.to_view(), *COLOR.get().unwrap_or(&false));
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(text.as_bytes())?;
+    Ok(())
 }
 #[derive(Subcommand)]
 enum Command {
@@ -747,7 +555,7 @@ enum TestsCommand {
         #[arg(long, conflicts_with_all = ["base", "staged", "working_tree"])]
         commit: Option<String>,
         /// Configured reviewer that drafts the test patch.
-        #[arg(long, default_value = "correctness")]
+        #[arg(long, default_value = operations::DEFAULT_DRAFTING_REVIEWER)]
         reviewer: String,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
@@ -761,7 +569,7 @@ enum TestsCommand {
         #[arg(long, required = true)]
         run: String,
         /// Configured reviewer that drafts the refined test patch.
-        #[arg(long, default_value = "correctness")]
+        #[arg(long, default_value = operations::DEFAULT_DRAFTING_REVIEWER)]
         reviewer: String,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
@@ -838,7 +646,7 @@ enum PrCommand {
         #[arg(long, conflicts_with_all = ["base", "staged", "working_tree"])]
         commit: Option<String>,
         /// Configured reviewer whose provider and instruction file draft the artifact.
-        #[arg(long, default_value = "correctness")]
+        #[arg(long, default_value = operations::DEFAULT_DRAFTING_REVIEWER)]
         reviewer: String,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
@@ -1266,7 +1074,7 @@ enum ImportedCommand {
         /// Search text.
         query: String,
         /// Maximum number of results.
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = operations::DEFAULT_SEARCH_LIMIT)]
         limit: usize,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
@@ -1316,673 +1124,6 @@ enum ImportedFeedbackCommand {
 enum ReportFormat {
     Sarif,
     VeeJson,
-}
-
-/// A saved review with its `gate` replaced by the selected persisted decision
-/// (default: the latest), checked to belong to the same snapshot, configuration,
-/// and replay inputs. Shared by evidence bundles and attestations.
-fn review_with_decision(
-    root: &std::path::Path,
-    id: &str,
-    decision_id: Option<&str>,
-) -> Result<vee_application::ReviewResult> {
-    let store = ReviewStore::open(&root.join(".vee/vee.sqlite")).map_err(anyhow::Error::msg)?;
-    let payload = store
-        .get(id)
-        .map_err(anyhow::Error::msg)?
-        .with_context(|| format!("review {id} was not found"))?;
-    let mut review = vee_application::deserialize_review_result(&payload)
-        .map_err(|error| anyhow::anyhow!(error))?;
-    let decisions = store
-        .gate_decisions_for_review(id)
-        .map_err(anyhow::Error::msg)?;
-    let selected = match decision_id {
-        Some(wanted) => decisions
-            .into_iter()
-            .find(|decision| decision.decision_id == wanted)
-            .ok_or_else(|| {
-                usage_failure("requested gate decision was not found for this review")
-            })?,
-        None => decisions
-            .into_iter()
-            .last()
-            .unwrap_or_else(|| review.gate.clone()),
-    };
-    if selected.snapshot_id != review.snapshot_id {
-        return Err(configuration_failure("selected gate decision belongs to a different snapshot and cannot be exported with this review"));
-    }
-    if selected.effective_config_digest != review.effective_config_digest
-        || selected.replay_inputs != review.gate.replay_inputs
-    {
-        return Err(configuration_failure("selected gate decision uses configuration or replay inputs not retained by the original review; export the original review decision or create a new review"));
-    }
-    review.effective_config_digest = selected.effective_config_digest.clone();
-    review.status = match selected.status {
-        GateStatus::Pass => "pass",
-        GateStatus::Block => "block",
-        GateStatus::Incomplete => "incomplete",
-    }
-    .into();
-    review.gate = selected;
-    Ok(review)
-}
-
-/// The commit an attestation can name as its subject: only when the reviewed
-/// snapshot is exactly that commit's change, so a verifier binding the
-/// attestation to a revision attests what was actually reviewed.
-fn attested_commit(root: &std::path::Path, change_set: &ChangeSet) -> Result<Option<String>> {
-    Ok(match change_set.scope.as_str() {
-        scope if scope.starts_with("commit:") || scope.starts_with("commit_range:") => {
-            change_set.head_oid.clone()
-        }
-        "base_and_worktree" => committed_snapshot_matches_review(root, change_set)
-            .map_err(anyhow::Error::msg)?
-            .then(|| change_set.head_oid.clone())
-            .flatten(),
-        _ => None,
-    })
-}
-
-fn evidence_bundle(review: &vee_application::ReviewResult) -> Result<serde_json::Value> {
-    let review_value = serde_json::to_value(review)?;
-    let review_bytes = serde_json::to_vec(&review_value)?;
-    let review_digest = vee_core::digest(&review_bytes);
-    let manifest = serde_json::json!({
-        "schema_version": 1,
-        "review_id": review.review_id,
-        "snapshot_id": review.snapshot_id,
-        "effective_config_digest": review.gate.effective_config_digest,
-        "policy_digest": review.gate.policy_digest,
-        "decision_id": review.gate.decision_id,
-        "gate_status": review.gate.status,
-        "review_digest": review_digest,
-        "finding_count": review.findings.len(),
-        "evidence_count": review.evidence.len(),
-        "verification_count": review.verification_runs.len(),
-    });
-    let manifest_digest = vee_core::digest(&serde_json::to_vec(&manifest)?);
-    Ok(serde_json::json!({
-        "schema_version": 1,
-        "manifest": manifest,
-        "manifest_digest": manifest_digest,
-        "review": review_value,
-        "limitations": [
-            "The bundle proves integrity and internal consistency, not that the source or provider output is correct.",
-            "Unsigned bundles do not provide cryptographic tamper protection; use sign-bundle and verify-bundle with a trusted key for authenticity.",
-            "Gate replay checks deterministic policy evaluation against retained inputs; it does not rerun providers or verification commands."
-        ]
-    }))
-}
-
-fn verify_evidence_bundle(
-    bundle: &serde_json::Value,
-    public_key_path: Option<&std::path::Path>,
-) -> serde_json::Value {
-    let invalid = |message: &str| serde_json::json!({ "schema_version": 1, "valid": false, "message": message });
-    if bundle["schema_version"] != 1 {
-        return invalid("unsupported evidence bundle schema version");
-    }
-    let Some(manifest) = bundle.get("manifest") else {
-        return invalid("bundle manifest is missing");
-    };
-    let Some(review) = bundle.get("review") else {
-        return invalid("bundled review is missing");
-    };
-    if !manifest.is_object() || !review.is_object() {
-        return invalid("bundle manifest and review must be JSON objects");
-    }
-    for key in [
-        "review_id",
-        "snapshot_id",
-        "effective_config_digest",
-        "policy_digest",
-        "decision_id",
-        "gate_status",
-        "review_digest",
-    ] {
-        if manifest
-            .get(key)
-            .and_then(serde_json::Value::as_str)
-            .is_none()
-        {
-            return invalid("bundle manifest is missing a required identity or digest field");
-        }
-    }
-    for key in ["finding_count", "evidence_count", "verification_count"] {
-        if manifest
-            .get(key)
-            .and_then(serde_json::Value::as_u64)
-            .is_none()
-        {
-            return invalid("bundle manifest is missing a required record count");
-        }
-    }
-    if serde_json::from_value::<vee_application::ReviewResult>(review.clone()).is_err() {
-        return invalid("bundled review does not match the Vee review contract");
-    }
-    let review_snapshot = review["snapshot_id"].as_str();
-    if review_snapshot.is_none()
-        || review["change_set"]["digest"].as_str() != review_snapshot
-        || review["gate"]["snapshot_id"].as_str() != review_snapshot
-    {
-        return invalid("review, change set, and gate must reference the same snapshot");
-    }
-    let Ok(manifest_bytes) = serde_json::to_vec(manifest) else {
-        return invalid("manifest could not be canonicalized");
-    };
-    if bundle["manifest_digest"].as_str() != Some(vee_core::digest(&manifest_bytes).as_str()) {
-        return invalid("manifest digest does not match");
-    }
-    let Ok(review_bytes) = serde_json::to_vec(review) else {
-        return invalid("review could not be canonicalized");
-    };
-    if manifest["review_digest"].as_str() != Some(vee_core::digest(&review_bytes).as_str()) {
-        return invalid("review digest does not match");
-    }
-    for (manifest_key, review_value) in [
-        ("review_id", review["review_id"].clone()),
-        ("snapshot_id", review["snapshot_id"].clone()),
-        (
-            "effective_config_digest",
-            review["effective_config_digest"].clone(),
-        ),
-        ("policy_digest", review["gate"]["policy_digest"].clone()),
-        ("decision_id", review["gate"]["decision_id"].clone()),
-        ("gate_status", review["gate"]["status"].clone()),
-    ] {
-        if manifest[manifest_key] != review_value {
-            return invalid("manifest and review identity fields do not agree");
-        }
-    }
-    for (manifest_key, review_key) in [
-        ("finding_count", "findings"),
-        ("evidence_count", "evidence"),
-        ("verification_count", "verification_runs"),
-    ] {
-        if manifest[manifest_key].as_u64()
-            != review[review_key]
-                .as_array()
-                .map(|values| values.len() as u64)
-        {
-            return invalid("manifest record counts do not agree with bundled review");
-        }
-    }
-    let signature = bundle.get("signature");
-    let signature_valid = match (signature, public_key_path) {
-        (Some(signature), Some(path)) => {
-            let key = match std::fs::read(path) {
-                Ok(value) if value.len() == 32 => value,
-                _ => return invalid("Ed25519 public key must be a readable raw 32-byte key"),
-            };
-            let encoded = match signature["signature"].as_str() {
-                Some(value) => value,
-                None => return invalid("bundle signature is malformed"),
-            };
-            let signature_bytes =
-                match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded) {
-                    Ok(value) => value,
-                    Err(_) => return invalid("bundle signature is not valid base64"),
-                };
-            let message = match bundle["manifest_digest"].as_str() {
-                Some(value) => value.as_bytes(),
-                None => return invalid("manifest digest is missing"),
-            };
-            if signature["algorithm"] != "ed25519" {
-                return invalid("unsupported bundle signature algorithm");
-            }
-            if ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key)
-                .verify(message, &signature_bytes)
-                .is_err()
-            {
-                return invalid("bundle signature verification failed");
-            }
-            true
-        }
-        (Some(_), None) => {
-            return invalid("bundle is signed; provide --public-key to verify its signer")
-        }
-        (None, Some(_)) => return invalid("bundle has no signature"),
-        (None, None) => false,
-    };
-    let replay_status = replay_gate(review);
-    serde_json::json!({ "schema_version": 1, "valid": true, "signature_valid": signature_valid, "replay_status": replay_status["status"], "replay_matches": replay_status["matches"], "replay_message": replay_status["message"], "message": if signature_valid { "bundle digests and signature are valid; signer trust is determined by the supplied public key" } else { "bundle internal bindings are consistent but it is unsigned; this is not cryptographic tamper protection" }, "review_id": manifest["review_id"], "snapshot_id": manifest["snapshot_id"], "gate_status": manifest["gate_status"], "manifest_digest": bundle["manifest_digest"] })
-}
-
-fn committed_snapshot_matches_review(
-    root: &std::path::Path,
-    reviewed: &ChangeSet,
-) -> Result<bool, String> {
-    let base_oid = reviewed
-        .base_oid
-        .as_deref()
-        .ok_or("base-and-worktree review is missing its captured base OID")?;
-    let head_oid = reviewed
-        .head_oid
-        .as_deref()
-        .ok_or("base-and-worktree review is missing its captured head OID")?;
-    let committed = vee_application::capture_change_set(
-        root,
-        vee_git::ChangeScope::CommitRange {
-            from: base_oid.to_owned(),
-            to: head_oid.to_owned(),
-        },
-    )?;
-    let normalize_mode = |mode: u32| {
-        if mode & 0o170000 == 0o100000 {
-            mode & 0o777
-        } else {
-            mode
-        }
-    };
-    Ok(reviewed.files.len() == committed.files.len()
-        && reviewed
-            .files
-            .iter()
-            .zip(&committed.files)
-            .all(|(left, right)| {
-                left.path == right.path
-                    && normalize_mode(left.mode) == normalize_mode(right.mode)
-                    && left.content_digest == right.content_digest
-                    && left.status == right.status
-            }))
-}
-
-fn replay_gate(review_value: &serde_json::Value) -> serde_json::Value {
-    let review: vee_application::ReviewResult = match serde_json::from_value(review_value.clone()) {
-        Ok(review) => review,
-        Err(error) => {
-            return serde_json::json!({"status":"unavailable","matches":null,"message":format!("review cannot be decoded for replay: {error}")})
-        }
-    };
-    let Some(inputs) = review.gate.replay_inputs.as_ref() else {
-        return serde_json::json!({"status":"unavailable","matches":null,"message":"bundle does not contain retained deterministic gate inputs"});
-    };
-    if inputs.schema_version != 1 {
-        return serde_json::json!({"status":"unavailable","matches":null,"message":"unsupported retained gate replay schema"});
-    }
-    let findings = review
-        .policy_findings
-        .as_deref()
-        .unwrap_or(&review.findings);
-    let mut replayed = vee_core::evaluate_gate_with_waivers_and_reviewer_policies(
-        &review.snapshot_id,
-        vee_core::GateDigests {
-            effective_config_digest: &review.effective_config_digest,
-            policy_digest: &review.gate.policy_digest,
-        },
-        findings,
-        &inputs.policy,
-        inputs.complete,
-        vee_core::GateEvidence {
-            verification_runs: &inputs.verification_runs,
-            source_evidence: &inputs.evidence,
-            analyzer_reports: &inputs.analyzer_reports,
-        },
-        vee_core::GateEvaluationOptions {
-            waiver_evaluation: vee_core::WaiverEvaluation {
-                records: &inputs.waivers,
-                evaluation_time_unix: inputs.evaluation_time_unix,
-            },
-            reviewer_policies: &inputs.reviewer_policies,
-        },
-    );
-    replayed.blocking_findings = vee_application::visible_blocking_findings(
-        &replayed.blocking_findings,
-        findings,
-        &review.findings,
-    );
-    let matches = replayed == review.gate;
-    serde_json::json!({"status":"replayed","matches":matches,"message":if matches {"deterministic gate replay matches the stored decision"} else {"replayed gate decision differs from the stored decision"},"replayed_decision":replayed})
-}
-
-fn write_private_key(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("creating private key {}", path.display()))?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(())
-}
-
-fn diff_contains_added_line(patch: Option<&str>, wanted: u32) -> bool {
-    let Some(patch) = patch else {
-        return false;
-    };
-    let mut new_line = 0u32;
-    let mut in_hunk = false;
-    for row in patch.lines() {
-        if row.starts_with("@@") {
-            let Some(range) = row.split_whitespace().find(|part| part.starts_with('+')) else {
-                in_hunk = false;
-                continue;
-            };
-            new_line = range
-                .trim_start_matches('+')
-                .split(',')
-                .next()
-                .and_then(|n| n.parse().ok())
-                .unwrap_or(0);
-            in_hunk = new_line > 0;
-            continue;
-        }
-        if !in_hunk {
-            continue;
-        }
-        if row.starts_with('+') {
-            if new_line == wanted {
-                return true;
-            }
-            new_line = new_line.saturating_add(1);
-        } else if row.starts_with(' ') {
-            new_line = new_line.saturating_add(1);
-        }
-    }
-    false
-}
-
-fn build_hosting_threads(
-    findings: &[vee_core::Finding],
-    pull_request: &vee_hosting::PullRequestRef,
-    changed_files: &[vee_hosting::PullRequestFile],
-    _review_id: &str,
-    snapshot_id: &str,
-    delivery_key: &str,
-) -> Vec<vee_hosting::ReviewThread> {
-    findings
-        .iter()
-        .filter_map(|finding| {
-            if matches!(finding.severity, Severity::Info) {
-                return None;
-            }
-            let (Some(path), Some(line)) = (&finding.path, finding.line) else {
-                return None;
-            };
-            if !changed_files.iter().any(|file| {
-                file.path == *path && diff_contains_added_line(file.patch.as_deref(), line)
-            }) {
-                return None;
-            }
-            Some(vee_hosting::ReviewThread {
-                pull_request: pull_request.clone(),
-                fingerprint: finding.fingerprint.clone(),
-                path: path.clone(),
-                line: u64::from(line),
-                side: vee_hosting::DiffSide::New,
-                body: format!(
-                    "**{:?} · {}** (confidence: {}%)\n\n{}\n\nVee finding `{}` · snapshot `{}`",
-                    finding.severity,
-                    finding.category,
-                    finding.confidence.unwrap_or(0),
-                    finding.rationale,
-                    finding.id,
-                    snapshot_id
-                ),
-                resolution: vee_hosting::ThreadResolution::Open,
-                snapshot_id: snapshot_id.to_owned(),
-                idempotency_key: format!("{delivery_key}:{}", finding.fingerprint),
-            })
-        })
-        .collect()
-}
-
-fn build_resolved_hosting_threads(
-    records: &[vee_core::FindingRecord],
-    active_fingerprints: &std::collections::BTreeSet<String>,
-    previously_published_fingerprints: &std::collections::BTreeSet<String>,
-    pull_request: &vee_hosting::PullRequestRef,
-    review_id: &str,
-    snapshot_id: &str,
-) -> Vec<vee_hosting::ReviewThread> {
-    records
-        .iter()
-        .filter_map(|record| {
-            let finding = &record.finding;
-            if record.status != vee_core::FindingStatus::Resolved
-                || active_fingerprints.contains(&finding.fingerprint)
-                || !previously_published_fingerprints.contains(&finding.fingerprint)
-                || matches!(finding.severity, Severity::Info)
-            {
-                return None;
-            }
-            let (Some(path), Some(line)) = (&finding.path, finding.line) else {
-                return None;
-            };
-            Some(vee_hosting::ReviewThread {
-                pull_request: pull_request.clone(),
-                fingerprint: finding.fingerprint.clone(),
-                path: path.clone(),
-                line: u64::from(line),
-                side: vee_hosting::DiffSide::New,
-                body: format!(
-                    "**Resolved finding**\n\n{}\n\nVee finding `{}` · previously reviewed snapshot `{}`",
-                    record.status_reason.as_deref().unwrap_or("Marked resolved locally"),
-                    finding.id,
-                    snapshot_id
-                ),
-                resolution: vee_hosting::ThreadResolution::Resolved,
-                snapshot_id: snapshot_id.to_owned(),
-                idempotency_key: format!("{review_id}:{}:resolved", finding.fingerprint),
-            })
-        })
-        .collect()
-}
-
-fn hosting_thread_target_key(
-    provider_id: &str,
-    pull_request: &vee_hosting::PullRequestRef,
-) -> Result<String, String> {
-    let identity = serde_json::to_string(pull_request).map_err(|error| error.to_string())?;
-    Ok(format!("{provider_id}:{identity}"))
-}
-
-fn updated_hosted_finding_fingerprints(
-    previously_published: &std::collections::BTreeSet<String>,
-    desired_threads: &[vee_hosting::ReviewThread],
-) -> std::collections::BTreeSet<String> {
-    let mut retained = previously_published.clone();
-    for thread in desired_threads {
-        match thread.resolution {
-            vee_hosting::ThreadResolution::Open => {
-                retained.insert(thread.fingerprint.clone());
-            }
-            vee_hosting::ThreadResolution::Resolved => {
-                retained.remove(&thread.fingerprint);
-            }
-        }
-    }
-    retained
-}
-
-/// Persist a recoverable superset before publishing. A provider may accept a
-/// thread update while its response is lost, so the next run must still know
-/// every fingerprint that could exist remotely until publication completes.
-fn hosting_thread_intent_fingerprints(
-    previously_published: &std::collections::BTreeSet<String>,
-    desired_threads: &[vee_hosting::ReviewThread],
-) -> std::collections::BTreeSet<String> {
-    previously_published
-        .iter()
-        .cloned()
-        .chain(
-            desired_threads
-                .iter()
-                .map(|thread| thread.fingerprint.clone()),
-        )
-        .collect()
-}
-
-fn add_resolved_hosting_threads(
-    threads: &mut Vec<vee_hosting::ReviewThread>,
-    records: &[vee_core::FindingRecord],
-    active_fingerprints: &std::collections::BTreeSet<String>,
-    previously_published_fingerprints: &std::collections::BTreeSet<String>,
-    pull_request: &vee_hosting::PullRequestRef,
-    review_id: &str,
-    snapshot_id: &str,
-) {
-    threads.extend(build_resolved_hosting_threads(
-        records,
-        active_fingerprints,
-        previously_published_fingerprints,
-        pull_request,
-        review_id,
-        snapshot_id,
-    ));
-}
-
-fn effective_work_item_host(provider: &str, host: &str) -> anyhow::Result<String> {
-    match provider {
-        "github" if host == "github.com" => Ok("github.com".into()),
-        "gitlab" if host == "github.com" => Ok("gitlab.com".into()),
-        "azure-devops" if host == "github.com" => Ok("dev.azure.com".into()),
-        "bitbucket" if host == "github.com" => Ok("bitbucket.org".into()),
-        "gerrit" if host == "github.com" => {
-            Err(configuration_failure("Gerrit requires an explicit --host"))
-        }
-        "github" | "gitlab" | "azure-devops" | "bitbucket" | "gerrit" => Ok(host.into()),
-        _ => Err(configuration_failure(format!(
-            "unsupported work item provider `{provider}`"
-        ))),
-    }
-}
-
-fn work_item_api_base(provider: &str, host: &str, configured: &str) -> anyhow::Result<String> {
-    if !configured.trim().is_empty() {
-        return Ok(configured.to_owned());
-    }
-    match provider {
-        "github" if host == "github.com" => Ok("https://api.github.com/".into()),
-        "github" => Ok(format!("https://{host}/api/v3/")),
-        "gitlab" => Ok(format!("https://{host}/api/v4/")),
-        "azure-devops" => Ok(format!("https://{host}/")),
-        "bitbucket" => Ok("https://api.bitbucket.org/2.0/".into()),
-        "gerrit" => Ok(format!("https://{host}/")),
-        _ => Err(configuration_failure(format!(
-            "unsupported work item provider `{provider}`"
-        ))),
-    }
-}
-
-fn fetch_work_item(
-    provider_id: &str,
-    specification: &str,
-    host: &str,
-    api_base: &str,
-    token_env: &str,
-) -> anyhow::Result<vee_hosting::WorkItemSnapshot> {
-    let (repository, number) = specification
-        .rsplit_once('#')
-        .ok_or_else(|| usage_failure("--work-item must use OWNER/REPO#NUMBER"))?;
-    let number = number
-        .parse::<u64>()
-        .map_err(|_| usage_failure("--work-item number must be a positive integer"))?;
-    let token = std::env::var(token_env).with_context(|| {
-        format!("required credential environment variable {token_env} is not set")
-    })?;
-    let host = effective_work_item_host(provider_id, host)?;
-    let reference = vee_hosting::WorkItemRef {
-        repository: vee_hosting::RepositoryRef {
-            host: host.clone(),
-            full_name: repository.to_owned(),
-        },
-        number,
-    };
-    reference.validate().map_err(configuration_failure)?;
-    let api_base = work_item_api_base(provider_id, &host, api_base)?;
-    get_work_item(provider_id, &api_base, token, &reference)
-}
-
-enum ImportedArchive {
-    Review(Box<vee_application::ReviewResult>),
-    Discussions(vee_hosting::PullRequestReviewIssues),
-}
-
-fn parse_imported_archive(bytes: &[u8]) -> Result<ImportedArchive> {
-    let payload: serde_json::Value =
-        serde_json::from_slice(bytes).context("imported archive is not valid JSON")?;
-    match payload
-        .get("schema_version")
-        .and_then(serde_json::Value::as_u64)
-    {
-        Some(2) => Ok(ImportedArchive::Review(Box::new(parse_portable_review(
-            bytes,
-        )?))),
-        Some(1) => {
-            let discussion: vee_hosting::PullRequestReviewIssues =
-                serde_json::from_slice(bytes).context("invalid provider discussion archive")?;
-            anyhow::ensure!(
-                !discussion.gate_eligible,
-                "provider discussion archive must remain gate-ineligible"
-            );
-            discussion
-                .pull_request
-                .validate()
-                .map_err(anyhow::Error::msg)?;
-            anyhow::ensure!(
-                discussion
-                    .issues
-                    .iter()
-                    .all(|issue| issue.classification == "untrusted_external_review"),
-                "provider discussion archive contains an unsupported issue classification"
-            );
-            Ok(ImportedArchive::Discussions(discussion))
-        }
-        _ => anyhow::bail!("unsupported imported archive schema"),
-    }
-}
-
-fn import_review_archive(
-    root: &std::path::Path,
-    source: &std::path::Path,
-) -> Result<(String, vee_application::ReviewResult)> {
-    let source_metadata = std::fs::symlink_metadata(source)
-        .with_context(|| format!("could not inspect import file {}", source.display()))?;
-    anyhow::ensure!(
-        source_metadata.file_type().is_file(),
-        "import path must be a regular, non-symlink file"
-    );
-    #[cfg(unix)]
-    let file = {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(source)
-    };
-    #[cfg(not(unix))]
-    let file = std::fs::File::open(source);
-    let file =
-        file.with_context(|| format!("could not inspect import file {}", source.display()))?;
-    let metadata = file
-        .metadata()
-        .context("could not inspect opened import file")?;
-    anyhow::ensure!(metadata.is_file(), "import path must be a regular file");
-    anyhow::ensure!(
-        metadata.len() <= MAX_IMPORTED_REVIEW_BYTES,
-        "import file exceeds 10 MiB limit"
-    );
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(MAX_IMPORTED_REVIEW_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .context("could not read import file")?;
-    anyhow::ensure!(
-        bytes.len() as u64 <= MAX_IMPORTED_REVIEW_BYTES,
-        "import file exceeds 10 MiB limit"
-    );
-    let review = parse_portable_review(&bytes)?;
-    let digest = store_imported_history(root, &bytes)?;
-    Ok((digest, review))
-}
-
-fn hex_digest(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[derive(Subcommand)]
@@ -2113,7 +1254,7 @@ enum FindingsCommand {
         /// Finding ID.
         id: String,
         /// Source lines of context around the finding.
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = operations::DEFAULT_CONTEXT_LINES)]
         context_lines: usize,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
@@ -2125,7 +1266,7 @@ enum FindingsCommand {
         #[arg(required = true, num_args = 1..=20)]
         ids: Vec<String>,
         /// Source lines of context around each finding.
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = operations::DEFAULT_CONTEXT_LINES)]
         context_lines: usize,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
@@ -2270,14 +1411,6 @@ enum FeedbackLabelArg {
     Actionable,
     NotActionable,
 }
-fn feedback_label_text(label: vee_core::FindingFeedbackLabel) -> &'static str {
-    match label {
-        vee_core::FindingFeedbackLabel::Confirmed => "confirmed",
-        vee_core::FindingFeedbackLabel::FalsePositive => "false_positive",
-        vee_core::FindingFeedbackLabel::Actionable => "actionable",
-        vee_core::FindingFeedbackLabel::NotActionable => "not_actionable",
-    }
-}
 impl From<FeedbackLabelArg> for vee_core::FindingFeedbackLabel {
     fn from(value: FeedbackLabelArg) -> Self {
         match value {
@@ -2302,25 +1435,6 @@ impl From<StatusArg> for vee_core::FindingStatus {
 enum Output {
     Text,
     Json,
-}
-fn current_change_set(root: &str, base_oid: Option<&str>, scope: &str) -> Result<ChangeSet> {
-    let capture_scope = match scope {
-        "staged" => vee_git::ChangeScope::Staged,
-        "working_tree" => vee_git::ChangeScope::WorkingTree,
-        value if value.starts_with("commit:") => {
-            vee_git::commit_scope(value.trim_start_matches("commit:"))
-                .map_err(anyhow::Error::msg)?
-        }
-        value if value.starts_with("commit_range:") => {
-            vee_git::commit_scope(value.trim_start_matches("commit_range:"))
-                .map_err(anyhow::Error::msg)?
-        }
-        _ => vee_git::ChangeScope::BaseAndWorktree {
-            base_oid: base_oid.map(str::to_string),
-        },
-    };
-    vee_application::capture_change_set(std::path::Path::new(root), capture_scope)
-        .map_err(anyhow::Error::msg)
 }
 
 struct HostingWebhookReviewer {
@@ -2401,336 +1515,51 @@ impl vee_http::WebhookEventHandler for HostingWebhookReviewer {
         {
             return Err("review result does not match webhook commit range".into());
         }
-        let (conclusion, title) = match review.gate.status {
-            GateStatus::Pass => (vee_hosting::CheckConclusion::Success, "Vee passed"),
-            GateStatus::Block => (vee_hosting::CheckConclusion::Failure, "Vee blocked"),
-            GateStatus::Incomplete => (
-                vee_hosting::CheckConclusion::ActionRequired,
-                "Vee incomplete",
-            ),
-        };
-        let summary = if review.gate.reasons.is_empty() {
-            format!("Gate status: {:?}", review.gate.status)
-        } else {
-            review
-                .gate
-                .reasons
-                .iter()
-                .map(|reason| format!("- {reason}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
         let changed = self
             .provider
             .list_changed_files(pull_request, &remote.revision)
             .map_err(|error| error.to_string())?;
         let delivery_key = vee_core::digest(event.event_id.as_bytes());
-        let mut threads = build_hosting_threads(
+        let threads = vee_application::publication::build_hosting_threads(
             &review.findings,
             pull_request,
             &changed,
-            &review.review_id,
             &review.snapshot_id,
             &delivery_key,
         );
-        let active_fingerprints = review
-            .findings
-            .iter()
-            .map(|finding| finding.fingerprint.clone())
-            .collect();
-        let resolved_findings =
-            store.list_findings(None, Some(vee_core::FindingStatus::Resolved), None)?;
-        let thread_target = hosting_thread_target_key(self.provider.provider_id(), pull_request)?;
-        let previously_published = store.hosted_finding_threads(&thread_target)?;
-        add_resolved_hosting_threads(
-            &mut threads,
-            &resolved_findings,
-            &active_fingerprints,
-            &previously_published,
+        let check = vee_application::publication::gate_check_run(
+            &review.gate,
             pull_request,
-            &review.review_id,
+            format!("webhook:{delivery_key}"),
             &review.snapshot_id,
         );
-        let published_fingerprints =
-            updated_hosted_finding_fingerprints(&previously_published, &threads);
-        let intent_fingerprints =
-            hosting_thread_intent_fingerprints(&previously_published, &threads);
-        store.replace_hosted_finding_threads(&thread_target, &intent_fingerprints)?;
-        self.provider
-            .publish_review(vee_hosting::ReviewPublication {
-                pull_request: pull_request.clone(),
-                expected_revision: remote.revision,
-                check: vee_hosting::CheckRun {
-                    pull_request: pull_request.clone(),
-                    external_id: format!("webhook:{delivery_key}"),
-                    name: "Vee".into(),
-                    status: vee_hosting::CheckStatus::Completed,
-                    conclusion: Some(conclusion),
-                    title: title.into(),
-                    summary,
-                    snapshot_id: review.snapshot_id,
-                    idempotency_key: format!("webhook:{delivery_key}"),
-                },
-                threads,
-            })
-            .map_err(|error| error.to_string())?;
-        store.replace_hosted_finding_threads(&thread_target, &published_fingerprints)?;
+        vee_application::publication::publish_with_thread_ledger(
+            &mut store,
+            self.provider.provider_id(),
+            pull_request,
+            &vee_application::publication::PublishedReview {
+                review_id: &review.review_id,
+                snapshot_id: &review.snapshot_id,
+                findings: &review.findings,
+            },
+            threads,
+            |threads| {
+                self.provider
+                    .publish_review(vee_hosting::ReviewPublication {
+                        pull_request: pull_request.clone(),
+                        expected_revision: remote.revision,
+                        check,
+                        threads,
+                    })
+                    .map_err(|error| error.to_string())
+            },
+        )?;
         Ok(())
     }
 }
 
-fn sarif_uri_reference(path: &str) -> String {
-    let mut encoded = String::with_capacity(path.len());
-    for byte in path.bytes() {
-        if byte.is_ascii_alphanumeric()
-            || matches!(
-                byte,
-                b'-' | b'.'
-                    | b'_'
-                    | b'~'
-                    | b'/'
-                    | b'!'
-                    | b'$'
-                    | b'&'
-                    | b'\''
-                    | b'('
-                    | b')'
-                    | b'*'
-                    | b'+'
-                    | b','
-                    | b';'
-                    | b'='
-                    | b':'
-                    | b'@'
-            )
-        {
-            encoded.push(char::from(byte));
-        } else {
-            use std::fmt::Write;
-            write!(encoded, "%{byte:02X}").expect("writing into String cannot fail");
-        }
-    }
-    encoded
-}
-
-fn review_to_sarif(review: &vee_application::ReviewResult) -> Result<serde_json::Value> {
-    let mut rules = std::collections::BTreeMap::<String, serde_json::Value>::new();
-    let mut findings: Vec<_> = review.findings.iter().collect();
-    findings.sort_by(|left, right| {
-        left.fingerprint
-            .cmp(&right.fingerprint)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    let results = findings
-        .into_iter()
-        .map(|finding| {
-            rules.entry(finding.category.clone()).or_insert_with(|| {
-                serde_json::json!({
-                    "id": finding.category,
-                    "name": finding.category,
-                    "shortDescription": {"text": finding.category}
-                })
-            });
-            let level = match finding.severity {
-                Severity::Critical | Severity::High => "error",
-                Severity::Medium => "warning",
-                Severity::Low | Severity::Info => "note",
-            };
-            let locations = match (finding.path.as_deref(), finding.line) {
-                (Some(path), Some(line)) => serde_json::json!([{
-                    "physicalLocation": {
-                        "artifactLocation": {"uri": sarif_uri_reference(path)},
-                        "region": {"startLine": line}
-                    }
-                }]),
-                (Some(path), None) => serde_json::json!([{
-                    "physicalLocation": {"artifactLocation": {"uri": sarif_uri_reference(path)}}
-                }]),
-                _ => serde_json::Value::Array(Vec::new()),
-            };
-            serde_json::json!({
-                "ruleId": finding.category,
-                "level": level,
-                "message": {"text": finding.rationale},
-                "partialFingerprints": {"vee/v1": finding.fingerprint},
-                "locations": locations,
-                "properties": {
-                    "veeFindingId": finding.id,
-                    "confidence": finding.confidence,
-                    "provenance": finding.provenance,
-                    "evidenceIds": finding.evidence_ids
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-    let rules = rules.into_values().collect::<Vec<_>>();
-    Ok(serde_json::json!({
-        "$schema": "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json",
-        "version": "2.1.0",
-        "runs": [{
-            "tool": {"driver": {
-                "name": "Vee",
-                "semanticVersion": env!("CARGO_PKG_VERSION"),
-                "rules": rules
-            }},
-            "results": results,
-            "invocations": [{
-                "executionSuccessful": review.analysis_complete,
-                "properties": {
-                    "veeReviewId": review.review_id,
-                    "veeSnapshotId": review.snapshot_id,
-                    "veeGateStatus": review.status
-                }
-            }]
-        }]
-    }))
-}
-
-fn print_detection(report: &setup::DetectionReport) {
-    println!("AI backends on this machine (preference order):");
-    for candidate in &report.candidates {
-        let marker = if report.recommended == Some(candidate.candidate_id) {
-            "*"
-        } else if candidate.available {
-            "+"
-        } else {
-            "-"
-        };
-        let state = if candidate.available {
-            let mut detail = candidate.detail.clone().unwrap_or_default();
-            if !candidate.models.is_empty() {
-                detail = format!("{detail}; models: {}", candidate.models.join(", "));
-            }
-            if candidate.requires_model {
-                detail = format!("{detail}; needs --model");
-            }
-            detail
-        } else {
-            candidate.reason.clone().unwrap_or_default()
-        };
-        println!(
-            "{marker} {:<14} {:<18} {:<8} {state}",
-            candidate.candidate_id, candidate.kind, candidate.egress
-        );
-    }
-    match report.recommended {
-        Some(recommended) => {
-            println!("Recommended: {recommended} (* recommended, + available, - unavailable)")
-        }
-        None => {
-            println!("No backend can be configured automatically (+ available, - unavailable).")
-        }
-    }
-}
-
-fn print_doctor_report(report: &setup::DoctorReport) {
-    println!(
-        "Repository config: {} ({})",
-        report.repository_config,
-        if report.config_valid {
-            "valid"
-        } else {
-            "invalid"
-        }
-    );
-    if let Some(error) = &report.config_error {
-        println!("  {error}");
-    }
-    match &report.user_config {
-        Some(path) => println!(
-            "User config: {path}{}",
-            if report.user_config_exists {
-                ""
-            } else {
-                " (not created yet)"
-            }
-        ),
-        None => println!("User config: location unknown (set VEE_CONFIG)"),
-    }
-    if report.offline {
-        println!("Offline mode: on (network providers are rejected)");
-    }
-    for check in &report.reviewers {
-        let status = if check.usable { "ok" } else { "FAIL" };
-        let role = if check.required {
-            "required"
-        } else {
-            "optional"
-        };
-        println!(
-            "[{status}] reviewer {} ({role}) -> provider {} [{}, {} egress]",
-            check.reviewer_id, check.provider_id, check.kind, check.egress
-        );
-        if let Some(detail) = &check.detail {
-            println!("       {detail}");
-        }
-        if let Some(problem) = &check.problem {
-            println!("       {problem}");
-        }
-    }
-    print_detection(&report.detection);
-    for step in &report.next_steps {
-        println!("Next: {step}");
-    }
-    println!(
-        "{}",
-        if report.ready {
-            "Ready to review."
-        } else {
-            "Not ready."
-        }
-    );
-}
-
 /// Fingerprint of an analyzer finding recorded in one of the review's gate
 /// decisions (at review time or a later `gate check`) on the review's snapshot.
-fn analyzer_finding_fingerprint(
-    store: &dyn Repositories,
-    review: &vee_application::ReviewResult,
-    finding_id: &str,
-) -> Result<Option<String>> {
-    let decisions = store
-        .gate_decisions_for_review(&review.review_id)
-        .map_err(anyhow::Error::msg)?;
-    Ok(std::iter::once(&review.gate)
-        .chain(decisions.iter())
-        .filter(|decision| decision.snapshot_id == review.snapshot_id)
-        .filter_map(|decision| decision.replay_inputs.as_ref())
-        .flat_map(|inputs| &inputs.analyzer_reports)
-        .flat_map(|report| &report.findings)
-        .find(|finding| finding.id == finding_id)
-        .map(|finding| finding.fingerprint.clone()))
-}
-
-fn print_analyzer_report(report: &vee_core::AnalyzerReport) {
-    println!(
-        "Analyzer run {} ({})  Snapshot: {}",
-        report.run_id, report.profile_id, report.snapshot_id
-    );
-    if !report.tools.is_empty() {
-        println!("Tools: {}", report.tools.join(", "));
-    }
-    if let Some(problem) = &report.problem {
-        println!("Not evaluable: {problem}");
-    }
-    println!(
-        "Results: {} total, {} on changed lines, {} elsewhere (pre-existing, never blocking), {} suppressed by the tool",
-        report.results_total,
-        report.findings.len(),
-        report.results_outside_changes,
-        report.results_suppressed
-    );
-    for finding in &report.findings {
-        println!(
-            "  {} [{:?}] {}:{} {}: {}",
-            finding.id, finding.level, finding.path, finding.line, finding.rule_id, finding.message
-        );
-    }
-    for limitation in &report.limitations {
-        println!("Limitation: {limitation}");
-    }
-}
-
 fn run_packs(command: PacksCommand) -> Result<u8> {
     match command {
         PacksCommand::Export {
@@ -2759,7 +1588,7 @@ fn run_packs(command: PacksCommand) -> Result<u8> {
             )?;
             match output {
                 Output::Json => emit_json(&summary)?,
-                Output::Text => print_pack_summary("Exported", &summary),
+                Output::Text => print_view(&summary)?,
             }
             Ok(0)
         }
@@ -2777,7 +1606,7 @@ fn run_packs(command: PacksCommand) -> Result<u8> {
             )?;
             match output {
                 Output::Json => emit_json(&summary)?,
-                Output::Text => print_pack_summary("Pinned", &summary),
+                Output::Text => print_view(&summary)?,
             }
             Ok(0)
         }
@@ -2785,24 +1614,7 @@ fn run_packs(command: PacksCommand) -> Result<u8> {
             let list = packs::list(&operations::Workspace::discover(crate::local_stores())?)?;
             match output {
                 Output::Json => emit_json(&list)?,
-                Output::Text => {
-                    if list.packs.is_empty() {
-                        println!("No packs are pinned in .vee.yaml.");
-                    }
-                    for pack in &list.packs {
-                        println!(
-                            "{} {}  {}  [{}]  provider: {}",
-                            pack.name.as_deref().unwrap_or("?"),
-                            pack.version.as_deref().unwrap_or("?"),
-                            pack.path,
-                            pack.status,
-                            pack.provider
-                        );
-                        if let Some(problem) = &pack.problem {
-                            println!("  {problem}");
-                        }
-                    }
-                }
+                Output::Text => print_view(&list)?,
             }
             Ok(if list.packs.iter().all(|pack| pack.status == "ok") {
                 0
@@ -2817,43 +1629,6 @@ fn run_packs(command: PacksCommand) -> Result<u8> {
             );
             Ok(0)
         }
-    }
-}
-
-fn print_pack_summary(action: &str, summary: &packs::PackSummary) {
-    println!(
-        "{action} pack {} {} at {}",
-        summary.name, summary.version, summary.path
-    );
-    println!("Digest: {}", summary.digest);
-    println!(
-        "Reviewers: {}",
-        if summary.reviewers.is_empty() {
-            "none".into()
-        } else {
-            summary.reviewers.join(", ")
-        }
-    );
-    if !summary.verification_profiles.is_empty() {
-        println!(
-            "Verification profiles: {}",
-            summary.verification_profiles.join(", ")
-        );
-    }
-    if !summary.policy_profiles.is_empty() {
-        println!("Policy profiles: {}", summary.policy_profiles.join(", "));
-    }
-    println!(
-        "Policy: {}  Approved rules: {}",
-        if summary.includes_policy {
-            "included"
-        } else {
-            "not included"
-        },
-        summary.rules
-    );
-    for warning in &summary.warnings {
-        println!("Warning: {warning}");
     }
 }
 
@@ -2969,14 +1744,6 @@ fn json_output_requested(args: &[std::ffi::OsString]) -> bool {
         .any(|triple| matches!(triple, ["reviews", "imported", "show"]))
 }
 
-/// Name each reviewer whose provider did not return valid findings, so an
-/// incomplete gate says which reviewer to rerun.
-fn print_unsuccessful_reviewers(outcomes: &[vee_application::ReviewerOutcome]) {
-    for outcome in outcomes.iter().filter(|outcome| !outcome.succeeded()) {
-        println!("Reviewer {}: {}", outcome.reviewer_id, outcome.status);
-    }
-}
-
 fn write_markdown_report(path: &std::path::Path, contents: &[u8]) -> Result<()> {
     if let Ok(metadata) = std::fs::symlink_metadata(path) {
         anyhow::ensure!(
@@ -3016,6 +1783,7 @@ fn run() -> Result<u8> {
         }
         Err(error) => return Err(anyhow::Error::new(error)),
     };
+    set_color(cli.color);
     match cli.command {
         Command::Init {
             provider,
@@ -3026,25 +1794,7 @@ fn run() -> Result<u8> {
             let report = operations::init(&workspace, provider.as_deref(), model.as_deref())?;
             match output {
                 Output::Json => emit_json(&report)?,
-                Output::Text => {
-                    if report.repository_config_status == "written" {
-                        println!("Created {}", report.repository_config);
-                    }
-                    if report.reviewer_instructions_created {
-                        println!("Created {}", report.reviewer_instructions);
-                    }
-                    match (report.provider_status, report.candidate_id) {
-                        ("written", Some(candidate)) => println!(
-                            "Configured provider `{}` ({candidate}, {} egress) in {}",
-                            report.provider_id, report.egress, report.user_config
-                        ),
-                        _ => println!(
-                            "Using existing provider `{}` from {}",
-                            report.provider_id, report.user_config
-                        ),
-                    }
-                    println!("Next: run `vee doctor`, then `vee review`.");
-                }
+                Output::Text => print_view(&report)?,
             }
             Ok(0)
         }
@@ -3053,7 +1803,7 @@ fn run() -> Result<u8> {
             let report = operations::doctor(&workspace)?;
             match output {
                 Output::Json => emit_json(&report)?,
-                Output::Text => print_doctor_report(&report),
+                Output::Text => print_view(&report)?,
             }
             Ok(if report.ready { 0 } else { 2 })
         }
@@ -3063,7 +1813,7 @@ fn run() -> Result<u8> {
             let report = operations::detect_providers();
             match output {
                 Output::Json => emit_json(&report)?,
-                Output::Text => print_detection(&report),
+                Output::Text => print_view(&report)?,
             }
             Ok(0)
         }
@@ -3150,40 +1900,7 @@ fn run() -> Result<u8> {
             )?;
             match output {
                 Output::Json => emit_json(&report)?,
-                Output::Text => {
-                    println!(
-                        "Applicable standards{}:",
-                        report
-                            .target_path
-                            .as_ref()
-                            .map(|path| format!(" for {path}"))
-                            .unwrap_or_default()
-                    );
-                    for source in &report.sources {
-                        println!(
-                            "- {} [{}; precedence {}; {}; {}; integrity: {}]",
-                            source.path,
-                            source.kind,
-                            source.precedence,
-                            source.scope,
-                            if source.truncated {
-                                "truncated"
-                            } else {
-                                "complete"
-                            },
-                            source.integrity
-                        );
-                    }
-                    if report.sources.is_empty() {
-                        println!("(none found)");
-                    }
-                    for conflict in &report.potential_conflicts {
-                        println!("Potential conflict: {conflict}");
-                    }
-                    for limitation in &report.limitations {
-                        println!("Limitation: {limitation}");
-                    }
-                }
+                Output::Text => print_view(&report)?,
             }
             Ok(0)
         }
@@ -3194,33 +1911,7 @@ fn run() -> Result<u8> {
             )?;
             match output {
                 Output::Json => println!("{}", serde_json::to_string(&report)?),
-                Output::Text => {
-                    if let Some(path) = &report.codeowners_path {
-                        println!(
-                            "Ownership rules: {path} ({})",
-                            report.codeowners_digest.as_deref().unwrap_or("no digest")
-                        );
-                    } else {
-                        println!("Ownership rules: none found");
-                    }
-                    for result in &report.results {
-                        if result.owners.is_empty() {
-                            println!("{}: {}", result.path, result.status);
-                        } else {
-                            println!(
-                                "{}: {} ({}) via {}:{}",
-                                result.path,
-                                result.owners.join(", "),
-                                result.status,
-                                result.matching_pattern.as_deref().unwrap_or("?"),
-                                result.matching_rule_line.unwrap_or_default()
-                            );
-                        }
-                    }
-                    for limitation in &report.limitations {
-                        println!("Limitation: {limitation}");
-                    }
-                }
+                Output::Text => print_view(&report)?,
             }
             Ok(0)
         }
@@ -3231,23 +1922,7 @@ fn run() -> Result<u8> {
                 )?)?;
                 match output {
                     Output::Json => emit_json(&report)?,
-                    Output::Text => {
-                        if report.candidates.is_empty() {
-                            println!("No repeated feedback patterns qualify as rule candidates.");
-                        }
-                        for candidate in &report.candidates {
-                            println!(
-                                "{}  {} distinct sources  {} ({}, {})",
-                                candidate.candidate_id,
-                                candidate.feedback_count,
-                                candidate.category,
-                                feedback_label_text(candidate.feedback_label),
-                                candidate.source_kind
-                            );
-                            println!("  {}", candidate.suggestion);
-                        }
-                        println!("Suggestions require human review and are not active policy.");
-                    }
+                    Output::Text => print_view(&report)?,
                 }
                 Ok(0)
             }
@@ -3275,7 +1950,10 @@ fn run() -> Result<u8> {
                         expires_in_days,
                     },
                 )?;
-                match output { Output::Json => emit_json(&result)?, Output::Text => println!("Approved {} ({}) for scope {}. Guidance is recorded and does not alter gate policy.", result.approval_id, result.candidate_id, result.scope) }
+                match output {
+                    Output::Json => emit_json(&result)?,
+                    Output::Text => print_view(&result)?,
+                }
                 Ok(0)
             }
             RulesCommand::List { output } => {
@@ -3284,20 +1962,7 @@ fn run() -> Result<u8> {
                 )?)?;
                 match output {
                     Output::Json => emit_json(&approvals)?,
-                    Output::Text => {
-                        if approvals.is_empty() {
-                            println!("No rule guidance approvals.");
-                        }
-                        for approval in approvals {
-                            println!(
-                                "{}  {}  {}  {}",
-                                approval.approval_id,
-                                approval.status.as_str(),
-                                approval.category,
-                                approval.scope
-                            );
-                        }
-                    }
+                    Output::Text => print_view(&approvals)?,
                 }
                 Ok(0)
             }
@@ -3315,9 +1980,7 @@ fn run() -> Result<u8> {
                 )?;
                 match output {
                     Output::Json => emit_json(&result)?,
-                    Output::Text => {
-                        println!("Revoked {}. Audit history retained.", result.approval_id)
-                    }
+                    Output::Text => print_view(&result)?,
                 }
                 Ok(0)
             }
@@ -3331,31 +1994,7 @@ fn run() -> Result<u8> {
                 )?;
                 match output {
                     Output::Json => emit_json(&report)?,
-                    Output::Text => {
-                        if report.approvals.is_empty() {
-                            println!("No rule approvals to evaluate.");
-                        }
-                        for item in &report.approvals {
-                            println!(
-                                "{} v{}  baseline accuracy n={} / later accuracy n={}",
-                                item.approval_id,
-                                item.version,
-                                item.baseline.accuracy_denominator,
-                                item.after_activation.accuracy_denominator
-                            );
-                            println!(
-                                "  observed false-positive rate: {:?} -> {:?}",
-                                item.baseline.false_positive_rate,
-                                item.after_activation.false_positive_rate
-                            );
-                            println!(
-                                "  observed not-actionable rate: {:?} -> {:?}",
-                                item.baseline.not_actionable_rate,
-                                item.after_activation.not_actionable_rate
-                            );
-                        }
-                        println!("Observational comparison only; it does not establish that guidance caused an outcome.");
-                    }
+                    Output::Text => print_view(&report)?,
                 }
                 Ok(0)
             }
@@ -3416,38 +2055,6 @@ fn run() -> Result<u8> {
         } => {
             let workspace = operations::Workspace::discover(crate::local_stores())?;
             let scope = operations::ScopeRequest::from_flags(base, commit, staged, working_tree)?;
-            let config = workspace.effective_config(policy_profile.as_deref())?;
-            let hosting_provider = resolve_hosting_setting(
-                hosting_provider,
-                config.hosting.provider.clone(),
-                "github",
-            );
-            let hosting_host =
-                resolve_hosting_setting(hosting_host, config.hosting.host.clone(), "github.com");
-            let hosting_api_base =
-                resolve_hosting_setting(hosting_api_base, config.hosting.api_base.clone(), "");
-            let hosting_token_env = resolve_hosting_setting(
-                hosting_token_env,
-                config.hosting.token_env.clone(),
-                "GH_TOKEN",
-            );
-            if work_item.is_some() && config.offline {
-                return Err(configuration_failure(
-                    "offline mode prevents fetching work item context",
-                ));
-            }
-            let work_item = work_item
-                .as_deref()
-                .map(|spec| {
-                    fetch_work_item(
-                        &hosting_provider,
-                        spec,
-                        &hosting_host,
-                        &hosting_api_base,
-                        effective_work_item_token_env(&hosting_provider, &hosting_token_env),
-                    )
-                })
-                .transpose()?;
             let out = operations::review(
                 &workspace,
                 operations::ReviewRequest {
@@ -3455,16 +2062,18 @@ fn run() -> Result<u8> {
                     reviewer_ids: (!reviewer_ids.is_empty()).then_some(reviewer_ids.as_slice()),
                     policy_profile: policy_profile.as_deref(),
                     effort: effort.map(Into::into),
-                    work_item,
-                    work_item_token_env: Some(
-                        effective_work_item_token_env(&hosting_provider, &hosting_token_env)
-                            .to_owned(),
-                    ),
+                    work_item: work_item.as_deref(),
+                    hosting: vee_application::work_items::HostingOverrides {
+                        provider: hosting_provider,
+                        host: hosting_host,
+                        api_base: hosting_api_base,
+                        token_env: hosting_token_env,
+                    },
                 },
                 None,
             )?;
             if let Some(path) = markdown {
-                let report = vee_application::render_review_markdown(&out);
+                let report = vee_present::markdown::render(&vee_present::review_report(&out));
                 write_markdown_report(&path, report.as_bytes())?;
             }
             match output {
@@ -3477,18 +2086,7 @@ fn run() -> Result<u8> {
                         eprintln!("Not reviewed: {}", out.unreviewed_paths.join(", "));
                     }
                 }
-                Output::Text => {
-                    println!("Review snapshot: {}", out.snapshot_id);
-                    println!("Status: {}", out.status);
-                    for reason in &out.reasons {
-                        println!("- {reason}");
-                    }
-                    print_unsuccessful_reviewers(&out.reviewer_outcomes);
-                    if !out.unreviewed_paths.is_empty() {
-                        println!("Not reviewed: {}", out.unreviewed_paths.join(", "));
-                        println!("  No reviewer's include rules matched these changed files; add or widen a reviewer, or set policy.on_unreviewed: allow.");
-                    }
-                }
+                Output::Text => print_view(&out)?,
             }
             std::io::stdout().flush()?;
             Ok(if gate {
@@ -3514,24 +2112,7 @@ fn run() -> Result<u8> {
             let impact = operations::impact(&workspace, target)?;
             match output {
                 Output::Json => emit_json(&impact)?,
-                Output::Text => {
-                    println!("Impact for snapshot: {}", impact.snapshot_id);
-                    println!("Changed paths: {}", impact.changed_paths.len());
-                    println!("Changed symbols: {}", impact.changed_symbols.join(", "));
-                    for edge in &impact.paths {
-                        println!(
-                            "{}:{} -> {} via {} ({})",
-                            edge.affected_path,
-                            edge.evidence_line,
-                            edge.source_path,
-                            edge.symbol,
-                            edge.certainty
-                        );
-                    }
-                    for limitation in &impact.limitations {
-                        println!("Limitation: {limitation}");
-                    }
-                }
+                Output::Text => print_view(&impact)?,
             }
             Ok(0)
         }
@@ -3543,56 +2124,14 @@ fn run() -> Result<u8> {
                 profile,
                 output,
             } => {
-                let cwd = std::env::current_dir()?;
-                let root = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-                let mut config = load_repository_config(&root)?;
-                apply_protected_policy(&root, &mut config)?;
-                let scope = if staged {
-                    vee_git::ChangeScope::Staged
-                } else if working_tree {
-                    vee_git::ChangeScope::WorkingTree
-                } else {
-                    vee_git::ChangeScope::BaseAndWorktree {
-                        base_oid: base
-                            .as_deref()
-                            .map(|base_ref| vee_git::merge_base(&root, base_ref))
-                            .transpose()
-                            .map_err(usage_failure)?,
-                    }
-                };
-                let snapshot = vee_application::capture_change_set(&root, scope)
-                    .map_err(anyhow::Error::msg)?;
-                let plan = vee_application::plan_impacted_test_verification(
-                    &root, &snapshot, &profile, &config,
-                )
-                .map_err(anyhow::Error::msg)?;
+                let plan = test_proposals::plan(
+                    &operations::Workspace::discover(crate::local_stores())?,
+                    operations::ScopeRequest::from_flags(base, None, staged, working_tree)?,
+                    &profile,
+                )?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &plan)?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!("Verification plan for snapshot: {}", plan.snapshot_id);
-                        println!(
-                            "Profile: {} ({}); no commands were executed",
-                            plan.profile_id, plan.executable
-                        );
-                        for (index, args) in plan.invocations.iter().enumerate() {
-                            println!(
-                                "{}: {} {}",
-                                index + 1,
-                                plan.executable,
-                                args.iter()
-                                    .map(|arg| format!("{:?}", arg))
-                                    .collect::<Vec<_>>()
-                                    .join(" ")
-                            );
-                        }
-                        println!("Targets: {}", plan.targets.join(", "));
-                        for limitation in &plan.limitations {
-                            println!("Limitation: {limitation}");
-                        }
-                    }
+                    Output::Json => emit_json(&plan)?,
+                    Output::Text => print_view(&plan)?,
                 }
                 Ok(0)
             }
@@ -3616,22 +2155,7 @@ fn run() -> Result<u8> {
                         serde_json::to_writer(std::io::stdout().lock(), &report)?;
                         println!();
                     }
-                    Output::Text => {
-                        println!("Test recommendations for snapshot: {}", report.snapshot_id);
-                        println!("Impact coverage complete: {}", report.coverage_complete);
-                        if report.recommendations.is_empty() {
-                            println!(
-                                "No changed Go/Rust source file lacks a likely test reference."
-                            );
-                        }
-                        for recommendation in &report.recommendations {
-                            println!("{}: {}", recommendation.changed_path, recommendation.action);
-                            println!("  {}", recommendation.rationale);
-                        }
-                        for limitation in &report.limitations {
-                            println!("Limitation: {limitation}");
-                        }
-                    }
+                    Output::Text => print_view(&report)?,
                 }
                 Ok(0)
             }
@@ -3643,134 +2167,15 @@ fn run() -> Result<u8> {
                 reviewer,
                 output,
             } => {
-                let cwd = std::env::current_dir()?;
-                let root = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-                let scope = if let Some(oid) = commit {
-                    vee_git::commit_scope(&oid).map_err(usage_failure)?
-                } else if staged {
-                    vee_git::ChangeScope::Staged
-                } else if working_tree {
-                    vee_git::ChangeScope::WorkingTree
-                } else {
-                    vee_git::ChangeScope::BaseAndWorktree {
-                        base_oid: base
-                            .as_deref()
-                            .map(|base_ref| vee_git::merge_base(&root, base_ref))
-                            .transpose()
-                            .map_err(usage_failure)?,
-                    }
-                };
-                let change_set = vee_application::capture_change_set(&root, scope)
-                    .map_err(anyhow::Error::msg)?;
-                anyhow::ensure!(
-                    !change_set.files.is_empty(),
-                    "test generation requires a non-empty change snapshot"
-                );
-                let mut config = load_repository_config(&root)?;
-                apply_protected_policy(&root, &mut config)?;
-                let impact = vee_application::analyze_impact(&root, &change_set)
-                    .map_err(anyhow::Error::msg)?;
-                let context = test_generation::context(
-                    &root,
-                    &change_set,
-                    &impact,
-                    config.review.max_context_files,
-                    config.review.max_context_file_bytes,
-                    config.review.max_context_bytes,
-                    config.test_generation.max_context_tokens,
+                let proposal = test_proposals::generate(
+                    &operations::Workspace::discover(crate::local_stores())?,
+                    operations::ScopeRequest::from_flags(base, commit, staged, working_tree)?,
+                    &reviewer,
                 )?;
-                anyhow::ensure!(
-                    context["context_budget"]["within_budget"] == true,
-                    "test-generation context estimate {} exceeds budget {}; raise test_generation.max_context_tokens or reduce the change scope",
-                    context["context_budget"]["estimated_prompt_tokens"],
-                    context["context_budget"]["max_context_tokens"]
-                );
-                let context_summary = test_generation::context_summary(&context)?;
-                let report = vee_application::run_provider_task(
-                    vee_application::ProviderTaskRequest {
-                        root: &root,
-                        snapshot_id: &change_set.digest,
-                        config: &config,
-                        reviewer_id: &reviewer,
-                        task_instructions: test_generation::INSTRUCTIONS,
-                        context,
-                        output_schema: test_generation::output_schema(),
-                    },
-                    &vee_application::CliReviewProvider,
-                )
-                .map_err(anyhow::Error::msg)?;
-                let snapshot_still_current =
-                    vee_application::capture_current_change_set(&root, &change_set)
-                        .map(|current| current.digest == change_set.digest)
-                        .unwrap_or(false);
-                anyhow::ensure!(
-                    snapshot_still_current,
-                    "change snapshot became stale during test generation; rerun against current changes"
-                );
-                let patch_text =
-                    test_generation::extract_patch(report.output["patch"].as_str().unwrap_or(""));
-                anyhow::ensure!(
-                    !patch_text.trim().is_empty(),
-                    "provider returned an empty test patch"
-                );
-                anyhow::ensure!(
-                    patch_text.len() <= 2 * 1024 * 1024,
-                    "generated patch exceeds 2 MiB"
-                );
-                let temp = tempfile::NamedTempFile::new()?;
-                std::fs::write(temp.path(), patch_text.as_bytes())?;
-                let sandbox_result =
-                    patch_sandbox::validate(&root, temp.path()).map_err(anyhow::Error::msg)?;
-                anyhow::ensure!(
-                    !sandbox_result.result_files.is_empty()
-                        && sandbox_result
-                            .result_files
-                            .iter()
-                            .all(|file| test_generation::is_test_path(&file.path)),
-                    "generated patch touches paths outside recognized test files"
-                );
-                let patch_digest = vee_core::digest(patch_text.as_bytes());
-                let proposal_id = test_proposal_id(&change_set.digest, &patch_digest)?;
-                let proposal_dir = proposal_directory(&root)?;
-                let patch_path = proposal_dir.join(format!("test-{}.patch", &proposal_id[7..]));
-                let metadata_path = proposal_dir.join(format!("test-{}.json", &proposal_id[7..]));
-                write_new_proposal_file(&patch_path, patch_text.as_bytes())?;
-                let proposal = serde_json::json!({
-                    "schema_version": 2,
-                    "proposal_id": proposal_id,
-                    "snapshot_id": report.snapshot_id,
-                    "source_scope": change_set.scope,
-                    "base_oid": change_set.base_oid,
-                    "reviewer_id": report.reviewer_id,
-                    "provider_id": report.provider_id,
-                    "provider_kind": report.provider_kind,
-                    "model": report.model,
-                    "provider_output_digest": report.output_digest,
-                    "context_summary": context_summary,
-                    "patch_digest": patch_digest,
-                    "patch_path": patch_path,
-                    "validated_in_isolated_sandbox": true,
-                    "sandbox_input_digest": patch_sandbox::input_digest(&sandbox_result.input_files).map_err(anyhow::Error::msg)?,
-                    "sandbox_result_digest": sandbox_result.result_digest,
-                    "application": "not_applied",
-                    "tests_executed": false,
-                    "verification_runs": [],
-                    "approval_instruction": format!("Inspect the generated diff, then run `vee tests apply {proposal_id} --approve {proposal_id}`. Vee has not modified the worktree or run repository tests.")
-                });
-                write_new_proposal_file(&metadata_path, &serde_json::to_vec_pretty(&proposal)?)?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &proposal)?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!("Generated test proposal: {proposal_id}");
-                        println!("Patch digest: {patch_digest}");
-                        println!("Snapshot: {}", report.snapshot_id);
-                        println!("Validated in isolated sandbox: yes");
-                        println!("Saved: {}", patch_path.display());
-                        println!("Not applied; tests were not run.");
-                    }
+                    // Through a Value, as before: keys stay sorted, as the saved record has them.
+                    Output::Json => emit_json(&serde_json::to_value(&proposal)?)?,
+                    Output::Text => print_view(&proposal)?,
                 }
                 Ok(0)
             }
@@ -3780,193 +2185,16 @@ fn run() -> Result<u8> {
                 reviewer,
                 output,
             } => {
-                if !is_sha256_digest(&proposal_id) {
-                    return Err(usage_failure(
-                        "test proposal ID must be a full sha256:<hex> digest",
-                    ));
-                }
-                let cwd = std::env::current_dir()?;
-                let root = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-                let proposal_dir = proposal_directory(&root)?;
-                let record_path = proposal_dir.join(format!("test-{}.json", &proposal_id[7..]));
-                let parent: serde_json::Value = serde_json::from_slice(
-                    &read_proposal_file(&record_path, 2 * 1024 * 1024)
-                        .with_context(|| format!("test proposal {proposal_id} was not found"))?,
-                )?;
-                anyhow::ensure!(
-                    parent["schema_version"] == 2,
-                    "unsupported test proposal schema"
-                );
-                anyhow::ensure!(
-                    parent["proposal_id"].as_str() == Some(proposal_id.as_str()),
-                    "test proposal ID does not match its record"
-                );
-                anyhow::ensure!(
-                    parent["application"] == "applied",
-                    "test proposal must be applied before it can be refined"
-                );
-                anyhow::ensure!(
-                    parent["approval_digest"].as_str() == Some(proposal_id.as_str()),
-                    "test proposal has no matching explicit approval record"
-                );
-                anyhow::ensure!(
-                    parent["concurrent_mutation_detected"] == false,
-                    "proposal application had concurrent mutations"
-                );
-                let linked_run = parent["verification_runs"]
-                    .as_array()
-                    .context("proposal has no verification run history")?
-                    .iter()
-                    .any(|entry| entry["run_id"].as_str() == Some(run.as_str()));
-                anyhow::ensure!(
-                    linked_run,
-                    "verification run is not linked to this test proposal"
-                );
-
-                let db_dir = root.join(".vee");
-                let store =
-                    ReviewStore::open(&db_dir.join("vee.sqlite")).map_err(anyhow::Error::msg)?;
-                let verification = store
-                    .verification(&run)
-                    .map_err(anyhow::Error::msg)?
-                    .with_context(|| format!("verification run {run} was not found"))?;
-                anyhow::ensure!(
-                    verification.status == vee_core::VerificationStatus::Failed,
-                    "only failed verification runs can guide refinement"
-                );
-                anyhow::ensure!(
-                    Some(verification.snapshot_id.as_str())
-                        == parent["post_application_snapshot_id"].as_str(),
-                    "failed verification run is not from this proposal's applied snapshot"
-                );
-                let scope = parent["source_scope"]
-                    .as_str()
-                    .context("proposal has no source scope")?;
-                anyhow::ensure!(
-                    !matches!(scope, "commit" | "commit_range"),
-                    "immutable commit proposals cannot be refined for application"
-                );
-                let base_oid = parent["base_oid"].as_str();
-                let root_string = root.to_string_lossy().to_string();
-                let current = current_change_set(&root_string, base_oid, scope)?;
-                anyhow::ensure!(current.digest == verification.snapshot_id, "worktree changed after the failed verification; capture a new review before refining");
-                let diagnosis = verification_diagnosis::diagnose(&root, &store, &verification)
-                    .map_err(anyhow::Error::msg)?;
-                let parent_patch_path =
-                    proposal_dir.join(format!("test-{}.patch", &proposal_id[7..]));
-                let parent_patch = read_proposal_file(&parent_patch_path, 2 * 1024 * 1024)?;
-                anyhow::ensure!(
-                    vee_core::digest(&parent_patch)
-                        == parent["patch_digest"].as_str().unwrap_or_default(),
-                    "parent test patch content has changed"
-                );
-                let parent_patch =
-                    std::str::from_utf8(&parent_patch).context("parent test patch is not UTF-8")?;
-
-                let mut config = load_repository_config(&root)?;
-                apply_protected_policy(&root, &mut config)?;
-                let impact =
-                    vee_application::analyze_impact(&root, &current).map_err(anyhow::Error::msg)?;
-                let context = test_generation::context(
-                    &root,
-                    &current,
-                    &impact,
-                    config.review.max_context_files,
-                    config.review.max_context_file_bytes,
-                    config.review.max_context_bytes,
-                    config.test_generation.max_context_tokens,
-                )?;
-                anyhow::ensure!(
-                    context["context_budget"]["within_budget"] == true,
-                    "test-generation context estimate {} exceeds budget {}; raise test_generation.max_context_tokens or reduce the change scope",
-                    context["context_budget"]["estimated_prompt_tokens"],
-                    context["context_budget"]["max_context_tokens"]
-                );
-                let context = test_generation::refinement_context(
-                    context,
-                    parent_patch,
-                    &diagnosis,
+                let proposal = test_proposals::refine(
+                    &operations::Workspace::discover(crate::local_stores())?,
                     &proposal_id,
                     &run,
-                );
-                let context_summary = test_generation::context_summary(&context)?;
-                let report = vee_application::run_provider_task(
-                    vee_application::ProviderTaskRequest {
-                        root: &root,
-                        snapshot_id: &current.digest,
-                        config: &config,
-                        reviewer_id: &reviewer,
-                        task_instructions: test_generation::REFINEMENT_INSTRUCTIONS,
-                        context,
-                        output_schema: test_generation::output_schema(),
-                    },
-                    &vee_application::CliReviewProvider,
-                )
-                .map_err(anyhow::Error::msg)?;
-                anyhow::ensure!(vee_application::capture_current_change_set(&root, &current)
-                    .map(|captured| captured.digest == current.digest).unwrap_or(false), "change snapshot became stale during test refinement; rerun against current changes");
-                let patch_text =
-                    test_generation::extract_patch(report.output["patch"].as_str().unwrap_or(""));
-                anyhow::ensure!(
-                    !patch_text.trim().is_empty() && patch_text.len() <= 2 * 1024 * 1024,
-                    "provider returned an empty or oversized test patch"
-                );
-                let temp = tempfile::NamedTempFile::new()?;
-                std::fs::write(temp.path(), patch_text.as_bytes())?;
-                let sandbox_result =
-                    patch_sandbox::validate(&root, temp.path()).map_err(anyhow::Error::msg)?;
-                anyhow::ensure!(
-                    !sandbox_result.result_files.is_empty()
-                        && sandbox_result
-                            .result_files
-                            .iter()
-                            .all(|file| test_generation::is_test_path(&file.path)),
-                    "refined patch touches paths outside recognized test files"
-                );
-                let patch_digest = vee_core::digest(patch_text.as_bytes());
-                let refined_id = test_proposal_id(&current.digest, &patch_digest)?;
-                let patch_path = proposal_dir.join(format!("test-{}.patch", &refined_id[7..]));
-                let metadata_path = proposal_dir.join(format!("test-{}.json", &refined_id[7..]));
-                write_new_proposal_file(&patch_path, patch_text.as_bytes())?;
-                let attempt = parent["refinement"]["attempt"].as_u64().unwrap_or(0) + 1;
-                let proposal = serde_json::json!({
-                    "schema_version": 2,
-                    "proposal_id": refined_id,
-                    "snapshot_id": report.snapshot_id,
-                    "source_scope": current.scope,
-                    "base_oid": current.base_oid,
-                    "reviewer_id": report.reviewer_id,
-                    "provider_id": report.provider_id,
-                    "provider_kind": report.provider_kind,
-                    "model": report.model,
-                    "provider_output_digest": report.output_digest,
-                    "context_summary": context_summary,
-                    "patch_digest": patch_digest,
-                    "patch_path": patch_path,
-                    "validated_in_isolated_sandbox": true,
-                    "sandbox_input_digest": patch_sandbox::input_digest(&sandbox_result.input_files).map_err(anyhow::Error::msg)?,
-                    "sandbox_result_digest": sandbox_result.result_digest,
-                    "application": "not_applied",
-                    "tests_executed": false,
-                    "verification_runs": [],
-                    "refinement": {"parent_proposal_id": proposal_id, "failed_run_id": run, "attempt": attempt},
-                    "approval_instruction": format!("Inspect the refined diff, then run `vee tests apply {refined_id} --approve {refined_id}`. This is a new proposal; Vee has not applied it or run tests.")
-                });
-                write_new_proposal_file(&metadata_path, &serde_json::to_vec_pretty(&proposal)?)?;
+                    &reviewer,
+                )?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &proposal)?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!("Generated refined test proposal: {refined_id}");
-                        println!("Based on failed verification: {run}");
-                        println!("Patch digest: {patch_digest}");
-                        println!("Validated in isolated sandbox: yes");
-                        println!(
-                            "Not applied; inspect and explicitly approve before running tests."
-                        );
-                    }
+                    // Through a Value, as before: keys stay sorted, as the saved record has them.
+                    Output::Json => emit_json(&serde_json::to_value(&proposal)?)?,
+                    Output::Text => print_view(&proposal)?,
                 }
                 Ok(0)
             }
@@ -3976,89 +2204,21 @@ fn run() -> Result<u8> {
                 mutant_patch,
                 output,
             } => {
-                let prepared = prepare_effectiveness(&proposal_id, &profile)?;
-                let root_canonical = vee_core::paths::canonicalize(&prepared.root)?;
-                let patch_canonical = vee_core::paths::canonicalize(&mutant_patch)?;
-                anyhow::ensure!(!patch_canonical.starts_with(&root_canonical), "mutant patch must be outside the repository so it cannot change the reviewed snapshot");
-                let mutant_meta = std::fs::symlink_metadata(&patch_canonical)?;
-                anyhow::ensure!(
-                    mutant_meta.file_type().is_file() && mutant_meta.len() <= 2 * 1024 * 1024,
-                    "mutant patch must be a regular file no larger than 2 MiB"
-                );
-                let mutant_bytes = std::fs::read(&patch_canonical)?;
-                let mut assessment = test_effectiveness::assess(
-                    &prepared.root,
-                    &prepared.snapshot,
+                let assessment = test_proposals::assess_effectiveness(
+                    &operations::Workspace::discover(crate::local_stores())?,
                     &proposal_id,
                     &profile,
-                    &prepared.baseline_run_id,
-                    &prepared.profile,
-                    &mutant_bytes,
-                )
-                .map_err(anyhow::Error::msg)?;
-                let (coverage_report, coverage_limitation) = effectiveness_coverage(
-                    &prepared.root,
-                    &prepared.baseline_run_id,
-                    &prepared.snapshot,
-                );
-                test_effectiveness::attach_coverage(&mut assessment, coverage_report.as_ref());
-                if !coverage_limitation.is_empty() {
-                    assessment.limitations.push(coverage_limitation);
-                }
-                let effectiveness_dir = prepared.root.join(".vee/effectiveness");
-                std::fs::create_dir_all(&effectiveness_dir)?;
-                anyhow::ensure!(
-                    std::fs::symlink_metadata(&effectiveness_dir)?
-                        .file_type()
-                        .is_dir(),
-                    "effectiveness artifact directory must be a real directory"
-                );
-                let assessment_bytes = serde_json::to_vec_pretty(&assessment)?;
-                let assessment_digest = vee_core::digest(&assessment_bytes);
-                let assessment_path =
-                    effectiveness_dir.join(format!("assessment-{}.json", &assessment_digest[7..]));
-                match std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&assessment_path)
-                {
-                    Ok(mut file) => file.write_all(&assessment_bytes)?,
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                        anyhow::ensure!(
-                            read_proposal_file(&assessment_path, 2 * 1024 * 1024)?
-                                == assessment_bytes,
-                            "existing effectiveness artifact has different content"
-                        );
-                    }
-                    Err(error) => return Err(error.into()),
-                }
+                    &mutant_patch,
+                )?;
                 match output {
                     Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &assessment)?;
-                        println!();
+                        emit_json(&assessment.report)?;
                         eprintln!(
-                            "Effectiveness artifact: {} ({assessment_digest})",
-                            assessment_path.display()
+                            "Effectiveness artifact: {} ({})",
+                            assessment.artifact_path, assessment.artifact_digest
                         );
                     }
-                    Output::Text => {
-                        println!("Mutation outcome: {}", assessment.outcome);
-                        println!(
-                            "Baseline: {}; mutant: {}",
-                            assessment.baseline_status, assessment.mutated_status
-                        );
-                        println!(
-                            "Profile: {}; snapshot: {}",
-                            assessment.profile_id, assessment.snapshot_id
-                        );
-                        println!(
-                            "Persisted: {} ({assessment_digest})",
-                            assessment_path.display()
-                        );
-                        for limitation in &assessment.limitations {
-                            println!("Limitation: {limitation}");
-                        }
-                    }
+                    Output::Text => print_view(&assessment)?,
                 }
                 Ok(0)
             }
@@ -4068,86 +2228,21 @@ fn run() -> Result<u8> {
                 manifest,
                 output,
             } => {
-                let prepared = prepare_effectiveness(&proposal_id, &profile)?;
-                let mut assessment = test_effectiveness::assess_corpus(
-                    &prepared.root,
-                    &prepared.snapshot,
+                let assessment = test_proposals::assess_effectiveness_corpus(
+                    &operations::Workspace::discover(crate::local_stores())?,
                     &proposal_id,
                     &profile,
-                    &prepared.baseline_run_id,
-                    &prepared.profile,
                     &manifest,
-                )
-                .map_err(anyhow::Error::msg)?;
-                let (coverage_report, coverage_limitation) = effectiveness_coverage(
-                    &prepared.root,
-                    &prepared.baseline_run_id,
-                    &prepared.snapshot,
-                );
-                test_effectiveness::attach_corpus_coverage(
-                    &mut assessment,
-                    coverage_report.as_ref(),
-                );
-                if !coverage_limitation.is_empty() {
-                    assessment.limitations.push(coverage_limitation);
-                }
-                let effectiveness_dir = prepared.root.join(".vee/effectiveness");
-                std::fs::create_dir_all(&effectiveness_dir)?;
-                anyhow::ensure!(
-                    std::fs::symlink_metadata(&effectiveness_dir)?
-                        .file_type()
-                        .is_dir(),
-                    "effectiveness artifact directory must be a real directory"
-                );
-                let assessment_bytes = serde_json::to_vec_pretty(&assessment)?;
-                let assessment_digest = vee_core::digest(&assessment_bytes);
-                let assessment_path =
-                    effectiveness_dir.join(format!("corpus-{}.json", &assessment_digest[7..]));
-                match std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&assessment_path)
-                {
-                    Ok(mut file) => file.write_all(&assessment_bytes)?,
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                        anyhow::ensure!(
-                            read_proposal_file(&assessment_path, 8 * 1024 * 1024)?
-                                == assessment_bytes,
-                            "existing corpus assessment artifact has different content"
-                        );
-                    }
-                    Err(error) => return Err(error.into()),
-                }
+                )?;
                 match output {
                     Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &assessment)?;
-                        println!();
+                        emit_json(&assessment.report)?;
                         eprintln!(
-                            "Effectiveness corpus artifact: {} ({assessment_digest})",
-                            assessment_path.display()
+                            "Effectiveness corpus artifact: {} ({})",
+                            assessment.artifact_path, assessment.artifact_digest
                         );
                     }
-                    Output::Text => {
-                        println!(
-                            "Mutant corpus {}: {} killed, {} survived, {} inconclusive of {}",
-                            assessment.corpus_id,
-                            assessment.killed,
-                            assessment.survived,
-                            assessment.inconclusive,
-                            assessment.sample_size
-                        );
-                        println!(
-                            "Profile: {}; snapshot: {}; corpus digest: {}",
-                            assessment.profile_id, assessment.snapshot_id, assessment.corpus_digest
-                        );
-                        println!(
-                            "Persisted: {} ({assessment_digest})",
-                            assessment_path.display()
-                        );
-                        for limitation in &assessment.limitations {
-                            println!("Limitation: {limitation}");
-                        }
-                    }
+                    Output::Text => print_view(&assessment)?,
                 }
                 Ok(0)
             }
@@ -4156,305 +2251,36 @@ fn run() -> Result<u8> {
                 approve,
                 output,
             } => {
-                if !is_sha256_digest(&proposal_id) {
-                    return Err(usage_failure(
-                        "test proposal ID must be a full sha256:<hex> digest",
-                    ));
-                }
-                if approve != proposal_id {
-                    return Err(usage_failure(
-                        "explicit approval must exactly match the generated test proposal ID",
-                    ));
-                }
-                let cwd = std::env::current_dir()?;
-                let root = vee_git::repository_root(&cwd).map_err(usage_failure)?;
-                let proposal_dir = proposal_directory(&root)?;
-                let apply_lock = acquire_proposal_apply_lock(&proposal_dir)?;
-                let record_path = proposal_dir.join(format!("test-{}.json", &proposal_id[7..]));
-                let patch_path = proposal_dir.join(format!("test-{}.patch", &proposal_id[7..]));
-                let mut proposal: serde_json::Value = serde_json::from_slice(
-                    &read_proposal_file(&record_path, 256 * 1024)
-                        .with_context(|| format!("test proposal {proposal_id} was not found"))?,
-                )?;
-                anyhow::ensure!(
-                    proposal["schema_version"] == 2,
-                    "unsupported test proposal schema"
-                );
-                anyhow::ensure!(
-                    proposal["proposal_id"].as_str() == Some(proposal_id.as_str()),
-                    "test proposal ID does not match its record"
-                );
-                anyhow::ensure!(
-                    proposal["application"].as_str() == Some("not_applied"),
-                    "test proposal was already applied or is not applicable"
-                );
-                let patch_digest = proposal["patch_digest"]
-                    .as_str()
-                    .context("test proposal has no patch digest")?;
-                anyhow::ensure!(
-                    is_sha256_digest(patch_digest),
-                    "test proposal patch digest is invalid"
-                );
-                let patch_bytes = read_proposal_file(&patch_path, 2 * 1024 * 1024)
-                    .context("saved test proposal patch is missing or invalid")?;
-                anyhow::ensure!(
-                    vee_core::digest(&patch_bytes) == patch_digest,
-                    "saved test patch content has changed"
-                );
-                let source_snapshot_id = proposal["snapshot_id"]
-                    .as_str()
-                    .context("test proposal has no source snapshot")?;
-                anyhow::ensure!(
-                    test_proposal_id(source_snapshot_id, patch_digest)? == proposal_id,
-                    "test proposal record does not match its approved content"
-                );
-                std::str::from_utf8(&patch_bytes).context("saved test patch is not UTF-8")?;
-                let scope = proposal["source_scope"]
-                    .as_str()
-                    .context("test proposal has no source scope")?;
-                anyhow::ensure!(
-                    matches!(scope, "staged" | "working_tree" | "base_and_worktree"),
-                    "test proposals from immutable commit scopes cannot be applied"
-                );
-                let base_oid = proposal["base_oid"].as_str();
-                let root_string = root.to_string_lossy().to_string();
-                let source_snapshot = current_change_set(&root_string, base_oid, scope)?;
-                anyhow::ensure!(
-                    proposal["snapshot_id"].as_str() == Some(source_snapshot.digest.as_str()),
-                    "source snapshot is stale; test patch was not applied"
-                );
-                let sandbox_result = patch_sandbox::validate_bytes(&root, &patch_bytes)
-                    .map_err(anyhow::Error::msg)?;
-                anyhow::ensure!(
-                    !sandbox_result.result_files.is_empty()
-                        && sandbox_result
-                            .result_files
-                            .iter()
-                            .all(|file| test_generation::is_test_path(&file.path)),
-                    "saved proposal no longer contains test-only paths"
-                );
-                let input_digest = patch_sandbox::input_digest(&sandbox_result.input_files)
-                    .map_err(anyhow::Error::msg)?;
-                anyhow::ensure!(
-                    proposal["sandbox_input_digest"].as_str() == Some(input_digest.as_str()),
-                    "a test patch target changed since proposal validation"
-                );
-                anyhow::ensure!(
-                    proposal["sandbox_result_digest"].as_str()
-                        == Some(sandbox_result.result_digest.as_str()),
-                    "isolated test patch result differs from the approved proposal"
-                );
-                let mut check_args = vec!["apply", "--check"];
-                if scope == "staged" {
-                    check_args.push("--index");
-                }
-                patch_sandbox::apply_bytes(&root, &check_args, &patch_bytes)
-                    .map_err(anyhow::Error::msg)?;
-                let current = current_change_set(&root_string, base_oid, scope)?;
-                anyhow::ensure!(
-                    current.digest == source_snapshot.digest,
-                    "source snapshot changed during test patch validation"
-                );
-                let final_inputs = vee_git::snapshot_files(
-                    &root,
-                    &sandbox_result
-                        .input_files
-                        .iter()
-                        .map(|file| std::path::PathBuf::from(&file.path))
-                        .collect::<Vec<_>>(),
-                )
-                .map_err(anyhow::Error::msg)?;
-                anyhow::ensure!(
-                    patch_sandbox::input_digest(&final_inputs).map_err(anyhow::Error::msg)?
-                        == input_digest,
-                    "a test patch target changed during validation"
-                );
-                let mut apply_args = vec!["apply"];
-                if scope == "staged" {
-                    apply_args.push("--index");
-                }
-                patch_sandbox::apply_bytes(&root, &apply_args, &patch_bytes)
-                    .map_err(anyhow::Error::msg)?;
-                let observed_outputs = vee_git::snapshot_files(
-                    &root,
-                    &sandbox_result
-                        .result_files
-                        .iter()
-                        .map(|file| std::path::PathBuf::from(&file.path))
-                        .collect::<Vec<_>>(),
-                )
-                .map_err(anyhow::Error::msg)?;
-                let patch_paths = sandbox_result
-                    .result_files
-                    .iter()
-                    .map(|file| file.path.as_str())
-                    .collect::<std::collections::BTreeSet<_>>();
-                let post_snapshot =
-                    vee_application::capture_current_change_set(&root, &source_snapshot)
-                        .map_err(anyhow::Error::msg)?;
-                let source_files = source_snapshot
-                    .files
-                    .iter()
-                    .filter(|file| !patch_paths.contains(file.path.as_str()))
-                    .map(|file| {
-                        (
-                            file.path.as_str(),
-                            (file.mode, file.content_digest.as_str()),
-                        )
-                    })
-                    .collect::<std::collections::BTreeMap<_, _>>();
-                let post_files = post_snapshot
-                    .files
-                    .iter()
-                    .filter(|file| !patch_paths.contains(file.path.as_str()))
-                    .map(|file| {
-                        (
-                            file.path.as_str(),
-                            (file.mode, file.content_digest.as_str()),
-                        )
-                    })
-                    .collect::<std::collections::BTreeMap<_, _>>();
-                let concurrent_mutation =
-                    observed_outputs != sandbox_result.result_files || source_files != post_files;
-                proposal["application"] = serde_json::Value::String("applied".into());
-                proposal["approval_digest"] = serde_json::Value::String(approve);
-                proposal["applied_at_unix"] = serde_json::json!(current_unix_time()?);
-                proposal["concurrent_mutation_detected"] =
-                    serde_json::Value::Bool(concurrent_mutation);
-                proposal["post_application_snapshot_id"] =
-                    serde_json::Value::String(post_snapshot.digest.clone());
-                write_proposal_file(&record_path, &serde_json::to_vec_pretty(&proposal)?)?;
-                drop(apply_lock);
+                let application =
+                    test_proposals::apply(&proposal_workspace()?, &proposal_id, &approve)?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(
-                            std::io::stdout().lock(),
-                            &serde_json::json!({"schema_version": 1, "proposal_id": proposal_id, "application": "applied", "snapshot_id": post_snapshot.digest, "concurrent_mutation_detected": concurrent_mutation}),
-                        )?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!("Applied approved test proposal {proposal_id}");
-                        println!("Current snapshot: {}", post_snapshot.digest);
-                        println!("Concurrent mutation detected: {concurrent_mutation}");
-                        println!("Run a trusted test profile with `vee tests run {proposal_id} --profile <profile>`.");
-                    }
+                    // Through a Value, as before: keys stay sorted.
+                    Output::Json => emit_json(&serde_json::to_value(&application)?)?,
+                    Output::Text => print_view(&application)?,
                 }
-                Ok(if concurrent_mutation { 2 } else { 0 })
+                Ok(if application.concurrent_mutation_detected {
+                    2
+                } else {
+                    0
+                })
             }
             TestsCommand::Run {
                 proposal_id,
                 profile,
                 output,
             } => {
-                if !is_sha256_digest(&proposal_id) {
-                    return Err(usage_failure(
-                        "test proposal ID must be a full sha256:<hex> digest",
-                    ));
+                let verification =
+                    test_proposals::run(&proposal_workspace()?, &proposal_id, &profile)?;
+                match output {
+                    // Through a Value, as before: keys stay sorted.
+                    Output::Json => emit_json(&serde_json::to_value(&verification)?)?,
+                    Output::Text => print_view(&verification)?,
                 }
-                let cwd = std::env::current_dir()?;
-                let root = vee_git::repository_root(&cwd).map_err(usage_failure)?;
-                let proposal_dir = proposal_directory(&root)?;
-                let apply_lock = acquire_proposal_apply_lock(&proposal_dir)?;
-                let record_path = proposal_dir.join(format!("test-{}.json", &proposal_id[7..]));
-                let mut proposal: serde_json::Value = serde_json::from_slice(
-                    &read_proposal_file(&record_path, 256 * 1024)
-                        .with_context(|| format!("test proposal {proposal_id} was not found"))?,
-                )?;
-                anyhow::ensure!(
-                    proposal["schema_version"] == 2,
-                    "unsupported test proposal schema"
-                );
-                anyhow::ensure!(
-                    proposal["proposal_id"].as_str() == Some(proposal_id.as_str()),
-                    "test proposal ID does not match its record"
-                );
-                anyhow::ensure!(
-                    proposal["application"].as_str() == Some("applied"),
-                    "test proposal must be explicitly applied before it can run"
-                );
-                anyhow::ensure!(
-                    proposal["approval_digest"].as_str() == Some(proposal_id.as_str()),
-                    "test proposal has no matching explicit approval record"
-                );
-                anyhow::ensure!(proposal["concurrent_mutation_detected"] == false, "test proposal application had a concurrent mutation; review the worktree and generate a new proposal");
-                let patch_digest = proposal["patch_digest"]
-                    .as_str()
-                    .context("test proposal has no patch digest")?;
-                let patch_path = proposal_dir.join(format!("test-{}.patch", &proposal_id[7..]));
-                let patch_bytes = read_proposal_file(&patch_path, 2 * 1024 * 1024)
-                    .context("saved test proposal patch is missing or invalid")?;
-                anyhow::ensure!(
-                    vee_core::digest(&patch_bytes) == patch_digest,
-                    "saved test patch content has changed"
-                );
-                let source_snapshot_id = proposal["snapshot_id"]
-                    .as_str()
-                    .context("test proposal has no source snapshot")?;
-                anyhow::ensure!(
-                    test_proposal_id(source_snapshot_id, patch_digest)? == proposal_id,
-                    "test proposal record does not match its approved content"
-                );
-                let scope = proposal["source_scope"]
-                    .as_str()
-                    .context("test proposal has no source scope")?;
-                let base_oid = proposal["base_oid"].as_str();
-                let root_string = root.to_string_lossy().to_string();
-                let snapshot = current_change_set(&root_string, base_oid, scope)?;
-                anyhow::ensure!(
-                    proposal["post_application_snapshot_id"].as_str()
-                        == Some(snapshot.digest.as_str()),
-                    "worktree no longer matches the snapshot produced by this test proposal"
-                );
-                let mut config = load_repository_config(&root)?;
-                apply_protected_policy(&root, &mut config)?;
-                anyhow::ensure!(
-                    config.verification.contains_key(&profile),
-                    "unknown trusted verification profile {profile}"
-                );
-                let db_dir = root.join(".vee");
-                std::fs::create_dir_all(&db_dir)?;
-                let mut store =
-                    ReviewStore::open(&db_dir.join("vee.sqlite")).map_err(anyhow::Error::msg)?;
-                let run = vee_application::run_verification(
-                    &root, &snapshot, &profile, &config, &mut store,
-                )
-                .map_err(anyhow::Error::msg)?;
-                let mut verification_runs = proposal["verification_runs"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
-                verification_runs.push(serde_json::json!({"run_id": &run.run_id, "snapshot_id": &run.snapshot_id, "profile_id": &run.profile_id, "status": run.status}));
-                proposal["verification_runs"] = serde_json::Value::Array(verification_runs);
-                proposal["tests_executed"] = serde_json::Value::Bool(true);
-                proposal["last_verification_run_id"] =
-                    serde_json::Value::String(run.run_id.clone());
-                write_proposal_file(&record_path, &serde_json::to_vec_pretty(&proposal)?)?;
-                drop(apply_lock);
-                let exit_code = match run.status {
+                Ok(match verification.verification_run.status {
                     VerificationStatus::Passed => 0,
                     VerificationStatus::Failed => 1,
-                    VerificationStatus::TimedOut => 2,
-                    VerificationStatus::Incomplete => 2,
-                };
-                match output {
-                    Output::Json => {
-                        serde_json::to_writer(
-                            std::io::stdout().lock(),
-                            &serde_json::json!({"schema_version": 1, "proposal_id": proposal_id, "verification_run": &run}),
-                        )?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!(
-                            "Verification {}: {:?} ({})",
-                            profile, run.status, run.run_id
-                        );
-                        println!("Snapshot: {}", run.snapshot_id);
-                        print_verification_artifacts(&run);
-                    }
-                }
-                Ok(exit_code)
+                    VerificationStatus::TimedOut | VerificationStatus::Incomplete => 2,
+                })
             }
         },
         Command::Pr { command } => match command {
@@ -4480,15 +2306,7 @@ fn run() -> Result<u8> {
                         eprintln!("Draft generated for snapshot {}", report.snapshot_id);
                         eprintln!("Provider output digest: {}", report.output_digest);
                     }
-                    Output::Text => {
-                        println!("Title: {}", report.output["title"].as_str().unwrap_or(""));
-                        println!();
-                        println!("{}", report.output["body"].as_str().unwrap_or(""));
-                        println!();
-                        println!("Draft only; it was not published or used in a gate.");
-                        println!("Snapshot: {}", report.snapshot_id);
-                        println!("Provider output digest: {}", report.output_digest);
-                    }
+                    Output::Text => print_view(&report)?,
                 }
                 std::io::stdout().flush()?;
                 Ok(0)
@@ -4500,7 +2318,7 @@ fn run() -> Result<u8> {
                 let report = operations::acceptance_report(&workspace, &review)?;
                 match output {
                     Output::Json => emit_json(&report)?,
-                    Output::Text => acceptance::render_text(&report),
+                    Output::Text => print_view(&report)?,
                 }
                 Ok(0)
             }
@@ -4510,48 +2328,11 @@ fn run() -> Result<u8> {
                 gate,
                 output,
             } => {
-                let cwd = std::env::current_dir()?;
-                let root = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-                let store =
-                    ReviewStore::open(&root.join(".vee/vee.sqlite")).map_err(anyhow::Error::msg)?;
-                let payload = store
-                    .get(&review)
-                    .map_err(anyhow::Error::msg)?
-                    .ok_or_else(|| usage_failure(format!("review {review} was not found")))?;
-                let review_result = vee_application::deserialize_review_result(&payload)
-                    .map_err(anyhow::Error::msg)?;
-                let mut repository_config = load_repository_config(&root)?;
-                repository_config
-                    .select_policy_profile(review_result.policy_profile.as_deref())
-                    .map_err(configuration_failure)?;
-                apply_protected_policy(&root, &mut repository_config)?;
-                let metadata = std::fs::symlink_metadata(&mapping).map_err(|error| {
-                    configuration_failure(format!("cannot read mapping file: {error}"))
-                })?;
-                if !metadata.file_type().is_file() || metadata.len() > 1_048_576 {
-                    return Err(configuration_failure(
-                        "mapping must be a regular file no larger than 1 MiB",
-                    ));
-                }
-                let contents = std::fs::read(&mapping).map_err(|error| {
-                    configuration_failure(format!("cannot read mapping file: {error}"))
-                })?;
-                let mapping: acceptance::AcceptanceMapping = serde_json::from_slice(&contents)
-                    .map_err(|error| {
-                        configuration_failure(format!("invalid acceptance mapping: {error}"))
-                    })?;
-                let report = acceptance::validate_mapping(
-                    &review_result,
-                    &mapping,
-                    &repository_config.policy.acceptance,
-                )
-                .map_err(configuration_failure)?;
+                let workspace = operations::Workspace::discover(crate::local_stores())?;
+                let report = operations::acceptance_validate(&workspace, &review, &mapping)?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &report)?;
-                        println!();
-                    }
-                    Output::Text => acceptance::render_validation_text(&report),
+                    Output::Json => emit_json(&report)?,
+                    Output::Text => print_view(&report)?,
                 }
                 if !gate {
                     Ok(0)
@@ -4574,12 +2355,7 @@ fn run() -> Result<u8> {
                 let response = operations::gate_check(&workspace, &review, token_env.as_deref())?;
                 match output {
                     Output::Json => emit_json(&response)?,
-                    Output::Text => {
-                        println!("Gate status: {:?}", response.status);
-                        for reason in &response.reasons {
-                            println!("- {reason}");
-                        }
-                    }
+                    Output::Text => print_view(&response)?,
                 }
                 Ok(response.exit_code())
             }
@@ -4588,20 +2364,9 @@ fn run() -> Result<u8> {
                     &operations::Workspace::discover(crate::local_stores())?,
                     &review,
                 )?;
-                let decisions = &history.decisions;
                 match output {
                     Output::Json => emit_json(&history)?,
-                    Output::Text => {
-                        for decision in decisions {
-                            println!(
-                                "{} {:?} snapshot={} evidence={}",
-                                decision.decision_id,
-                                decision.status,
-                                decision.snapshot_id,
-                                decision.evidence_digest
-                            );
-                        }
-                    }
+                    Output::Text => print_view(&history)?,
                 }
                 Ok(0)
             }
@@ -4641,13 +2406,7 @@ fn run() -> Result<u8> {
             )?;
             match output {
                 Output::Json => emit_json(&run)?,
-                Output::Text => {
-                    println!(
-                        "Verification {}: {:?} ({})",
-                        profile, run.status, run.run_id
-                    );
-                    print_verification_artifacts(&run);
-                }
+                Output::Text => print_view(&run)?,
             }
             Ok(match run.status {
                 VerificationStatus::Passed => 0,
@@ -4658,68 +2417,22 @@ fn run() -> Result<u8> {
         }
         Command::Verification { command } => match command {
             VerificationCommand::List { snapshot, output } => {
-                let cwd = std::env::current_dir()?;
-                let root = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-                let store =
-                    ReviewStore::open(&root.join(".vee/vee.sqlite")).map_err(anyhow::Error::msg)?;
-                let runs = store
-                    .verifications_for_snapshot(&snapshot)
-                    .map_err(anyhow::Error::msg)?;
+                let list = operations::verification_list(
+                    &operations::Workspace::discover(crate::local_stores())?,
+                    &snapshot,
+                )?;
                 match output {
-                    Output::Json => {
-                        let records: Vec<_> = runs
-                            .iter()
-                            .map(|run| {
-                                serde_json::json!({
-                                    "run_id": run.run_id,
-                                    "snapshot_id": run.snapshot_id,
-                                    "profile_id": run.profile_id,
-                                    "status": run.status,
-                                    "targets": run.targets,
-                                    "has_stdout_artifact": run.stdout_artifact.is_some(),
-                                    "has_stderr_artifact": run.stderr_artifact.is_some(),
-                                })
-                            })
-                            .collect();
-                        serde_json::to_writer(
-                            std::io::stdout().lock(),
-                            &serde_json::json!({ "schema_version": 1, "snapshot_id": snapshot, "runs": records }),
-                        )?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!("Verification runs for snapshot {snapshot}:");
-                        for run in runs {
-                            println!("{}  {}  {:?}", run.run_id, run.profile_id, run.status);
-                        }
-                    }
+                    Output::Json => emit_json(&list)?,
+                    Output::Text => print_view(&list)?,
                 }
                 Ok(0)
             }
             VerificationCommand::Show { run_id, output } => {
-                let cwd = std::env::current_dir()?;
-                let top = vee_git::repository_root(&cwd)
-                    .map_err(anyhow::Error::msg)?
-                    .to_string_lossy()
-                    .to_string();
-                let db_path = std::path::Path::new(&top).join(".vee/vee.sqlite");
-                let store = ReviewStore::open(&db_path).map_err(anyhow::Error::msg)?;
-                let run = store
-                    .verification(&run_id)
-                    .map_err(anyhow::Error::msg)?
-                    .with_context(|| format!("verification run {run_id} was not found"))?;
+                let workspace = operations::Workspace::discover(crate::local_stores())?;
+                let run = operations::verification_show(&workspace, &run_id)?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &run)?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!(
-                            "Verification {}: {:?} on {}",
-                            run.profile_id, run.status, run.snapshot_id
-                        );
-                        print_verification_artifacts(&run);
-                    }
+                    Output::Json => emit_json(&run)?,
+                    Output::Text => print_view(&run)?,
                 }
                 Ok(0)
             }
@@ -4728,34 +2441,7 @@ fn run() -> Result<u8> {
                 let diagnosis = operations::diagnose_verification(&workspace, &run_id)?;
                 match output {
                     Output::Json => emit_json(&diagnosis)?,
-                    Output::Text => {
-                        println!(
-                            "Verification diagnosis {}: {} ({})",
-                            diagnosis.profile_id, diagnosis.status, diagnosis.run_id
-                        );
-                        println!("Snapshot: {}", diagnosis.snapshot_id);
-                        if !diagnosis.targets.is_empty() {
-                            println!("Targets: {}", diagnosis.targets.join(", "));
-                        }
-                        for item in &diagnosis.diagnostics {
-                            println!(
-                                "{}:{} [{}] {}",
-                                item.stream, item.line, item.kind, item.text
-                            );
-                            if !item.referenced_changed_paths.is_empty() {
-                                println!(
-                                    "  changed paths: {}",
-                                    item.referenced_changed_paths.join(", ")
-                                );
-                            }
-                        }
-                        if diagnosis.diagnostics.is_empty() {
-                            println!("No recognized failure lines");
-                        }
-                        for limitation in &diagnosis.limitations {
-                            println!("Note: {limitation}");
-                        }
-                    }
+                    Output::Text => print_view(&diagnosis)?,
                 }
                 Ok(0)
             }
@@ -4766,7 +2452,7 @@ fn run() -> Result<u8> {
                 )?;
                 match output {
                     Output::Json => emit_json(&report)?,
-                    Output::Text => print_analyzer_report(&report),
+                    Output::Text => print_view(&report)?,
                 }
                 Ok(if report.parsed { 0 } else { 2 })
             }
@@ -4775,51 +2461,15 @@ fn run() -> Result<u8> {
                 stream,
                 output,
             } => {
-                let cwd = std::env::current_dir()?;
-                let top = vee_git::repository_root(&cwd)
-                    .map_err(anyhow::Error::msg)?
-                    .to_string_lossy()
-                    .to_string();
-                let root = std::path::Path::new(&top);
-                let store =
-                    ReviewStore::open(&root.join(".vee/vee.sqlite")).map_err(anyhow::Error::msg)?;
-                let run = store
-                    .verification(&run_id)
-                    .map_err(anyhow::Error::msg)?
-                    .with_context(|| format!("verification run {run_id} was not found"))?;
-                let report = coverage::report(
-                    root,
-                    &store,
-                    &run,
-                    match stream {
-                        CoverageStream::Stdout => "stdout",
-                        CoverageStream::Stderr => "stderr",
-                    },
-                )
-                .map_err(anyhow::Error::msg)?;
+                let workspace = operations::Workspace::discover(crate::local_stores())?;
+                let stream = match stream {
+                    CoverageStream::Stdout => "stdout",
+                    CoverageStream::Stderr => "stderr",
+                };
+                let report = operations::verification_coverage(&workspace, &run_id, stream)?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &report)?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!(
-                            "Coverage for changed files: {} ({})",
-                            report.profile_id, report.snapshot_id
-                        );
-                        for file in &report.files {
-                            match file.percent {
-                                Some(percent) => println!(
-                                    "{}: {:.1}% ({}/{})",
-                                    file.path, percent, file.covered_lines, file.executable_lines
-                                ),
-                                None => println!("{}: no executable lines", file.path),
-                            }
-                        }
-                        for limitation in &report.limitations {
-                            println!("Note: {limitation}");
-                        }
-                    }
+                    Output::Json => emit_json(&report)?,
+                    Output::Text => print_view(&report)?,
                 }
                 Ok(0)
             }
@@ -4841,35 +2491,13 @@ fn run() -> Result<u8> {
             };
             match command {
                 ReviewsCommand::List { output } => {
-                    let store =
-                        ReviewStore::open(&std::path::Path::new(&top).join(".vee/vee.sqlite"))
-                            .map_err(anyhow::Error::msg)?;
-                    let records = store.list_reviews().map_err(anyhow::Error::msg)?;
+                    let list = operations::reviews_list(&operations::Workspace::new(
+                        std::path::PathBuf::from(&top),
+                        crate::local_stores(),
+                    ))?;
                     match output {
-                        Output::Json => {
-                            serde_json::to_writer(
-                                std::io::stdout().lock(),
-                                &serde_json::json!({
-                                    "schema_version": 1,
-                                    "reviews": records,
-                                }),
-                            )?;
-                            println!();
-                        }
-                        Output::Text => {
-                            if records.is_empty() {
-                                println!("No reviews");
-                            }
-                            for record in records {
-                                println!(
-                                    "{}  {}  {}  {}",
-                                    record.review_id,
-                                    record.status,
-                                    record.snapshot_id,
-                                    record.created_at
-                                );
-                            }
-                        }
+                        Output::Json => emit_json(&list)?,
+                        Output::Text => print_view(&list)?,
                     }
                     Ok(0)
                 }
@@ -4879,55 +2507,34 @@ fn run() -> Result<u8> {
                         crate::local_stores(),
                     );
                     let review = operations::get_review(&workspace, &id)?;
-                    let review = serde_json::to_value(review)?;
                     match output {
-                        Output::Json => emit_json(&review)?,
-                        Output::Text => {
-                            println!("Review {}", review["review_id"].as_str().unwrap_or(&id));
-                            println!("Snapshot: {}", review["snapshot_id"]);
-                            println!("Status: {}", review["status"]);
-                            println!(
-                                "Findings: {}",
-                                review["findings"].as_array().map_or(0, Vec::len)
-                            );
-                            println!("Gate: {}", review["gate"]["status"]);
-                        }
+                        // Through a Value, as before: keys stay sorted, as MCP emits them.
+                        Output::Json => emit_json(&serde_json::to_value(&review)?)?,
+                        Output::Text => print_view(&review)?,
                     }
                     Ok(0)
                 }
                 ReviewsCommand::Export { id, format } => {
-                    let store =
-                        ReviewStore::open(&std::path::Path::new(&top).join(".vee/vee.sqlite"))
-                            .map_err(anyhow::Error::msg)?;
-                    let payload = store
-                        .get(&id)
-                        .map_err(anyhow::Error::msg)?
-                        .with_context(|| format!("review {id} was not found"))?;
-                    let review = vee_application::deserialize_review_result(&payload)
-                        .map_err(anyhow::Error::msg)?;
-                    let report = match format {
-                        ReportFormat::Sarif => review_to_sarif(&review)?,
-                        ReportFormat::VeeJson => serde_json::to_value(&review)?,
+                    let workspace = operations::Workspace::new(
+                        std::path::PathBuf::from(&top),
+                        crate::local_stores(),
+                    );
+                    let format = match format {
+                        ReportFormat::Sarif => operations::ReviewExportFormat::Sarif,
+                        ReportFormat::VeeJson => operations::ReviewExportFormat::VeeJson,
                     };
-                    serde_json::to_writer(std::io::stdout().lock(), &report)?;
-                    println!();
+                    emit_json(&operations::export_review(&workspace, &id, format)?)?;
                     Ok(0)
                 }
                 ReviewsCommand::Bundle { id, decision_id } => {
-                    let review = review_with_decision(
-                        std::path::Path::new(&top),
-                        &id,
-                        decision_id.as_deref(),
-                    )?;
-                    let bundle = evidence_bundle(&review)?;
-                    let bytes = serde_json::to_vec(&bundle)?;
-                    anyhow::ensure!(
-                        bytes.len() as u64 <= MAX_IMPORTED_REVIEW_BYTES,
-                        "evidence bundle exceeds 10 MiB and cannot be verified by Vee"
+                    let workspace = operations::Workspace::new(
+                        std::path::PathBuf::from(&top),
+                        crate::local_stores(),
                     );
-                    let mut stdout = std::io::stdout().lock();
-                    stdout.write_all(&bytes)?;
-                    stdout.write_all(b"\n")?;
+                    let bundle =
+                        evidence_bundle::export_bundle(&workspace, &id, decision_id.as_deref())?;
+                    // Through a Value: the manifest digests cover the sorted-key form.
+                    emit_json(&serde_json::to_value(&bundle)?)?;
                     Ok(0)
                 }
                 ReviewsCommand::Attest {
@@ -4937,33 +2544,19 @@ fn run() -> Result<u8> {
                     private_key,
                     key_id,
                 } => {
-                    let root = std::path::Path::new(&top);
-                    let review = review_with_decision(root, &id, decision_id.as_deref())?;
-                    let bundle = evidence_bundle(&review)?;
-                    let manifest_digest = bundle["manifest_digest"].as_str().unwrap_or_default();
-                    let commit = attested_commit(root, &review.change_set)?;
-                    let statement =
-                        attestation::statement(&review, manifest_digest, commit.as_deref())?;
-                    let document = match format {
-                        AttestationFormat::Statement => statement,
-                        AttestationFormat::Dsse => {
-                            let key_id = key_id.unwrap_or_default();
-                            if key_id.trim().is_empty() {
-                                return Err(usage_failure("--key-id cannot be empty"));
-                            }
-                            let private_key = private_key.unwrap_or_default();
-                            let key_bytes = std::fs::read(&private_key).with_context(|| {
-                                format!("reading private key {}", private_key.display())
-                            })?;
-                            let key = ring::signature::Ed25519KeyPair::from_pkcs8(&key_bytes)
-                                .map_err(|_| {
-                                    configuration_failure(
-                                        "private key must be a valid Ed25519 PKCS#8 DER file",
-                                    )
-                                })?;
-                            attestation::sign(&statement, &key, &key_id)?
-                        }
+                    let workspace = operations::Workspace::new(
+                        std::path::PathBuf::from(&top),
+                        crate::local_stores(),
+                    );
+                    let format = match format {
+                        AttestationFormat::Statement => attestation::AttestationFormat::Statement,
+                        AttestationFormat::Dsse => attestation::AttestationFormat::Dsse {
+                            private_key: private_key.as_deref().unwrap_or(std::path::Path::new("")),
+                            key_id: key_id.as_deref().unwrap_or_default(),
+                        },
                     };
+                    let document =
+                        attestation::attest(&workspace, &id, decision_id.as_deref(), format)?;
                     emit_json(&document)?;
                     Ok(0)
                 }
@@ -4972,325 +2565,68 @@ fn run() -> Result<u8> {
                     public_key,
                     output,
                 } => {
-                    let file = std::fs::File::open(&path)
-                        .with_context(|| format!("opening attestation {}", path.display()))?;
-                    let mut bytes = Vec::new();
-                    file.take(MAX_IMPORTED_REVIEW_BYTES + 1)
-                        .read_to_end(&mut bytes)
-                        .with_context(|| format!("reading attestation {}", path.display()))?;
-                    anyhow::ensure!(
-                        bytes.len() as u64 <= MAX_IMPORTED_REVIEW_BYTES,
-                        "attestation exceeds 10 MiB"
-                    );
-                    let envelope: serde_json::Value = serde_json::from_slice(&bytes)
-                        .map_err(|_| usage_failure("attestation is not valid JSON"))?;
-                    let key = std::fs::read(&public_key)
-                        .with_context(|| format!("reading public key {}", public_key.display()))?;
-                    let report = attestation::verify(&envelope, &key);
+                    let report = attestation::verify_file(&path, &public_key)?;
                     match output {
-                        Output::Json => emit_json(&report)?,
-                        Output::Text => {
-                            if report["valid"] == true {
-                                println!(
-                                    "Valid: gate {} (decision {}) signed by {}",
-                                    report["gate_status"].as_str().unwrap_or("?"),
-                                    report["decision_id"].as_str().unwrap_or("?"),
-                                    report["key_id"].as_str().unwrap_or("?")
-                                );
-                                for subject in report["subjects"].as_array().into_iter().flatten() {
-                                    println!(
-                                        "Subject: {}",
-                                        subject["name"].as_str().unwrap_or("?")
-                                    );
-                                }
-                            } else {
-                                println!(
-                                    "Invalid: {}",
-                                    report["message"].as_str().unwrap_or("verification failed")
-                                );
-                            }
-                        }
+                        // Through a Value, as before: keys stay sorted.
+                        Output::Json => emit_json(&serde_json::to_value(&report)?)?,
+                        Output::Text => print_view(&report)?,
                     }
-                    Ok(if report["valid"] == true { 0 } else { 2 })
+                    Ok(if report.valid { 0 } else { 2 })
                 }
                 ReviewsCommand::VerifyBundle {
                     path,
                     public_key,
                     output,
                 } => {
-                    let file = std::fs::File::open(&path)
-                        .with_context(|| format!("opening evidence bundle {}", path.display()))?;
-                    let mut bytes = Vec::new();
-                    file.take(MAX_IMPORTED_REVIEW_BYTES + 1)
-                        .read_to_end(&mut bytes)
-                        .with_context(|| format!("reading evidence bundle {}", path.display()))?;
-                    anyhow::ensure!(
-                        bytes.len() as u64 <= MAX_IMPORTED_REVIEW_BYTES,
-                        "evidence bundle exceeds 10 MiB"
-                    );
-                    let bundle: serde_json::Value = serde_json::from_slice(&bytes)
-                        .context("evidence bundle is not valid JSON")?;
-                    let report = verify_evidence_bundle(&bundle, public_key.as_deref());
+                    let report = evidence_bundle::verify_file(&path, public_key.as_deref())?;
                     match output {
-                        Output::Json => {
-                            serde_json::to_writer(std::io::stdout().lock(), &report)?;
-                            println!();
-                        }
-                        Output::Text => println!(
-                            "{}: {}",
-                            if report["valid"] == true && report["replay_matches"] != false {
-                                "Valid"
-                            } else {
-                                "Invalid"
-                            },
-                            report["message"]
-                                .as_str()
-                                .unwrap_or("bundle verification failed")
-                        ),
+                        // Through a Value, as before: keys stay sorted.
+                        Output::Json => emit_json(&serde_json::to_value(&report)?)?,
+                        Output::Text => print_view(&report)?,
                     }
-                    if report["valid"] == true && report["replay_matches"] != false {
-                        Ok(0)
-                    } else {
-                        Ok(2)
-                    }
+                    Ok(if report.passed() { 0 } else { 2 })
                 }
                 ReviewsCommand::SignBundle {
                     path,
                     private_key,
                     key_id,
                 } => {
-                    if key_id.trim().is_empty() {
-                        return Err(usage_failure("--key-id cannot be empty"));
-                    }
-                    let file = std::fs::File::open(&path)
-                        .with_context(|| format!("reading evidence bundle {}", path.display()))?;
-                    anyhow::ensure!(
-                        file.metadata()?.len() <= MAX_IMPORTED_REVIEW_BYTES,
-                        "evidence bundle exceeds 10 MiB"
-                    );
-                    let mut bytes = Vec::new();
-                    file.take(MAX_IMPORTED_REVIEW_BYTES + 1)
-                        .read_to_end(&mut bytes)
-                        .context("reading evidence bundle")?;
-                    anyhow::ensure!(
-                        bytes.len() as u64 <= MAX_IMPORTED_REVIEW_BYTES,
-                        "evidence bundle exceeds 10 MiB"
-                    );
-                    let mut bundle: serde_json::Value = serde_json::from_slice(&bytes)
-                        .context("evidence bundle is not valid JSON")?;
-                    let integrity = verify_evidence_bundle(&bundle, None);
-                    if integrity["valid"] != true || integrity["replay_matches"] == false {
-                        return Err(configuration_failure(
-                            "cannot sign an invalid evidence bundle",
-                        ));
-                    }
-                    if bundle.get("signature").is_some() {
-                        return Err(usage_failure("bundle is already signed; export a fresh bundle to create another signature"));
-                    }
-                    let key_bytes = std::fs::read(&private_key).with_context(|| {
-                        format!("reading private key {}", private_key.display())
-                    })?;
-                    let key =
-                        ring::signature::Ed25519KeyPair::from_pkcs8(&key_bytes).map_err(|_| {
-                            configuration_failure(
-                                "private key must be a valid Ed25519 PKCS#8 DER file",
-                            )
-                        })?;
-                    let digest = bundle["manifest_digest"].as_str().ok_or_else(|| {
-                        configuration_failure("bundle manifest digest is missing")
-                    })?;
-                    let signature = key.sign(digest.as_bytes());
-                    bundle["signature"] = serde_json::json!({ "algorithm": "ed25519", "key_id": key_id, "signature": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, signature.as_ref()) });
-                    let mut output = serde_json::to_vec_pretty(&bundle)?;
-                    output.push(b'\n');
-                    anyhow::ensure!(
-                        output.len() as u64 <= MAX_IMPORTED_REVIEW_BYTES,
-                        "signed evidence bundle exceeds 10 MiB and cannot be verified by Vee"
-                    );
-                    std::fs::write(&path, output).with_context(|| {
-                        format!("writing signed evidence bundle {}", path.display())
-                    })?;
-                    println!("Signed evidence bundle with Ed25519 key {key_id}.");
+                    print_view(&evidence_bundle::sign_file(&path, &private_key, &key_id)?)?;
                     Ok(0)
                 }
                 ReviewsCommand::Keygen {
                     private_key,
                     public_key,
                 } => {
-                    let resolve_target = |path: &std::path::Path| -> Result<std::path::PathBuf> {
-                        let name = path
-                            .file_name()
-                            .context("key output path must name a file")?;
-                        let parent = path
-                            .parent()
-                            .filter(|parent| !parent.as_os_str().is_empty())
-                            .unwrap_or(std::path::Path::new("."));
-                        std::fs::create_dir_all(parent)?;
-                        Ok(vee_core::paths::canonicalize(parent)?.join(name))
-                    };
-                    let private_target = resolve_target(&private_key)?;
-                    let public_target = resolve_target(&public_key)?;
-                    if private_target == public_target {
-                        return Err(usage_failure(
-                            "private and public key output paths must differ",
-                        ));
-                    }
-                    if private_target.exists() || public_target.exists() {
-                        return Err(usage_failure("key output paths must not already exist"));
-                    }
-                    let rng = ring::rand::SystemRandom::new();
-                    let document =
-                        ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).map_err(|_| {
-                            configuration_failure("could not generate Ed25519 key pair")
-                        })?;
-                    let pair = ring::signature::Ed25519KeyPair::from_pkcs8(document.as_ref())
-                        .map_err(|_| {
-                            configuration_failure("generated Ed25519 key pair could not be loaded")
-                        })?;
-                    write_private_key(&private_target, document.as_ref())?;
-                    std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&public_target)?
-                        .write_all(ring::signature::KeyPair::public_key(&pair).as_ref())?;
-                    println!("Generated Ed25519 key pair; keep {} private and distribute {} to verifiers.", private_key.display(), public_key.display());
+                    print_view(&signing::generate_key_pair(&private_key, &public_key)?)?;
                     Ok(0)
                 }
                 ReviewsCommand::Import { path, output } => {
-                    let (digest, review) =
-                        import_review_archive(std::path::Path::new(&top), &path)?;
+                    let imported =
+                        imported_history::import_review_archive(std::path::Path::new(&top), &path)?;
                     match output {
-                        Output::Json => {
-                            serde_json::to_writer(std::io::stdout().lock(), &serde_json::json!({
-                                "schema_version": 1,
-                                "archive_digest": digest,
-                                "review_id": review.review_id,
-                                "snapshot_id": review.snapshot_id,
-                                "status": review.status,
-                                "trust": "untrusted_external",
-                                "gate_eligible": false
-                            }))?;
-                            println!();
-                        }
-                        Output::Text => println!("Imported {} ({}) as untrusted external history; excluded from gate evaluation.", review.review_id, digest),
+                        // Through a Value, as before: keys stay sorted.
+                        Output::Json => emit_json(&serde_json::to_value(&imported)?)?,
+                        Output::Text => print_view(&imported)?,
                     }
                     Ok(0)
                 }
                 ReviewsCommand::Imported { command } => match command {
                     ImportedCommand::List { output } => {
-                        let archive = imported_reviews_dir(std::path::Path::new(&top), true)?;
-                        let mut records = Vec::new();
-                        if archive.exists() {
-                            for entry in std::fs::read_dir(&archive)? {
-                                let entry = entry?;
-                                if entry.path().extension().and_then(|ext| ext.to_str())
-                                    != Some("json")
-                                {
-                                    continue;
-                                }
-                                let metadata = entry.metadata()?;
-                                if !metadata.is_file() || metadata.len() > MAX_IMPORTED_REVIEW_BYTES
-                                {
-                                    continue;
-                                }
-                                let bytes = std::fs::read(entry.path())?;
-                                let imported = match parse_imported_archive(&bytes) {
-                                    Ok(imported) => imported,
-                                    Err(_) => continue,
-                                };
-                                let hash = hex_digest(&Sha256::digest(&bytes));
-                                if entry.file_name().to_string_lossy() != format!("{hash}.json") {
-                                    continue;
-                                }
-                                records.push(match imported {
-                                    ImportedArchive::Review(review) => serde_json::json!({
-                                        "archive_digest": format!("sha256:{hash}"),
-                                        "archive_type": "review",
-                                        "review_id": review.review_id,
-                                        "snapshot_id": review.snapshot_id,
-                                        "status": review.status,
-                                        "trust": "untrusted_external",
-                                        "gate_eligible": false
-                                    }),
-                                    ImportedArchive::Discussions(discussion) => serde_json::json!({
-                                        "archive_digest": format!("sha256:{hash}"),
-                                        "archive_type": "provider_discussions",
-                                        "provider": discussion.provider,
-                                        "pull_request": discussion.pull_request,
-                                        "revision": discussion.revision,
-                                        "complete": discussion.complete,
-                                        "issue_count": discussion.issues.len(),
-                                        "trust": "untrusted_external",
-                                        "gate_eligible": false
-                                    }),
-                                });
-                            }
-                        }
-                        records.sort_by(|a, b| {
-                            a["archive_digest"]
-                                .as_str()
-                                .cmp(&b["archive_digest"].as_str())
-                        });
+                        let list =
+                            imported_history::list_imported_archives(std::path::Path::new(&top))?;
                         match output {
-                            Output::Json => {
-                                serde_json::to_writer(
-                                    std::io::stdout().lock(),
-                                    &serde_json::json!({"schema_version": 1, "reviews": records}),
-                                )?;
-                                println!();
-                            }
-                            Output::Text => {
-                                for record in records {
-                                    if record["archive_type"] == "provider_discussions" {
-                                        println!("{}  {}  {} issues  untrusted_external (not gate eligible)", record["archive_digest"], record["pull_request"]["number"], record["issue_count"]);
-                                    } else {
-                                        println!(
-                                            "{}  {}  {}  untrusted_external",
-                                            record["archive_digest"],
-                                            record["review_id"],
-                                            record["status"]
-                                        );
-                                    }
-                                }
-                            }
+                            // Through a Value, as before: keys stay sorted.
+                            Output::Json => emit_json(&serde_json::to_value(&list)?)?,
+                            Output::Text => print_view(&list)?,
                         }
                         Ok(0)
                     }
                     ImportedCommand::Show { digest } => {
-                        let archive = imported_reviews_dir(std::path::Path::new(&top), false)?;
-                        let raw_digest = digest.strip_prefix("sha256:").unwrap_or(&digest);
-                        anyhow::ensure!(
-                            raw_digest.len() == 64
-                                && raw_digest.bytes().all(|b| b.is_ascii_hexdigit()),
-                            "digest must be a SHA-256 hex digest"
-                        );
-                        let normalized_digest = raw_digest.to_ascii_lowercase();
-                        let path = archive.join(format!("{normalized_digest}.json"));
-                        let metadata =
-                            std::fs::metadata(&path).context("imported review not found")?;
-                        anyhow::ensure!(
-                            metadata.is_file() && metadata.len() <= MAX_IMPORTED_REVIEW_BYTES,
-                            "invalid imported review archive entry"
-                        );
-                        let bytes = std::fs::read(&path)?;
-                        anyhow::ensure!(
-                            format!("sha256:{}", hex_digest(&Sha256::digest(&bytes)))
-                                == format!("sha256:{normalized_digest}"),
-                            "imported archive entry failed integrity check"
-                        );
-                        let (mut value, archive_type) = match parse_imported_archive(&bytes)? {
-                            ImportedArchive::Review(review) => {
-                                (serde_json::to_value(review)?, "review")
-                            }
-                            ImportedArchive::Discussions(discussion) => {
-                                (serde_json::to_value(discussion)?, "provider_discussions")
-                            }
-                        };
-                        value["archive_type"] = serde_json::json!(archive_type);
-                        value["trust"] = serde_json::json!("untrusted_external");
-                        value["gate_eligible"] = serde_json::json!(false);
-                        serde_json::to_writer(std::io::stdout().lock(), &value)?;
-                        println!();
+                        emit_json(&imported_history::show_imported_archive(
+                            std::path::Path::new(&top),
+                            &digest,
+                        )?)?;
                         Ok(0)
                     }
                     ImportedCommand::Search {
@@ -5305,23 +2641,9 @@ fn run() -> Result<u8> {
                         let report =
                             operations::search_imported_history(&workspace, &query, limit)?;
                         match output {
-                            Output::Json => emit_json(&report)?,
-                            Output::Text => {
-                                for item in report["matches"].as_array().into_iter().flatten() {
-                                    println!(
-                                        "{}  {}  {}  {}:{}  untrusted_external (not gate eligible)",
-                                        item["archive_digest"],
-                                        item["review_id"],
-                                        item["finding"]["severity"],
-                                        item["finding"]["path"].as_str().unwrap_or("<unknown>"),
-                                        item["finding"]["line"].as_u64().unwrap_or(0)
-                                    );
-                                    println!(
-                                        "  {}",
-                                        item["finding"]["rationale"].as_str().unwrap_or("")
-                                    );
-                                }
-                            }
+                            // Through a Value, as before: keys stay sorted, as MCP emits them.
+                            Output::Json => emit_json(&serde_json::to_value(&report)?)?,
+                            Output::Text => print_view(&report)?,
                         }
                         Ok(0)
                     }
@@ -5350,10 +2672,9 @@ fn run() -> Result<u8> {
                                     reviewer: &reviewer,
                                 },
                             )?;
-                            let feedback = &recorded.feedback;
                             match output {
                                 Output::Json => emit_json(&recorded)?,
-                                Output::Text => println!("Recorded {} feedback for external comment {} in {} (human label; never gate eligible).", feedback.label_text(), feedback.external_id, feedback.archive_digest),
+                                Output::Text => print_view(&recorded)?,
                             }
                             Ok(0)
                         }
@@ -5369,21 +2690,9 @@ fn run() -> Result<u8> {
                                 &workspace,
                                 archive_digest.as_deref(),
                             )?;
-                            let feedback = &listed.feedback;
                             match output {
                                 Output::Json => emit_json(&listed)?,
-                                Output::Text => {
-                                    for item in feedback {
-                                        println!(
-                                            "{} {} {} {} — {}",
-                                            item.archive_digest,
-                                            item.external_id,
-                                            item.label_text(),
-                                            item.reviewer,
-                                            item.reason
-                                        );
-                                    }
-                                }
+                                Output::Text => print_view(&listed)?,
                             }
                             Ok(0)
                         }
@@ -5396,58 +2705,7 @@ fn run() -> Result<u8> {
             let analytics = operations::quality_analytics(&workspace)?;
             match output {
                 Output::Json => emit_json(&analytics)?,
-                Output::Text => {
-                    println!(
-                        "Local quality analytics ({} reviews)",
-                        analytics.review_count
-                    );
-                    print_count_map("Latest gate decisions", &analytics.latest_gate_decisions);
-                    print_count_map("Findings by lifecycle", &analytics.findings_by_status);
-                    print_count_map("Findings by severity", &analytics.findings_by_severity);
-                    println!("Verification profile outcomes");
-                    for (profile, outcomes) in &analytics.verification_runs_by_profile {
-                        print_count_map(&format!("  {profile}"), outcomes);
-                    }
-                    println!("Recognized test log events by profile (observed event counts)");
-                    for (profile, events) in &analytics.test_diagnostics_by_profile {
-                        print_count_map(&format!("  {profile}"), events);
-                    }
-                    for limitation in &analytics.test_diagnostics_limitations {
-                        println!("Test analytics limitation: {limitation}");
-                    }
-                    print_count_map(
-                        "Reviewed feedback labels",
-                        &analytics.reviewed_feedback_by_label,
-                    );
-                    print_feedback_rate(
-                        "Finding accuracy",
-                        &analytics.reviewed_feedback_metrics.finding_accuracy,
-                    );
-                    print_feedback_rate(
-                        "Actionability",
-                        &analytics.reviewed_feedback_metrics.actionability,
-                    );
-                    println!("Provider adapter latency (latest saved reviews)");
-                    for (provider, metric) in &analytics.provider_latency {
-                        println!(
-                            "  {provider}: samples={} p50={}ms p95={}ms unmeasured={} failed={}",
-                            metric.measured_runs,
-                            metric
-                                .median_duration_ms
-                                .map_or_else(|| "n/a".into(), |v| v.to_string()),
-                            metric
-                                .p95_duration_ms
-                                .map_or_else(|| "n/a".into(), |v| v.to_string()),
-                            metric.unmeasured_runs,
-                            metric.failed_runs,
-                        );
-                    }
-                    println!("Provider latency note: {}", analytics.provider_latency_note);
-                    for (provider, usage) in &analytics.provider_usage {
-                        println!("Provider usage {provider}: reported runs {}, unreported runs {}, input tokens {}, output tokens {}, total tokens {}, estimated cost {} USD (priced {}, unpriced {})", usage.reported_runs, usage.unreported_runs, usage.input_tokens, usage.output_tokens, usage.total_tokens, usage.estimated_cost_usd.map_or_else(|| "n/a".into(), |cost| format!("{cost:.6}")), usage.priced_runs, usage.unpriced_runs);
-                    }
-                    println!("Provider usage note: {}", analytics.provider_usage_note);
-                }
+                Output::Text => print_view(&analytics)?,
             }
             Ok(0)
         }
@@ -5456,32 +2714,10 @@ fn run() -> Result<u8> {
                 repositories,
                 output,
             } => {
-                let result = repository_map::build(&repositories).map_err(anyhow::Error::msg)?;
+                let result = operations::repository_map(&repositories)?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &result)?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!(
-                            "Local repository dependency map ({} repositories, {} direct edges)",
-                            result.repositories.len(),
-                            result.dependencies.len()
-                        );
-                        for repo in &result.repositories {
-                            println!("  {} [{}] {}", repo.id, repo.ecosystem, repo.root);
-                        }
-                        for edge in &result.dependencies {
-                            println!(
-                                "  {} -> {} ({}, {}) [{}]",
-                                edge.from, edge.to, edge.package, edge.kind, edge.evidence_digest
-                            );
-                        }
-                        for limitation in &result.limitations {
-                            println!("Limitation: {limitation}");
-                        }
-                        println!("Map digest: {}", result.digest);
-                    }
+                    Output::Json => emit_json(&result)?,
+                    Output::Text => print_view(&result)?,
                 }
                 Ok(0)
             }
@@ -5493,204 +2729,19 @@ fn run() -> Result<u8> {
                 base,
                 output,
             } => {
-                let mut explicit_links =
-                    std::collections::BTreeMap::<String, Vec<vee_hosting::PullRequestRef>>::new();
-                for value in pull_requests {
-                    let (repository_id, reference) =
-                        repository_map::parse_pull_request_link(&value).map_err(usage_failure)?;
-                    let entry = explicit_links.entry(repository_id).or_default();
-                    if entry.contains(&reference) {
-                        return Err(usage_failure("pull request link is repeated"));
-                    }
-                    entry.push(reference);
-                }
-                let mut links = explicit_links.clone();
-                let mut discovered_links =
-                    std::collections::BTreeMap::<String, Vec<vee_hosting::PullRequestRef>>::new();
-                if discover_linked_prs {
-                    discovered_links = repository_map::discover_linked_pull_requests(&repositories)
-                        .map_err(anyhow::Error::msg)?;
-                    for (repository_id, references) in &discovered_links {
-                        let entry = links.entry(repository_id.clone()).or_default();
-                        for reference in references {
-                            if !entry.contains(reference) {
-                                entry.push(reference.clone());
-                            }
-                        }
-                    }
-                }
-                if refresh_pr_links && links.is_empty() {
-                    return Err(usage_failure(
-                        "--refresh-pr-links requires at least one --link-pr",
-                    ));
-                }
-                let mut remote_states = std::collections::BTreeMap::new();
-                if refresh_pr_links {
-                    let local = repository_map::build(&repositories).map_err(anyhow::Error::msg)?;
-                    for entry in &local.repositories {
-                        let Some(references) = links.get(&entry.id) else {
-                            continue;
-                        };
-                        let root = std::path::Path::new(&entry.root);
-                        let local_head_oid = repository_map::repository_head_oid(root)
-                            .map_err(anyhow::Error::msg)?;
-                        let (offline, hosting) = load_hosting_config(root)?;
-                        if offline {
-                            return Err(configuration_failure(format!(
-                                "offline mode prevents refreshing linked pull requests in {}",
-                                root.display()
-                            )));
-                        }
-                        let provider_id =
-                            hosting.provider.clone().unwrap_or_else(|| "github".into());
-                        let host = hosting.host.clone().unwrap_or_else(|| "github.com".into());
-                        let api_base = hosting.api_base.clone().unwrap_or_default();
-                        let token_env = hosting.token_env.clone().unwrap_or_else(|| {
-                            match provider_id.as_str() {
-                                "gitlab" => "GL_TOKEN",
-                                "bitbucket" => "BB_TOKEN",
-                                "azure-devops" => "AZURE_DEVOPS_EXT_PAT",
-                                "gerrit" => "GERRIT_TOKEN",
-                                _ => "GH_TOKEN",
-                            }
-                            .into()
-                        });
-                        let token = std::env::var(&token_env).with_context(|| {
-                            format!(
-                                "required credential environment variable {token_env} is not set"
-                            )
-                        })?;
-                        let host = effective_work_item_host(&provider_id, &host)?;
-                        let api_base = work_item_api_base(&provider_id, &host, &api_base)?;
-                        let username = hosting.username.unwrap_or_default();
-                        let adapter: Box<dyn vee_hosting::PullRequestContextProvider> =
-                            match provider_id.as_str() {
-                                "github" => Box::new(
-                                    vee_hosting::github::GitHubAdapter::new(
-                                        vee_hosting::github::GitHubConfig::new(
-                                            &api_base,
-                                            token,
-                                            String::new(),
-                                        )
-                                        .map_err(configuration_failure)?,
-                                    )
-                                    .map_err(configuration_failure)?,
-                                ),
-                                "gitlab" => Box::new(
-                                    vee_hosting::gitlab::GitLabAdapter::new(
-                                        vee_hosting::gitlab::GitLabConfig::new(&api_base, token)
-                                            .map_err(configuration_failure)?,
-                                    )
-                                    .map_err(configuration_failure)?,
-                                ),
-                                "bitbucket" => Box::new(
-                                    vee_hosting::bitbucket::BitbucketAdapter::new(
-                                        vee_hosting::bitbucket::BitbucketConfig::new(
-                                            &api_base, token,
-                                        )
-                                        .map_err(configuration_failure)?,
-                                    )
-                                    .map_err(configuration_failure)?,
-                                ),
-                                "azure-devops" => Box::new(
-                                    vee_hosting::azure_devops::AzureDevOpsAdapter::new(
-                                        vee_hosting::azure_devops::AzureDevOpsConfig::new(
-                                            &api_base, token,
-                                        )
-                                        .map_err(configuration_failure)?,
-                                    )
-                                    .map_err(configuration_failure)?,
-                                ),
-                                "gerrit" => {
-                                    let mut config =
-                                        vee_hosting::gerrit::GerritConfig::new(&api_base, token)
-                                            .map_err(configuration_failure)?;
-                                    if !username.is_empty() {
-                                        config = config.with_username(username);
-                                    }
-                                    Box::new(
-                                        vee_hosting::gerrit::GerritAdapter::new(config)
-                                            .map_err(configuration_failure)?,
-                                    )
-                                }
-                                _ => {
-                                    return Err(configuration_failure(format!(
-                                        "unsupported hosting provider `{provider_id}`"
-                                    )))
-                                }
-                            };
-                        let mut states = Vec::new();
-                        for reference in references {
-                            let snapshot = adapter
-                                .get_pull_request_context(reference)
-                                .map_err(anyhow::Error::msg)?;
-                            states.push(repository_map::RemotePullRequestState {
-                                pull_request: reference.clone(),
-                                provider: provider_id.clone(),
-                                state: format!("{:?}", snapshot.state).to_ascii_lowercase(),
-                                base_oid: snapshot.base_oid,
-                                local_head_matches: snapshot.head_oid == local_head_oid,
-                                head_oid: snapshot.head_oid,
-                                revision: snapshot.revision,
-                            });
-                        }
-                        remote_states.insert(entry.id.clone(), states);
-                    }
-                }
-                let package = repository_map::change_package_with_pull_requests(
-                    &repositories,
-                    base.as_deref(),
-                    &links,
-                    &discovered_links,
-                    &remote_states,
+                let package = operations::change_package(
+                    operations::ChangePackageRequest {
+                        repositories: &repositories,
+                        pull_request_links: &pull_requests,
+                        discover_linked_prs,
+                        refresh_pr_links,
+                        base: base.as_deref(),
+                    },
                     &vee_store_sqlite::SqliteRepositoryStores,
-                )
-                .map_err(|error| {
-                    if error.starts_with("pull request link") {
-                        usage_failure(error)
-                    } else {
-                        anyhow::Error::msg(error)
-                    }
-                })?;
+                )?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &package)?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!(
-                            "Change package {} ({} repositories)",
-                            package.package_id,
-                            package.repositories.len()
-                        );
-                        for repository in &package.repositories {
-                            println!(
-                                "  {} [{}] {} — {} changed files — gate: {}",
-                                repository.repository_id,
-                                repository.branch.as_deref().unwrap_or("detached"),
-                                repository.root,
-                                repository.changed_files.len(),
-                                repository.saved_gate_status
-                            );
-                            for file in &repository.changed_files {
-                                println!("    {} ({})", file.path, file.status);
-                            }
-                            for remote in &repository.remote_pull_requests {
-                                println!(
-                                    "    PR {}#{}: {} — provider revision {} — local head match: {}",
-                                    remote.pull_request.repository.full_name,
-                                    remote.pull_request.number,
-                                    remote.state,
-                                    remote.revision,
-                                    remote.local_head_matches
-                                );
-                            }
-                        }
-                        println!("Local dependency edges: {}", package.dependency_edges.len());
-                        for limitation in &package.limitations {
-                            println!("Limitation: {limitation}");
-                        }
-                    }
+                    Output::Json => emit_json(&package)?,
+                    Output::Text => print_view(&package)?,
                 }
                 Ok(0)
             }
@@ -5700,39 +2751,10 @@ fn run() -> Result<u8> {
                 base,
                 output,
             } => {
-                let result = repository_map::analyze_cross_impact(&producer, &base, &consumers)
-                    .map_err(anyhow::Error::msg)?;
+                let result = operations::cross_repository_impact(&producer, &base, &consumers)?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &result)?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!(
-                            "Cross-repository impact for producer snapshot: {}",
-                            result.producer_snapshot_id
-                        );
-                        println!("Changed symbols: {}", result.changed_symbols.join(", "));
-                        for path in &result.dependency_paths {
-                            println!("  package path: {}", path.packages.join(" -> "));
-                            println!("    manifest digests: {}", path.manifest_digests.join(", "));
-                        }
-                        for reference in &result.references {
-                            println!(
-                                "  {}:{}:{} may reference {} ({})",
-                                reference.consumer_repository,
-                                reference.path,
-                                reference.line,
-                                reference.symbol,
-                                reference.certainty
-                            );
-                        }
-                        println!("Coverage complete: {}", result.coverage_complete);
-                        for limitation in &result.limitations {
-                            println!("Limitation: {limitation}");
-                        }
-                        println!("Impact digest: {}", result.digest);
-                    }
+                    Output::Json => emit_json(&result)?,
+                    Output::Text => print_view(&result)?,
                 }
                 Ok(0)
             }
@@ -5749,150 +2771,24 @@ fn run() -> Result<u8> {
                 output,
                 archive,
             } => {
-                let cwd = std::env::current_dir()?;
-                let config_root = vee_git::repository_root(&cwd).unwrap_or(cwd);
-                let (offline, hosting) = load_hosting_config(&config_root)?;
-                if offline {
-                    return Err(configuration_failure(
-                        "offline mode prevents fetching pull request review issues",
-                    ));
-                }
-                let provider_id = resolve_hosting_setting(provider, hosting.provider, "github");
-                if !matches!(
-                    provider_id.as_str(),
-                    "github" | "gitlab" | "bitbucket" | "azure-devops" | "gerrit"
-                ) {
-                    return Err(configuration_failure(format!(
-                        "unsupported hosting provider `{provider_id}`"
-                    )));
-                }
-                let host = resolve_hosting_setting(host, hosting.host, "github.com");
-                let api_base = resolve_hosting_setting(api_base, hosting.api_base, "");
-                let token_env = resolve_hosting_setting(token_env, hosting.token_env, "GH_TOKEN");
-                let username = resolve_hosting_setting(username, hosting.username, "");
-                let token_env = effective_work_item_token_env(&provider_id, &token_env);
-                let token = std::env::var(token_env).with_context(|| {
-                    format!("required credential environment variable {token_env} is not set")
-                })?;
-                let host = effective_work_item_host(&provider_id, &host)?;
-                let api_base = work_item_api_base(&provider_id, &host, &api_base)?;
-                let reference = vee_hosting::PullRequestRef {
-                    repository: vee_hosting::RepositoryRef {
+                let issues = vee_application::hosting::pull_request_issues(
+                    &hosting_config_root()?,
+                    vee_application::hosting::HostingFlags {
+                        provider,
                         host,
-                        full_name: repository,
+                        api_base,
+                        token_env,
+                        username,
                     },
-                    number,
-                };
-                reference.validate().map_err(configuration_failure)?;
-                if provider_id != "gerrit" && !username.is_empty() {
-                    return Err(configuration_failure(
-                        "--username is only supported with the Gerrit provider",
-                    ));
-                }
-                let adapter: Box<dyn vee_hosting::PullRequestReviewIssuesProvider> =
-                    match provider_id.as_str() {
-                        "github" => Box::new(
-                            vee_hosting::github::GitHubAdapter::new(
-                                vee_hosting::github::GitHubConfig::new(
-                                    &api_base,
-                                    token,
-                                    String::new(),
-                                )
-                                .map_err(configuration_failure)?,
-                            )
-                            .map_err(configuration_failure)?,
-                        ),
-                        "gitlab" => Box::new(
-                            vee_hosting::gitlab::GitLabAdapter::new(
-                                vee_hosting::gitlab::GitLabConfig::new(&api_base, token)
-                                    .map_err(configuration_failure)?,
-                            )
-                            .map_err(configuration_failure)?,
-                        ),
-                        "bitbucket" => Box::new(
-                            vee_hosting::bitbucket::BitbucketAdapter::new(
-                                vee_hosting::bitbucket::BitbucketConfig::new(&api_base, token)
-                                    .map_err(configuration_failure)?,
-                            )
-                            .map_err(configuration_failure)?,
-                        ),
-                        "azure-devops" => Box::new(
-                            vee_hosting::azure_devops::AzureDevOpsAdapter::new(
-                                vee_hosting::azure_devops::AzureDevOpsConfig::new(&api_base, token)
-                                    .map_err(configuration_failure)?,
-                            )
-                            .map_err(configuration_failure)?,
-                        ),
-                        "gerrit" => {
-                            let mut config =
-                                vee_hosting::gerrit::GerritConfig::new(&api_base, token)
-                                    .map_err(configuration_failure)?;
-                            if !username.is_empty() {
-                                config = config.with_username(username);
-                            }
-                            Box::new(
-                                vee_hosting::gerrit::GerritAdapter::new(config)
-                                    .map_err(configuration_failure)?,
-                            )
-                        }
-                        _ => {
-                            return Err(configuration_failure(format!(
-                                "unsupported hosting provider `{provider_id}`"
-                            )))
-                        }
-                    };
-                let report = adapter
-                    .list_pull_request_review_issues(&reference)
-                    .map_err(anyhow::Error::msg)?;
-                let archive_digest = if archive {
-                    anyhow::ensure!(
-                        !report.gate_eligible,
-                        "provider review discussions must remain non-gating"
-                    );
-                    let bytes = serde_json::to_vec(&report)?;
-                    Some(store_imported_history(&config_root, &bytes)?)
-                } else {
-                    None
-                };
+                    vee_application::hosting::PullRequestTarget { repository, number },
+                    archive,
+                )?;
                 match output {
-                    Output::Json => {
-                        let mut value = serde_json::to_value(&report)?;
-                        if let Some(digest) = &archive_digest {
-                            value["archive_digest"] = serde_json::Value::String(digest.clone());
-                        }
-                        serde_json::to_writer(std::io::stdout().lock(), &value)?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!(
-                            "{} #{} — {} external review issue(s){}",
-                            report.pull_request.repository.full_name,
-                            report.pull_request.number,
-                            report.issues.len(),
-                            if report.complete {
-                                ""
-                            } else {
-                                " (incomplete pagination)"
-                            }
-                        );
-                        if let Some(digest) = &archive_digest {
-                            println!("Archived as {digest}");
-                        }
-                        for issue in &report.issues {
-                            println!(
-                                "- {} {}:{} — {}",
-                                issue.external_id,
-                                issue.path.as_deref().unwrap_or("(general comment)"),
-                                issue
-                                    .line
-                                    .map(|line| line.to_string())
-                                    .unwrap_or_else(|| "?".into()),
-                                issue.body.lines().next().unwrap_or_default()
-                            );
-                        }
-                    }
+                    // Sorted keys, as the document has always been printed.
+                    Output::Json => emit_json(&serde_json::to_value(&issues)?)?,
+                    Output::Text => print_view(&issues)?,
                 }
-                Ok(if report.complete { 0 } else { 2 })
+                Ok(if issues.report.complete { 0 } else { 2 })
             }
             HostingCommand::PrContext {
                 repository,
@@ -5904,127 +2800,20 @@ fn run() -> Result<u8> {
                 username,
                 output,
             } => {
-                let cwd = std::env::current_dir()?;
-                let config_root = vee_git::repository_root(&cwd).unwrap_or(cwd);
-                let (offline, hosting) = load_hosting_config(&config_root)?;
-                if offline {
-                    return Err(configuration_failure(
-                        "offline mode prevents fetching pull request context",
-                    ));
-                }
-                let provider_id =
-                    resolve_hosting_setting(provider, hosting.provider, "azure-devops");
-                let host = resolve_hosting_setting(host, hosting.host, "github.com");
-                let api_base = resolve_hosting_setting(api_base, hosting.api_base, "");
-                let token_env =
-                    resolve_hosting_setting(token_env, hosting.token_env, "AZURE_DEVOPS_EXT_PAT");
-                let username = resolve_hosting_setting(username, hosting.username, "");
-                let token_env = match provider_id.as_str() {
-                    "github" if token_env == "AZURE_DEVOPS_EXT_PAT" => "GH_TOKEN",
-                    "gitlab" if token_env == "AZURE_DEVOPS_EXT_PAT" => "GL_TOKEN",
-                    "bitbucket" if token_env == "AZURE_DEVOPS_EXT_PAT" => "BB_TOKEN",
-                    "gerrit" if token_env == "AZURE_DEVOPS_EXT_PAT" => "GERRIT_TOKEN",
-                    _ => &token_env,
-                };
-                let token = std::env::var(token_env).with_context(|| {
-                    format!("required credential environment variable {token_env} is not set")
-                })?;
-                let host = effective_work_item_host(&provider_id, &host)?;
-                let api_base = work_item_api_base(&provider_id, &host, &api_base)?;
-                let reference = vee_hosting::PullRequestRef {
-                    repository: vee_hosting::RepositoryRef {
-                        host: host.clone(),
-                        full_name: repository,
+                let report = vee_application::hosting::pull_request_context(
+                    &hosting_config_root()?,
+                    vee_application::hosting::HostingFlags {
+                        provider,
+                        host,
+                        api_base,
+                        token_env,
+                        username,
                     },
-                    number,
-                };
-                reference.validate().map_err(configuration_failure)?;
-                let provider: Box<dyn vee_hosting::PullRequestContextProvider> = match provider_id
-                    .as_str()
-                {
-                    "github" => Box::new(
-                        vee_hosting::github::GitHubAdapter::new(
-                            vee_hosting::github::GitHubConfig::new(&api_base, token, String::new())
-                                .map_err(configuration_failure)?,
-                        )
-                        .map_err(configuration_failure)?,
-                    ),
-                    "gitlab" => Box::new(
-                        vee_hosting::gitlab::GitLabAdapter::new(
-                            vee_hosting::gitlab::GitLabConfig::new(&api_base, token)
-                                .map_err(configuration_failure)?,
-                        )
-                        .map_err(configuration_failure)?,
-                    ),
-                    "bitbucket" => Box::new(
-                        vee_hosting::bitbucket::BitbucketAdapter::new(
-                            vee_hosting::bitbucket::BitbucketConfig::new(&api_base, token)
-                                .map_err(configuration_failure)?,
-                        )
-                        .map_err(configuration_failure)?,
-                    ),
-                    "azure-devops" => Box::new(
-                        vee_hosting::azure_devops::AzureDevOpsAdapter::new(
-                            vee_hosting::azure_devops::AzureDevOpsConfig::new(&api_base, token)
-                                .map_err(configuration_failure)?,
-                        )
-                        .map_err(configuration_failure)?,
-                    ),
-                    "gerrit" => {
-                        let mut config = vee_hosting::gerrit::GerritConfig::new(&api_base, token)
-                            .map_err(configuration_failure)?;
-                        if !username.is_empty() {
-                            config = config.with_username(username);
-                        }
-                        Box::new(
-                            vee_hosting::gerrit::GerritAdapter::new(config)
-                                .map_err(configuration_failure)?,
-                        )
-                    }
-                    _ => {
-                        return Err(configuration_failure(format!(
-                            "unsupported pull request provider `{provider_id}`"
-                        )))
-                    }
-                };
-                let snapshot = provider
-                    .get_pull_request_context(&reference)
-                    .map_err(anyhow::Error::msg)?;
-                let changed_files = provider
-                    .list_pull_request_context_files(&reference, &snapshot.revision)
-                    .map_err(anyhow::Error::msg)?;
-                let report = vee_hosting::PullRequestContextReport {
-                    schema_version: 1,
-                    provider: provider_id.clone(),
-                    snapshot,
-                    changed_files,
-                    limitations: match provider_id.as_str() {
-                        "azure-devops" => vec!["Azure DevOps diff metadata does not include line-level patches; file records are context only, not line evidence.".into()],
-                        "bitbucket" => vec!["Bitbucket unified diffs are bounded to 5 MiB; quoted or unsupported paths may lack line-level patch evidence.".into()],
-                        _ => vec![],
-                    },
-                };
+                    vee_application::hosting::PullRequestTarget { repository, number },
+                )?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &report)?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!(
-                            "{} #{} — {} ({:?})\nRevision: {}",
-                            report.snapshot.pull_request.repository.full_name,
-                            report.snapshot.pull_request.number,
-                            report.snapshot.title,
-                            report.snapshot.state,
-                            report.snapshot.revision
-                        );
-                        for file in &report.changed_files {
-                            println!("{:?} {}", file.change, file.path);
-                        }
-                        for limitation in &report.limitations {
-                            println!("Limit: {limitation}");
-                        }
-                    }
+                    Output::Json => emit_json(&report)?,
+                    Output::Text => print_view(&report)?,
                 }
                 Ok(0)
             }
@@ -6037,56 +2826,21 @@ fn run() -> Result<u8> {
                 token_env,
                 output,
             } => {
-                let cwd = std::env::current_dir()?;
-                let config_root = vee_git::repository_root(&cwd).unwrap_or(cwd);
-                let (offline, hosting) = load_hosting_config(&config_root)?;
-                if offline {
-                    return Err(configuration_failure(
-                        "offline mode prevents fetching work item context",
-                    ));
-                }
-                let provider = resolve_hosting_setting(provider, hosting.provider, "github");
-                let host = resolve_hosting_setting(host, hosting.host, "github.com");
-                let api_base = resolve_hosting_setting(api_base, hosting.api_base, "");
-                let token_env = resolve_hosting_setting(token_env, hosting.token_env, "");
-                let token_env = if token_env.is_empty() {
-                    match provider.as_str() {
-                        "gitlab" => "GL_TOKEN",
-                        "azure-devops" => "AZURE_DEVOPS_EXT_PAT",
-                        "gerrit" => "GERRIT_TOKEN",
-                        _ => "GH_TOKEN",
-                    }
-                } else {
-                    &token_env
-                };
-                let token = std::env::var(token_env).with_context(|| {
-                    format!("required credential environment variable {token_env} is not set")
-                })?;
-                let host = effective_work_item_host(&provider, &host)?;
-                let api_base = work_item_api_base(&provider, &host, &api_base)?;
-                let reference = vee_hosting::WorkItemRef {
-                    repository: vee_hosting::RepositoryRef {
-                        host: host.clone(),
-                        full_name: repository,
+                let item = vee_application::hosting::issue_context(
+                    &hosting_config_root()?,
+                    vee_application::hosting::HostingFlags {
+                        provider,
+                        host,
+                        api_base,
+                        token_env,
+                        username: None,
                     },
+                    repository,
                     number,
-                };
-                reference.validate().map_err(configuration_failure)?;
-                let item = get_work_item(&provider, &api_base, token, &reference)?;
+                )?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &item)?;
-                        println!();
-                    }
-                    Output::Text => println!(
-                        "{} #{} — {} ({})\n{}\nContent digest: {}",
-                        reference.repository.full_name,
-                        reference.number,
-                        item.title,
-                        item.state,
-                        item.url,
-                        item.content_digest
-                    ),
+                    Output::Json => emit_json(&item)?,
+                    Output::Text => print_view(&item)?,
                 }
                 Ok(0)
             }
@@ -6104,551 +2858,30 @@ fn run() -> Result<u8> {
                 output,
             } => {
                 let cwd = std::env::current_dir()?;
-                let top = vee_git::repository_root(&cwd)
-                    .map_err(anyhow::Error::msg)?
-                    .to_string_lossy()
-                    .to_string();
-                let (offline, hosting) = load_hosting_config(std::path::Path::new(&top))?;
-                anyhow::ensure!(
-                    !offline,
-                    "offline mode prevents publishing to a Git hosting provider"
-                );
-                let provider_id = resolve_hosting_setting(provider, hosting.provider, "github");
-                let host = resolve_hosting_setting(host, hosting.host, "github.com");
-                let api_base = resolve_hosting_setting(api_base, hosting.api_base, "");
-                let token_env = resolve_hosting_setting(token_env, hosting.token_env, "");
-                let username = resolve_hosting_setting(username, hosting.username, "");
-                let webhook_secret_env = resolve_hosting_setting(
-                    webhook_secret_env,
-                    hosting.webhook_secret_env,
-                    "VEE_GITHUB_WEBHOOK_SECRET",
-                );
-                let actor_login = resolve_hosting_setting(actor_login, hosting.actor_login, "");
-                let mut store =
-                    ReviewStore::open(&std::path::Path::new(&top).join(".vee/vee.sqlite"))
-                        .map_err(anyhow::Error::msg)?;
-                let payload = store
-                    .get(&review_id)
-                    .map_err(anyhow::Error::msg)?
-                    .with_context(|| format!("review {review_id} was not found"))?;
-                let mut reviewed = vee_application::deserialize_review_result(&payload)
-                    .map_err(anyhow::Error::msg)?;
-                let current_snapshot = vee_application::capture_current_change_set(
-                    std::path::Path::new(&top),
-                    &reviewed.change_set,
-                )
-                .map_err(anyhow::Error::msg)?;
-                let mut current_config = load_repository_config(std::path::Path::new(&top))?;
-                current_config
-                    .select_policy_profile(reviewed.policy_profile.as_deref())
-                    .map_err(configuration_failure)?;
-                apply_protected_policy(std::path::Path::new(&top), &mut current_config)?;
-                let current_work_item = if let Some(item) = reviewed.work_item.as_ref() {
-                    anyhow::ensure!(
-                        !current_config.offline,
-                        "offline mode prevents revalidating the work item used by this review"
-                    );
-                    let configured_token_env = reviewed
-                        .work_item_token_env
-                        .as_deref()
-                        .or(current_config.hosting.token_env.as_deref())
-                        .unwrap_or("GH_TOKEN");
-                    let token_env =
-                        effective_work_item_token_env(&item.provider, configured_token_env);
-                    let token = std::env::var(token_env).with_context(|| {
-                        format!("{token_env} is required to revalidate the external work item used by this review")
-                    })?;
-                    Some(get_work_item(
-                        &item.provider,
-                        &item.api_base,
-                        token,
-                        &item.reference,
-                    )?)
-                } else {
-                    None
-                };
-                let current_config_digest =
-                    vee_application::effective_review_config_digest_with_work_item(
-                        &current_config,
-                        std::path::Path::new(&top),
-                        &reviewed.selected_reviewers,
-                        &vee_application::active_rule_approvals(&store)
-                            .map_err(anyhow::Error::msg)?,
-                        current_work_item.as_ref(),
-                    )
-                    .map_err(anyhow::Error::msg)?;
-                let current_verifications = store
-                    .verifications_for_snapshot(&current_snapshot.digest)
-                    .map_err(anyhow::Error::msg)?;
-                reviewed.gate = vee_application::evaluate_and_persist_gate(
-                    &mut store,
-                    vee_application::GateEvaluation {
+                let top = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
+                let publication = vee_application::hosting::publish_review(
+                    &operations::Workspace::new(top, crate::local_stores()),
+                    vee_application::hosting::PublishRequest {
                         review_id: &review_id,
-                        reviewed_snapshot_id: &reviewed.snapshot_id,
-                        current: &current_snapshot,
-                        repository_root: std::path::Path::new(&top),
-                        reviewed_config_digest: &reviewed.effective_config_digest,
-                        effective_config_digest: &current_config_digest,
-                        config: &current_config,
-                        findings: &reviewed.findings,
-                        policy_findings: reviewed.policy_findings.as_deref(),
-                        reviewer_outcomes: &reviewed.reviewer_outcomes,
-                        analysis_complete: reviewed.analysis_complete,
-                        verification_runs: &current_verifications,
-                    },
-                )
-                .map_err(anyhow::Error::msg)?;
-                anyhow::ensure!(
-                    reviewed.analysis_complete,
-                    "cannot publish an incomplete review"
-                );
-                anyhow::ensure!(
-                    reviewed.snapshot_id == reviewed.change_set.digest,
-                    "review snapshot digest is invalid"
-                );
-                anyhow::ensure!(
-                    !matches!(
-                        reviewed.change_set.scope.as_str(),
-                        "staged" | "working_tree"
-                    ),
-                    "cannot publish a staged-only or working-tree-only snapshot to a pull request"
-                );
-                if reviewed.change_set.scope == "base_and_worktree" {
-                    anyhow::ensure!(
-                        committed_snapshot_matches_review(
-                            std::path::Path::new(&top),
-                            &reviewed.change_set,
-                        )
-                        .map_err(anyhow::Error::msg)?,
-                        "cannot publish a review whose captured worktree content differs from the committed PR diff"
-                    );
-                    let status = std::process::Command::new("git")
-                        .args(["status", "--porcelain", "--untracked-files=all"])
-                        .current_dir(&top)
-                        .output()?;
-                    anyhow::ensure!(
-                        status.status.success(),
-                        "could not verify the local worktree state"
-                    );
-                    anyhow::ensure!(status.stdout.is_empty(), "cannot publish a snapshot while the local worktree or index has uncommitted changes");
-                }
-                let token_env = if token_env.is_empty() {
-                    match provider_id.as_str() {
-                        "gitlab" => "GL_TOKEN",
-                        "bitbucket" => "BB_TOKEN",
-                        "azure-devops" => "AZURE_DEVOPS_EXT_PAT",
-                        "gerrit" => "GERRIT_TOKEN",
-                        _ => "GH_TOKEN",
-                    }
-                } else {
-                    &token_env
-                };
-                let token = std::env::var(token_env).with_context(|| {
-                    format!("required credential environment variable {token_env} is not set")
-                })?;
-                let secret_env = if webhook_secret_env == "VEE_GITHUB_WEBHOOK_SECRET"
-                    && provider_id == "bitbucket"
-                {
-                    "VEE_BITBUCKET_WEBHOOK_SECRET"
-                } else {
-                    &webhook_secret_env
-                };
-                let webhook_secret = std::env::var(secret_env).unwrap_or_default();
-                let host = effective_work_item_host(&provider_id, &host)?;
-                let api_base = work_item_api_base(&provider_id, &host, &api_base)?;
-                if provider_id == "azure-devops" {
-                    let provider = vee_hosting::azure_devops::AzureDevOpsAdapter::new(
-                        vee_hosting::azure_devops::AzureDevOpsConfig::new(&api_base, token)
-                            .map_err(anyhow::Error::msg)?,
-                    )
-                    .map_err(anyhow::Error::msg)?;
-                    let pull_request = vee_hosting::PullRequestRef {
-                        repository: vee_hosting::RepositoryRef {
-                            host: host.clone(),
-                            full_name: repository.clone(),
-                        },
+                        repository: &repository,
                         number,
-                    };
-                    let remote = vee_hosting::PullRequestContextProvider::get_pull_request_context(
-                        &provider,
-                        &pull_request,
-                    )
-                    .map_err(anyhow::Error::msg)?;
-                    anyhow::ensure!(
-                        remote.state == vee_hosting::PullRequestState::Open,
-                        "pull request is not open"
-                    );
-                    anyhow::ensure!(reviewed.change_set.head_oid.as_deref() == Some(remote.head_oid.as_str()), "reviewed head does not match the current pull request head; rerun Vee against the PR head");
-                    anyhow::ensure!(reviewed.change_set.base_oid.as_deref() == Some(remote.base_oid.as_str()), "reviewed base does not match the current pull request base; rerun Vee against the current PR diff");
-                    // Equal to the provider's commits (checked above), but captured
-                    // from local Git, so these are what reach git as arguments.
-                    let reviewed_base = reviewed.change_set.base_oid.clone().unwrap_or_default();
-                    let reviewed_head = reviewed.change_set.head_oid.clone().unwrap_or_default();
-                    let (conclusion, title) = match reviewed.gate.status {
-                        vee_core::GateStatus::Pass => {
-                            (vee_hosting::CheckConclusion::Success, "Vee passed")
-                        }
-                        vee_core::GateStatus::Block => {
-                            (vee_hosting::CheckConclusion::Failure, "Vee blocked")
-                        }
-                        vee_core::GateStatus::Incomplete => (
-                            vee_hosting::CheckConclusion::ActionRequired,
-                            "Vee incomplete",
-                        ),
-                    };
-                    let summary = if reviewed.gate.reasons.is_empty() {
-                        format!("Gate status: {:?}", reviewed.gate.status)
-                    } else {
-                        reviewed
-                            .gate
-                            .reasons
-                            .iter()
-                            .map(|reason| format!("- {reason}"))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    };
-                    let mut threads = Vec::new();
-                    for finding in &reviewed.findings {
-                        if matches!(finding.severity, Severity::Info) {
-                            continue;
-                        }
-                        let (Some(path), Some(line)) = (&finding.path, finding.line) else {
-                            continue;
-                        };
-                        let relative = std::path::Path::new(path);
-                        if relative.is_absolute()
-                            || relative.components().any(|component| {
-                                matches!(
-                                    component,
-                                    std::path::Component::ParentDir
-                                        | std::path::Component::RootDir
-                                        | std::path::Component::Prefix(_)
-                                )
-                            })
-                        {
-                            continue;
-                        }
-                        let diff = std::process::Command::new("git")
-                            .args([
-                                "--literal-pathspecs",
-                                "diff",
-                                "--no-ext-diff",
-                                "--unified=0",
-                            ])
-                            .arg(&reviewed_base)
-                            .arg(&reviewed_head)
-                            .arg("--")
-                            .arg(path)
-                            .current_dir(&top)
-                            .output()?;
-                        anyhow::ensure!(diff.status.success(), "could not verify Azure DevOps finding locations against the local PR diff");
-                        if !diff_contains_added_line(Some(std::str::from_utf8(&diff.stdout)?), line)
-                        {
-                            continue;
-                        }
-                        threads.push(vee_hosting::ReviewThread {
-                            pull_request: pull_request.clone(),
-                            fingerprint: finding.fingerprint.clone(),
-                            path: path.clone(),
-                            line: u64::from(line),
-                            side: vee_hosting::DiffSide::New,
-                            body: format!("**{:?} · {}** (confidence: {}%)\n\n{}\n\nVee finding `{}` · snapshot `{}`", finding.severity, finding.category, finding.confidence.unwrap_or(0), finding.rationale, finding.id, reviewed.snapshot_id),
-                            resolution: vee_hosting::ThreadResolution::Open,
-                            snapshot_id: reviewed.snapshot_id.clone(),
-                            idempotency_key: format!("{}:{}", reviewed.review_id, finding.fingerprint),
-                        });
-                    }
-                    let active_fingerprints = reviewed
-                        .findings
-                        .iter()
-                        .map(|finding| finding.fingerprint.clone())
-                        .collect();
-                    let resolved_findings = store
-                        .list_findings(None, Some(vee_core::FindingStatus::Resolved), None)
-                        .map_err(anyhow::Error::msg)?;
-                    let thread_target = hosting_thread_target_key(&provider_id, &pull_request)
-                        .map_err(anyhow::Error::msg)?;
-                    let previously_published = store
-                        .hosted_finding_threads(&thread_target)
-                        .map_err(anyhow::Error::msg)?;
-                    add_resolved_hosting_threads(
-                        &mut threads,
-                        &resolved_findings,
-                        &active_fingerprints,
-                        &previously_published,
-                        &pull_request,
-                        &reviewed.review_id,
-                        &reviewed.snapshot_id,
-                    );
-                    let published_fingerprints =
-                        updated_hosted_finding_fingerprints(&previously_published, &threads);
-                    let intent_fingerprints =
-                        hosting_thread_intent_fingerprints(&previously_published, &threads);
-                    store
-                        .replace_hosted_finding_threads(&thread_target, &intent_fingerprints)
-                        .map_err(anyhow::Error::msg)?;
-                    let thread_ids = if threads.is_empty() {
-                        std::collections::BTreeMap::new()
-                    } else {
-                        provider
-                            .publish_threads(&pull_request, &remote.revision, &threads)
-                            .map_err(anyhow::Error::msg)?
-                    };
-                    let check = vee_hosting::CheckRun {
-                        pull_request: pull_request.clone(),
-                        external_id: reviewed.review_id.clone(),
-                        name: "Vee".into(),
-                        status: vee_hosting::CheckStatus::Completed,
-                        conclusion: Some(conclusion),
-                        title: title.into(),
-                        summary,
-                        snapshot_id: reviewed.snapshot_id.clone(),
-                        idempotency_key: reviewed.review_id.clone(),
-                    };
-                    let check_id = provider
-                        .publish_check(&pull_request, &remote.revision, &check)
-                        .map_err(anyhow::Error::msg)?;
-                    store
-                        .replace_hosted_finding_threads(&thread_target, &published_fingerprints)
-                        .map_err(anyhow::Error::msg)?;
-                    match output {
-                        Output::Json => { serde_json::to_writer(std::io::stdout().lock(), &serde_json::json!({"schema_version":1,"review_id":reviewed.review_id,"snapshot_id":reviewed.snapshot_id,"provider_check_id":check_id,"thread_ids":thread_ids,"revision":remote.revision}))?; println!(); }
-                        Output::Text => println!("Published Vee review for {} to {}/{}#{} on Azure DevOps (status {}, {} finding threads)", reviewed.review_id, host, repository, number, check_id, thread_ids.len()),
-                    }
-                    return Ok(0);
-                }
-                let provider: Box<dyn vee_hosting::GitHostingProvider> = match provider_id.as_str()
-                {
-                    "github" => Box::new(
-                        vee_hosting::github::GitHubAdapter::new(
-                            vee_hosting::github::GitHubConfig::new(
-                                &api_base,
-                                token,
-                                webhook_secret,
-                            )
-                            .map_err(anyhow::Error::msg)?
-                            .with_actor_login(actor_login),
-                        )
-                        .map_err(anyhow::Error::msg)?,
-                    ),
-                    "gitlab" => {
-                        let secret_env = if webhook_secret_env == "VEE_GITHUB_WEBHOOK_SECRET" {
-                            "VEE_GITLAB_WEBHOOK_SECRET"
-                        } else {
-                            &webhook_secret_env
-                        };
-                        let webhook_secret = std::env::var(secret_env).unwrap_or_default();
-                        Box::new(
-                            vee_hosting::gitlab::GitLabAdapter::new(
-                                vee_hosting::gitlab::GitLabConfig::new(&api_base, token)
-                                    .map_err(anyhow::Error::msg)?
-                                    .with_webhook_secret(webhook_secret)
-                                    .with_actor_login(actor_login),
-                            )
-                            .map_err(anyhow::Error::msg)?,
-                        )
-                    }
-                    "bitbucket" => Box::new(
-                        vee_hosting::bitbucket::BitbucketAdapter::new(
-                            vee_hosting::bitbucket::BitbucketConfig::new(&api_base, token)
-                                .map_err(anyhow::Error::msg)?
-                                .with_webhook_secret(webhook_secret),
-                        )
-                        .map_err(anyhow::Error::msg)?,
-                    ),
-                    "gerrit" => {
-                        let mut config = vee_hosting::gerrit::GerritConfig::new(&api_base, token)
-                            .map_err(anyhow::Error::msg)?;
-                        if !username.is_empty() {
-                            config = config.with_username(username);
-                        }
-                        Box::new(
-                            vee_hosting::gerrit::GerritAdapter::new(config)
-                                .map_err(anyhow::Error::msg)?,
-                        )
-                    }
-                    _ => {
-                        return Err(configuration_failure(format!(
-                            "unsupported hosting provider `{provider_id}`"
-                        )))
-                    }
-                };
-                let pull_request = vee_hosting::PullRequestRef {
-                    repository: vee_hosting::RepositoryRef {
-                        host: host.clone(),
-                        full_name: repository.clone(),
-                    },
-                    number,
-                };
-                let remote = provider
-                    .get_pull_request(&pull_request)
-                    .map_err(anyhow::Error::msg)?;
-                anyhow::ensure!(
-                    remote.state == vee_hosting::PullRequestState::Open,
-                    "pull request is not open"
-                );
-                anyhow::ensure!(reviewed.change_set.head_oid.as_deref() == Some(remote.head_oid.as_str()), "reviewed head does not match the current pull request head; rerun Vee against the PR head");
-                anyhow::ensure!(reviewed.change_set.base_oid.as_deref() == Some(remote.base_oid.as_str()), "reviewed base does not match the current pull request base; rerun Vee against the current PR diff");
-                // Equal to the provider's commits (checked above), but captured
-                // from local Git, so these are what reach git as arguments.
-                let reviewed_base = reviewed.change_set.base_oid.clone().unwrap_or_default();
-                let reviewed_head = reviewed.change_set.head_oid.clone().unwrap_or_default();
-                let changed = provider
-                    .list_changed_files(&pull_request, &remote.revision)
-                    .map_err(anyhow::Error::msg)?;
-                let changed_paths: std::collections::BTreeSet<_> =
-                    changed.iter().map(|file| file.path.as_str()).collect();
-                let mut threads = Vec::new();
-                for finding in &reviewed.findings {
-                    if matches!(finding.severity, vee_core::Severity::Info) {
-                        continue;
-                    }
-                    let (Some(path), Some(line)) = (&finding.path, finding.line) else {
-                        continue;
-                    };
-                    anyhow::ensure!(
-                        changed_paths.contains(path.as_str()),
-                        "finding {} is outside the current pull request diff",
-                        finding.id
-                    );
-                    let on_added_line = if provider_id == "gerrit" {
-                        let diff = std::process::Command::new("git")
-                            .args([
-                                "--literal-pathspecs",
-                                "diff",
-                                "--no-ext-diff",
-                                "--unified=0",
-                            ])
-                            .arg(&reviewed_base)
-                            .arg(&reviewed_head)
-                            .arg("--")
-                            .arg(path)
-                            .current_dir(&top)
-                            .output()?;
-                        anyhow::ensure!(diff.status.success(), "could not verify Gerrit finding locations against the local base-to-head Git diff");
-                        diff_contains_added_line(Some(std::str::from_utf8(&diff.stdout)?), line)
-                    } else {
-                        changed.iter().any(|file| {
-                            file.path == *path
-                                && diff_contains_added_line(file.patch.as_deref(), line)
-                        })
-                    };
-                    if !on_added_line {
-                        continue;
-                    }
-                    let resolution = vee_hosting::ThreadResolution::Open;
-                    let body = format!(
-                        "**{:?} · {}** (confidence: {}%)\n\n{}\n\nVee finding `{}` · snapshot `{}`",
-                        finding.severity,
-                        finding.category,
-                        finding.confidence.unwrap_or(0),
-                        finding.rationale,
-                        finding.id,
-                        reviewed.snapshot_id
-                    );
-                    threads.push(vee_hosting::ReviewThread {
-                        pull_request: pull_request.clone(),
-                        fingerprint: finding.fingerprint.clone(),
-                        path: path.clone(),
-                        line: u64::from(line),
-                        side: vee_hosting::DiffSide::New,
-                        body,
-                        resolution,
-                        snapshot_id: reviewed.snapshot_id.clone(),
-                        idempotency_key: format!("{}:{}", reviewed.review_id, finding.fingerprint),
-                    });
-                }
-                let active_fingerprints = reviewed
-                    .findings
-                    .iter()
-                    .map(|finding| finding.fingerprint.clone())
-                    .collect();
-                let resolved_findings = store
-                    .list_findings(None, Some(vee_core::FindingStatus::Resolved), None)
-                    .map_err(anyhow::Error::msg)?;
-                let thread_target = hosting_thread_target_key(&provider_id, &pull_request)
-                    .map_err(anyhow::Error::msg)?;
-                let previously_published = store
-                    .hosted_finding_threads(&thread_target)
-                    .map_err(anyhow::Error::msg)?;
-                add_resolved_hosting_threads(
-                    &mut threads,
-                    &resolved_findings,
-                    &active_fingerprints,
-                    &previously_published,
-                    &pull_request,
-                    &reviewed.review_id,
-                    &reviewed.snapshot_id,
-                );
-                let (conclusion, title) = match reviewed.gate.status {
-                    vee_core::GateStatus::Pass => {
-                        (vee_hosting::CheckConclusion::Success, "Vee passed")
-                    }
-                    vee_core::GateStatus::Block => {
-                        (vee_hosting::CheckConclusion::Failure, "Vee blocked")
-                    }
-                    vee_core::GateStatus::Incomplete => (
-                        vee_hosting::CheckConclusion::ActionRequired,
-                        "Vee incomplete",
-                    ),
-                };
-                let summary = reviewed
-                    .gate
-                    .reasons
-                    .iter()
-                    .map(|reason| format!("- {reason}"))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let published_fingerprints =
-                    updated_hosted_finding_fingerprints(&previously_published, &threads);
-                let intent_fingerprints =
-                    hosting_thread_intent_fingerprints(&previously_published, &threads);
-                store
-                    .replace_hosted_finding_threads(&thread_target, &intent_fingerprints)
-                    .map_err(anyhow::Error::msg)?;
-                let publication = vee_hosting::ReviewPublication {
-                    pull_request: pull_request.clone(),
-                    expected_revision: remote.revision.clone(),
-                    check: vee_hosting::CheckRun {
-                        pull_request,
-                        external_id: reviewed.review_id.clone(),
-                        name: "Vee".into(),
-                        status: vee_hosting::CheckStatus::Completed,
-                        conclusion: Some(conclusion),
-                        title: title.into(),
-                        summary: if summary.is_empty() {
-                            format!("Gate status: {:?}", reviewed.gate.status)
-                        } else {
-                            summary
+                        flags: vee_application::hosting::PublishFlags {
+                            hosting: vee_application::hosting::HostingFlags {
+                                provider,
+                                host,
+                                api_base,
+                                token_env,
+                                username,
+                            },
+                            webhook_secret_env,
+                            actor_login,
                         },
-                        snapshot_id: reviewed.snapshot_id.clone(),
-                        idempotency_key: reviewed.review_id.clone(),
                     },
-                    threads,
-                };
-                let receipt = provider
-                    .publish_review(publication)
-                    .map_err(anyhow::Error::msg)?;
-                store
-                    .replace_hosted_finding_threads(&thread_target, &published_fingerprints)
-                    .map_err(anyhow::Error::msg)?;
+                )?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(
-                            std::io::stdout().lock(),
-                            &serde_json::json!({"schema_version":1,"review_id":reviewed.review_id,"snapshot_id":reviewed.snapshot_id,"provider_check_id":receipt.provider_check_id,"thread_ids":receipt.thread_ids,"revision":receipt.resulting_revision}),
-                        )?;
-                        println!();
-                    }
-                    Output::Text => println!(
-                        "Published review {} to {}/{}#{} on {} (check {})",
-                        reviewed.review_id,
-                        host,
-                        repository,
-                        number,
-                        provider_id,
-                        receipt.provider_check_id
-                    ),
+                    // Sorted keys, as the document has always been printed.
+                    Output::Json => emit_json(&serde_json::to_value(&publication)?)?,
+                    Output::Text => print_view(&publication)?,
                 }
                 Ok(0)
             }
@@ -6824,36 +3057,16 @@ fn run() -> Result<u8> {
                 apply,
                 output,
             } => {
-                let cwd = std::env::current_dir()?;
-                let root = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-                let database = root.join(".vee/vee.sqlite");
-                let mut store = ReviewStore::open(&database).map_err(anyhow::Error::msg)?;
-                let now = current_unix_time()?;
-                let retention_seconds = i64::from(older_than_days)
-                    .checked_mul(86_400)
-                    .context("webhook retention period exceeds supported timestamp")?;
-                let cutoff = now
-                    .checked_sub(retention_seconds)
-                    .context("webhook retention cutoff is outside the supported range")?;
-                let eligible = store
-                    .prune_processed_webhook_deliveries_before(cutoff, apply)
-                    .map_err(anyhow::Error::msg)?;
+                let workspace = operations::Workspace::discover(crate::local_stores())?;
+                let retention = vee_application::hosting::prune_webhook_deliveries(
+                    &workspace,
+                    older_than_days,
+                    apply,
+                )?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(
-                            std::io::stdout().lock(),
-                            &serde_json::json!({
-                                "schema_version": 1,
-                                "retention_days": older_than_days,
-                                "eligible_receipts": eligible,
-                                "deleted_receipts": if apply { eligible } else { 0 },
-                                "dry_run": !apply
-                            }),
-                        )?;
-                        println!();
-                    }
-                    Output::Text if apply => println!("Deleted {eligible} completed webhook receipts older than {older_than_days} days."),
-                    Output::Text => println!("{eligible} completed webhook receipts are eligible for deletion; rerun with --apply to remove them."),
+                    // Sorted keys, as the document has always been printed.
+                    Output::Json => emit_json(&serde_json::to_value(&retention)?)?,
+                    Output::Text => print_view(&retention)?,
                 }
                 Ok(0)
             }
@@ -6861,8 +3074,6 @@ fn run() -> Result<u8> {
         Command::Waivers { command } => {
             let cwd = std::env::current_dir()?;
             let top = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-            let database = top.join(".vee/vee.sqlite");
-            let mut store = ReviewStore::open(&database).map_err(anyhow::Error::msg)?;
             match command {
                 WaiversCommand::Create {
                     finding_id,
@@ -6872,65 +3083,19 @@ fn run() -> Result<u8> {
                     expires_in_days,
                     output,
                 } => {
-                    if expires_in_days == 0 {
-                        anyhow::bail!("--expires-in-days must be positive");
-                    }
-                    let payload = store
-                        .get(&review)
-                        .map_err(anyhow::Error::msg)?
-                        .with_context(|| format!("review {review} was not found"))?;
-                    let reviewed = vee_application::deserialize_review_result(&payload)
-                        .map_err(anyhow::Error::msg)?;
-                    let fingerprint = match reviewed
-                        .findings
-                        .iter()
-                        .find(|finding| finding.id == finding_id)
-                    {
-                        Some(finding) => finding.fingerprint.clone(),
-                        None => analyzer_finding_fingerprint(&store, &reviewed, &finding_id)?
-                            .with_context(|| {
-                                format!("finding {finding_id} was not observed in review {review}")
-                            })?,
-                    };
-                    let reason = vee_core::Reason::new(&reason).map_err(usage_failure)?;
-                    let author =
-                        vee_core::ActorName::new("author", &author).map_err(usage_failure)?;
-                    let created_at_unix = current_unix_time()?;
-                    let expires_at_unix = created_at_unix
-                        .checked_add(i64::from(expires_in_days) * 86_400)
-                        .context("waiver expiry exceeds supported timestamp")?;
-                    let id = format!(
-                        "waiver_{}",
-                        &vee_core::digest(&serde_json::to_vec(&(
-                            fingerprint.as_str(),
-                            reviewed.snapshot_id.as_str(),
-                            reason.as_str(),
-                            author.as_str(),
-                            created_at_unix,
-                            expires_at_unix,
-                        ))?)[..20]
-                    );
-                    let waiver = vee_core::Waiver {
-                        schema_version: 1,
-                        id,
-                        finding_fingerprint: fingerprint,
-                        snapshot_id: reviewed.snapshot_id,
-                        reason: reason.as_str().to_owned(),
-                        author: author.as_str().to_owned(),
-                        provenance: "local_cli".into(),
-                        created_at_unix,
-                        expires_at_unix,
-                    };
-                    store.create_waiver(&waiver).map_err(anyhow::Error::msg)?;
+                    let waiver = operations::create_waiver(
+                        &operations::Workspace::new(top.clone(), crate::local_stores()),
+                        &operations::WaiverRequest {
+                            review_id: &review,
+                            finding_id: &finding_id,
+                            reason: &reason,
+                            author: &author,
+                            expires_in_days,
+                        },
+                    )?;
                     match output {
-                        Output::Json => {
-                            serde_json::to_writer(std::io::stdout().lock(), &waiver)?;
-                            println!();
-                        }
-                        Output::Text => println!(
-                            "Created {} for {} through {}",
-                            waiver.id, finding_id, waiver.expires_at_unix
-                        ),
+                        Output::Json => emit_json(&waiver)?,
+                        Output::Text => print_view(&waiver)?,
                     }
                     Ok(0)
                 }
@@ -6939,21 +3104,9 @@ fn run() -> Result<u8> {
                         &operations::Workspace::new(top.clone(), crate::local_stores()),
                         &review,
                     )?;
-                    let waivers = &listed.waivers;
                     match output {
                         Output::Json => emit_json(&listed)?,
-                        Output::Text => {
-                            for waiver in waivers {
-                                println!(
-                                    "{}  {}  expires {}  by {}  {}",
-                                    waiver.id,
-                                    waiver.finding_fingerprint,
-                                    waiver.expires_at_unix,
-                                    waiver.author,
-                                    waiver.reason
-                                );
-                            }
-                        }
+                        Output::Text => print_view(&listed)?,
                     }
                     Ok(0)
                 }
@@ -6987,81 +3140,17 @@ fn run() -> Result<u8> {
                             offset: Some(offset),
                         },
                     )?;
-                    let records = &page.findings;
                     match output {
                         Output::Json => emit_json(&page)?,
-                        Output::Text => {
-                            if records.is_empty() {
-                                println!("No findings");
-                            }
-                            for record in records {
-                                println!(
-                                    "{}  {:?}  {:?}  {}",
-                                    record.finding.id,
-                                    record.finding.severity,
-                                    record.status,
-                                    record.finding.path.as_deref().unwrap_or("<no path>")
-                                );
-                            }
-                            if page.offset + records.len() < page.total {
-                                println!(
-                                    "Showing {}-{} of {}; use --offset {} for more",
-                                    page.offset + 1,
-                                    page.offset + records.len(),
-                                    page.total,
-                                    page.offset + records.len()
-                                );
-                            }
-                        }
+                        Output::Text => print_view(&page)?,
                     }
                     Ok(0)
                 }
                 FindingsCommand::Show { id, output } => {
                     let detail = operations::finding_detail(&workspace, &id)?;
-                    let record = &detail.finding;
-                    let verification_runs = &detail.verification_runs;
                     match output {
                         Output::Json => emit_json(&detail)?,
-                        Output::Text => {
-                            println!(
-                                "{} {:?} ({:?})",
-                                record.finding.id, record.finding.severity, record.status
-                            );
-                            if let Some(path) = &record.finding.path {
-                                println!("Location: {}:{}", path, record.finding.line.unwrap_or(0));
-                            }
-                            println!(
-                                "Confidence: {}",
-                                record
-                                    .finding
-                                    .confidence
-                                    .map_or_else(|| "unknown".into(), |v| format!("{v}%"))
-                            );
-                            println!("{}", record.finding.rationale);
-                            println!("Occurrences: {}", record.occurrence_count);
-                            if let Some(reason) = &record.status_reason {
-                                println!("Status reason: {reason}");
-                            }
-                            if verification_runs.is_empty() {
-                                println!("Finding-specific verification: none recorded");
-                            } else {
-                                println!("Finding-specific verification:");
-                                for run in verification_runs {
-                                    println!(
-                                        "  {}  {}  {}  snapshot {}",
-                                        run.run_id,
-                                        run.profile_id,
-                                        match run.status {
-                                            VerificationStatus::Passed => "passed",
-                                            VerificationStatus::Failed => "failed",
-                                            VerificationStatus::TimedOut => "timed out",
-                                            VerificationStatus::Incomplete => "incomplete",
-                                        },
-                                        run.snapshot_id,
-                                    );
-                                }
-                            }
-                        }
+                        Output::Text => print_view(&detail)?,
                     }
                     Ok(0)
                 }
@@ -7073,29 +3162,7 @@ fn run() -> Result<u8> {
                     let task = operations::finding_task(&workspace, &id, context_lines)?;
                     match output {
                         Output::Json => emit_json(&task)?,
-                        Output::Text => {
-                            println!("Task {}", task.task_id);
-                            println!("Review: {}  Snapshot: {}", task.review_id, task.snapshot_id);
-                            println!("Current snapshot: {}", task.snapshot_current);
-                            println!(
-                                "Finding {} {:?} {:?} ({})",
-                                task.finding.finding.id,
-                                task.finding.finding.severity,
-                                task.finding.status,
-                                task.finding.finding.category
-                            );
-                            if let Some(source) = &task.source_context {
-                                println!(
-                                    "Source {}:{}-{}",
-                                    source.path, source.start_line, source.end_line
-                                );
-                                print!("{}", source.content);
-                            }
-                            if let Some(note) = &task.context_note {
-                                println!("Source context: {note}");
-                            }
-                            println!("{}", task.instructions);
-                        }
+                        Output::Text => print_view(&task)?,
                     }
                     Ok(0)
                 }
@@ -7108,24 +3175,7 @@ fn run() -> Result<u8> {
                         operations::finding_work_package(&workspace, &ids, context_lines)?;
                     match output {
                         Output::Json => emit_json(&package)?,
-                        Output::Text => {
-                            println!("Work package {}", package.package_id);
-                            println!(
-                                "Review: {}  Snapshot: {}",
-                                package.review_id, package.snapshot_id
-                            );
-                            println!("Current snapshot: {}", package.snapshot_current);
-                            for task in &package.findings {
-                                println!(
-                                    "{} {:?} {:?} ({})",
-                                    task.finding.finding.id,
-                                    task.finding.finding.severity,
-                                    task.finding.status,
-                                    task.finding.finding.category
-                                );
-                            }
-                            println!("{}", package.instructions);
-                        }
+                        Output::Text => print_view(&package)?,
                     }
                     Ok(0)
                 }
@@ -7139,25 +3189,10 @@ fn run() -> Result<u8> {
                             "patch must be a regular, non-symlink file no larger than 2 MiB",
                         )?;
                     let proposal = operations::propose_patch(&workspace, &review, &bytes)?;
-                    let digest = proposal["patch_digest"].as_str().unwrap_or_default();
                     match output {
-                        Output::Json => {
-                            serde_json::to_writer(std::io::stdout().lock(), &proposal)?;
-                            println!();
-                        }
-                        Output::Text => {
-                            println!("Patch validated: {digest}");
-                            println!(
-                                "Review: {}  Snapshot: {}",
-                                proposal["review_id"].as_str().unwrap_or_default(),
-                                proposal["snapshot_id"].as_str().unwrap_or_default()
-                            );
-                            println!(
-                                "Saved patch: {}",
-                                proposal["patch_path"].as_str().unwrap_or_default()
-                            );
-                            println!("No repository files were changed.");
-                        }
+                        // Through a Value, as before: keys stay sorted, as MCP emits them.
+                        Output::Json => emit_json(&serde_json::to_value(&proposal)?)?,
+                        Output::Text => print_view(&proposal)?,
                     }
                     Ok(0)
                 }
@@ -7226,45 +3261,19 @@ fn run() -> Result<u8> {
                             == Some(saved.effective_config_digest.as_str()),
                         "proposal configuration digest does not match its saved review"
                     );
-                    let mut config = load_repository_config(std::path::Path::new(&top))?;
-                    config
-                        .select_policy_profile(saved.policy_profile.as_deref())
-                        .map_err(configuration_failure)?;
-                    apply_protected_policy(std::path::Path::new(&top), &mut config)?;
-                    let current_work_item = if let Some(item) = saved.work_item.as_ref() {
-                        anyhow::ensure!(
-                            !config.offline,
-                            "offline mode prevents revalidating the work item used by this review"
-                        );
-                        let configured_token_env = saved
-                            .work_item_token_env
-                            .as_deref()
-                            .or(config.hosting.token_env.as_deref())
-                            .unwrap_or("GH_TOKEN");
-                        let token_env =
-                            effective_work_item_token_env(&item.provider, configured_token_env);
-                        let token = std::env::var(token_env).with_context(|| {
-                            format!("{token_env} is required to revalidate the external work item used by this review")
-                        })?;
-                        Some(get_work_item(
-                            &item.provider,
-                            &item.api_base,
-                            token,
-                            &item.reference,
-                        )?)
-                    } else {
-                        None
-                    };
-                    let current_config_digest =
-                        vee_application::effective_review_config_digest_with_work_item(
-                            &config,
-                            std::path::Path::new(&top),
-                            &saved.selected_reviewers,
-                            &vee_application::active_rule_approvals(&store)
-                                .map_err(anyhow::Error::msg)?,
-                            current_work_item.as_ref(),
-                        )
-                        .map_err(anyhow::Error::msg)?;
+                    let operations::CurrentReviewConfig {
+                        config,
+                        digest: current_config_digest,
+                        work_item: current_work_item,
+                    } = operations::current_review_config(
+                        &operations::Workspace::new(
+                            std::path::PathBuf::from(&top),
+                            crate::local_stores(),
+                        ),
+                        &store,
+                        &saved,
+                        None,
+                    )?;
                     anyhow::ensure!(
                         current_config_digest == saved.effective_config_digest,
                         "effective review configuration changed; patch was not applied"
@@ -7384,37 +3393,23 @@ fn run() -> Result<u8> {
                     proposal["follow_up_snapshot_id"] =
                         serde_json::Value::String(review.snapshot_id.clone());
                     write_proposal_file(&record_path, &serde_json::to_vec_pretty(&proposal)?)?;
+                    let applied = operations::PatchApplication {
+                        schema_version: 1,
+                        proposal_digest: digest,
+                        approved: true,
+                        application: "applied".into(),
+                        concurrent_mutation_detected,
+                        review,
+                    };
                     match output {
-                        Output::Json => {
-                            serde_json::to_writer(
-                                std::io::stdout().lock(),
-                                &serde_json::json!({"schema_version":1,"proposal_digest":digest,"approved":true,"application":"applied","concurrent_mutation_detected":concurrent_mutation_detected,"review":review}),
-                            )?;
-                            println!();
-                        }
-                        Output::Text => {
-                            println!("Applied approved patch {digest}");
-                            if concurrent_mutation_detected {
-                                println!("Warning: patch target changed concurrently; inspect the re-reviewed result.");
-                            }
-                            println!("Follow-up review: {}", review.review_id);
-                            println!(
-                                "Snapshot: {}  Gate: {:?}",
-                                review.snapshot_id, review.gate.status
-                            );
-                            for reason in &review.gate.reasons {
-                                println!("- {reason}");
-                            }
-                            print_unsuccessful_reviewers(&review.reviewer_outcomes);
-                            if !review.unreviewed_paths.is_empty() {
-                                println!("Not reviewed: {}", review.unreviewed_paths.join(", "));
-                            }
-                        }
+                        // Sorted keys, as this command has always emitted.
+                        Output::Json => emit_json(&serde_json::to_value(&applied)?)?,
+                        Output::Text => print_view(&applied)?,
                     }
-                    Ok(if concurrent_mutation_detected {
+                    Ok(if applied.concurrent_mutation_detected {
                         2
                     } else {
-                        match review.gate.status {
+                        match applied.review.gate.status {
                             GateStatus::Pass => 0,
                             GateStatus::Block => 1,
                             GateStatus::Incomplete => 2,
@@ -7431,10 +3426,7 @@ fn run() -> Result<u8> {
                         operations::set_finding_status(&workspace, &id, status.into(), &reason)?;
                     match output {
                         Output::Json => emit_json(&update)?,
-                        Output::Text => println!(
-                            "Updated finding {} to {:?}. {}",
-                            update.finding_id, update.status, update.note
-                        ),
+                        Output::Text => print_view(&update)?,
                     }
                     Ok(0)
                 }
@@ -7459,46 +3451,16 @@ fn run() -> Result<u8> {
                         )?;
                         match output {
                             Output::Json => emit_json(&feedback)?,
-                            Output::Text => println!(
-                                "Recorded {} feedback for finding {} on snapshot {}",
-                                feedback_label_text(feedback.label),
-                                feedback.finding_id,
-                                feedback.snapshot_id
-                            ),
+                            Output::Text => print_view(&feedback)?,
                         }
                         Ok(0)
                     }
                     FindingFeedbackCommand::List { finding, output } => {
-                        let feedback = store.list_finding_feedback().map_err(anyhow::Error::msg)?;
-                        let feedback: Vec<_> = feedback
-                            .into_iter()
-                            .filter(|item| {
-                                finding.as_deref().is_none_or(|id| item.finding_id == id)
-                            })
-                            .collect();
+                        let list =
+                            operations::finding_feedback_list(&workspace, finding.as_deref())?;
                         match output {
-                            Output::Json => {
-                                serde_json::to_writer(
-                                    std::io::stdout().lock(),
-                                    &serde_json::json!({"schema_version": 1, "feedback": feedback}),
-                                )?;
-                                println!();
-                            }
-                            Output::Text => {
-                                if feedback.is_empty() {
-                                    println!("No reviewed feedback");
-                                }
-                                for item in feedback {
-                                    println!(
-                                        "{}  {}  {}  {}  {}",
-                                        item.finding_id,
-                                        item.snapshot_id,
-                                        feedback_label_text(item.label),
-                                        item.reviewer,
-                                        item.reason
-                                    );
-                                }
-                            }
+                            Output::Json => emit_json(&list)?,
+                            Output::Text => print_view(&list)?,
                         }
                         Ok(0)
                     }
@@ -7634,55 +3596,16 @@ fn install_agent_skills(root: &std::path::Path, force: bool) -> Result<()> {
     Ok(())
 }
 
-fn print_verification_artifacts(run: &VerificationRun) {
-    if let Some(artifact) = &run.stdout_artifact {
-        println!("stdout artifact: {} ({})", artifact.path, artifact.digest);
-    }
-    if let Some(artifact) = &run.stderr_artifact {
-        println!("stderr artifact: {} ({})", artifact.path, artifact.digest);
-    }
-}
-
-fn print_count_map(label: &str, counts: &std::collections::BTreeMap<String, usize>) {
-    println!("{label}:");
-    if counts.is_empty() {
-        println!("  none");
-    } else {
-        for (name, count) in counts {
-            println!("  {name}: {count}");
-        }
-    }
-}
-
-fn print_feedback_rate(label: &str, metric: &analytics::FeedbackRate) {
-    match metric.observed_rate {
-        Some(rate) => println!(
-            "{label}: {:.1}% ({}/{} labeled occurrences; {} disputed)",
-            rate * 100.0,
-            metric.positive_occurrences,
-            metric.denominator,
-            metric.disputed_occurrences
-        ),
-        None => println!(
-            "{label}: unavailable (no unambiguous labels; {} disputed)",
-            metric.disputed_occurrences
-        ),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
     use super::install_agent_skills;
     use super::{
-        build_hosting_threads, committed_snapshot_matches_review, diff_contains_added_line,
-        json_output_requested, read_proposal_file, sarif_uri_reference, work_item_api_base,
-        write_markdown_report, Cli, Command, HostingCommand, Output,
+        json_output_requested, read_proposal_file, work_item_api_base, write_markdown_report, Cli,
+        Command, HostingCommand, Output,
     };
     use clap::Parser;
-    use std::collections::BTreeSet;
-    use vee_core::ports::HostedDeliveryRepository;
-    use vee_core::Severity;
+    use vee_application::attestation::committed_snapshot_matches_review;
 
     fn undocumented_cli_items(command: &clap::Command, path: &str, problems: &mut Vec<String>) {
         if command.get_about().is_none() && !path.is_empty() {
@@ -7916,26 +3839,6 @@ mod tests {
     }
 
     #[test]
-    fn sarif_uri_encodes_spaces_and_uri_delimiters() {
-        assert_eq!(
-            sarif_uri_reference("src/my file#1?.rs"),
-            "src/my%20file%231%3F.rs"
-        );
-        assert_eq!(sarif_uri_reference("src/naïve.rs"), "src/na%C3%AFve.rs");
-    }
-
-    #[test]
-    fn azure_review_location_must_be_on_an_added_line() {
-        let patch = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -2,2 +2,3 @@\n context\n+added line\n more context\n";
-        assert!(diff_contains_added_line(Some(patch), 3));
-        let plus_prefixed_addition = "@@ -1,0 +1,1 @@\n+++ valid added source\n";
-        assert!(diff_contains_added_line(Some(plus_prefixed_addition), 1));
-        assert!(!diff_contains_added_line(Some(patch), 4));
-        assert!(!diff_contains_added_line(Some(patch), 2));
-        assert!(!diff_contains_added_line(None, 3));
-    }
-
-    #[test]
     fn publish_snapshot_rejects_uncommitted_content_in_base_and_worktree_review() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
@@ -8008,250 +3911,6 @@ mod tests {
             "review files: {:?}",
             clean_review.files
         );
-    }
-
-    #[test]
-    fn hosting_threads_only_target_findings_on_added_diff_lines() {
-        let pull_request = vee_hosting::PullRequestRef {
-            repository: vee_hosting::RepositoryRef {
-                host: "github.com".into(),
-                full_name: "example/repo".into(),
-            },
-            number: 12,
-        };
-        let finding = |id: &str, line: u32, severity| vee_core::Finding {
-            id: id.into(),
-            fingerprint: format!("sha256:{id}"),
-            category: "correctness".into(),
-            severity,
-            confidence: Some(90),
-            rationale: "A concrete issue".into(),
-            path: Some("src/lib.rs".into()),
-            line: Some(line),
-            provenance: "model_inference".into(),
-            reviewer_ids: Vec::new(),
-            evidence_ids: Vec::new(),
-            rule_attributions: Vec::new(),
-            sample_agreement: None,
-            advisory: false,
-        };
-        let findings = vec![
-            finding("added", 3, vee_core::Severity::High),
-            finding("context", 4, vee_core::Severity::High),
-            finding("informational", 3, vee_core::Severity::Info),
-        ];
-        let changed_files = vec![vee_hosting::PullRequestFile {
-            path: "src/lib.rs".into(),
-            change: vee_hosting::FileChange::Modified,
-            previous_path: None,
-            patch: Some("@@ -2,2 +2,3 @@\n context\n+added\n more context\n".into()),
-            additions: 1,
-            deletions: 0,
-        }];
-
-        let threads = build_hosting_threads(
-            &findings,
-            &pull_request,
-            &changed_files,
-            "review-1",
-            "sha256:snapshot",
-            "sha256:delivery",
-        );
-
-        assert_eq!(threads.len(), 1);
-        assert_eq!(threads[0].fingerprint, "sha256:added");
-        assert_eq!(threads[0].line, 3);
-        assert_eq!(threads[0].side, vee_hosting::DiffSide::New);
-        assert_eq!(threads[0].snapshot_id, "sha256:snapshot");
-        assert_eq!(threads[0].idempotency_key, "sha256:delivery:sha256:added");
-    }
-
-    #[test]
-    fn hosted_finding_ledger_retains_unmentioned_threads_until_resolved() {
-        let pull_request = vee_hosting::PullRequestRef {
-            repository: vee_hosting::RepositoryRef {
-                host: "github.com".into(),
-                full_name: "example/repo".into(),
-            },
-            number: 12,
-        };
-        let thread = |fingerprint: &str, resolution| vee_hosting::ReviewThread {
-            pull_request: pull_request.clone(),
-            fingerprint: fingerprint.into(),
-            path: "src/lib.rs".into(),
-            line: 10,
-            side: vee_hosting::DiffSide::New,
-            body: "finding".into(),
-            resolution,
-            snapshot_id: "sha256:snapshot".into(),
-            idempotency_key: format!("key:{fingerprint}"),
-        };
-        let previous = BTreeSet::from(["sha256:stale".into(), "sha256:resolved".into()]);
-        let updated = super::updated_hosted_finding_fingerprints(
-            &previous,
-            &[
-                thread("sha256:new", vee_hosting::ThreadResolution::Open),
-                thread("sha256:resolved", vee_hosting::ThreadResolution::Resolved),
-            ],
-        );
-        assert_eq!(
-            updated,
-            BTreeSet::from(["sha256:new".into(), "sha256:stale".into()])
-        );
-        let intent = super::hosting_thread_intent_fingerprints(
-            &previous,
-            &[
-                thread("sha256:new", vee_hosting::ThreadResolution::Open),
-                thread("sha256:resolved", vee_hosting::ThreadResolution::Resolved),
-            ],
-        );
-        assert_eq!(
-            intent,
-            BTreeSet::from([
-                "sha256:new".into(),
-                "sha256:resolved".into(),
-                "sha256:stale".into(),
-            ]),
-            "pending publication must retain prior and all possibly written fingerprints"
-        );
-
-        // Model a provider accepting the write while Vee exits before it can
-        // store the final publication receipt. The prewritten intent survives
-        // restart and still allows the next review to resolve that thread.
-        let directory = tempfile::tempdir().unwrap();
-        let database = directory.path().join("hosted-threads.sqlite");
-        let target = "github:example/repo#12";
-        let mut store = vee_store_sqlite::ReviewStore::open(&database).unwrap();
-        store
-            .replace_hosted_finding_threads(target, &intent)
-            .unwrap();
-        drop(store);
-
-        let reopened = vee_store_sqlite::ReviewStore::open(&database).unwrap();
-        let recovered = reopened.hosted_finding_threads(target).unwrap();
-        assert_eq!(recovered, intent);
-
-        let records = vec![vee_core::FindingRecord {
-            assessments: Vec::new(),
-            finding: vee_core::Finding {
-                id: "recovered".into(),
-                fingerprint: "sha256:new".into(),
-                category: "correctness".into(),
-                severity: Severity::High,
-                confidence: Some(90),
-                rationale: "Concrete issue".into(),
-                path: Some("src/lib.rs".into()),
-                line: Some(10),
-                provenance: "model_inference".into(),
-                reviewer_ids: Vec::new(),
-                evidence_ids: Vec::new(),
-                rule_attributions: Vec::new(),
-                sample_agreement: None,
-                advisory: false,
-            },
-            status: vee_core::FindingStatus::Resolved,
-            status_reason: Some("fixed and verified".into()),
-            occurrence_count: 1,
-            first_seen: "2026-11-14T00:00:00Z".into(),
-            last_seen: "2026-11-14T00:00:00Z".into(),
-            occurrences: Vec::new(),
-        }];
-        let resolved = super::build_resolved_hosting_threads(
-            &records,
-            &BTreeSet::new(),
-            &recovered,
-            &pull_request,
-            "review-after-restart",
-            "sha256:next-snapshot",
-        );
-        assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].fingerprint, "sha256:new");
-        assert_eq!(
-            resolved[0].resolution,
-            vee_hosting::ThreadResolution::Resolved
-        );
-    }
-
-    #[test]
-    fn resolved_hosting_threads_exclude_active_and_non_resolved_findings() {
-        let pull_request = vee_hosting::PullRequestRef {
-            repository: vee_hosting::RepositoryRef {
-                host: "github.com".into(),
-                full_name: "example/repo".into(),
-            },
-            number: 12,
-        };
-        let record = |id: &str, status| vee_core::FindingRecord {
-            assessments: Vec::new(),
-            finding: vee_core::Finding {
-                id: id.into(),
-                fingerprint: format!("sha256:{id}"),
-                category: "correctness".into(),
-                severity: Severity::High,
-                confidence: Some(90),
-                rationale: "Concrete issue".into(),
-                path: Some("src/lib.rs".into()),
-                line: Some(10),
-                provenance: "model_inference".into(),
-                reviewer_ids: Vec::new(),
-                evidence_ids: Vec::new(),
-                rule_attributions: Vec::new(),
-                sample_agreement: None,
-                advisory: false,
-            },
-            status,
-            status_reason: Some("fixed and verified".into()),
-            occurrence_count: 1,
-            first_seen: "2026-11-14T00:00:00Z".into(),
-            last_seen: "2026-11-14T00:00:00Z".into(),
-            occurrences: Vec::new(),
-        };
-        let records = vec![
-            record("resolved", vee_core::FindingStatus::Resolved),
-            record("active", vee_core::FindingStatus::Resolved),
-            record("refuted", vee_core::FindingStatus::Refuted),
-        ];
-        let active = BTreeSet::from(["sha256:active".to_owned()]);
-        let threads = super::build_resolved_hosting_threads(
-            &records,
-            &active,
-            &BTreeSet::from(["sha256:resolved".to_owned()]),
-            &pull_request,
-            "review-2",
-            "sha256:snapshot",
-        );
-        assert_eq!(threads.len(), 1);
-        assert_eq!(threads[0].fingerprint, "sha256:resolved");
-        assert_eq!(
-            threads[0].resolution,
-            vee_hosting::ThreadResolution::Resolved
-        );
-        assert_eq!(
-            threads[0].idempotency_key,
-            "review-2:sha256:resolved:resolved"
-        );
-
-        let mut publication = vec![vee_hosting::ReviewThread {
-            pull_request: pull_request.clone(),
-            fingerprint: "sha256:active".into(),
-            path: "src/lib.rs".into(),
-            line: 10,
-            side: vee_hosting::DiffSide::New,
-            body: "still present".into(),
-            resolution: vee_hosting::ThreadResolution::Open,
-            snapshot_id: "sha256:snapshot".into(),
-            idempotency_key: "review-2:sha256:active".into(),
-        }];
-        super::add_resolved_hosting_threads(
-            &mut publication,
-            &records,
-            &BTreeSet::from(["sha256:active".to_owned(), "sha256:resolved".to_owned()]),
-            &BTreeSet::from(["sha256:resolved".to_owned()]),
-            &pull_request,
-            "review-2",
-            "sha256:snapshot",
-        );
-        assert_eq!(publication.len(), 1);
     }
 
     #[cfg(unix)]

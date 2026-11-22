@@ -37,7 +37,7 @@ Separately, the layering only partly follows domain-driven design:
 
 ### Step 1 (implemented)
 
-1. `crates/vee-cli/src/operations.rs` is the single implementation of every
+1. `crates/vee-application/src/operations.rs` (originally in `vee-cli`) is the single implementation of every
    operation shared by the CLI and MCP. Each operation validates input once, calls
    the application services, and returns the published result document. Errors use
    the existing usage/configuration markers, so the CLI keeps its exit codes and MCP

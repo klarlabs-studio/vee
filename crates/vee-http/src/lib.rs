@@ -387,7 +387,7 @@ async fn start_review(
                 policy_profile: request.policy_profile.as_deref(),
                 effort: request.effort,
                 work_item: None,
-                work_item_token_env: None,
+                hosting: Default::default(),
             },
             None,
         )

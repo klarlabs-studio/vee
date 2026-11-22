@@ -8,7 +8,7 @@
 //! `init` writes them to the per-user config; the repository's `.vee.yaml` holds
 //! reviewers and policy and stays portable across team members.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use vee_core::{ProviderConfig, ProviderEgress, ProviderKind};
@@ -54,7 +54,7 @@ pub trait SystemProbe {
 }
 
 /// How an available backend would be used.
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BackendFamily {
     LocalModel,
@@ -63,13 +63,13 @@ pub enum BackendFamily {
 }
 
 /// `provider-detection-v1` candidate.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Candidate {
     /// Stable identifier accepted by `vee init --provider`.
-    pub candidate_id: &'static str,
+    pub candidate_id: String,
     pub family: BackendFamily,
-    pub kind: &'static str,
-    pub egress: &'static str,
+    pub kind: String,
+    pub egress: String,
     pub available: bool,
     /// Version, endpoint, or key variable that made the candidate available.
     pub detail: Option<String>,
@@ -81,13 +81,13 @@ pub struct Candidate {
 }
 
 /// `provider-detection-v1`
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DetectionReport {
     pub schema_version: u32,
     /// Candidates in preference order: local model, agent CLIs, API keys.
     pub candidates: Vec<Candidate>,
     /// First available candidate that `init` can configure without further input.
-    pub recommended: Option<&'static str>,
+    pub recommended: Option<String>,
 }
 
 struct AgentCli {
@@ -212,10 +212,10 @@ pub fn detect(probe: &dyn SystemProbe) -> DetectionReport {
                 format!("Ollama at {base} has no models; run `ollama pull <model>`"),
             ),
             Ok(models) => Candidate {
-                candidate_id: "ollama",
+                candidate_id: "ollama".to_string(),
                 family: BackendFamily::LocalModel,
-                kind: "ollama_native",
-                egress: "local",
+                kind: "ollama_native".to_string(),
+                egress: "local".to_string(),
                 available: true,
                 detail: Some(base),
                 models,
@@ -250,10 +250,10 @@ pub fn detect(probe: &dyn SystemProbe) -> DetectionReport {
                     format!("`{} --version` did not succeed", path.display()),
                 ),
                 Some(version) => Candidate {
-                    candidate_id: cli.candidate_id,
+                    candidate_id: cli.candidate_id.to_string(),
                     family: BackendFamily::AgentCli,
-                    kind: cli.kind_name,
-                    egress: "network",
+                    kind: cli.kind_name.to_string(),
+                    egress: "network".to_string(),
                     available: true,
                     detail: Some(version),
                     models: Vec::new(),
@@ -270,10 +270,10 @@ pub fn detect(probe: &dyn SystemProbe) -> DetectionReport {
             .is_some_and(|value| !value.trim().is_empty());
         candidates.push(if present {
             Candidate {
-                candidate_id: vendor.candidate_id,
+                candidate_id: vendor.candidate_id.to_string(),
                 family: BackendFamily::ApiKey,
-                kind: "openai_compatible",
-                egress: "network",
+                kind: "openai_compatible".to_string(),
+                egress: "network".to_string(),
                 available: true,
                 detail: Some(vendor.key.to_owned()),
                 models: Vec::new(),
@@ -293,7 +293,7 @@ pub fn detect(probe: &dyn SystemProbe) -> DetectionReport {
     let recommended = candidates
         .iter()
         .find(|candidate| candidate.available && !candidate.requires_model)
-        .map(|candidate| candidate.candidate_id);
+        .map(|candidate| candidate.candidate_id.clone());
     DetectionReport {
         schema_version: 1,
         candidates,
@@ -310,10 +310,10 @@ impl Candidate {
         reason: String,
     ) -> Self {
         Self {
-            candidate_id,
+            candidate_id: candidate_id.to_string(),
             family,
-            kind,
-            egress,
+            kind: kind.to_string(),
+            egress: egress.to_string(),
             available: false,
             detail: None,
             models: Vec::new(),
@@ -450,20 +450,20 @@ pub struct InitRequest<'a> {
 }
 
 /// `init-report-v1`
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct InitReport {
     pub schema_version: u32,
     pub repository_config: String,
     /// `written` for a new repository; `existing` when only this machine was configured.
-    pub repository_config_status: &'static str,
+    pub repository_config_status: String,
     pub reviewer_instructions: String,
     pub reviewer_instructions_created: bool,
     pub user_config: String,
     /// `written` when this run added the provider; `existing` when the user config
     /// already defined it and was left unchanged.
-    pub provider_status: &'static str,
-    pub provider_id: &'static str,
-    pub candidate_id: Option<&'static str>,
+    pub provider_status: String,
+    pub provider_id: String,
+    pub candidate_id: Option<String>,
     pub egress: String,
     pub detection: DetectionReport,
 }
@@ -554,7 +554,7 @@ pub fn init(
             )))
         }
         (None, requested) => {
-            let candidate_id = match requested.or(detection.recommended) {
+            let candidate_id = match requested.or(detection.recommended.as_deref()) {
                 Some(id) => id,
                 None => {
                     return Err(InitError::Configuration(no_backend_message(&detection)));
@@ -565,7 +565,7 @@ pub fn init(
                 .iter()
                 .find(|candidate| candidate.candidate_id == candidate_id)
                 .ok_or_else(|| {
-                    let known: Vec<_> = detection.candidates.iter().map(|c| c.candidate_id).collect();
+                    let known: Vec<_> = detection.candidates.iter().map(|c| c.candidate_id.as_str()).collect();
                     InitError::Usage(format!(
                         "unknown provider `{candidate_id}`; choose one of: {}",
                         known.join(", ")
@@ -582,7 +582,7 @@ pub fn init(
                 .as_mapping_mut()
                 .ok_or_else(|| InitError::Configuration(format!("{}: providers must be a mapping", user_config.display())))?
                 .insert(DEFAULT_PROVIDER_ID.into(), provider);
-            ("written", Some(candidate.candidate_id), candidate.egress.to_owned())
+            ("written", Some(candidate.candidate_id.clone()), candidate.egress.to_owned())
         }
     };
 
@@ -610,15 +610,15 @@ pub fn init(
         schema_version: 1,
         repository_config: repository_config.display().to_string(),
         repository_config_status: if repository_exists {
-            "existing"
+            "existing".to_string()
         } else {
-            "written"
+            "written".to_string()
         },
         reviewer_instructions: instructions.display().to_string(),
         reviewer_instructions_created: instructions_created,
         user_config: user_config.display().to_string(),
-        provider_status,
-        provider_id: DEFAULT_PROVIDER_ID,
+        provider_status: provider_status.to_string(),
+        provider_id: DEFAULT_PROVIDER_ID.to_string(),
         candidate_id,
         egress,
         detection,
@@ -630,7 +630,7 @@ fn no_backend_message(detection: &DetectionReport) -> String {
         .candidates
         .iter()
         .filter(|candidate| candidate.available && candidate.requires_model)
-        .map(|candidate| candidate.candidate_id)
+        .map(|candidate| candidate.candidate_id.as_str())
         .collect();
     if api_keys.is_empty() {
         "no AI backend found: install Ollama and pull a model, install Codex, Gemini, or Claude Code, or set OPENAI_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY".into()
@@ -652,7 +652,7 @@ pub enum InitError {
 // doctor
 
 /// One configured reviewer and whether its provider can run.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ReviewerCheck {
     pub reviewer_id: String,
     pub provider_id: String,
@@ -666,7 +666,7 @@ pub struct ReviewerCheck {
 }
 
 /// `doctor-report-v1`
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DoctorReport {
     pub schema_version: u32,
     pub repository_config: String,
@@ -827,7 +827,7 @@ pub fn doctor(probe: &dyn SystemProbe, root: &Path, user_config: Option<&Path>) 
             .push("Add a reviewer to .vee.yaml, or run `vee init` in a fresh repository.".into());
     }
     if !blocked.is_empty() {
-        if let Some(recommended) = report.detection.recommended {
+        if let Some(recommended) = report.detection.recommended.clone() {
             report.next_steps.push(format!(
                 "`{recommended}` is available on this machine; point the reviewer's provider at it in your user config."
             ));
@@ -983,7 +983,7 @@ mod tests {
         report
             .candidates
             .iter()
-            .map(|candidate| (candidate.candidate_id, candidate.available))
+            .map(|candidate| (candidate.candidate_id.as_str(), candidate.available))
             .collect()
     }
 
@@ -1000,7 +1000,7 @@ mod tests {
             ..Default::default()
         };
         let report = detect(&system);
-        assert_eq!(report.recommended, Some("ollama"));
+        assert_eq!(report.recommended.as_deref(), Some("ollama"));
         assert_eq!(
             ids(&report),
             [
@@ -1022,7 +1022,7 @@ mod tests {
             executables: [("gemini", "0.9.0")].into(),
             ..Default::default()
         };
-        assert_eq!(detect(&only_cli).recommended, Some("gemini"));
+        assert_eq!(detect(&only_cli).recommended.as_deref(), Some("gemini"));
         let only_key = FakeSystem {
             env: [("ANTHROPIC_API_KEY", "key")].into(),
             ..Default::default()
@@ -1130,7 +1130,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.provider_status, "written");
-        assert_eq!(report.candidate_id, Some("codex"));
+        assert_eq!(report.candidate_id.as_deref(), Some("codex"));
         let repository_yaml = std::fs::read_to_string(repository.path().join(".vee.yaml")).unwrap();
         assert!(
             !repository_yaml.contains("codex"),
@@ -1201,7 +1201,7 @@ mod tests {
         .unwrap();
         assert_eq!(report.repository_config_status, "existing");
         assert_eq!(report.provider_status, "written");
-        assert_eq!(report.candidate_id, Some("claude"));
+        assert_eq!(report.candidate_id.as_deref(), Some("claude"));
         assert_eq!(
             std::fs::read_to_string(repository.path().join(".vee.yaml")).unwrap(),
             shared

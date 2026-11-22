@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use vee_core::VerificationStatus;
 use vee_hosting::WorkItemSnapshot;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AcceptanceReport {
     pub schema_version: u32,
     pub review_id: String,
@@ -19,13 +19,13 @@ pub struct AcceptanceReport {
     pub limitations: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkItemReference {
     pub url: String,
     pub content_digest: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AcceptanceCriterion {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -36,10 +36,10 @@ pub struct AcceptanceCriterion {
     pub candidate_changed_paths: Vec<String>,
     /// Analyzer-derived changed-source -> likely-test links; these remain inferred candidates.
     pub candidate_test_references: Vec<TestReferenceCandidate>,
-    pub status: &'static str,
+    pub status: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TestReferenceCandidate {
     pub changed_path: String,
     pub test_path: String,
@@ -48,7 +48,7 @@ pub struct TestReferenceCandidate {
     pub certainty: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VerificationSummary {
     pub run_id: String,
     pub profile_id: String,
@@ -82,7 +82,7 @@ pub struct CriterionAssessment {
     pub verification_run_ids: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AcceptanceValidation {
     pub schema_version: u32,
     pub review_id: String,
@@ -99,7 +99,7 @@ pub struct AcceptanceValidation {
     pub limitations: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ValidatedCriterion {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -406,7 +406,7 @@ pub fn report_with_impact(
                 text,
                 candidate_changed_paths: candidates,
                 candidate_test_references,
-                status: "needs_human_review",
+                status: "needs_human_review".to_string(),
             }
         })
         .collect();
@@ -672,100 +672,6 @@ fn criterion_id_with_source(
     hash.update(text.trim().as_bytes());
     let encoded = format!("{:x}", hash.finalize());
     format!("AC-{}", &encoded[..12])
-}
-
-pub fn render_text(report: &AcceptanceReport) {
-    println!("Acceptance traceability for review {}", report.review_id);
-    println!("Snapshot: {}", report.snapshot_id);
-    if let Some(work_item) = &report.work_item {
-        println!(
-            "Work item: {} ({})",
-            work_item.url, work_item.content_digest
-        );
-    } else {
-        println!("Work item: none");
-    }
-    if report.criteria.is_empty() {
-        println!("No supported acceptance criteria were extracted.");
-    }
-    for criterion in &report.criteria {
-        println!(
-            "{} [line {}] {}",
-            criterion.id, criterion.source_line, criterion.text
-        );
-        println!("  Status: {}", criterion.status);
-        if criterion.candidate_changed_paths.is_empty() {
-            println!("  Candidate changed paths: none");
-        } else {
-            println!(
-                "  Candidate changed paths: {}",
-                criterion.candidate_changed_paths.join(", ")
-            );
-        }
-    }
-    println!(
-        "Snapshot-bound verification runs: {}",
-        report.verification_runs.len()
-    );
-    for run in &report.verification_runs {
-        let result = match run.status {
-            VerificationStatus::Passed => "passed",
-            VerificationStatus::Failed => "failed",
-            VerificationStatus::TimedOut => "timed_out",
-            VerificationStatus::Incomplete => "incomplete",
-        };
-        println!(
-            "  {} [{}] {} targets={}",
-            run.run_id,
-            run.profile_id,
-            result,
-            run.targets.join(",")
-        );
-    }
-    for limitation in &report.limitations {
-        println!("Limitation: {limitation}");
-    }
-}
-
-pub fn render_validation_text(report: &AcceptanceValidation) {
-    println!("Acceptance assessment for review {}", report.review_id);
-    println!("Snapshot: {}", report.snapshot_id);
-    println!("Result: {} (human attestation)", report.result);
-    println!("Gate: {}", report.gate_status);
-    println!("Policy: {}", report.policy_digest);
-    for criterion in &report.criteria {
-        println!(
-            "{}: {}",
-            criterion.id,
-            criterion.assessment.as_deref().unwrap_or("unassessed")
-        );
-        println!("  {}", criterion.text);
-        if let Some(rationale) = &criterion.rationale {
-            println!("  Rationale: {rationale}");
-        }
-        if !criterion.changed_paths.is_empty() {
-            println!("  Paths: {}", criterion.changed_paths.join(", "));
-        }
-        if !criterion.verification_runs.is_empty() {
-            println!(
-                "  Verification runs: {}",
-                criterion
-                    .verification_runs
-                    .iter()
-                    .map(|run| run.run_id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
-        if !criterion.evidence_satisfied {
-            for reason in &criterion.evidence_reasons {
-                println!("  Evidence required: {reason}");
-            }
-        }
-    }
-    for limitation in &report.limitations {
-        println!("Limitation: {limitation}");
-    }
 }
 
 #[cfg(test)]

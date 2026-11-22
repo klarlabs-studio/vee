@@ -5,7 +5,7 @@
 use crate::failure::usage_failure;
 use crate::operations::Workspace;
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use vee_core::packs::{self, PackReviewer, PolicyPack, PACK_MANIFEST};
 
@@ -13,7 +13,7 @@ use vee_core::packs::{self, PackReviewer, PolicyPack, PACK_MANIFEST};
 pub const PACKS_DIRECTORY: &str = ".vee/packs";
 
 /// `pack-summary-v1`: the result of exporting or adding a pack.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PackSummary {
     pub schema_version: u32,
     pub name: String,
@@ -31,13 +31,13 @@ pub struct PackSummary {
 }
 
 /// `packs-list-v1`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PackList {
     pub schema_version: u32,
     pub packs: Vec<PinnedPack>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PinnedPack {
     pub path: String,
     pub pinned_digest: String,
@@ -139,6 +139,7 @@ pub fn export(workspace: &Workspace, request: ExportRequest<'_>) -> Result<PackS
         .collect();
     let rules = if request.include_rules {
         let mut rules: Vec<_> = crate::operations::list_rule_approvals(workspace)?
+            .approvals
             .into_iter()
             .filter(|approval| approval.is_active())
             .collect();
