@@ -479,3 +479,474 @@ pub fn refresh_linked_pull_requests(
     }
     Ok(remote_states)
 }
+
+/// Hosting settings for `vee hosting publish`: the shared flags plus the
+/// webhook secret variable and the actor login some adapters need.
+#[derive(Clone, Debug, Default)]
+pub struct PublishFlags {
+    pub hosting: HostingFlags,
+    pub webhook_secret_env: Option<String>,
+    pub actor_login: Option<String>,
+}
+
+/// One saved review to publish to one pull request.
+pub struct PublishRequest<'a> {
+    pub review_id: &'a str,
+    pub repository: &'a str,
+    pub number: u64,
+    pub flags: PublishFlags,
+}
+
+/// Settings resolved from flags, the repository's `hosting` block and defaults.
+struct PublishSettings {
+    provider_id: String,
+    host: String,
+    api_base: String,
+    token: String,
+    username: String,
+    webhook_secret_env: String,
+    actor_login: String,
+}
+
+const DEFAULT_WEBHOOK_SECRET_ENV: &str = "VEE_GITHUB_WEBHOOK_SECRET";
+
+/// The default credential variable of each provider.
+fn default_publish_token_env(provider_id: &str) -> &'static str {
+    match provider_id {
+        "gitlab" => "GL_TOKEN",
+        "bitbucket" => "BB_TOKEN",
+        "azure-devops" => "AZURE_DEVOPS_EXT_PAT",
+        "gerrit" => "GERRIT_TOKEN",
+        _ => "GH_TOKEN",
+    }
+}
+
+/// The webhook secret, read from the provider's variable when the default
+/// GitHub variable was not overridden.
+fn webhook_secret(provider_id: &str, configured_env: &str) -> String {
+    let env = match (configured_env, provider_id) {
+        (DEFAULT_WEBHOOK_SECRET_ENV, "bitbucket") => "VEE_BITBUCKET_WEBHOOK_SECRET",
+        (DEFAULT_WEBHOOK_SECRET_ENV, "gitlab") => "VEE_GITLAB_WEBHOOK_SECRET",
+        (env, _) => env,
+    };
+    std::env::var(env).unwrap_or_default()
+}
+
+/// Re-evaluate a saved review's gate and publish it to a pull request: one
+/// check with the decision, a thread per finding on an added line of the pull
+/// request diff, and resolutions for previously published findings that are
+/// resolved since. The review must be complete and capture exactly the pull
+/// request's committed base and head.
+pub fn publish_review(
+    workspace: &Workspace,
+    request: PublishRequest<'_>,
+) -> Result<ReviewPublication> {
+    let root = workspace.root();
+    let (offline, hosting) = load_hosting_config(root)?;
+    anyhow::ensure!(
+        !offline,
+        "offline mode prevents publishing to a Git hosting provider"
+    );
+    let flags = request.flags;
+    let provider_id = resolve_hosting_setting(flags.hosting.provider, hosting.provider, "github");
+    let host = resolve_hosting_setting(flags.hosting.host, hosting.host, "github.com");
+    let api_base = resolve_hosting_setting(flags.hosting.api_base, hosting.api_base, "");
+    let token_env = resolve_hosting_setting(flags.hosting.token_env, hosting.token_env, "");
+    let username = resolve_hosting_setting(flags.hosting.username, hosting.username, "");
+    let webhook_secret_env = resolve_hosting_setting(
+        flags.webhook_secret_env,
+        hosting.webhook_secret_env,
+        DEFAULT_WEBHOOK_SECRET_ENV,
+    );
+    let actor_login = resolve_hosting_setting(flags.actor_login, hosting.actor_login, "");
+
+    // The same re-evaluation as `vee gate check`, so a published decision is the
+    // one the gate would make now.
+    let reevaluated = crate::operations::reevaluate_gate(workspace, request.review_id, None)?;
+    let mut reviewed = reevaluated.review;
+    reviewed.gate = reevaluated.decision;
+    ensure_publishable(root, &reviewed)?;
+
+    let token_env = if token_env.is_empty() {
+        default_publish_token_env(&provider_id).to_owned()
+    } else {
+        token_env
+    };
+    let token = read_token(&token_env)?;
+    let host = crate::work_items::effective_work_item_host(&provider_id, &host)?;
+    let api_base = crate::work_items::work_item_api_base(&provider_id, &host, &api_base)?;
+    let settings = PublishSettings {
+        provider_id,
+        host,
+        api_base,
+        token,
+        username,
+        webhook_secret_env,
+        actor_login,
+    };
+    let pull_request = vee_hosting::PullRequestRef {
+        repository: vee_hosting::RepositoryRef {
+            host: settings.host.clone(),
+            full_name: request.repository.to_owned(),
+        },
+        number: request.number,
+    };
+    let mut store = workspace.store()?;
+    let (provider_check_id, thread_ids, revision) = if settings.provider_id == "azure-devops" {
+        publish_to_azure_devops(root, &mut *store, &settings, &pull_request, &reviewed)?
+    } else {
+        publish_to_provider(
+            root,
+            &mut *store,
+            settings_provider(&settings)?,
+            &settings,
+            &pull_request,
+            &reviewed,
+        )?
+    };
+    Ok(ReviewPublication {
+        schema_version: REVIEW_PUBLICATION_SCHEMA_VERSION,
+        review_id: reviewed.review_id,
+        snapshot_id: reviewed.snapshot_id,
+        provider_check_id,
+        thread_ids,
+        revision,
+        destination: Some(PublicationDestination {
+            provider: settings.provider_id,
+            pull_request,
+        }),
+    })
+}
+
+/// A review is publishable when it is complete, its snapshot digest is intact,
+/// and it captures committed content: never a staged-only or working-tree-only
+/// snapshot, and a base-and-worktree snapshot only of a clean checkout whose
+/// content equals the commits.
+fn ensure_publishable(root: &Path, reviewed: &crate::ReviewResult) -> Result<()> {
+    anyhow::ensure!(
+        reviewed.analysis_complete,
+        "cannot publish an incomplete review"
+    );
+    anyhow::ensure!(
+        reviewed.snapshot_id == reviewed.change_set.digest,
+        "review snapshot digest is invalid"
+    );
+    anyhow::ensure!(
+        !matches!(
+            reviewed.change_set.scope.as_str(),
+            "staged" | "working_tree"
+        ),
+        "cannot publish a staged-only or working-tree-only snapshot to a pull request"
+    );
+    if reviewed.change_set.scope == "base_and_worktree" {
+        anyhow::ensure!(
+            crate::attestation::committed_snapshot_matches_review(root, &reviewed.change_set)
+                .map_err(anyhow::Error::msg)?,
+            "cannot publish a review whose captured worktree content differs from the committed PR diff"
+        );
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=all"])
+            .current_dir(root)
+            .output()?;
+        anyhow::ensure!(
+            status.status.success(),
+            "could not verify the local worktree state"
+        );
+        anyhow::ensure!(
+            status.stdout.is_empty(),
+            "cannot publish a snapshot while the local worktree or index has uncommitted changes"
+        );
+    }
+    Ok(())
+}
+
+/// The remote pull request must be open and at exactly the reviewed commits.
+/// Returns the reviewed base and head, captured from local Git, which are the
+/// values that reach `git` as arguments.
+fn ensure_reviewed_commits(
+    reviewed: &crate::ReviewResult,
+    state: vee_hosting::PullRequestState,
+    base_oid: &str,
+    head_oid: &str,
+) -> Result<(String, String)> {
+    anyhow::ensure!(
+        state == vee_hosting::PullRequestState::Open,
+        "pull request is not open"
+    );
+    anyhow::ensure!(
+        reviewed.change_set.head_oid.as_deref() == Some(head_oid),
+        "reviewed head does not match the current pull request head; rerun Vee against the PR head"
+    );
+    anyhow::ensure!(
+        reviewed.change_set.base_oid.as_deref() == Some(base_oid),
+        "reviewed base does not match the current pull request base; rerun Vee against the current PR diff"
+    );
+    Ok((
+        reviewed.change_set.base_oid.clone().unwrap_or_default(),
+        reviewed.change_set.head_oid.clone().unwrap_or_default(),
+    ))
+}
+
+/// Whether `line` of `path` is added in the local `base..head` Git diff.
+fn locally_added_line(
+    root: &Path,
+    (base, head): (&str, &str),
+    path: &str,
+    line: u32,
+    failure: &str,
+) -> Result<bool> {
+    let diff = std::process::Command::new("git")
+        .args([
+            "--literal-pathspecs",
+            "diff",
+            "--no-ext-diff",
+            "--unified=0",
+        ])
+        .arg(base)
+        .arg(head)
+        .arg("--")
+        .arg(path)
+        .current_dir(root)
+        .output()?;
+    anyhow::ensure!(diff.status.success(), "{failure}");
+    Ok(crate::publication::diff_contains_added_line(
+        Some(std::str::from_utf8(&diff.stdout)?),
+        line,
+    ))
+}
+
+/// A relative path without parent, root or prefix components.
+fn is_confined_relative_path(path: &str) -> bool {
+    let path = Path::new(path);
+    !path.is_absolute()
+        && !path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+}
+
+type PublicationReceipt = (String, BTreeMap<String, String>, String);
+
+/// Azure DevOps publishes threads and the status separately. Its diff metadata
+/// has no line patches, so finding locations are checked against local Git.
+fn publish_to_azure_devops(
+    root: &Path,
+    store: &mut dyn vee_core::ports::Repositories,
+    settings: &PublishSettings,
+    pull_request: &vee_hosting::PullRequestRef,
+    reviewed: &crate::ReviewResult,
+) -> Result<PublicationReceipt> {
+    let provider = vee_hosting::azure_devops::AzureDevOpsAdapter::new(
+        vee_hosting::azure_devops::AzureDevOpsConfig::new(
+            &settings.api_base,
+            settings.token.clone(),
+        )
+        .map_err(anyhow::Error::msg)?,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let remote =
+        vee_hosting::PullRequestContextProvider::get_pull_request_context(&provider, pull_request)
+            .map_err(anyhow::Error::msg)?;
+    let (base, head) =
+        ensure_reviewed_commits(reviewed, remote.state, &remote.base_oid, &remote.head_oid)?;
+    let mut threads = Vec::new();
+    for finding in &reviewed.findings {
+        let Some((path, line)) = crate::publication::thread_location(finding) else {
+            continue;
+        };
+        if !is_confined_relative_path(path)
+            || !locally_added_line(
+                root,
+                (&base, &head),
+                path,
+                line,
+                "could not verify Azure DevOps finding locations against the local PR diff",
+            )?
+        {
+            continue;
+        }
+        threads.push(crate::publication::finding_thread(
+            finding,
+            path,
+            line,
+            pull_request,
+            &reviewed.snapshot_id,
+            &reviewed.review_id,
+        ));
+    }
+    let check = crate::publication::gate_check_run(
+        &reviewed.gate,
+        pull_request,
+        reviewed.review_id.clone(),
+        &reviewed.snapshot_id,
+    );
+    let (check_id, thread_ids) = crate::publication::publish_with_thread_ledger(
+        store,
+        &settings.provider_id,
+        pull_request,
+        &published_review(reviewed),
+        threads,
+        |threads| {
+            let thread_ids = if threads.is_empty() {
+                BTreeMap::new()
+            } else {
+                provider
+                    .publish_threads(pull_request, &remote.revision, &threads)
+                    .map_err(|error| error.to_string())?
+            };
+            let check_id = provider
+                .publish_check(pull_request, &remote.revision, &check)
+                .map_err(|error| error.to_string())?;
+            Ok((check_id, thread_ids))
+        },
+    )
+    .map_err(anyhow::Error::msg)?;
+    Ok((check_id, thread_ids, remote.revision))
+}
+
+/// The adapter for a provider that publishes a check and its threads together.
+fn settings_provider(
+    settings: &PublishSettings,
+) -> Result<Box<dyn vee_hosting::GitHostingProvider>> {
+    let webhook_secret = webhook_secret(&settings.provider_id, &settings.webhook_secret_env);
+    let token = settings.token.clone();
+    Ok(match settings.provider_id.as_str() {
+        "github" => Box::new(
+            vee_hosting::github::GitHubAdapter::new(
+                vee_hosting::github::GitHubConfig::new(&settings.api_base, token, webhook_secret)
+                    .map_err(anyhow::Error::msg)?
+                    .with_actor_login(settings.actor_login.clone()),
+            )
+            .map_err(anyhow::Error::msg)?,
+        ),
+        "gitlab" => Box::new(
+            vee_hosting::gitlab::GitLabAdapter::new(
+                vee_hosting::gitlab::GitLabConfig::new(&settings.api_base, token)
+                    .map_err(anyhow::Error::msg)?
+                    .with_webhook_secret(webhook_secret)
+                    .with_actor_login(settings.actor_login.clone()),
+            )
+            .map_err(anyhow::Error::msg)?,
+        ),
+        "bitbucket" => Box::new(
+            vee_hosting::bitbucket::BitbucketAdapter::new(
+                vee_hosting::bitbucket::BitbucketConfig::new(&settings.api_base, token)
+                    .map_err(anyhow::Error::msg)?
+                    .with_webhook_secret(webhook_secret),
+            )
+            .map_err(anyhow::Error::msg)?,
+        ),
+        "gerrit" => {
+            let mut config = vee_hosting::gerrit::GerritConfig::new(&settings.api_base, token)
+                .map_err(anyhow::Error::msg)?;
+            if !settings.username.is_empty() {
+                config = config.with_username(settings.username.clone());
+            }
+            Box::new(vee_hosting::gerrit::GerritAdapter::new(config).map_err(anyhow::Error::msg)?)
+        }
+        other => {
+            return Err(configuration_failure(format!(
+                "unsupported hosting provider `{other}`"
+            )))
+        }
+    })
+}
+
+/// Publish through a provider's combined review publication. Every located
+/// finding must be in the pull request's changed files; Gerrit's are checked
+/// against local Git, the others against the provider's patches.
+fn publish_to_provider(
+    root: &Path,
+    store: &mut dyn vee_core::ports::Repositories,
+    provider: Box<dyn vee_hosting::GitHostingProvider>,
+    settings: &PublishSettings,
+    pull_request: &vee_hosting::PullRequestRef,
+    reviewed: &crate::ReviewResult,
+) -> Result<PublicationReceipt> {
+    let remote = provider
+        .get_pull_request(pull_request)
+        .map_err(anyhow::Error::msg)?;
+    let (base, head) =
+        ensure_reviewed_commits(reviewed, remote.state, &remote.base_oid, &remote.head_oid)?;
+    let changed = provider
+        .list_changed_files(pull_request, &remote.revision)
+        .map_err(anyhow::Error::msg)?;
+    let changed_paths: std::collections::BTreeSet<_> =
+        changed.iter().map(|file| file.path.as_str()).collect();
+    let mut threads = Vec::new();
+    for finding in &reviewed.findings {
+        let Some((path, line)) = crate::publication::thread_location(finding) else {
+            continue;
+        };
+        anyhow::ensure!(
+            changed_paths.contains(path),
+            "finding {} is outside the current pull request diff",
+            finding.id
+        );
+        let on_added_line = if settings.provider_id == "gerrit" {
+            locally_added_line(
+                root,
+                (&base, &head),
+                path,
+                line,
+                "could not verify Gerrit finding locations against the local base-to-head Git diff",
+            )?
+        } else {
+            changed.iter().any(|file| {
+                file.path == path
+                    && crate::publication::diff_contains_added_line(file.patch.as_deref(), line)
+            })
+        };
+        if on_added_line {
+            threads.push(crate::publication::finding_thread(
+                finding,
+                path,
+                line,
+                pull_request,
+                &reviewed.snapshot_id,
+                &reviewed.review_id,
+            ));
+        }
+    }
+    let check = crate::publication::gate_check_run(
+        &reviewed.gate,
+        pull_request,
+        reviewed.review_id.clone(),
+        &reviewed.snapshot_id,
+    );
+    let receipt = crate::publication::publish_with_thread_ledger(
+        store,
+        &settings.provider_id,
+        pull_request,
+        &published_review(reviewed),
+        threads,
+        |threads| {
+            provider
+                .publish_review(vee_hosting::ReviewPublication {
+                    pull_request: pull_request.clone(),
+                    expected_revision: remote.revision.clone(),
+                    check,
+                    threads,
+                })
+                .map_err(|error| error.to_string())
+        },
+    )
+    .map_err(anyhow::Error::msg)?;
+    Ok((
+        receipt.provider_check_id,
+        receipt.thread_ids,
+        receipt.resulting_revision,
+    ))
+}
+
+fn published_review(reviewed: &crate::ReviewResult) -> crate::publication::PublishedReview<'_> {
+    crate::publication::PublishedReview {
+        review_id: &reviewed.review_id,
+        snapshot_id: &reviewed.snapshot_id,
+        findings: &reviewed.findings,
+    }
+}

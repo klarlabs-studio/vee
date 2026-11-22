@@ -21,6 +21,7 @@ pub mod patch_sandbox;
 pub mod pr_description;
 pub mod proposals;
 mod providers;
+pub mod publication;
 pub mod repository_map;
 mod review;
 pub mod rule_candidates;
