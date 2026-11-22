@@ -28,6 +28,7 @@ mod source;
 pub mod standards;
 pub mod test_effectiveness;
 pub mod test_generation;
+pub mod test_proposals;
 pub mod test_recommendations;
 mod verification;
 pub mod verification_diagnosis;

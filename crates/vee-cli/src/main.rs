@@ -21,7 +21,9 @@ use vee_application::failure::{
 use vee_application::imported_history::{
     imported_reviews_dir, parse_portable_review, store_imported_history, MAX_IMPORTED_REVIEW_BYTES,
 };
-use vee_application::proposals::{proposal_directory, read_proposal_file};
+use vee_application::proposals::{
+    acquire_proposal_apply_lock, proposal_directory, read_proposal_file, write_proposal_file,
+};
 use vee_application::work_items::{
     effective_work_item_host, effective_work_item_token_env, get_work_item, work_item_api_base,
 };
@@ -31,9 +33,7 @@ use vee_application::packs;
 use vee_application::patch_sandbox;
 use vee_application::repository_map;
 use vee_application::standards;
-use vee_application::test_effectiveness;
-use vee_application::test_generation;
-use vee_application::verification_diagnosis;
+use vee_application::test_proposals;
 
 /// The local SQLite stores that the CLI and MCP server hand to application services.
 fn local_stores() -> std::sync::Arc<dyn vee_core::ports::RepositoryStores + Send + Sync> {
@@ -48,213 +48,12 @@ fn load_repository_config(root: &std::path::Path) -> Result<RepositoryConfig> {
     vee_application::load_repository_config(root).map_err(configuration_failure)
 }
 
-fn is_sha256_digest(value: &str) -> bool {
-    value.starts_with("sha256:")
-        && value.len() == 71
-        && value[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-struct PreparedEffectiveness {
-    root: std::path::PathBuf,
-    snapshot: ChangeSet,
-    profile: vee_core::VerificationProfile,
-    baseline_run_id: String,
-}
-
-fn prepare_effectiveness(proposal_id: &str, profile_id: &str) -> Result<PreparedEffectiveness> {
-    anyhow::ensure!(
-        is_sha256_digest(proposal_id),
-        "test proposal ID must be a full sha256:<hex> digest"
-    );
+/// The workspace for commands that change the worktree: outside a Git
+/// repository is a usage error.
+fn proposal_workspace() -> Result<operations::Workspace> {
     let cwd = std::env::current_dir()?;
-    let root = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-    let proposal_dir = proposal_directory(&root)?;
-    let record_path = proposal_dir.join(format!("test-{}.json", &proposal_id[7..]));
-    let proposal: serde_json::Value = serde_json::from_slice(
-        &read_proposal_file(&record_path, 2 * 1024 * 1024)
-            .with_context(|| format!("test proposal {proposal_id} was not found"))?,
-    )?;
-    anyhow::ensure!(
-        proposal["schema_version"] == 2,
-        "unsupported test proposal schema"
-    );
-    anyhow::ensure!(
-        proposal["proposal_id"].as_str() == Some(proposal_id),
-        "test proposal ID does not match its record"
-    );
-    anyhow::ensure!(
-        proposal["application"] == "applied"
-            && proposal["approval_digest"].as_str() == Some(proposal_id),
-        "test proposal must be explicitly approved and applied before effectiveness assessment"
-    );
-    anyhow::ensure!(
-        proposal["concurrent_mutation_detected"] == false,
-        "proposal application had concurrent mutations"
-    );
-    let scope = proposal["source_scope"]
-        .as_str()
-        .context("proposal has no source scope")?;
-    let base_oid = proposal["base_oid"].as_str();
-    let root_string = root.to_string_lossy().to_string();
-    let snapshot = current_change_set(&root_string, base_oid, scope)?;
-    anyhow::ensure!(
-        proposal["post_application_snapshot_id"].as_str() == Some(snapshot.digest.as_str()),
-        "worktree no longer matches the proposal's applied snapshot"
-    );
-    let saved_patch = read_proposal_file(
-        &proposal_dir.join(format!("test-{}.patch", &proposal_id[7..])),
-        2 * 1024 * 1024,
-    )?;
-    let patch_digest = vee_core::digest(&saved_patch);
-    anyhow::ensure!(
-        proposal["patch_digest"].as_str() == Some(patch_digest.as_str())
-            && test_proposal_id(
-                proposal["snapshot_id"].as_str().unwrap_or_default(),
-                &patch_digest
-            )? == proposal_id,
-        "test proposal integrity check failed"
-    );
-    let mut config = load_repository_config(&root)?;
-    apply_protected_policy(&root, &mut config)?;
-    let profile = config
-        .verification
-        .get(profile_id)
-        .context("unknown trusted verification profile")?;
-    let expected_command_digest =
-        vee_process::verification_command_digest(profile, &root).map_err(anyhow::Error::msg)?;
-    let store = ReviewStore::open(&root.join(".vee/vee.sqlite")).map_err(anyhow::Error::msg)?;
-    let baseline_run_id = proposal["verification_runs"]
-        .as_array()
-        .context("proposal has no verification history")?
-        .iter()
-        .filter(|entry| {
-            entry["profile_id"].as_str() == Some(profile_id)
-                && entry["snapshot_id"].as_str() == Some(snapshot.digest.as_str())
-                && entry["status"] == "passed"
-        })
-        .filter_map(|entry| entry["run_id"].as_str())
-        .find(|run_id| {
-            store
-                .verification(run_id)
-                .ok()
-                .flatten()
-                .is_some_and(|run| {
-                    run.status == VerificationStatus::Passed
-                        && run.snapshot_id == snapshot.digest
-                        && run.profile_id == profile_id
-                        && run.command_digest == expected_command_digest
-                })
-        })
-        .context("effectiveness assessment requires a passing run for this trusted profile and exact proposal snapshot")?
-        .to_owned();
-    Ok(PreparedEffectiveness {
-        root,
-        snapshot,
-        profile: profile.clone(),
-        baseline_run_id,
-    })
-}
-
-fn effectiveness_coverage(
-    root: &std::path::Path,
-    run_id: &str,
-    snapshot: &ChangeSet,
-) -> (Option<coverage::CoverageReport>, String) {
-    let result = (|| -> Result<coverage::CoverageReport> {
-        let store = ReviewStore::open(&root.join(".vee/vee.sqlite")).map_err(anyhow::Error::msg)?;
-        let run = store
-            .verification(run_id)
-            .map_err(anyhow::Error::msg)?
-            .context("passing verification run was not found")?;
-        coverage::report_for_change_set(root, &run, "stdout", snapshot)
-            .or_else(|_| coverage::report_for_change_set(root, &run, "stderr", snapshot))
-            .map_err(anyhow::Error::msg)
-    })();
-    match result {
-        Ok(report) => (Some(report), String::new()),
-        Err(error) => (
-            None,
-            format!("Changed-line coverage could not be attached: {error}"),
-        ),
-    }
-}
-
-fn test_proposal_id(snapshot_id: &str, patch_digest: &str) -> Result<String> {
-    Ok(vee_core::digest(&serde_json::to_vec(&(
-        "vee-test-patch-proposal-v2",
-        snapshot_id,
-        patch_digest,
-    ))?))
-}
-
-fn write_proposal_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            anyhow::ensure!(
-                metadata.file_type().is_file(),
-                "proposal artifact must be a regular file"
-            );
-            std::fs::write(path, bytes)?;
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)?;
-            file.write_all(bytes)?;
-        }
-        Err(error) => return Err(error.into()),
-    }
-    Ok(())
-}
-
-fn write_new_proposal_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .with_context(|| {
-            format!(
-                "refusing to overwrite existing proposal artifact {}",
-                path.display()
-            )
-        })?;
-    file.write_all(bytes)?;
-    Ok(())
-}
-
-struct ProposalApplyLock(std::path::PathBuf);
-
-impl Drop for ProposalApplyLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-fn acquire_proposal_apply_lock(directory: &std::path::Path) -> Result<ProposalApplyLock> {
-    let path = directory.join("apply.lock");
-    let mut file = match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            anyhow::bail!(
-                "another Vee patch application is in progress ({}); if this lock is stale, verify no apply-patch process is running before removing it",
-                path.display()
-            )
-        }
-        Err(error) => return Err(error.into()),
-    };
-    writeln!(
-        file,
-        "pid={} started_unix={}",
-        std::process::id(),
-        current_unix_time()?
-    )?;
-    file.sync_all()?;
-    Ok(ProposalApplyLock(path))
+    let root = vee_git::repository_root(&cwd).map_err(usage_failure)?;
+    Ok(operations::Workspace::new(root, crate::local_stores()))
 }
 
 fn resolve_hosting_setting(
@@ -2267,25 +2066,6 @@ enum Output {
     Text,
     Json,
 }
-fn current_change_set(root: &str, base_oid: Option<&str>, scope: &str) -> Result<ChangeSet> {
-    let capture_scope = match scope {
-        "staged" => vee_git::ChangeScope::Staged,
-        "working_tree" => vee_git::ChangeScope::WorkingTree,
-        value if value.starts_with("commit:") => {
-            vee_git::commit_scope(value.trim_start_matches("commit:"))
-                .map_err(anyhow::Error::msg)?
-        }
-        value if value.starts_with("commit_range:") => {
-            vee_git::commit_scope(value.trim_start_matches("commit_range:"))
-                .map_err(anyhow::Error::msg)?
-        }
-        _ => vee_git::ChangeScope::BaseAndWorktree {
-            base_oid: base_oid.map(str::to_string),
-        },
-    };
-    vee_application::capture_change_set(std::path::Path::new(root), capture_scope)
-        .map_err(anyhow::Error::msg)
-}
 
 struct HostingWebhookReviewer {
     root: std::path::PathBuf,
@@ -3116,45 +2896,14 @@ fn run() -> Result<u8> {
                 profile,
                 output,
             } => {
-                let cwd = std::env::current_dir()?;
-                let root = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-                let mut config = load_repository_config(&root)?;
-                apply_protected_policy(&root, &mut config)?;
-                let scope = operations::ScopeRequest::from_flags(base, None, staged, working_tree)?
-                    .resolve(&root)?;
-                let snapshot = vee_application::capture_change_set(&root, scope)
-                    .map_err(anyhow::Error::msg)?;
-                let plan = vee_application::plan_impacted_test_verification(
-                    &root, &snapshot, &profile, &config,
-                )
-                .map_err(anyhow::Error::msg)?;
+                let plan = test_proposals::plan(
+                    &operations::Workspace::discover(crate::local_stores())?,
+                    operations::ScopeRequest::from_flags(base, None, staged, working_tree)?,
+                    &profile,
+                )?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &plan)?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!("Verification plan for snapshot: {}", plan.snapshot_id);
-                        println!(
-                            "Profile: {} ({}); no commands were executed",
-                            plan.profile_id, plan.executable
-                        );
-                        for (index, args) in plan.invocations.iter().enumerate() {
-                            println!(
-                                "{}: {} {}",
-                                index + 1,
-                                plan.executable,
-                                args.iter()
-                                    .map(|arg| format!("{:?}", arg))
-                                    .collect::<Vec<_>>()
-                                    .join(" ")
-                            );
-                        }
-                        println!("Targets: {}", plan.targets.join(", "));
-                        for limitation in &plan.limitations {
-                            println!("Limitation: {limitation}");
-                        }
-                    }
+                    Output::Json => emit_json(&plan)?,
+                    Output::Text => print_view(&plan)?,
                 }
                 Ok(0)
             }
@@ -3190,122 +2939,15 @@ fn run() -> Result<u8> {
                 reviewer,
                 output,
             } => {
-                let cwd = std::env::current_dir()?;
-                let root = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-                let scope =
-                    operations::ScopeRequest::from_flags(base, commit, staged, working_tree)?
-                        .resolve(&root)?;
-                let change_set = vee_application::capture_change_set(&root, scope)
-                    .map_err(anyhow::Error::msg)?;
-                anyhow::ensure!(
-                    !change_set.files.is_empty(),
-                    "test generation requires a non-empty change snapshot"
-                );
-                let mut config = load_repository_config(&root)?;
-                apply_protected_policy(&root, &mut config)?;
-                let impact = vee_application::analyze_impact(&root, &change_set)
-                    .map_err(anyhow::Error::msg)?;
-                let context = test_generation::context(
-                    &root,
-                    &change_set,
-                    &impact,
-                    config.review.max_context_files,
-                    config.review.max_context_file_bytes,
-                    config.review.max_context_bytes,
-                    config.test_generation.max_context_tokens,
+                let proposal = test_proposals::generate(
+                    &operations::Workspace::discover(crate::local_stores())?,
+                    operations::ScopeRequest::from_flags(base, commit, staged, working_tree)?,
+                    &reviewer,
                 )?;
-                anyhow::ensure!(
-                    context["context_budget"]["within_budget"] == true,
-                    "test-generation context estimate {} exceeds budget {}; raise test_generation.max_context_tokens or reduce the change scope",
-                    context["context_budget"]["estimated_prompt_tokens"],
-                    context["context_budget"]["max_context_tokens"]
-                );
-                let context_summary = test_generation::context_summary(&context)?;
-                let report = vee_application::run_provider_task(
-                    vee_application::ProviderTaskRequest {
-                        root: &root,
-                        snapshot_id: &change_set.digest,
-                        config: &config,
-                        reviewer_id: &reviewer,
-                        task_instructions: test_generation::INSTRUCTIONS,
-                        context,
-                        output_schema: test_generation::output_schema(),
-                    },
-                    &vee_application::CliReviewProvider,
-                )
-                .map_err(anyhow::Error::msg)?;
-                let snapshot_still_current =
-                    vee_application::capture_current_change_set(&root, &change_set)
-                        .map(|current| current.digest == change_set.digest)
-                        .unwrap_or(false);
-                anyhow::ensure!(
-                    snapshot_still_current,
-                    "change snapshot became stale during test generation; rerun against current changes"
-                );
-                let patch_text =
-                    test_generation::extract_patch(report.output["patch"].as_str().unwrap_or(""));
-                anyhow::ensure!(
-                    !patch_text.trim().is_empty(),
-                    "provider returned an empty test patch"
-                );
-                anyhow::ensure!(
-                    patch_text.len() <= 2 * 1024 * 1024,
-                    "generated patch exceeds 2 MiB"
-                );
-                let temp = tempfile::NamedTempFile::new()?;
-                std::fs::write(temp.path(), patch_text.as_bytes())?;
-                let sandbox_result =
-                    patch_sandbox::validate(&root, temp.path()).map_err(anyhow::Error::msg)?;
-                anyhow::ensure!(
-                    !sandbox_result.result_files.is_empty()
-                        && sandbox_result
-                            .result_files
-                            .iter()
-                            .all(|file| test_generation::is_test_path(&file.path)),
-                    "generated patch touches paths outside recognized test files"
-                );
-                let patch_digest = vee_core::digest(patch_text.as_bytes());
-                let proposal_id = test_proposal_id(&change_set.digest, &patch_digest)?;
-                let proposal_dir = proposal_directory(&root)?;
-                let patch_path = proposal_dir.join(format!("test-{}.patch", &proposal_id[7..]));
-                let metadata_path = proposal_dir.join(format!("test-{}.json", &proposal_id[7..]));
-                write_new_proposal_file(&patch_path, patch_text.as_bytes())?;
-                let proposal = serde_json::json!({
-                    "schema_version": 2,
-                    "proposal_id": proposal_id,
-                    "snapshot_id": report.snapshot_id,
-                    "source_scope": change_set.scope,
-                    "base_oid": change_set.base_oid,
-                    "reviewer_id": report.reviewer_id,
-                    "provider_id": report.provider_id,
-                    "provider_kind": report.provider_kind,
-                    "model": report.model,
-                    "provider_output_digest": report.output_digest,
-                    "context_summary": context_summary,
-                    "patch_digest": patch_digest,
-                    "patch_path": patch_path,
-                    "validated_in_isolated_sandbox": true,
-                    "sandbox_input_digest": patch_sandbox::input_digest(&sandbox_result.input_files).map_err(anyhow::Error::msg)?,
-                    "sandbox_result_digest": sandbox_result.result_digest,
-                    "application": "not_applied",
-                    "tests_executed": false,
-                    "verification_runs": [],
-                    "approval_instruction": format!("Inspect the generated diff, then run `vee tests apply {proposal_id} --approve {proposal_id}`. Vee has not modified the worktree or run repository tests.")
-                });
-                write_new_proposal_file(&metadata_path, &serde_json::to_vec_pretty(&proposal)?)?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &proposal)?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!("Generated test proposal: {proposal_id}");
-                        println!("Patch digest: {patch_digest}");
-                        println!("Snapshot: {}", report.snapshot_id);
-                        println!("Validated in isolated sandbox: yes");
-                        println!("Saved: {}", patch_path.display());
-                        println!("Not applied; tests were not run.");
-                    }
+                    // Through a Value, as before: keys stay sorted, as the saved record has them.
+                    Output::Json => emit_json(&serde_json::to_value(&proposal)?)?,
+                    Output::Text => print_view(&proposal)?,
                 }
                 Ok(0)
             }
@@ -3315,193 +2957,16 @@ fn run() -> Result<u8> {
                 reviewer,
                 output,
             } => {
-                if !is_sha256_digest(&proposal_id) {
-                    return Err(usage_failure(
-                        "test proposal ID must be a full sha256:<hex> digest",
-                    ));
-                }
-                let cwd = std::env::current_dir()?;
-                let root = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-                let proposal_dir = proposal_directory(&root)?;
-                let record_path = proposal_dir.join(format!("test-{}.json", &proposal_id[7..]));
-                let parent: serde_json::Value = serde_json::from_slice(
-                    &read_proposal_file(&record_path, 2 * 1024 * 1024)
-                        .with_context(|| format!("test proposal {proposal_id} was not found"))?,
-                )?;
-                anyhow::ensure!(
-                    parent["schema_version"] == 2,
-                    "unsupported test proposal schema"
-                );
-                anyhow::ensure!(
-                    parent["proposal_id"].as_str() == Some(proposal_id.as_str()),
-                    "test proposal ID does not match its record"
-                );
-                anyhow::ensure!(
-                    parent["application"] == "applied",
-                    "test proposal must be applied before it can be refined"
-                );
-                anyhow::ensure!(
-                    parent["approval_digest"].as_str() == Some(proposal_id.as_str()),
-                    "test proposal has no matching explicit approval record"
-                );
-                anyhow::ensure!(
-                    parent["concurrent_mutation_detected"] == false,
-                    "proposal application had concurrent mutations"
-                );
-                let linked_run = parent["verification_runs"]
-                    .as_array()
-                    .context("proposal has no verification run history")?
-                    .iter()
-                    .any(|entry| entry["run_id"].as_str() == Some(run.as_str()));
-                anyhow::ensure!(
-                    linked_run,
-                    "verification run is not linked to this test proposal"
-                );
-
-                let db_dir = root.join(".vee");
-                let store =
-                    ReviewStore::open(&db_dir.join("vee.sqlite")).map_err(anyhow::Error::msg)?;
-                let verification = store
-                    .verification(&run)
-                    .map_err(anyhow::Error::msg)?
-                    .with_context(|| format!("verification run {run} was not found"))?;
-                anyhow::ensure!(
-                    verification.status == vee_core::VerificationStatus::Failed,
-                    "only failed verification runs can guide refinement"
-                );
-                anyhow::ensure!(
-                    Some(verification.snapshot_id.as_str())
-                        == parent["post_application_snapshot_id"].as_str(),
-                    "failed verification run is not from this proposal's applied snapshot"
-                );
-                let scope = parent["source_scope"]
-                    .as_str()
-                    .context("proposal has no source scope")?;
-                anyhow::ensure!(
-                    !matches!(scope, "commit" | "commit_range"),
-                    "immutable commit proposals cannot be refined for application"
-                );
-                let base_oid = parent["base_oid"].as_str();
-                let root_string = root.to_string_lossy().to_string();
-                let current = current_change_set(&root_string, base_oid, scope)?;
-                anyhow::ensure!(current.digest == verification.snapshot_id, "worktree changed after the failed verification; capture a new review before refining");
-                let diagnosis = verification_diagnosis::diagnose(&root, &store, &verification)
-                    .map_err(anyhow::Error::msg)?;
-                let parent_patch_path =
-                    proposal_dir.join(format!("test-{}.patch", &proposal_id[7..]));
-                let parent_patch = read_proposal_file(&parent_patch_path, 2 * 1024 * 1024)?;
-                anyhow::ensure!(
-                    vee_core::digest(&parent_patch)
-                        == parent["patch_digest"].as_str().unwrap_or_default(),
-                    "parent test patch content has changed"
-                );
-                let parent_patch =
-                    std::str::from_utf8(&parent_patch).context("parent test patch is not UTF-8")?;
-
-                let mut config = load_repository_config(&root)?;
-                apply_protected_policy(&root, &mut config)?;
-                let impact =
-                    vee_application::analyze_impact(&root, &current).map_err(anyhow::Error::msg)?;
-                let context = test_generation::context(
-                    &root,
-                    &current,
-                    &impact,
-                    config.review.max_context_files,
-                    config.review.max_context_file_bytes,
-                    config.review.max_context_bytes,
-                    config.test_generation.max_context_tokens,
-                )?;
-                anyhow::ensure!(
-                    context["context_budget"]["within_budget"] == true,
-                    "test-generation context estimate {} exceeds budget {}; raise test_generation.max_context_tokens or reduce the change scope",
-                    context["context_budget"]["estimated_prompt_tokens"],
-                    context["context_budget"]["max_context_tokens"]
-                );
-                let context = test_generation::refinement_context(
-                    context,
-                    parent_patch,
-                    &diagnosis,
+                let proposal = test_proposals::refine(
+                    &operations::Workspace::discover(crate::local_stores())?,
                     &proposal_id,
                     &run,
-                );
-                let context_summary = test_generation::context_summary(&context)?;
-                let report = vee_application::run_provider_task(
-                    vee_application::ProviderTaskRequest {
-                        root: &root,
-                        snapshot_id: &current.digest,
-                        config: &config,
-                        reviewer_id: &reviewer,
-                        task_instructions: test_generation::REFINEMENT_INSTRUCTIONS,
-                        context,
-                        output_schema: test_generation::output_schema(),
-                    },
-                    &vee_application::CliReviewProvider,
-                )
-                .map_err(anyhow::Error::msg)?;
-                anyhow::ensure!(vee_application::capture_current_change_set(&root, &current)
-                    .map(|captured| captured.digest == current.digest).unwrap_or(false), "change snapshot became stale during test refinement; rerun against current changes");
-                let patch_text =
-                    test_generation::extract_patch(report.output["patch"].as_str().unwrap_or(""));
-                anyhow::ensure!(
-                    !patch_text.trim().is_empty() && patch_text.len() <= 2 * 1024 * 1024,
-                    "provider returned an empty or oversized test patch"
-                );
-                let temp = tempfile::NamedTempFile::new()?;
-                std::fs::write(temp.path(), patch_text.as_bytes())?;
-                let sandbox_result =
-                    patch_sandbox::validate(&root, temp.path()).map_err(anyhow::Error::msg)?;
-                anyhow::ensure!(
-                    !sandbox_result.result_files.is_empty()
-                        && sandbox_result
-                            .result_files
-                            .iter()
-                            .all(|file| test_generation::is_test_path(&file.path)),
-                    "refined patch touches paths outside recognized test files"
-                );
-                let patch_digest = vee_core::digest(patch_text.as_bytes());
-                let refined_id = test_proposal_id(&current.digest, &patch_digest)?;
-                let patch_path = proposal_dir.join(format!("test-{}.patch", &refined_id[7..]));
-                let metadata_path = proposal_dir.join(format!("test-{}.json", &refined_id[7..]));
-                write_new_proposal_file(&patch_path, patch_text.as_bytes())?;
-                let attempt = parent["refinement"]["attempt"].as_u64().unwrap_or(0) + 1;
-                let proposal = serde_json::json!({
-                    "schema_version": 2,
-                    "proposal_id": refined_id,
-                    "snapshot_id": report.snapshot_id,
-                    "source_scope": current.scope,
-                    "base_oid": current.base_oid,
-                    "reviewer_id": report.reviewer_id,
-                    "provider_id": report.provider_id,
-                    "provider_kind": report.provider_kind,
-                    "model": report.model,
-                    "provider_output_digest": report.output_digest,
-                    "context_summary": context_summary,
-                    "patch_digest": patch_digest,
-                    "patch_path": patch_path,
-                    "validated_in_isolated_sandbox": true,
-                    "sandbox_input_digest": patch_sandbox::input_digest(&sandbox_result.input_files).map_err(anyhow::Error::msg)?,
-                    "sandbox_result_digest": sandbox_result.result_digest,
-                    "application": "not_applied",
-                    "tests_executed": false,
-                    "verification_runs": [],
-                    "refinement": {"parent_proposal_id": proposal_id, "failed_run_id": run, "attempt": attempt},
-                    "approval_instruction": format!("Inspect the refined diff, then run `vee tests apply {refined_id} --approve {refined_id}`. This is a new proposal; Vee has not applied it or run tests.")
-                });
-                write_new_proposal_file(&metadata_path, &serde_json::to_vec_pretty(&proposal)?)?;
+                    &reviewer,
+                )?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &proposal)?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!("Generated refined test proposal: {refined_id}");
-                        println!("Based on failed verification: {run}");
-                        println!("Patch digest: {patch_digest}");
-                        println!("Validated in isolated sandbox: yes");
-                        println!(
-                            "Not applied; inspect and explicitly approve before running tests."
-                        );
-                    }
+                    // Through a Value, as before: keys stay sorted, as the saved record has them.
+                    Output::Json => emit_json(&serde_json::to_value(&proposal)?)?,
+                    Output::Text => print_view(&proposal)?,
                 }
                 Ok(0)
             }
@@ -3511,89 +2976,21 @@ fn run() -> Result<u8> {
                 mutant_patch,
                 output,
             } => {
-                let prepared = prepare_effectiveness(&proposal_id, &profile)?;
-                let root_canonical = vee_core::paths::canonicalize(&prepared.root)?;
-                let patch_canonical = vee_core::paths::canonicalize(&mutant_patch)?;
-                anyhow::ensure!(!patch_canonical.starts_with(&root_canonical), "mutant patch must be outside the repository so it cannot change the reviewed snapshot");
-                let mutant_meta = std::fs::symlink_metadata(&patch_canonical)?;
-                anyhow::ensure!(
-                    mutant_meta.file_type().is_file() && mutant_meta.len() <= 2 * 1024 * 1024,
-                    "mutant patch must be a regular file no larger than 2 MiB"
-                );
-                let mutant_bytes = std::fs::read(&patch_canonical)?;
-                let mut assessment = test_effectiveness::assess(
-                    &prepared.root,
-                    &prepared.snapshot,
+                let assessment = test_proposals::assess_effectiveness(
+                    &operations::Workspace::discover(crate::local_stores())?,
                     &proposal_id,
                     &profile,
-                    &prepared.baseline_run_id,
-                    &prepared.profile,
-                    &mutant_bytes,
-                )
-                .map_err(anyhow::Error::msg)?;
-                let (coverage_report, coverage_limitation) = effectiveness_coverage(
-                    &prepared.root,
-                    &prepared.baseline_run_id,
-                    &prepared.snapshot,
-                );
-                test_effectiveness::attach_coverage(&mut assessment, coverage_report.as_ref());
-                if !coverage_limitation.is_empty() {
-                    assessment.limitations.push(coverage_limitation);
-                }
-                let effectiveness_dir = prepared.root.join(".vee/effectiveness");
-                std::fs::create_dir_all(&effectiveness_dir)?;
-                anyhow::ensure!(
-                    std::fs::symlink_metadata(&effectiveness_dir)?
-                        .file_type()
-                        .is_dir(),
-                    "effectiveness artifact directory must be a real directory"
-                );
-                let assessment_bytes = serde_json::to_vec_pretty(&assessment)?;
-                let assessment_digest = vee_core::digest(&assessment_bytes);
-                let assessment_path =
-                    effectiveness_dir.join(format!("assessment-{}.json", &assessment_digest[7..]));
-                match std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&assessment_path)
-                {
-                    Ok(mut file) => file.write_all(&assessment_bytes)?,
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                        anyhow::ensure!(
-                            read_proposal_file(&assessment_path, 2 * 1024 * 1024)?
-                                == assessment_bytes,
-                            "existing effectiveness artifact has different content"
-                        );
-                    }
-                    Err(error) => return Err(error.into()),
-                }
+                    &mutant_patch,
+                )?;
                 match output {
                     Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &assessment)?;
-                        println!();
+                        emit_json(&assessment.report)?;
                         eprintln!(
-                            "Effectiveness artifact: {} ({assessment_digest})",
-                            assessment_path.display()
+                            "Effectiveness artifact: {} ({})",
+                            assessment.artifact_path, assessment.artifact_digest
                         );
                     }
-                    Output::Text => {
-                        println!("Mutation outcome: {}", assessment.outcome);
-                        println!(
-                            "Baseline: {}; mutant: {}",
-                            assessment.baseline_status, assessment.mutated_status
-                        );
-                        println!(
-                            "Profile: {}; snapshot: {}",
-                            assessment.profile_id, assessment.snapshot_id
-                        );
-                        println!(
-                            "Persisted: {} ({assessment_digest})",
-                            assessment_path.display()
-                        );
-                        for limitation in &assessment.limitations {
-                            println!("Limitation: {limitation}");
-                        }
-                    }
+                    Output::Text => print_view(&assessment)?,
                 }
                 Ok(0)
             }
@@ -3603,86 +3000,21 @@ fn run() -> Result<u8> {
                 manifest,
                 output,
             } => {
-                let prepared = prepare_effectiveness(&proposal_id, &profile)?;
-                let mut assessment = test_effectiveness::assess_corpus(
-                    &prepared.root,
-                    &prepared.snapshot,
+                let assessment = test_proposals::assess_effectiveness_corpus(
+                    &operations::Workspace::discover(crate::local_stores())?,
                     &proposal_id,
                     &profile,
-                    &prepared.baseline_run_id,
-                    &prepared.profile,
                     &manifest,
-                )
-                .map_err(anyhow::Error::msg)?;
-                let (coverage_report, coverage_limitation) = effectiveness_coverage(
-                    &prepared.root,
-                    &prepared.baseline_run_id,
-                    &prepared.snapshot,
-                );
-                test_effectiveness::attach_corpus_coverage(
-                    &mut assessment,
-                    coverage_report.as_ref(),
-                );
-                if !coverage_limitation.is_empty() {
-                    assessment.limitations.push(coverage_limitation);
-                }
-                let effectiveness_dir = prepared.root.join(".vee/effectiveness");
-                std::fs::create_dir_all(&effectiveness_dir)?;
-                anyhow::ensure!(
-                    std::fs::symlink_metadata(&effectiveness_dir)?
-                        .file_type()
-                        .is_dir(),
-                    "effectiveness artifact directory must be a real directory"
-                );
-                let assessment_bytes = serde_json::to_vec_pretty(&assessment)?;
-                let assessment_digest = vee_core::digest(&assessment_bytes);
-                let assessment_path =
-                    effectiveness_dir.join(format!("corpus-{}.json", &assessment_digest[7..]));
-                match std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&assessment_path)
-                {
-                    Ok(mut file) => file.write_all(&assessment_bytes)?,
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                        anyhow::ensure!(
-                            read_proposal_file(&assessment_path, 8 * 1024 * 1024)?
-                                == assessment_bytes,
-                            "existing corpus assessment artifact has different content"
-                        );
-                    }
-                    Err(error) => return Err(error.into()),
-                }
+                )?;
                 match output {
                     Output::Json => {
-                        serde_json::to_writer(std::io::stdout().lock(), &assessment)?;
-                        println!();
+                        emit_json(&assessment.report)?;
                         eprintln!(
-                            "Effectiveness corpus artifact: {} ({assessment_digest})",
-                            assessment_path.display()
+                            "Effectiveness corpus artifact: {} ({})",
+                            assessment.artifact_path, assessment.artifact_digest
                         );
                     }
-                    Output::Text => {
-                        println!(
-                            "Mutant corpus {}: {} killed, {} survived, {} inconclusive of {}",
-                            assessment.corpus_id,
-                            assessment.killed,
-                            assessment.survived,
-                            assessment.inconclusive,
-                            assessment.sample_size
-                        );
-                        println!(
-                            "Profile: {}; snapshot: {}; corpus digest: {}",
-                            assessment.profile_id, assessment.snapshot_id, assessment.corpus_digest
-                        );
-                        println!(
-                            "Persisted: {} ({assessment_digest})",
-                            assessment_path.display()
-                        );
-                        for limitation in &assessment.limitations {
-                            println!("Limitation: {limitation}");
-                        }
-                    }
+                    Output::Text => print_view(&assessment)?,
                 }
                 Ok(0)
             }
@@ -3691,305 +3023,36 @@ fn run() -> Result<u8> {
                 approve,
                 output,
             } => {
-                if !is_sha256_digest(&proposal_id) {
-                    return Err(usage_failure(
-                        "test proposal ID must be a full sha256:<hex> digest",
-                    ));
-                }
-                if approve != proposal_id {
-                    return Err(usage_failure(
-                        "explicit approval must exactly match the generated test proposal ID",
-                    ));
-                }
-                let cwd = std::env::current_dir()?;
-                let root = vee_git::repository_root(&cwd).map_err(usage_failure)?;
-                let proposal_dir = proposal_directory(&root)?;
-                let apply_lock = acquire_proposal_apply_lock(&proposal_dir)?;
-                let record_path = proposal_dir.join(format!("test-{}.json", &proposal_id[7..]));
-                let patch_path = proposal_dir.join(format!("test-{}.patch", &proposal_id[7..]));
-                let mut proposal: serde_json::Value = serde_json::from_slice(
-                    &read_proposal_file(&record_path, 256 * 1024)
-                        .with_context(|| format!("test proposal {proposal_id} was not found"))?,
-                )?;
-                anyhow::ensure!(
-                    proposal["schema_version"] == 2,
-                    "unsupported test proposal schema"
-                );
-                anyhow::ensure!(
-                    proposal["proposal_id"].as_str() == Some(proposal_id.as_str()),
-                    "test proposal ID does not match its record"
-                );
-                anyhow::ensure!(
-                    proposal["application"].as_str() == Some("not_applied"),
-                    "test proposal was already applied or is not applicable"
-                );
-                let patch_digest = proposal["patch_digest"]
-                    .as_str()
-                    .context("test proposal has no patch digest")?;
-                anyhow::ensure!(
-                    is_sha256_digest(patch_digest),
-                    "test proposal patch digest is invalid"
-                );
-                let patch_bytes = read_proposal_file(&patch_path, 2 * 1024 * 1024)
-                    .context("saved test proposal patch is missing or invalid")?;
-                anyhow::ensure!(
-                    vee_core::digest(&patch_bytes) == patch_digest,
-                    "saved test patch content has changed"
-                );
-                let source_snapshot_id = proposal["snapshot_id"]
-                    .as_str()
-                    .context("test proposal has no source snapshot")?;
-                anyhow::ensure!(
-                    test_proposal_id(source_snapshot_id, patch_digest)? == proposal_id,
-                    "test proposal record does not match its approved content"
-                );
-                std::str::from_utf8(&patch_bytes).context("saved test patch is not UTF-8")?;
-                let scope = proposal["source_scope"]
-                    .as_str()
-                    .context("test proposal has no source scope")?;
-                anyhow::ensure!(
-                    matches!(scope, "staged" | "working_tree" | "base_and_worktree"),
-                    "test proposals from immutable commit scopes cannot be applied"
-                );
-                let base_oid = proposal["base_oid"].as_str();
-                let root_string = root.to_string_lossy().to_string();
-                let source_snapshot = current_change_set(&root_string, base_oid, scope)?;
-                anyhow::ensure!(
-                    proposal["snapshot_id"].as_str() == Some(source_snapshot.digest.as_str()),
-                    "source snapshot is stale; test patch was not applied"
-                );
-                let sandbox_result = patch_sandbox::validate_bytes(&root, &patch_bytes)
-                    .map_err(anyhow::Error::msg)?;
-                anyhow::ensure!(
-                    !sandbox_result.result_files.is_empty()
-                        && sandbox_result
-                            .result_files
-                            .iter()
-                            .all(|file| test_generation::is_test_path(&file.path)),
-                    "saved proposal no longer contains test-only paths"
-                );
-                let input_digest = patch_sandbox::input_digest(&sandbox_result.input_files)
-                    .map_err(anyhow::Error::msg)?;
-                anyhow::ensure!(
-                    proposal["sandbox_input_digest"].as_str() == Some(input_digest.as_str()),
-                    "a test patch target changed since proposal validation"
-                );
-                anyhow::ensure!(
-                    proposal["sandbox_result_digest"].as_str()
-                        == Some(sandbox_result.result_digest.as_str()),
-                    "isolated test patch result differs from the approved proposal"
-                );
-                let mut check_args = vec!["apply", "--check"];
-                if scope == "staged" {
-                    check_args.push("--index");
-                }
-                patch_sandbox::apply_bytes(&root, &check_args, &patch_bytes)
-                    .map_err(anyhow::Error::msg)?;
-                let current = current_change_set(&root_string, base_oid, scope)?;
-                anyhow::ensure!(
-                    current.digest == source_snapshot.digest,
-                    "source snapshot changed during test patch validation"
-                );
-                let final_inputs = vee_git::snapshot_files(
-                    &root,
-                    &sandbox_result
-                        .input_files
-                        .iter()
-                        .map(|file| std::path::PathBuf::from(&file.path))
-                        .collect::<Vec<_>>(),
-                )
-                .map_err(anyhow::Error::msg)?;
-                anyhow::ensure!(
-                    patch_sandbox::input_digest(&final_inputs).map_err(anyhow::Error::msg)?
-                        == input_digest,
-                    "a test patch target changed during validation"
-                );
-                let mut apply_args = vec!["apply"];
-                if scope == "staged" {
-                    apply_args.push("--index");
-                }
-                patch_sandbox::apply_bytes(&root, &apply_args, &patch_bytes)
-                    .map_err(anyhow::Error::msg)?;
-                let observed_outputs = vee_git::snapshot_files(
-                    &root,
-                    &sandbox_result
-                        .result_files
-                        .iter()
-                        .map(|file| std::path::PathBuf::from(&file.path))
-                        .collect::<Vec<_>>(),
-                )
-                .map_err(anyhow::Error::msg)?;
-                let patch_paths = sandbox_result
-                    .result_files
-                    .iter()
-                    .map(|file| file.path.as_str())
-                    .collect::<std::collections::BTreeSet<_>>();
-                let post_snapshot =
-                    vee_application::capture_current_change_set(&root, &source_snapshot)
-                        .map_err(anyhow::Error::msg)?;
-                let source_files = source_snapshot
-                    .files
-                    .iter()
-                    .filter(|file| !patch_paths.contains(file.path.as_str()))
-                    .map(|file| {
-                        (
-                            file.path.as_str(),
-                            (file.mode, file.content_digest.as_str()),
-                        )
-                    })
-                    .collect::<std::collections::BTreeMap<_, _>>();
-                let post_files = post_snapshot
-                    .files
-                    .iter()
-                    .filter(|file| !patch_paths.contains(file.path.as_str()))
-                    .map(|file| {
-                        (
-                            file.path.as_str(),
-                            (file.mode, file.content_digest.as_str()),
-                        )
-                    })
-                    .collect::<std::collections::BTreeMap<_, _>>();
-                let concurrent_mutation =
-                    observed_outputs != sandbox_result.result_files || source_files != post_files;
-                proposal["application"] = serde_json::Value::String("applied".into());
-                proposal["approval_digest"] = serde_json::Value::String(approve);
-                proposal["applied_at_unix"] = serde_json::json!(current_unix_time()?);
-                proposal["concurrent_mutation_detected"] =
-                    serde_json::Value::Bool(concurrent_mutation);
-                proposal["post_application_snapshot_id"] =
-                    serde_json::Value::String(post_snapshot.digest.clone());
-                write_proposal_file(&record_path, &serde_json::to_vec_pretty(&proposal)?)?;
-                drop(apply_lock);
+                let application =
+                    test_proposals::apply(&proposal_workspace()?, &proposal_id, &approve)?;
                 match output {
-                    Output::Json => {
-                        serde_json::to_writer(
-                            std::io::stdout().lock(),
-                            &serde_json::json!({"schema_version": 1, "proposal_id": proposal_id, "application": "applied", "snapshot_id": post_snapshot.digest, "concurrent_mutation_detected": concurrent_mutation}),
-                        )?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!("Applied approved test proposal {proposal_id}");
-                        println!("Current snapshot: {}", post_snapshot.digest);
-                        println!("Concurrent mutation detected: {concurrent_mutation}");
-                        println!("Run a trusted test profile with `vee tests run {proposal_id} --profile <profile>`.");
-                    }
+                    // Through a Value, as before: keys stay sorted.
+                    Output::Json => emit_json(&serde_json::to_value(&application)?)?,
+                    Output::Text => print_view(&application)?,
                 }
-                Ok(if concurrent_mutation { 2 } else { 0 })
+                Ok(if application.concurrent_mutation_detected {
+                    2
+                } else {
+                    0
+                })
             }
             TestsCommand::Run {
                 proposal_id,
                 profile,
                 output,
             } => {
-                if !is_sha256_digest(&proposal_id) {
-                    return Err(usage_failure(
-                        "test proposal ID must be a full sha256:<hex> digest",
-                    ));
+                let verification =
+                    test_proposals::run(&proposal_workspace()?, &proposal_id, &profile)?;
+                match output {
+                    // Through a Value, as before: keys stay sorted.
+                    Output::Json => emit_json(&serde_json::to_value(&verification)?)?,
+                    Output::Text => print_view(&verification)?,
                 }
-                let cwd = std::env::current_dir()?;
-                let root = vee_git::repository_root(&cwd).map_err(usage_failure)?;
-                let proposal_dir = proposal_directory(&root)?;
-                let apply_lock = acquire_proposal_apply_lock(&proposal_dir)?;
-                let record_path = proposal_dir.join(format!("test-{}.json", &proposal_id[7..]));
-                let mut proposal: serde_json::Value = serde_json::from_slice(
-                    &read_proposal_file(&record_path, 256 * 1024)
-                        .with_context(|| format!("test proposal {proposal_id} was not found"))?,
-                )?;
-                anyhow::ensure!(
-                    proposal["schema_version"] == 2,
-                    "unsupported test proposal schema"
-                );
-                anyhow::ensure!(
-                    proposal["proposal_id"].as_str() == Some(proposal_id.as_str()),
-                    "test proposal ID does not match its record"
-                );
-                anyhow::ensure!(
-                    proposal["application"].as_str() == Some("applied"),
-                    "test proposal must be explicitly applied before it can run"
-                );
-                anyhow::ensure!(
-                    proposal["approval_digest"].as_str() == Some(proposal_id.as_str()),
-                    "test proposal has no matching explicit approval record"
-                );
-                anyhow::ensure!(proposal["concurrent_mutation_detected"] == false, "test proposal application had a concurrent mutation; review the worktree and generate a new proposal");
-                let patch_digest = proposal["patch_digest"]
-                    .as_str()
-                    .context("test proposal has no patch digest")?;
-                let patch_path = proposal_dir.join(format!("test-{}.patch", &proposal_id[7..]));
-                let patch_bytes = read_proposal_file(&patch_path, 2 * 1024 * 1024)
-                    .context("saved test proposal patch is missing or invalid")?;
-                anyhow::ensure!(
-                    vee_core::digest(&patch_bytes) == patch_digest,
-                    "saved test patch content has changed"
-                );
-                let source_snapshot_id = proposal["snapshot_id"]
-                    .as_str()
-                    .context("test proposal has no source snapshot")?;
-                anyhow::ensure!(
-                    test_proposal_id(source_snapshot_id, patch_digest)? == proposal_id,
-                    "test proposal record does not match its approved content"
-                );
-                let scope = proposal["source_scope"]
-                    .as_str()
-                    .context("test proposal has no source scope")?;
-                let base_oid = proposal["base_oid"].as_str();
-                let root_string = root.to_string_lossy().to_string();
-                let snapshot = current_change_set(&root_string, base_oid, scope)?;
-                anyhow::ensure!(
-                    proposal["post_application_snapshot_id"].as_str()
-                        == Some(snapshot.digest.as_str()),
-                    "worktree no longer matches the snapshot produced by this test proposal"
-                );
-                let mut config = load_repository_config(&root)?;
-                apply_protected_policy(&root, &mut config)?;
-                anyhow::ensure!(
-                    config.verification.contains_key(&profile),
-                    "unknown trusted verification profile {profile}"
-                );
-                let db_dir = root.join(".vee");
-                std::fs::create_dir_all(&db_dir)?;
-                let mut store =
-                    ReviewStore::open(&db_dir.join("vee.sqlite")).map_err(anyhow::Error::msg)?;
-                let run = vee_application::run_verification(
-                    &root, &snapshot, &profile, &config, &mut store,
-                )
-                .map_err(anyhow::Error::msg)?;
-                let mut verification_runs = proposal["verification_runs"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
-                verification_runs.push(serde_json::json!({"run_id": &run.run_id, "snapshot_id": &run.snapshot_id, "profile_id": &run.profile_id, "status": run.status}));
-                proposal["verification_runs"] = serde_json::Value::Array(verification_runs);
-                proposal["tests_executed"] = serde_json::Value::Bool(true);
-                proposal["last_verification_run_id"] =
-                    serde_json::Value::String(run.run_id.clone());
-                write_proposal_file(&record_path, &serde_json::to_vec_pretty(&proposal)?)?;
-                drop(apply_lock);
-                let exit_code = match run.status {
+                Ok(match verification.verification_run.status {
                     VerificationStatus::Passed => 0,
                     VerificationStatus::Failed => 1,
-                    VerificationStatus::TimedOut => 2,
-                    VerificationStatus::Incomplete => 2,
-                };
-                match output {
-                    Output::Json => {
-                        serde_json::to_writer(
-                            std::io::stdout().lock(),
-                            &serde_json::json!({"schema_version": 1, "proposal_id": proposal_id, "verification_run": &run}),
-                        )?;
-                        println!();
-                    }
-                    Output::Text => {
-                        println!(
-                            "Verification {}: {:?} ({})",
-                            profile, run.status, run.run_id
-                        );
-                        println!("Snapshot: {}", run.snapshot_id);
-                        print_verification_artifacts(&run);
-                    }
-                }
-                Ok(exit_code)
+                    VerificationStatus::TimedOut | VerificationStatus::Incomplete => 2,
+                })
             }
         },
         Command::Pr { command } => match command {

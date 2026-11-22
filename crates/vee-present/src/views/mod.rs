@@ -11,6 +11,7 @@ mod lists;
 mod patch;
 pub mod review;
 mod setup;
+mod tests_gen;
 pub(crate) mod verification;
 pub(crate) mod work;
 
