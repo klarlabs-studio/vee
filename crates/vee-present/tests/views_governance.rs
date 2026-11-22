@@ -129,7 +129,7 @@ fn candidate(id: &str, suggestion: &str) -> RuleCandidate {
             reviewer: "dana".into(),
             reason: "the error is handled by the caller".into(),
         }],
-        approval_status: "requires_human_review",
+        approval_status: "requires_human_review".to_string(),
     }
 }
 
@@ -437,7 +437,7 @@ fn acceptance_view_traces_criteria_to_paths_tests_and_runs() {
             evidence_line: 30,
             certainty: "inferred".into(),
         }],
-        status: "needs_human_review",
+        status: "needs_human_review".to_string(),
     }]);
     let text = text(&report);
     assert!(

@@ -308,11 +308,17 @@ fn cli_and_mcp_return_identical_documents_for_shared_operations() {
     assert_same(&cli, &via_mcp, "show finding", "finding-detail-v2");
 
     let cli = cli_json(root, &["findings", "task", &finding_id]);
-    let via_mcp = mcp.call("get_finding_task", json!({"finding_id": finding_id}));
+    let (via_mcp, text) = mcp.call_with_text("get_finding_task", json!({"finding_id": finding_id}));
     assert_same(&cli, &via_mcp, "finding task", "finding-task-v3");
+    assert_same_view::<vee_application::finding_task::FindingTask>(
+        root,
+        &["findings", "task", &finding_id],
+        &via_mcp,
+        &text,
+    );
 
     let cli = cli_json(root, &["findings", "package", &finding_id]);
-    let via_mcp = mcp.call(
+    let (via_mcp, text) = mcp.call_with_text(
         "get_finding_work_package",
         json!({"finding_ids": [finding_id]}),
     );
@@ -321,6 +327,12 @@ fn cli_and_mcp_return_identical_documents_for_shared_operations() {
         &via_mcp,
         "finding work package",
         "finding-work-package-v2",
+    );
+    assert_same_view::<vee_application::finding_task::FindingWorkPackage>(
+        root,
+        &["findings", "package", &finding_id],
+        &via_mcp,
+        &text,
     );
 
     let cli = cli_json(root, &["impact", "--review", &review_id]);
@@ -334,8 +346,15 @@ fn cli_and_mcp_return_identical_documents_for_shared_operations() {
     );
 
     let cli = cli_json(root, &["acceptance", "report", "--review", &review_id]);
-    let via_mcp = mcp.call("acceptance_traceability", json!({"review_id": review_id}));
+    let (via_mcp, text) =
+        mcp.call_with_text("acceptance_traceability", json!({"review_id": review_id}));
     assert_same(&cli, &via_mcp, "acceptance", "acceptance-traceability-v1");
+    assert_same_view::<vee_application::acceptance::AcceptanceReport>(
+        root,
+        &["acceptance", "report", "--review", &review_id],
+        &via_mcp,
+        &text,
+    );
 
     let cli = cli_json(root, &["standards", "--path", "tracked.rs"]);
     let (via_mcp, text) =
@@ -349,8 +368,14 @@ fn cli_and_mcp_return_identical_documents_for_shared_operations() {
     );
 
     let cli = cli_json(root, &["rules", "candidates"]);
-    let via_mcp = mcp.call("list_rule_candidates", json!({}));
+    let (via_mcp, text) = mcp.call_with_text("list_rule_candidates", json!({}));
     assert_same(&cli, &via_mcp, "rule candidates", "rule-candidates-v3");
+    assert_same_view::<vee_application::rule_candidates::CandidateReport>(
+        root,
+        &["rules", "candidates"],
+        &via_mcp,
+        &text,
+    );
 
     let cli = cli_json(root, &["gate", "check", "--review", &review_id]);
     let (via_mcp, text) = mcp.call_with_text("evaluate_gate", json!({"review_id": review_id}));
@@ -500,8 +525,9 @@ fn cli_and_mcp_return_identical_documents_for_shared_operations() {
     );
 
     let cli = cli_json(root, &["doctor"]);
-    let via_mcp = mcp.call("check_setup", json!({}));
+    let (via_mcp, text) = mcp.call_with_text("check_setup", json!({}));
     assert_same(&cli, &via_mcp, "doctor", "doctor-report-v1");
+    assert_same_view::<vee_application::setup::DoctorReport>(root, &["doctor"], &via_mcp, &text);
     assert_eq!(cli["ready"], true, "{cli:#}");
 
     let cli = cli_json(root, &["analytics"]);

@@ -7,7 +7,7 @@ const MIN_DISTINCT_FINDINGS: usize = 3;
 const MAX_EXAMPLES_PER_CANDIDATE: usize = 5;
 const MAX_REASON_CHARS: usize = 500;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CandidateReport {
     pub schema_version: u32,
     pub candidates: Vec<RuleCandidate>,
@@ -18,7 +18,7 @@ pub struct CandidateReport {
     pub limitations: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RuleCandidate {
     pub candidate_id: String,
     pub source_kind: String,
@@ -28,11 +28,11 @@ pub struct RuleCandidate {
     pub feedback_count: usize,
     pub feedback_event_count: usize,
     pub evidence_digest: String,
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing, default)]
     pub feedback_ids: Vec<String>,
     pub suggestion: String,
     pub feedback: Vec<FeedbackExample>,
-    pub approval_status: &'static str,
+    pub approval_status: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -190,7 +190,7 @@ pub fn mine(
                 feedback_ids,
                 suggestion,
                 feedback: examples,
-                approval_status: "requires_human_review",
+                approval_status: "requires_human_review".to_string(),
             })
         })
         .collect();
@@ -317,7 +317,7 @@ pub fn mine_with_external(
             feedback_ids,
             suggestion,
             feedback: examples,
-            approval_status: "requires_human_review",
+            approval_status: "requires_human_review".to_string(),
         });
     }
     report.disputed_external_comments_excluded = disputed.len();

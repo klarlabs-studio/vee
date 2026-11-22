@@ -62,9 +62,9 @@ each transport *showed* still differed, and neither was readable:
 - **CLI text output is not a stable interface.** Scripts should use
   `--output json`.
 - **Covered documents derive `Deserialize`,** so the parity test can rebuild
-  them. Documents that cannot yet be rebuilt (the setup report and provider
-  detection borrow `&'static str`) still have views, but parity compares only
-  their JSON for now.
+  them. Fields that were `&'static str` (setup, finding task and package, rule
+  candidate and acceptance statuses) are now `String`; they serialize the
+  same.
 - **Alignment counts characters,** so wide East Asian characters can misalign
   a column. The text itself is unaffected. No width dependency was added.
 - **Coverage is staged.**

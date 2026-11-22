@@ -48,7 +48,7 @@ fn task(id: &str, current: bool) -> FindingTask {
             end_line: 167,
             content: "   165 | func (l *Lockout) Fail() {\n   166 | \tl.count = l.count + 1\n   167 | }\n"
                 .into(),
-            classification: "untrusted_repository_source",
+            classification: "untrusted_repository_source".to_string(),
         }),
         context_note: None,
         impact_paths: vec![ImpactEdge {
@@ -85,10 +85,10 @@ fn task(id: &str, current: bool) -> FindingTask {
             coverage_complete: true,
             matching_rule_line: Some(3),
             matching_pattern: Some("domain/".into()),
-            classification: "advisory_ownership_context",
+            classification: "advisory_ownership_context".to_string(),
         }),
         ownership_note: None,
-        instructions: "Investigate this finding against the exact snapshot.",
+        instructions: "Investigate this finding against the exact snapshot.".to_string(),
     }
 }
 
@@ -194,7 +194,7 @@ fn finding_task_lists_standards_with_integrity() {
         integrity: "local-content-hash".into(),
         content: "Use table-driven tests.".into(),
         truncated: true,
-        classification: "repository_guidance_context",
+        classification: "repository_guidance_context".to_string(),
     }];
     let text = ansi::render(&task.to_view(), false);
     assert!(
@@ -211,7 +211,7 @@ fn package(findings: Vec<FindingTask>) -> FindingWorkPackage {
         snapshot_id: "sha256:snap".into(),
         snapshot_current: findings.iter().all(|task| task.snapshot_current),
         findings,
-        instructions: "Investigate these findings as one bounded work package.",
+        instructions: "Investigate these findings as one bounded work package.".to_string(),
     }
 }
 

@@ -2848,7 +2848,10 @@ fn run() -> Result<u8> {
                     if report.reviewer_instructions_created {
                         println!("Created {}", report.reviewer_instructions);
                     }
-                    match (report.provider_status, report.candidate_id) {
+                    match (
+                        report.provider_status.as_str(),
+                        report.candidate_id.as_deref(),
+                    ) {
                         ("written", Some(candidate)) => println!(
                             "Configured provider `{}` ({candidate}, {} egress) in {}",
                             report.provider_id, report.egress, report.user_config

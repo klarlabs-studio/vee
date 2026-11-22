@@ -61,7 +61,7 @@ impl ToView for FindingTask {
             .extend(evidence_view(self))
             .extend(standards_view(self))
             .section("Instructions")
-            .paragraph(Cell::plain(self.instructions))
+            .paragraph(Cell::plain(&self.instructions))
             .next_action(
                 format!("vee verify {} --profile <profile>", finding.id),
                 "verify_finding",
@@ -236,7 +236,7 @@ impl ToView for FindingWorkPackage {
         }
         view = view
             .section("Instructions")
-            .paragraph(Cell::plain(self.instructions));
+            .paragraph(Cell::plain(&self.instructions));
         if let Some(first) = self.findings.first() {
             let id = &first.finding.finding.id;
             view = view.next_action(

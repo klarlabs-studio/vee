@@ -129,7 +129,7 @@ impl ToView for CandidateReport {
                                 Cell::plain(&candidate.category),
                                 Cell::plain(serde_name(&candidate.feedback_label)),
                                 Cell::plain(&candidate.source_kind),
-                                tone::status_text(candidate.approval_status),
+                                tone::status_text(&candidate.approval_status),
                                 Cell::plain(summary(&candidate.suggestion, SUMMARY_WIDTH)),
                             ]
                         })
@@ -453,7 +453,7 @@ impl ToView for AcceptanceReport {
                         vec![
                             Cell::id(&criterion.id),
                             Cell::plain(criterion.source_line.to_string()),
-                            tone::status_text(criterion.status),
+                            tone::status_text(&criterion.status),
                             Cell::plain(criterion.candidate_changed_paths.len().to_string()),
                             Cell::plain(criterion.candidate_test_references.len().to_string()),
                             Cell::plain(summary(&criterion.text, SUMMARY_WIDTH)),
