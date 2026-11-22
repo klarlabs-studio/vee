@@ -303,7 +303,9 @@ fn failed_verification_shows_the_run_and_suggests_refinement() {
         "{text}"
     );
     assert!(
-        text.contains("Logs\n\n  • stdout .vee/artifacts/sha256/4444\n"),
+        text.contains(&format!(
+            "Logs\n\n  • stdout .vee/artifacts/sha256/4444 {DIGEST}\n"
+        )),
         "{text}"
     );
     assert!(
