@@ -1219,3 +1219,117 @@ fn only_files_naming_a_changed_symbol_need_parsing() {
     assert!(!filter.may_mention("fn unrelated() {}"));
     assert!(!ChangedSymbolFilter::new(std::iter::empty()).may_mention("parse_config"));
 }
+
+#[test]
+fn only_declarations_whose_content_changed_are_changed_symbols() {
+    let base = "fn untouched() -> u8 { 1 }\n\nfn edited() -> u8 { 1 }\n\n#[cfg(test)]\nmod tests {\n    fn helper() {}\n}\n";
+    let current = "fn untouched() -> u8 {\n    1\n}\n\n// reformatted above\nfn edited() -> u8 { 2 }\n\n#[cfg(test)]\nmod tests {\n    fn helper() { let _ = 1; }\n}\n";
+    let mut coverage_complete = true;
+    let symbols = changed_file_symbols(
+        "src/lib.rs",
+        Some(&current.to_owned()),
+        Some(base.as_bytes().to_vec()),
+        &mut coverage_complete,
+    );
+    assert_eq!(
+        symbols.into_iter().collect::<Vec<_>>(),
+        vec!["edited".to_owned()],
+        "the private helper inside the test module is unreachable from other files"
+    );
+    assert!(coverage_complete);
+}
+
+#[test]
+fn lexical_languages_report_only_edited_declarations() {
+    let base =
+        "package app\n\nfunc Stable() int {\n\treturn 1\n}\n\nfunc Edited() int {\n\treturn 1\n}\n";
+    let current = "package app\n\nfunc Stable() int {\n\treturn 1\n}\n\nfunc Edited() int {\n\treturn 2\n}\n\nfunc Added() {}\n";
+    let mut coverage_complete = true;
+    let symbols = changed_file_symbols(
+        "app/app.go",
+        Some(&current.to_owned()),
+        Some(base.as_bytes().to_vec()),
+        &mut coverage_complete,
+    );
+    assert_eq!(
+        symbols.into_iter().collect::<Vec<_>>(),
+        vec!["Added".to_owned(), "Edited".to_owned()]
+    );
+}
+
+#[test]
+fn unparseable_rust_falls_back_to_lexical_comparison_on_both_sides() {
+    let base = "fn stable() {}\nfn edited() { 1 }\n";
+    let current = "fn stable() {}\nfn edited() { 2 \n";
+    let mut coverage_complete = true;
+    let symbols = changed_file_symbols(
+        "src/lib.rs",
+        Some(&current.to_owned()),
+        Some(base.as_bytes().to_vec()),
+        &mut coverage_complete,
+    );
+    assert_eq!(
+        symbols.into_iter().collect::<Vec<_>>(),
+        vec!["edited".to_owned()]
+    );
+    assert!(!coverage_complete);
+}
+
+#[test]
+fn crate_private_and_cross_language_matches_are_not_impact() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    for (path, contents) in [
+        ("cli/Cargo.toml", "[package]\nname='cli'\nversion='0.1.0'\nedition='2021'\n"),
+        ("cli/src/main.rs", "fn run() -> u8 { 1 }\npub fn shared() -> u8 { 1 }\nfn main() { run(); }\n"),
+        ("cli/src/commands.rs", "fn dispatch() { super::run(); }\n"),
+        ("other/Cargo.toml", "[package]\nname='other'\nversion='0.1.0'\nedition='2021'\n"),
+        ("other/src/lib.rs", "pub fn run() {}\npub fn caller() { run(); cli::shared(); }\n"),
+        ("scripts/tool.py", "import subprocess\nsubprocess.run(['true'])\n"),
+    ] {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+    git(&["add", "."]);
+    git(&["commit", "-qm", "baseline"]);
+    std::fs::write(
+        root.join("cli/src/main.rs"),
+        "fn run() -> u8 { 2 }\npub fn shared() -> u8 { 2 }\nfn main() { run(); }\n",
+    )
+    .unwrap();
+    let change_set = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
+
+    let impact = analyze_impact(root, &change_set).unwrap();
+
+    let affected = |symbol: &str| -> std::collections::BTreeSet<String> {
+        impact
+            .paths
+            .iter()
+            .filter(|edge| edge.symbol == symbol)
+            .map(|edge| edge.affected_path.clone())
+            .collect()
+    };
+    assert_eq!(
+        affected("run"),
+        std::collections::BTreeSet::from(["cli/src/commands.rs".to_owned()]),
+        "a private fn is reachable only inside its own package, never from Python"
+    );
+    assert_eq!(
+        affected("shared"),
+        std::collections::BTreeSet::from(["other/src/lib.rs".to_owned()]),
+        "a pub fn stays visible to other packages"
+    );
+}

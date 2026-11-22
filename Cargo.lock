@@ -2586,6 +2586,7 @@ dependencies = [
  "jsonschema",
  "libc",
  "proc-macro2",
+ "quote",
  "reqwest",
  "ring",
  "roxmltree",

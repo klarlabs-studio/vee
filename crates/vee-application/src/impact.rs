@@ -229,13 +229,33 @@ pub(crate) fn analyze_impact_with_typescript_server(
         .zip(&symbol_paths)
         .filter_map(|(bytes, path)| Some((path.as_str(), bytes?)))
         .collect();
+    // Changed Rust symbols that no declaration exports beyond its crate.
+    let mut crate_private_symbols =
+        std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
     for path in &changed {
-        let path_symbols = changed_file_symbols(
-            path,
-            source.get(path),
-            base_bytes.remove(path.as_str()),
-            &mut coverage_complete,
-        );
+        let base = base_bytes.remove(path.as_str());
+        let path_symbols =
+            changed_file_symbols(path, source.get(path), base.clone(), &mut coverage_complete);
+        if path.ends_with(".rs") {
+            let base_text = base.and_then(|bytes| String::from_utf8(bytes).ok());
+            let exported = [source.get(path).map(String::as_str), base_text.as_deref()]
+                .into_iter()
+                .flatten()
+                .map(rust_exported_symbols)
+                .collect::<Option<Vec<_>>>();
+            if let Some(exported) = exported {
+                let exported: std::collections::BTreeSet<_> =
+                    exported.into_iter().flatten().collect();
+                crate_private_symbols.insert(
+                    path.clone(),
+                    path_symbols
+                        .iter()
+                        .filter(|symbol| !exported.contains(*symbol))
+                        .cloned()
+                        .collect(),
+                );
+            }
+        }
         symbols.extend(path_symbols.iter().cloned());
         changed_symbols_by_path.insert(path.clone(), path_symbols);
     }
@@ -248,6 +268,10 @@ pub(crate) fn analyze_impact_with_typescript_server(
         coverage_complete = false;
     }
     let rust_test_modules = rust_test_module_paths(&source);
+    let packages: std::collections::BTreeMap<&str, Option<String>> = source
+        .iter()
+        .map(|(path, text)| (path.as_str(), package_id(root, path, text)))
+        .collect();
     let mut analyzers = Vec::new();
     if has_rust_changes {
         analyzers.push(ImpactAnalyzer {
@@ -313,14 +337,37 @@ pub(crate) fn analyze_impact_with_typescript_server(
             .unwrap_or_default()
             .into_iter()
             .collect();
+        let crate_private = crate_private_symbols.get(changed_path);
+        let exported_symbols: Vec<_> = local_symbols
+            .iter()
+            .filter(|symbol| crate_private.is_none_or(|private| !private.contains(*symbol)))
+            .cloned()
+            .collect();
         let symbol_matcher = SymbolMatcher::new(&local_symbols);
-        let wanted: std::collections::HashSet<&str> =
+        let exported_matcher = SymbolMatcher::new(&exported_symbols);
+        let local_wanted: std::collections::HashSet<&str> =
             local_symbols.iter().map(String::as_str).collect();
+        let exported_wanted: std::collections::HashSet<&str> =
+            exported_symbols.iter().map(String::as_str).collect();
+        let changed_package = packages.get(changed_path.as_str()).cloned().flatten();
         for (candidate_path, candidate_text) in &source {
             let same_file_rust = candidate_path == changed_path && candidate_path.ends_with(".rs");
-            if !should_scan_impact_candidate(&changed, changed_path, candidate_path) {
+            if !should_scan_impact_candidate(&changed, changed_path, candidate_path)
+                || !same_language_family(changed_path, candidate_path)
+            {
                 continue;
             }
+            // Crate-private items are only reachable from their own package.
+            let same_package = changed_package.is_some()
+                && packages
+                    .get(candidate_path.as_str())
+                    .and_then(Option::as_ref)
+                    == changed_package.as_ref();
+            let (symbol_matcher, wanted) = if same_package {
+                (&symbol_matcher, &local_wanted)
+            } else {
+                (&exported_matcher, &exported_wanted)
+            };
             if candidate_path.ends_with(".rs") {
                 let occurrences = rust_occurrences
                     .entry(candidate_path.as_str())
@@ -524,7 +571,7 @@ pub(crate) fn analyze_impact_with_typescript_server(
     paths.dedup();
     let mut group_map = std::collections::BTreeMap::<String, (Vec<String>, Vec<String>)>::new();
     for path in source.keys() {
-        if let Some(package) = package_id(root, path, &source[path]) {
+        if let Some(package) = packages.get(path.as_str()).cloned().flatten() {
             let entry = group_map.entry(package).or_default();
             entry.1.push(path.clone());
             if changed.contains(path) {
@@ -602,54 +649,146 @@ fn declares_symbols(path: &str) -> bool {
 }
 
 /// Symbols declared by a changed file in its current and base versions.
+/// The symbols a change adds, removes, or modifies in one file.
+///
+/// Each declaration is fingerprinted on both sides of the change, and only
+/// names whose fingerprints differ are reported. Treating every declaration
+/// in a touched file as changed would make one edited function pull in every
+/// caller of its unrelated siblings.
 pub(crate) fn changed_file_symbols(
     path: &str,
     current: Option<&String>,
     base: Option<Vec<u8>>,
     coverage_complete: &mut bool,
 ) -> std::collections::BTreeSet<String> {
-    let mut symbols = std::collections::BTreeSet::new();
     if !declares_symbols(path) {
-        return symbols;
+        return std::collections::BTreeSet::new();
     }
-    let mut add = |text: &str| {
-        if path.ends_with(".rs") {
-            match rust_declared_symbols(text) {
-                Some(found) => symbols.extend(found),
-                None => {
-                    *coverage_complete = false;
-                    symbols.extend(declared_symbols(path, text));
-                }
+    let base = match base.map(String::from_utf8) {
+        Some(Ok(text)) => Some(text),
+        Some(Err(_)) => {
+            // Without a readable base side every current declaration may have changed.
+            *coverage_complete = false;
+            return current
+                .map(|text| declaration_fingerprints(path, text, coverage_complete))
+                .unwrap_or_default()
+                .into_keys()
+                .collect();
+        }
+        None => None,
+    };
+    let rust_sides = path.ends_with(".rs").then(|| {
+        (
+            current.map(|text| rust_declaration_fingerprints(text)),
+            base.as_deref().map(rust_declaration_fingerprints),
+        )
+    });
+    // Compare like with like: if either Rust side fails to parse, both sides
+    // fall back to the lexical fingerprints.
+    let (current_fingerprints, base_fingerprints) = match rust_sides {
+        Some((current_side, base_side))
+            if current_side.as_ref().is_none_or(Option::is_some)
+                && base_side.as_ref().is_none_or(Option::is_some) =>
+        {
+            (
+                current_side.flatten().unwrap_or_default(),
+                base_side.flatten().unwrap_or_default(),
+            )
+        }
+        rust_sides => {
+            if rust_sides.is_some() {
+                *coverage_complete = false;
             }
-        } else if is_typescript_path(path) {
-            symbols.extend(declared_symbols(
-                path,
-                &typescript_code_without_comments_and_strings(text),
-            ));
-        } else if is_python_path(path) {
-            symbols.extend(declared_symbols(
-                path,
-                &python_code_without_comments_and_strings(text),
-            ));
-        } else if is_java_path(path) {
-            symbols.extend(java_declared_symbols(
-                &java_code_without_comments_and_strings(text),
-            ));
-        } else {
-            symbols.extend(declared_symbols(path, text));
+            (
+                current
+                    .map(|text| lexical_declaration_fingerprints(path, text))
+                    .unwrap_or_default(),
+                base.as_deref()
+                    .map(|text| lexical_declaration_fingerprints(path, text))
+                    .unwrap_or_default(),
+            )
         }
     };
-    if let Some(text) = current {
-        add(text);
+    let mut changed: std::collections::BTreeSet<String> = current_fingerprints
+        .keys()
+        .chain(base_fingerprints.keys())
+        .filter(|name| current_fingerprints.get(*name) != base_fingerprints.get(*name))
+        .cloned()
+        .collect();
+    if let Some(helpers) = current
+        .filter(|_| path.ends_with(".rs"))
+        .and_then(|text| rust_test_helper_mentions(text))
+    {
+        extend_with_test_helpers(&mut changed, &helpers);
+        // Helpers private to a test module carry the change but are not
+        // themselves reachable from other files.
+        changed.retain(|name| {
+            current_fingerprints.contains_key(name) || base_fingerprints.contains_key(name)
+        });
     }
-    if let Some(bytes) = base {
-        if let Ok(text) = String::from_utf8(bytes) {
-            add(&text);
+    changed
+}
+
+/// Every declaration in a file, keyed by name, with one fingerprint per
+/// declaration of that name (sorted, so reordering is not a change).
+pub(crate) type DeclarationFingerprints = std::collections::BTreeMap<String, Vec<String>>;
+
+fn declaration_fingerprints(
+    path: &str,
+    text: &str,
+    coverage_complete: &mut bool,
+) -> DeclarationFingerprints {
+    if path.ends_with(".rs") {
+        if let Some(found) = rust_declaration_fingerprints(text) {
+            return found;
+        }
+        *coverage_complete = false;
+    }
+    lexical_declaration_fingerprints(path, text)
+}
+
+/// Lexical fingerprints: a declaration spans from its declaring line to the
+/// next declaring line, compared with whitespace trimmed.
+pub(crate) fn lexical_declaration_fingerprints(path: &str, text: &str) -> DeclarationFingerprints {
+    let code = if is_typescript_path(path) {
+        typescript_code_without_comments_and_strings(text)
+    } else if is_python_path(path) {
+        python_code_without_comments_and_strings(text)
+    } else if is_java_path(path) {
+        java_code_without_comments_and_strings(text)
+    } else {
+        text.to_owned()
+    };
+    let mut fingerprints = DeclarationFingerprints::new();
+    let mut open: Vec<String> = Vec::new();
+    let mut region = String::new();
+    let mut close = |open: &mut Vec<String>, region: &mut String| {
+        for name in open.drain(..) {
+            fingerprints.entry(name).or_default().push(region.clone());
+        }
+        region.clear();
+    };
+    for line in code.lines() {
+        let names = if is_java_path(path) {
+            java_line_declared_symbols(line)
         } else {
-            *coverage_complete = false;
+            line_declared_symbol(path, line).into_iter().collect()
+        };
+        if !names.is_empty() {
+            close(&mut open, &mut region);
+            open = names;
+        }
+        let trimmed = line.trim();
+        if !open.is_empty() && !trimmed.is_empty() {
+            region.push_str(trimmed);
+            region.push('\n');
         }
     }
-    symbols
+    close(&mut open, &mut region);
+    for regions in fingerprints.values_mut() {
+        regions.sort();
+    }
+    fingerprints
 }
 
 pub(crate) fn snapshot_go_module_path(
@@ -777,6 +916,30 @@ pub(crate) fn go_local_dependency_edges(
         }
     }
     edges
+}
+
+/// Whether two paths are in the same language family. Lexical matches
+/// across languages (a Rust `run` against Python's `subprocess.run`) are noise.
+fn same_language_family(changed_path: &str, candidate_path: &str) -> bool {
+    fn family(path: &str) -> Option<&'static str> {
+        if path.ends_with(".rs") {
+            Some("rust")
+        } else if path.ends_with(".go") {
+            Some("go")
+        } else if is_typescript_path(path) {
+            Some("typescript")
+        } else if is_python_path(path) {
+            Some("python")
+        } else if is_java_path(path) {
+            Some("java")
+        } else {
+            None
+        }
+    }
+    match (family(changed_path), family(candidate_path)) {
+        (Some(changed), Some(candidate)) => changed == candidate,
+        _ => true,
+    }
 }
 
 pub(crate) fn should_scan_impact_candidate(
@@ -1903,54 +2066,255 @@ pub(crate) fn go_symbol_occurrences(
     occurrences
 }
 
-pub(crate) fn rust_declared_symbols(source: &str) -> Option<std::collections::BTreeSet<String>> {
-    struct Declarations(std::collections::BTreeSet<String>);
+/// Rust declarations fingerprinted by their token streams, so formatting and
+/// ordinary comments are not changes; `None` when the source does not parse.
+///
+/// A module records only its presence: an edit inside `mod tests` changes the
+/// items it contains, not every reference to the module name.
+pub(crate) fn rust_declaration_fingerprints(source: &str) -> Option<DeclarationFingerprints> {
+    use quote::ToTokens;
+    struct Declarations {
+        fingerprints: DeclarationFingerprints,
+        /// Depth of enclosing `#[cfg(test)]` modules.
+        in_test: usize,
+    }
+    impl Declarations {
+        /// Records a declaration. A private item inside a test module is
+        /// unreachable from other files, and its same-file references are
+        /// already test-context edges, so it is not recorded.
+        fn record(&mut self, name: &syn::Ident, vis: &syn::Visibility, item: &impl ToTokens) {
+            if self.in_test > 0 && matches!(vis, syn::Visibility::Inherited) {
+                return;
+            }
+            self.record_text(name, item.to_token_stream().to_string());
+        }
+        fn record_text(&mut self, name: &syn::Ident, fingerprint: String) {
+            self.fingerprints
+                .entry(name.to_string())
+                .or_default()
+                .push(fingerprint);
+        }
+    }
     impl<'ast> syn::visit::Visit<'ast> for Declarations {
         fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
-            self.0.insert(item.sig.ident.to_string());
+            self.record(&item.sig.ident, &item.vis, item);
             syn::visit::visit_item_fn(self, item);
         }
         fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
-            self.0.insert(item.ident.to_string());
+            self.record(&item.ident, &item.vis, item);
             syn::visit::visit_item_struct(self, item);
         }
         fn visit_item_enum(&mut self, item: &'ast syn::ItemEnum) {
-            self.0.insert(item.ident.to_string());
+            self.record(&item.ident, &item.vis, item);
             syn::visit::visit_item_enum(self, item);
         }
         fn visit_item_trait(&mut self, item: &'ast syn::ItemTrait) {
-            self.0.insert(item.ident.to_string());
+            self.record(&item.ident, &item.vis, item);
             syn::visit::visit_item_trait(self, item);
         }
         fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
-            self.0.insert(item.ident.to_string());
+            let test = rust_is_test_cfg(&item.attrs);
+            if !test {
+                self.record_text(&item.ident, "mod".into());
+            }
+            self.in_test += test as usize;
             syn::visit::visit_item_mod(self, item);
+            self.in_test -= test as usize;
         }
         fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
-            self.0.insert(item.ident.to_string());
+            self.record(&item.ident, &item.vis, item);
             syn::visit::visit_item_type(self, item);
         }
         fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
-            self.0.insert(item.ident.to_string());
+            self.record(&item.ident, &item.vis, item);
             syn::visit::visit_item_const(self, item);
         }
         fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
-            self.0.insert(item.ident.to_string());
+            self.record(&item.ident, &item.vis, item);
             syn::visit::visit_item_static(self, item);
         }
         fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
-            self.0.insert(item.sig.ident.to_string());
+            self.record(&item.sig.ident, &item.vis, item);
             syn::visit::visit_impl_item_fn(self, item);
         }
         fn visit_trait_item_fn(&mut self, item: &'ast syn::TraitItemFn) {
-            self.0.insert(item.sig.ident.to_string());
+            self.record(
+                &item.sig.ident,
+                &syn::Visibility::Public(Default::default()),
+                item,
+            );
             syn::visit::visit_trait_item_fn(self, item);
         }
     }
     let file = syn::parse_file(source).ok()?;
-    let mut visitor = Declarations(std::collections::BTreeSet::new());
+    let mut visitor = Declarations {
+        fingerprints: DeclarationFingerprints::new(),
+        in_test: 0,
+    };
     syn::visit::Visit::visit_file(&mut visitor, &file);
-    Some(visitor.0)
+    for fingerprints in visitor.fingerprints.values_mut() {
+        fingerprints.sort();
+    }
+    Some(visitor.fingerprints)
+}
+
+/// Test-only Rust functions (under `#[cfg(test)]`) with the identifiers each
+/// one mentions; `None` when the source does not parse.
+///
+/// A test helper that calls a changed function is how tests elsewhere reach
+/// that change, so it is treated as changed for test selection.
+/// Rust symbols declared `pub`, or reachable through a trait, so callable
+/// from other crates; `None` when the source does not parse.
+fn rust_exported_symbols(source: &str) -> Option<std::collections::BTreeSet<String>> {
+    struct Exported {
+        names: std::collections::BTreeSet<String>,
+        in_trait: usize,
+    }
+    impl Exported {
+        fn record(&mut self, name: &syn::Ident, vis: &syn::Visibility) {
+            if self.in_trait > 0 || matches!(vis, syn::Visibility::Public(_)) {
+                self.names.insert(name.to_string());
+            }
+        }
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Exported {
+        fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+            self.record(&item.sig.ident, &item.vis);
+            syn::visit::visit_item_fn(self, item);
+        }
+        fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
+            self.record(&item.ident, &item.vis);
+        }
+        fn visit_item_enum(&mut self, item: &'ast syn::ItemEnum) {
+            self.record(&item.ident, &item.vis);
+        }
+        fn visit_item_trait(&mut self, item: &'ast syn::ItemTrait) {
+            self.record(&item.ident, &item.vis);
+            self.in_trait += 1;
+            syn::visit::visit_item_trait(self, item);
+            self.in_trait -= 1;
+        }
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            self.record(&item.ident, &item.vis);
+            syn::visit::visit_item_mod(self, item);
+        }
+        fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
+            self.record(&item.ident, &item.vis);
+        }
+        fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
+            self.record(&item.ident, &item.vis);
+        }
+        fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
+            self.record(&item.ident, &item.vis);
+        }
+        fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
+            // `macro_rules!` with `#[macro_export]` is exported; keep any macro's name.
+            if let Some(ident) = &item.ident {
+                self.names.insert(ident.to_string());
+            }
+        }
+        fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+            let trait_impl = item.trait_.is_some() as usize;
+            self.in_trait += trait_impl;
+            syn::visit::visit_item_impl(self, item);
+            self.in_trait -= trait_impl;
+        }
+        fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+            self.record(&item.sig.ident, &item.vis);
+            syn::visit::visit_impl_item_fn(self, item);
+        }
+        fn visit_trait_item_fn(&mut self, item: &'ast syn::TraitItemFn) {
+            self.names.insert(item.sig.ident.to_string());
+        }
+    }
+    let file = syn::parse_file(source).ok()?;
+    let mut visitor = Exported {
+        names: std::collections::BTreeSet::new(),
+        in_trait: 0,
+    };
+    syn::visit::Visit::visit_file(&mut visitor, &file);
+    Some(visitor.names)
+}
+
+/// Whether attributes include a `cfg` that names `test`, such as `#[cfg(test)]`.
+fn rust_is_test_cfg(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        attr.path().is_ident("cfg")
+            && matches!(&attr.meta, syn::Meta::List(list)
+                if list.tokens.clone().into_iter().any(|tree| matches!(tree, proc_macro2::TokenTree::Ident(ident) if ident == "test")))
+    })
+}
+
+fn rust_test_helper_mentions(
+    source: &str,
+) -> Option<Vec<(String, std::collections::BTreeSet<String>)>> {
+    use quote::ToTokens;
+    fn mentions(tokens: proc_macro2::TokenStream, into: &mut std::collections::BTreeSet<String>) {
+        for tree in tokens {
+            match tree {
+                proc_macro2::TokenTree::Ident(ident) => {
+                    into.insert(ident.to_string());
+                }
+                proc_macro2::TokenTree::Group(group) => mentions(group.stream(), into),
+                _ => {}
+            }
+        }
+    }
+    struct Helpers {
+        in_test: usize,
+        found: Vec<(String, std::collections::BTreeSet<String>)>,
+    }
+    impl Helpers {
+        fn record(&mut self, attrs: &[syn::Attribute], name: &syn::Ident, block: &syn::Block) {
+            if self.in_test > 0 || rust_is_test_cfg(attrs) {
+                let mut names = std::collections::BTreeSet::new();
+                mentions(block.to_token_stream(), &mut names);
+                self.found.push((name.to_string(), names));
+            }
+        }
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Helpers {
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            let test = rust_is_test_cfg(&item.attrs);
+            self.in_test += test as usize;
+            syn::visit::visit_item_mod(self, item);
+            self.in_test -= test as usize;
+        }
+        fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+            self.record(&item.attrs, &item.sig.ident, &item.block);
+            syn::visit::visit_item_fn(self, item);
+        }
+        fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+            self.record(&item.attrs, &item.sig.ident, &item.block);
+            syn::visit::visit_impl_item_fn(self, item);
+        }
+    }
+    let file = syn::parse_file(source).ok()?;
+    let mut visitor = Helpers {
+        in_test: 0,
+        found: Vec::new(),
+    };
+    syn::visit::Visit::visit_file(&mut visitor, &file);
+    Some(visitor.found)
+}
+
+/// Adds every test helper that, directly or through another helper,
+/// mentions a changed symbol.
+fn extend_with_test_helpers(
+    changed: &mut std::collections::BTreeSet<String>,
+    helpers: &[(String, std::collections::BTreeSet<String>)],
+) {
+    loop {
+        let before = changed.len();
+        for (name, mentioned) in helpers {
+            if !changed.contains(name) && mentioned.iter().any(|symbol| changed.contains(symbol)) {
+                changed.insert(name.clone());
+            }
+        }
+        if changed.len() == before {
+            break;
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2842,8 +3206,15 @@ pub fn java_code_without_comments_and_strings(source: &str) -> String {
 }
 
 pub fn declared_symbols(path: &str, source: &str) -> std::collections::BTreeSet<String> {
-    let mut symbols = std::collections::BTreeSet::new();
-    for line in source.lines() {
+    source
+        .lines()
+        .filter_map(|line| line_declared_symbol(path, line))
+        .collect()
+}
+
+/// The symbol a single source line declares, by lexical keyword.
+fn line_declared_symbol(path: &str, line: &str) -> Option<String> {
+    {
         let trimmed = line.trim_start();
         let words: Vec<_> = trimmed.split_whitespace().collect();
         let keyword_index = if words.first() == Some(&"pub") { 1 } else { 0 };
@@ -2906,21 +3277,26 @@ pub fn declared_symbols(path: &str, source: &str) -> std::collections::BTreeSet<
             }
             _ => None,
         };
-        if let Some(candidate) = candidate {
-            let symbol: String = candidate
-                .chars()
-                .take_while(|character| character.is_alphanumeric() || *character == '_')
-                .collect();
-            if symbol.len() > 1 {
-                symbols.insert(symbol);
-            }
-        }
+        let symbol: String = candidate?
+            .chars()
+            .take_while(|character| character.is_alphanumeric() || *character == '_')
+            .collect();
+        (symbol.len() > 1).then_some(symbol)
     }
-    symbols
 }
 
 pub fn java_declared_symbols(source: &str) -> std::collections::BTreeSet<String> {
-    let mut symbols = declared_symbols("Source.java", source);
+    source
+        .lines()
+        .flat_map(java_line_declared_symbols)
+        .collect()
+}
+
+/// The types and methods a single Java source line declares.
+fn java_line_declared_symbols(line: &str) -> Vec<String> {
+    let mut symbols: Vec<String> = line_declared_symbol("Source.java", line)
+        .into_iter()
+        .collect();
     const NON_DECLARATION_CALLS: &[&str] = &[
         "if",
         "for",
@@ -2938,7 +3314,7 @@ pub fn java_declared_symbols(source: &str) -> std::collections::BTreeSet<String>
         "do",
         "yield",
     ];
-    for line in source.lines() {
+    {
         for (open, _) in line
             .char_indices()
             .filter(|(_, character)| *character == '(')
@@ -2983,7 +3359,7 @@ pub fn java_declared_symbols(source: &str) -> std::collections::BTreeSet<String>
                 .last()
                 .is_some_and(|word| word.chars().any(|character| character.is_alphanumeric()))
             {
-                symbols.insert(name.to_owned());
+                symbols.push(name.to_owned());
             }
         }
     }
