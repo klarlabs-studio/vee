@@ -7,6 +7,7 @@ mod governance;
 mod history;
 mod insights;
 mod lists;
+mod patch;
 pub mod review;
 mod setup;
 pub(crate) mod verification;

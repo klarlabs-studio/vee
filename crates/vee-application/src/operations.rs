@@ -1485,11 +1485,29 @@ const MAX_PROPOSAL_RECORD_BYTES: usize = 128 * 1024;
 /// and save it as a digest-bound proposal (`patch-proposal-v1`). No repository file
 /// is changed; applying requires explicit human approval of the digest through
 /// `vee findings apply-patch`.
+/// `patch-proposal-v1` for a newly validated, unapplied patch.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PatchProposal {
+    pub schema_version: u32,
+    pub review_id: String,
+    pub snapshot_id: String,
+    pub effective_config_digest: String,
+    pub patch_digest: String,
+    pub patch_bytes: usize,
+    pub patch_inputs: Vec<vee_core::SnapshotFile>,
+    pub patch_input_digest: String,
+    pub patch_sandbox_result_digest: String,
+    pub validated: bool,
+    pub application: String,
+    pub approval_instruction: String,
+    pub patch_path: String,
+}
+
 pub fn propose_patch(
     workspace: &Workspace,
     review_id: &str,
     patch: &[u8],
-) -> Result<serde_json::Value> {
+) -> Result<PatchProposal> {
     use sha2::Digest as _;
     use std::io::Write as _;
     let root = workspace.root();
@@ -1555,22 +1573,26 @@ pub fn propose_patch(
     let directory = crate::proposals::proposal_directory(root)?;
     let saved_patch = directory.join(format!("{}.patch", &digest[7..]));
     let record_path = directory.join(format!("{}.json", &digest[7..]));
-    let proposal = serde_json::json!({
-        "schema_version": 1,
-        "review_id": review_id,
-        "snapshot_id": saved.snapshot_id,
-        "effective_config_digest": saved.effective_config_digest,
-        "patch_digest": digest,
-        "patch_bytes": patch.len(),
-        "patch_inputs": sandbox.input_files,
-        "patch_input_digest": input_digest,
-        "patch_sandbox_result_digest": sandbox.result_digest,
-        "validated": true,
-        "application": "not_applied",
-        "approval_instruction": format!("Review the diff, then apply only with explicit approval of digest {digest}."),
-        "patch_path": saved_patch.to_string_lossy(),
-    });
-    let record = serde_json::to_vec_pretty(&proposal)?;
+    let proposal = PatchProposal {
+        schema_version: 1,
+        review_id: review_id.to_owned(),
+        snapshot_id: saved.snapshot_id.clone(),
+        effective_config_digest: saved.effective_config_digest.clone(),
+        approval_instruction: format!(
+            "Review the diff, then apply only with explicit approval of digest {digest}."
+        ),
+        patch_digest: digest,
+        patch_bytes: patch.len(),
+        patch_inputs: sandbox.input_files,
+        patch_input_digest: input_digest,
+        patch_sandbox_result_digest: sandbox.result_digest,
+        validated: true,
+        application: "not_applied".to_owned(),
+        patch_path: saved_patch.to_string_lossy().into_owned(),
+    };
+    // Through a Value so the record keeps its sorted keys: apply-patch reads
+    // and extends it as JSON.
+    let record = serde_json::to_vec_pretty(&serde_json::to_value(&proposal)?)?;
     if record.len() > MAX_PROPOSAL_RECORD_BYTES {
         return Err(usage_failure(
             "patch proposal metadata exceeds the 128 KiB apply limit",

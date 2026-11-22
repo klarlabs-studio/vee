@@ -6406,25 +6406,10 @@ fn run() -> Result<u8> {
                             "patch must be a regular, non-symlink file no larger than 2 MiB",
                         )?;
                     let proposal = operations::propose_patch(&workspace, &review, &bytes)?;
-                    let digest = proposal["patch_digest"].as_str().unwrap_or_default();
                     match output {
-                        Output::Json => {
-                            serde_json::to_writer(std::io::stdout().lock(), &proposal)?;
-                            println!();
-                        }
-                        Output::Text => {
-                            println!("Patch validated: {digest}");
-                            println!(
-                                "Review: {}  Snapshot: {}",
-                                proposal["review_id"].as_str().unwrap_or_default(),
-                                proposal["snapshot_id"].as_str().unwrap_or_default()
-                            );
-                            println!(
-                                "Saved patch: {}",
-                                proposal["patch_path"].as_str().unwrap_or_default()
-                            );
-                            println!("No repository files were changed.");
-                        }
+                        // Through a Value, as before: keys stay sorted, as MCP emits them.
+                        Output::Json => emit_json(&serde_json::to_value(&proposal)?)?,
+                        Output::Text => print_view(&proposal)?,
                     }
                     Ok(0)
                 }

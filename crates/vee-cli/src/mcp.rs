@@ -855,8 +855,8 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         "Report whether this repository's reviewers can run on this machine, which AI backends (local models, agent CLIs, API keys) are available, and what to do next. Same document as `vee doctor --output json`.",
         |ws, _input: EmptyInput| operations::doctor(&ws));
 
-    operation_tool!(server, workspace, "propose_patch", "Propose patch", write_tool(false, false, false),
-        Some("patch-proposal-v1"),
+    viewed_tool!(server, workspace, "propose_patch", "Propose patch", write_tool(false, false, false),
+        "patch-proposal-v1",
         "Validate an agent-authored unified diff against a saved, still-current review and save it as a digest-bound proposal. No repository file changes; a human applies it with `vee findings apply-patch <digest> --approve <digest>`. Same document as `vee findings propose-patch --output json`.",
         |ws, input: ProposePatchInput| operations::propose_patch(&ws, &input.review_id, input.patch.as_bytes()));
 

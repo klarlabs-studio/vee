@@ -508,9 +508,16 @@ fn cli_and_mcp_return_identical_documents_for_shared_operations() {
             patch_file.to_str().unwrap(),
         ],
     );
-    let via_mcp = mcp.call(
+    let (via_mcp, text) = mcp.call_with_text(
         "propose_patch",
         json!({"review_id": review_id, "patch": patch("fn main() { let _ = 1; }")}),
+    );
+    // Proposals are immutable records, so only the MCP side renders this one.
+    let proposal: vee_application::operations::PatchProposal =
+        serde_json::from_value(via_mcp.clone()).unwrap();
+    assert_eq!(
+        text,
+        vee_present::markdown::render(&vee_present::ToView::to_view(&proposal))
     );
     for proposal in [&cli, &via_mcp] {
         assert_matches_published_schema(proposal, "patch-proposal-v1");
