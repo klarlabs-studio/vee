@@ -7,9 +7,16 @@
 //! decision and what it was based on, and links to the evidence bundle by its
 //! manifest digest, so the full evidence can be verified separately.
 
+use crate::failure::usage_failure;
+use crate::imported_history::MAX_IMPORTED_REVIEW_BYTES;
+use crate::operations::Workspace;
 use anyhow::{Context, Result};
 use base64::Engine;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::io::Read;
+use std::path::Path;
+use vee_core::ChangeSet;
 
 pub const STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
 pub const PREDICATE_TYPE: &str = "https://vee.klarlabs.de/attestations/review-gate/v1";
@@ -149,12 +156,44 @@ pub fn sign(
     }))
 }
 
-/// Verify a DSSE envelope with a raw 32-byte Ed25519 public key and return the
-/// `attestation-verification-v1` report. The statement is returned only when
-/// a signature verifies.
-pub fn verify(envelope: &Value, public_key: &[u8]) -> Value {
-    let invalid =
-        |message: String| json!({ "schema_version": 1, "valid": false, "message": message });
+/// `attestation-verification-v1`: the result of `vee reviews verify-attestation`.
+/// The verified details are present only when a signature verifies.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AttestationVerification {
+    pub schema_version: u32,
+    pub valid: bool,
+    pub message: String,
+    #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
+    pub verified: Option<VerifiedAttestation>,
+}
+
+/// What a verified attestation states, as signed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VerifiedAttestation {
+    pub key_id: String,
+    /// The statement's in-toto subjects, as signed.
+    pub subjects: Value,
+    pub gate_status: Value,
+    pub decision_id: Value,
+    /// The full in-toto statement.
+    pub statement: Value,
+}
+
+impl AttestationVerification {
+    fn invalid(message: String) -> Self {
+        Self {
+            schema_version: 1,
+            valid: false,
+            message,
+            verified: None,
+        }
+    }
+}
+
+/// Verify a DSSE envelope with a raw 32-byte Ed25519 public key. The statement
+/// is returned only when a signature verifies.
+pub fn verify(envelope: &Value, public_key: &[u8]) -> AttestationVerification {
+    let invalid = AttestationVerification::invalid;
     let standard = base64::engine::general_purpose::STANDARD;
     if envelope["payloadType"].as_str() != Some(PAYLOAD_TYPE) {
         return invalid(format!("payloadType must be {PAYLOAD_TYPE}"));
@@ -194,16 +233,136 @@ pub fn verify(envelope: &Value, public_key: &[u8]) -> Value {
             "signed payload is not a {STATEMENT_TYPE} with predicate {PREDICATE_TYPE}"
         ));
     }
-    json!({
-        "schema_version": 1,
-        "valid": true,
-        "message": "signature verified; trust in the signer is determined by the supplied public key",
-        "key_id": key_id,
-        "subjects": statement["subject"],
-        "gate_status": statement["predicate"]["decision"]["status"],
-        "decision_id": statement["predicate"]["decision"]["decision_id"],
-        "statement": statement,
+    AttestationVerification {
+        schema_version: 1,
+        valid: true,
+        message: "signature verified; trust in the signer is determined by the supplied public key"
+            .into(),
+        verified: Some(VerifiedAttestation {
+            key_id,
+            subjects: statement["subject"].clone(),
+            gate_status: statement["predicate"]["decision"]["status"].clone(),
+            decision_id: statement["predicate"]["decision"]["decision_id"].clone(),
+            statement,
+        }),
+    }
+}
+
+/// `vee reviews verify-attestation`: verify the DSSE envelope file at `path`
+/// with the raw Ed25519 public key file at `public_key`.
+pub fn verify_file(path: &Path, public_key: &Path) -> Result<AttestationVerification> {
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("opening attestation {}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_IMPORTED_REVIEW_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("reading attestation {}", path.display()))?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_IMPORTED_REVIEW_BYTES,
+        "attestation exceeds 10 MiB"
+    );
+    let envelope: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| usage_failure("attestation is not valid JSON"))?;
+    let key = std::fs::read(public_key)
+        .with_context(|| format!("reading public key {}", public_key.display()))?;
+    Ok(verify(&envelope, &key))
+}
+
+/// How `vee reviews attest` packages the statement.
+pub enum AttestationFormat<'a> {
+    /// The unsigned in-toto Statement, for signing with external tools.
+    Statement,
+    /// An Ed25519-signed DSSE envelope.
+    Dsse {
+        private_key: &'a Path,
+        key_id: &'a str,
+    },
+}
+
+/// `vee reviews attest`: the in-toto statement (or signed DSSE envelope) for a
+/// saved review's selected gate decision.
+pub fn attest(
+    workspace: &Workspace,
+    review_id: &str,
+    decision_id: Option<&str>,
+    format: AttestationFormat<'_>,
+) -> Result<Value> {
+    let store = workspace.store()?;
+    let review =
+        crate::evidence_bundle::review_with_decision(store.as_ref(), review_id, decision_id)?;
+    let bundle = crate::evidence_bundle::bundle(&review)?;
+    let commit = attested_commit(workspace.root(), &review.change_set)?;
+    let statement = statement(&review, &bundle.manifest_digest, commit.as_deref())?;
+    match format {
+        AttestationFormat::Statement => Ok(statement),
+        AttestationFormat::Dsse {
+            private_key,
+            key_id,
+        } => {
+            if key_id.trim().is_empty() {
+                return Err(usage_failure("--key-id cannot be empty"));
+            }
+            let key = crate::signing::load_private_key(private_key)?;
+            sign(&statement, &key, key_id)
+        }
+    }
+}
+
+/// The commit an attestation can name as its subject: only when the reviewed
+/// snapshot is exactly that commit's change, so a verifier binding the
+/// attestation to a revision attests what was actually reviewed.
+pub fn attested_commit(root: &Path, change_set: &ChangeSet) -> Result<Option<String>> {
+    Ok(match change_set.scope.as_str() {
+        scope if scope.starts_with("commit:") || scope.starts_with("commit_range:") => {
+            change_set.head_oid.clone()
+        }
+        "base_and_worktree" => committed_snapshot_matches_review(root, change_set)
+            .map_err(anyhow::Error::msg)?
+            .then(|| change_set.head_oid.clone())
+            .flatten(),
+        _ => None,
     })
+}
+
+/// Whether a base-and-worktree review's content is exactly the committed range
+/// from its captured base to its captured head.
+pub fn committed_snapshot_matches_review(
+    root: &Path,
+    reviewed: &ChangeSet,
+) -> Result<bool, String> {
+    let base_oid = reviewed
+        .base_oid
+        .as_deref()
+        .ok_or("base-and-worktree review is missing its captured base OID")?;
+    let head_oid = reviewed
+        .head_oid
+        .as_deref()
+        .ok_or("base-and-worktree review is missing its captured head OID")?;
+    let committed = crate::capture_change_set(
+        root,
+        vee_git::ChangeScope::CommitRange {
+            from: base_oid.to_owned(),
+            to: head_oid.to_owned(),
+        },
+    )?;
+    let normalize_mode = |mode: u32| {
+        if mode & 0o170000 == 0o100000 {
+            mode & 0o777
+        } else {
+            mode
+        }
+    };
+    Ok(reviewed.files.len() == committed.files.len()
+        && reviewed
+            .files
+            .iter()
+            .zip(&committed.files)
+            .all(|(left, right)| {
+                left.path == right.path
+                    && normalize_mode(left.mode) == normalize_mode(right.mode)
+                    && left.content_digest == right.content_digest
+                    && left.status == right.status
+            }))
 }
 
 /// Format Unix seconds as an RFC 3339 UTC timestamp.
@@ -275,12 +434,13 @@ mod tests {
 
         let envelope = sign(&statement, &key, "team-key").unwrap();
         let report = verify(&envelope, &public);
-        assert_eq!(report["valid"], true, "{report:#}");
-        assert_eq!(report["key_id"], "team-key");
-        assert_eq!(report["gate_status"], "pass");
+        assert!(report.valid, "{report:?}");
+        let verified = report.verified.unwrap();
+        assert_eq!(verified.key_id, "team-key");
+        assert_eq!(verified.gate_status, "pass");
 
         let wrong_key = sign(&statement, &other, "other").unwrap();
-        assert_eq!(verify(&wrong_key, &public)["valid"], false);
+        assert!(!verify(&wrong_key, &public).valid);
 
         let mut tampered = envelope.clone();
         let mut altered = statement.clone();
@@ -288,6 +448,6 @@ mod tests {
         tampered["payload"] =
             json!(base64::engine::general_purpose::STANDARD
                 .encode(serde_json::to_vec(&altered).unwrap()));
-        assert_eq!(verify(&tampered, &public)["valid"], false);
+        assert!(!verify(&tampered, &public).valid);
     }
 }

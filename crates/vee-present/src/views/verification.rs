@@ -42,7 +42,9 @@ impl ToView for VerificationRun {
         .into_iter()
         .filter_map(|(name, artifact)| {
             artifact.as_ref().map(|artifact| {
-                Cell::plain(name).then(crate::Span::new(&artifact.path, crate::Style::Code))
+                Cell::plain(name)
+                    .then(crate::Span::new(&artifact.path, crate::Style::Code))
+                    .then(crate::Span::new(&artifact.digest, crate::Style::Id))
             })
         })
         .collect();
