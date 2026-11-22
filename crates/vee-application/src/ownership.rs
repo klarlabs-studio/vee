@@ -1,5 +1,5 @@
 use globset::{GlobBuilder, GlobMatcher};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use vee_core::paths::CanonicalPath as _;
@@ -8,7 +8,7 @@ const MAX_CODEOWNERS_BYTES: u64 = 256 * 1024;
 const MAX_CODEOWNERS_RULES: usize = 4096;
 const MAX_OWNER_PATHS: usize = 256;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct OwnershipReport {
     pub schema_version: u32,
     pub advisory_only: bool,
@@ -21,7 +21,7 @@ pub struct OwnershipReport {
     pub digest: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct OwnershipResult {
     pub path: String,
     pub status: String,

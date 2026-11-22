@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/vee-core", "crates/vee-store-sqlite", "crates/vee-process", "crates/vee-application", "crates/vee-git", "crates/vee-hosting", "crates/vee-http", "crates/vee-cli"]
+members = ["crates/vee-core", "crates/vee-store-sqlite", "crates/vee-process", "crates/vee-application", "crates/vee-git", "crates/vee-hosting", "crates/vee-http", "crates/vee-present", "crates/vee-cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,8 @@ repository = "https://github.com/klarlabs-studio/vee"
 
 [workspace.dependencies]
 anyhow = "1"
+anstream = "1"
+anstyle = "1"
 axum = { version = "0.8", features = ["json"] }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"

@@ -8262,11 +8262,27 @@ esac
         value["effective_config_digest"]
     );
     let markdown = fs::read_to_string(markdown_report).unwrap();
-    assert!(markdown.contains("# Vee review"));
-    assert!(markdown.contains("Status: **block**"));
-    assert!(markdown.contains("unsafe operation"));
-    assert!(markdown.contains("## Reviewer arbitration"));
-    assert!(markdown.contains("Disagreement: severity, confidence, rationale"));
+    assert!(markdown.starts_with("## Review rev\\_"), "{markdown}");
+    assert!(
+        markdown
+            .lines()
+            .next()
+            .unwrap()
+            .ends_with(" · 🔴 **block**"),
+        "{markdown}"
+    );
+    assert!(markdown.contains("unsafe operation"), "{markdown}");
+    assert!(markdown.contains("### Reviewer disagreement"), "{markdown}");
+    assert!(
+        markdown.contains("disagree on severity, confidence, rationale"),
+        "{markdown}"
+    );
+    assert!(markdown.contains("### Finding details"), "{markdown}");
+    assert!(markdown.contains("### Reviewer reports"), "{markdown}");
+    assert!(
+        !markdown.contains("Next:"),
+        "a shared report has no interactive next step"
+    );
     assert_eq!(
         value["selected_reviewers"],
         serde_json::json!(["correctness", "security"])
@@ -10210,8 +10226,11 @@ fn mcp_stdio_supports_legacy_initialize_and_read_only_tool_calls() {
     let called = receive(&mut output);
     assert!(called.get("error").is_none(), "tool call failed: {called}");
     let text = called["result"]["content"][0]["text"].as_str().unwrap();
-    let result: serde_json::Value = serde_json::from_str(text).unwrap();
-    assert_eq!(result["total"], 0);
+    assert_eq!(
+        text, "## Findings \\(0\\)\n\n_No findings\\._\n",
+        "the text is the shared view"
+    );
+    assert_eq!(called["result"]["structuredContent"]["total"], 0);
     assert!(directory.path().join(".vee/vee.sqlite").exists());
 
     let _ = child.kill();
@@ -10705,7 +10724,9 @@ fn changed_files_no_reviewer_received_leave_the_gate_incomplete() {
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&text.stdout);
-    assert!(text.contains("Not reviewed: core/lib.rs"), "{text}");
+    assert!(text.contains("Not reviewed\n"), "{text}");
+    assert!(text.contains("• core/lib.rs"), "{text}");
+    assert!(text.contains("policy.on_unreviewed: allow"), "{text}");
 
     configure("  on_unreviewed: allow\n");
     let output = review();

@@ -12,7 +12,6 @@ use vee_core::{
 use vee_store_sqlite::ReviewStore;
 
 use vee_application::acceptance;
-use vee_application::analytics;
 use vee_application::attestation;
 mod contracts;
 use vee_application::coverage;
@@ -29,7 +28,6 @@ use vee_application::operations;
 use vee_application::packs;
 use vee_application::patch_sandbox;
 use vee_application::repository_map;
-use vee_application::setup;
 use vee_application::standards;
 use vee_application::test_effectiveness;
 use vee_application::test_generation;
@@ -298,8 +296,42 @@ fn classify_error(error: &anyhow::Error) -> (&'static str, u8) {
 #[derive(Parser)]
 #[command(name = "vee", version, about = "Local-first code change assurance")]
 struct Cli {
+    /// When to color text output: auto (a terminal, unless NO_COLOR is set), always, or never.
+    #[arg(long, global = true, value_enum, default_value_t = ColorArg::Auto)]
+    color: ColorArg,
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum ColorArg {
+    Auto,
+    Always,
+    Never,
+}
+
+/// Whether text output is colored, decided once from `--color` and the environment.
+static COLOR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+fn set_color(choice: ColorArg) {
+    let enabled = match choice {
+        ColorArg::Always => true,
+        ColorArg::Never => false,
+        // Honors NO_COLOR, CLICOLOR, CLICOLOR_FORCE and whether stdout is a terminal.
+        ColorArg::Auto => !matches!(
+            anstream::AutoStream::choice(&std::io::stdout()),
+            anstream::ColorChoice::Never
+        ),
+    };
+    let _ = COLOR.set(enabled);
+}
+
+/// Prints the shared view of a result document: the same view MCP returns as Markdown.
+fn print_view(document: &impl vee_present::ToView) -> Result<()> {
+    let text = vee_present::ansi::render(&document.to_view(), *COLOR.get().unwrap_or(&false));
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(text.as_bytes())?;
+    Ok(())
 }
 #[derive(Subcommand)]
 enum Command {
@@ -2586,102 +2618,6 @@ fn review_to_sarif(review: &vee_application::ReviewResult) -> Result<serde_json:
     }))
 }
 
-fn print_detection(report: &setup::DetectionReport) {
-    println!("AI backends on this machine (preference order):");
-    for candidate in &report.candidates {
-        let marker = if report.recommended == Some(candidate.candidate_id) {
-            "*"
-        } else if candidate.available {
-            "+"
-        } else {
-            "-"
-        };
-        let state = if candidate.available {
-            let mut detail = candidate.detail.clone().unwrap_or_default();
-            if !candidate.models.is_empty() {
-                detail = format!("{detail}; models: {}", candidate.models.join(", "));
-            }
-            if candidate.requires_model {
-                detail = format!("{detail}; needs --model");
-            }
-            detail
-        } else {
-            candidate.reason.clone().unwrap_or_default()
-        };
-        println!(
-            "{marker} {:<14} {:<18} {:<8} {state}",
-            candidate.candidate_id, candidate.kind, candidate.egress
-        );
-    }
-    match report.recommended {
-        Some(recommended) => {
-            println!("Recommended: {recommended} (* recommended, + available, - unavailable)")
-        }
-        None => {
-            println!("No backend can be configured automatically (+ available, - unavailable).")
-        }
-    }
-}
-
-fn print_doctor_report(report: &setup::DoctorReport) {
-    println!(
-        "Repository config: {} ({})",
-        report.repository_config,
-        if report.config_valid {
-            "valid"
-        } else {
-            "invalid"
-        }
-    );
-    if let Some(error) = &report.config_error {
-        println!("  {error}");
-    }
-    match &report.user_config {
-        Some(path) => println!(
-            "User config: {path}{}",
-            if report.user_config_exists {
-                ""
-            } else {
-                " (not created yet)"
-            }
-        ),
-        None => println!("User config: location unknown (set VEE_CONFIG)"),
-    }
-    if report.offline {
-        println!("Offline mode: on (network providers are rejected)");
-    }
-    for check in &report.reviewers {
-        let status = if check.usable { "ok" } else { "FAIL" };
-        let role = if check.required {
-            "required"
-        } else {
-            "optional"
-        };
-        println!(
-            "[{status}] reviewer {} ({role}) -> provider {} [{}, {} egress]",
-            check.reviewer_id, check.provider_id, check.kind, check.egress
-        );
-        if let Some(detail) = &check.detail {
-            println!("       {detail}");
-        }
-        if let Some(problem) = &check.problem {
-            println!("       {problem}");
-        }
-    }
-    print_detection(&report.detection);
-    for step in &report.next_steps {
-        println!("Next: {step}");
-    }
-    println!(
-        "{}",
-        if report.ready {
-            "Ready to review."
-        } else {
-            "Not ready."
-        }
-    );
-}
-
 /// Fingerprint of an analyzer finding recorded in one of the review's gate
 /// decisions (at review time or a later `gate check`) on the review's snapshot.
 fn analyzer_finding_fingerprint(
@@ -2700,35 +2636,6 @@ fn analyzer_finding_fingerprint(
         .flat_map(|report| &report.findings)
         .find(|finding| finding.id == finding_id)
         .map(|finding| finding.fingerprint.clone()))
-}
-
-fn print_analyzer_report(report: &vee_core::AnalyzerReport) {
-    println!(
-        "Analyzer run {} ({})  Snapshot: {}",
-        report.run_id, report.profile_id, report.snapshot_id
-    );
-    if !report.tools.is_empty() {
-        println!("Tools: {}", report.tools.join(", "));
-    }
-    if let Some(problem) = &report.problem {
-        println!("Not evaluable: {problem}");
-    }
-    println!(
-        "Results: {} total, {} on changed lines, {} elsewhere (pre-existing, never blocking), {} suppressed by the tool",
-        report.results_total,
-        report.findings.len(),
-        report.results_outside_changes,
-        report.results_suppressed
-    );
-    for finding in &report.findings {
-        println!(
-            "  {} [{:?}] {}:{} {}: {}",
-            finding.id, finding.level, finding.path, finding.line, finding.rule_id, finding.message
-        );
-    }
-    for limitation in &report.limitations {
-        println!("Limitation: {limitation}");
-    }
 }
 
 fn run_packs(command: PacksCommand) -> Result<u8> {
@@ -2785,24 +2692,7 @@ fn run_packs(command: PacksCommand) -> Result<u8> {
             let list = packs::list(&operations::Workspace::discover(crate::local_stores())?)?;
             match output {
                 Output::Json => emit_json(&list)?,
-                Output::Text => {
-                    if list.packs.is_empty() {
-                        println!("No packs are pinned in .vee.yaml.");
-                    }
-                    for pack in &list.packs {
-                        println!(
-                            "{} {}  {}  [{}]  provider: {}",
-                            pack.name.as_deref().unwrap_or("?"),
-                            pack.version.as_deref().unwrap_or("?"),
-                            pack.path,
-                            pack.status,
-                            pack.provider
-                        );
-                        if let Some(problem) = &pack.problem {
-                            println!("  {problem}");
-                        }
-                    }
-                }
+                Output::Text => print_view(&list)?,
             }
             Ok(if list.packs.iter().all(|pack| pack.status == "ok") {
                 0
@@ -3008,6 +2898,7 @@ fn run() -> Result<u8> {
         }
         Err(error) => return Err(anyhow::Error::new(error)),
     };
+    set_color(cli.color);
     match cli.command {
         Command::Init {
             provider,
@@ -3045,7 +2936,7 @@ fn run() -> Result<u8> {
             let report = operations::doctor(&workspace)?;
             match output {
                 Output::Json => emit_json(&report)?,
-                Output::Text => print_doctor_report(&report),
+                Output::Text => print_view(&report)?,
             }
             Ok(if report.ready { 0 } else { 2 })
         }
@@ -3055,7 +2946,7 @@ fn run() -> Result<u8> {
             let report = operations::detect_providers();
             match output {
                 Output::Json => emit_json(&report)?,
-                Output::Text => print_detection(&report),
+                Output::Text => print_view(&report)?,
             }
             Ok(0)
         }
@@ -3142,40 +3033,7 @@ fn run() -> Result<u8> {
             )?;
             match output {
                 Output::Json => emit_json(&report)?,
-                Output::Text => {
-                    println!(
-                        "Applicable standards{}:",
-                        report
-                            .target_path
-                            .as_ref()
-                            .map(|path| format!(" for {path}"))
-                            .unwrap_or_default()
-                    );
-                    for source in &report.sources {
-                        println!(
-                            "- {} [{}; precedence {}; {}; {}; integrity: {}]",
-                            source.path,
-                            source.kind,
-                            source.precedence,
-                            source.scope,
-                            if source.truncated {
-                                "truncated"
-                            } else {
-                                "complete"
-                            },
-                            source.integrity
-                        );
-                    }
-                    if report.sources.is_empty() {
-                        println!("(none found)");
-                    }
-                    for conflict in &report.potential_conflicts {
-                        println!("Potential conflict: {conflict}");
-                    }
-                    for limitation in &report.limitations {
-                        println!("Limitation: {limitation}");
-                    }
-                }
+                Output::Text => print_view(&report)?,
             }
             Ok(0)
         }
@@ -3186,33 +3044,7 @@ fn run() -> Result<u8> {
             )?;
             match output {
                 Output::Json => println!("{}", serde_json::to_string(&report)?),
-                Output::Text => {
-                    if let Some(path) = &report.codeowners_path {
-                        println!(
-                            "Ownership rules: {path} ({})",
-                            report.codeowners_digest.as_deref().unwrap_or("no digest")
-                        );
-                    } else {
-                        println!("Ownership rules: none found");
-                    }
-                    for result in &report.results {
-                        if result.owners.is_empty() {
-                            println!("{}: {}", result.path, result.status);
-                        } else {
-                            println!(
-                                "{}: {} ({}) via {}:{}",
-                                result.path,
-                                result.owners.join(", "),
-                                result.status,
-                                result.matching_pattern.as_deref().unwrap_or("?"),
-                                result.matching_rule_line.unwrap_or_default()
-                            );
-                        }
-                    }
-                    for limitation in &report.limitations {
-                        println!("Limitation: {limitation}");
-                    }
-                }
+                Output::Text => print_view(&report)?,
             }
             Ok(0)
         }
@@ -3223,23 +3055,7 @@ fn run() -> Result<u8> {
                 )?)?;
                 match output {
                     Output::Json => emit_json(&report)?,
-                    Output::Text => {
-                        if report.candidates.is_empty() {
-                            println!("No repeated feedback patterns qualify as rule candidates.");
-                        }
-                        for candidate in &report.candidates {
-                            println!(
-                                "{}  {} distinct sources  {} ({}, {})",
-                                candidate.candidate_id,
-                                candidate.feedback_count,
-                                candidate.category,
-                                feedback_label_text(candidate.feedback_label),
-                                candidate.source_kind
-                            );
-                            println!("  {}", candidate.suggestion);
-                        }
-                        println!("Suggestions require human review and are not active policy.");
-                    }
+                    Output::Text => print_view(&report)?,
                 }
                 Ok(0)
             }
@@ -3323,31 +3139,7 @@ fn run() -> Result<u8> {
                 )?;
                 match output {
                     Output::Json => emit_json(&report)?,
-                    Output::Text => {
-                        if report.approvals.is_empty() {
-                            println!("No rule approvals to evaluate.");
-                        }
-                        for item in &report.approvals {
-                            println!(
-                                "{} v{}  baseline accuracy n={} / later accuracy n={}",
-                                item.approval_id,
-                                item.version,
-                                item.baseline.accuracy_denominator,
-                                item.after_activation.accuracy_denominator
-                            );
-                            println!(
-                                "  observed false-positive rate: {:?} -> {:?}",
-                                item.baseline.false_positive_rate,
-                                item.after_activation.false_positive_rate
-                            );
-                            println!(
-                                "  observed not-actionable rate: {:?} -> {:?}",
-                                item.baseline.not_actionable_rate,
-                                item.after_activation.not_actionable_rate
-                            );
-                        }
-                        println!("Observational comparison only; it does not establish that guidance caused an outcome.");
-                    }
+                    Output::Text => print_view(&report)?,
                 }
                 Ok(0)
             }
@@ -3456,7 +3248,7 @@ fn run() -> Result<u8> {
                 None,
             )?;
             if let Some(path) = markdown {
-                let report = vee_application::render_review_markdown(&out);
+                let report = vee_present::markdown::render(&vee_present::review_report(&out));
                 write_markdown_report(&path, report.as_bytes())?;
             }
             match output {
@@ -3469,17 +3261,7 @@ fn run() -> Result<u8> {
                         eprintln!("Not reviewed: {}", out.unreviewed_paths.join(", "));
                     }
                 }
-                Output::Text => {
-                    println!("Review snapshot: {}", out.snapshot_id);
-                    println!("Status: {}", out.status);
-                    for reason in &out.reasons {
-                        println!("- {reason}");
-                    }
-                    if !out.unreviewed_paths.is_empty() {
-                        println!("Not reviewed: {}", out.unreviewed_paths.join(", "));
-                        println!("  No reviewer's include rules matched these changed files; add or widen a reviewer, or set policy.on_unreviewed: allow.");
-                    }
-                }
+                Output::Text => print_view(&out)?,
             }
             std::io::stdout().flush()?;
             Ok(if gate {
@@ -3505,24 +3287,7 @@ fn run() -> Result<u8> {
             let impact = operations::impact(&workspace, target)?;
             match output {
                 Output::Json => emit_json(&impact)?,
-                Output::Text => {
-                    println!("Impact for snapshot: {}", impact.snapshot_id);
-                    println!("Changed paths: {}", impact.changed_paths.len());
-                    println!("Changed symbols: {}", impact.changed_symbols.join(", "));
-                    for edge in &impact.paths {
-                        println!(
-                            "{}:{} -> {} via {} ({})",
-                            edge.affected_path,
-                            edge.evidence_line,
-                            edge.source_path,
-                            edge.symbol,
-                            edge.certainty
-                        );
-                    }
-                    for limitation in &impact.limitations {
-                        println!("Limitation: {limitation}");
-                    }
-                }
+                Output::Text => print_view(&impact)?,
             }
             Ok(0)
         }
@@ -3607,22 +3372,7 @@ fn run() -> Result<u8> {
                         serde_json::to_writer(std::io::stdout().lock(), &report)?;
                         println!();
                     }
-                    Output::Text => {
-                        println!("Test recommendations for snapshot: {}", report.snapshot_id);
-                        println!("Impact coverage complete: {}", report.coverage_complete);
-                        if report.recommendations.is_empty() {
-                            println!(
-                                "No changed Go/Rust source file lacks a likely test reference."
-                            );
-                        }
-                        for recommendation in &report.recommendations {
-                            println!("{}: {}", recommendation.changed_path, recommendation.action);
-                            println!("  {}", recommendation.rationale);
-                        }
-                        for limitation in &report.limitations {
-                            println!("Limitation: {limitation}");
-                        }
-                    }
+                    Output::Text => print_view(&report)?,
                 }
                 Ok(0)
             }
@@ -4471,15 +4221,7 @@ fn run() -> Result<u8> {
                         eprintln!("Draft generated for snapshot {}", report.snapshot_id);
                         eprintln!("Provider output digest: {}", report.output_digest);
                     }
-                    Output::Text => {
-                        println!("Title: {}", report.output["title"].as_str().unwrap_or(""));
-                        println!();
-                        println!("{}", report.output["body"].as_str().unwrap_or(""));
-                        println!();
-                        println!("Draft only; it was not published or used in a gate.");
-                        println!("Snapshot: {}", report.snapshot_id);
-                        println!("Provider output digest: {}", report.output_digest);
-                    }
+                    Output::Text => print_view(&report)?,
                 }
                 std::io::stdout().flush()?;
                 Ok(0)
@@ -4491,7 +4233,7 @@ fn run() -> Result<u8> {
                 let report = operations::acceptance_report(&workspace, &review)?;
                 match output {
                     Output::Json => emit_json(&report)?,
-                    Output::Text => acceptance::render_text(&report),
+                    Output::Text => print_view(&report)?,
                 }
                 Ok(0)
             }
@@ -4565,12 +4307,7 @@ fn run() -> Result<u8> {
                 let response = operations::gate_check(&workspace, &review, token_env.as_deref())?;
                 match output {
                     Output::Json => emit_json(&response)?,
-                    Output::Text => {
-                        println!("Gate status: {:?}", response.status);
-                        for reason in &response.reasons {
-                            println!("- {reason}");
-                        }
-                    }
+                    Output::Text => print_view(&response)?,
                 }
                 Ok(response.exit_code())
             }
@@ -4579,20 +4316,9 @@ fn run() -> Result<u8> {
                     &operations::Workspace::discover(crate::local_stores())?,
                     &review,
                 )?;
-                let decisions = &history.decisions;
                 match output {
                     Output::Json => emit_json(&history)?,
-                    Output::Text => {
-                        for decision in decisions {
-                            println!(
-                                "{} {:?} snapshot={} evidence={}",
-                                decision.decision_id,
-                                decision.status,
-                                decision.snapshot_id,
-                                decision.evidence_digest
-                            );
-                        }
-                    }
+                    Output::Text => print_view(&history)?,
                 }
                 Ok(0)
             }
@@ -4632,13 +4358,7 @@ fn run() -> Result<u8> {
             )?;
             match output {
                 Output::Json => emit_json(&run)?,
-                Output::Text => {
-                    println!(
-                        "Verification {}: {:?} ({})",
-                        profile, run.status, run.run_id
-                    );
-                    print_verification_artifacts(&run);
-                }
+                Output::Text => print_view(&run)?,
             }
             Ok(match run.status {
                 VerificationStatus::Passed => 0,
@@ -4719,34 +4439,7 @@ fn run() -> Result<u8> {
                 let diagnosis = operations::diagnose_verification(&workspace, &run_id)?;
                 match output {
                     Output::Json => emit_json(&diagnosis)?,
-                    Output::Text => {
-                        println!(
-                            "Verification diagnosis {}: {} ({})",
-                            diagnosis.profile_id, diagnosis.status, diagnosis.run_id
-                        );
-                        println!("Snapshot: {}", diagnosis.snapshot_id);
-                        if !diagnosis.targets.is_empty() {
-                            println!("Targets: {}", diagnosis.targets.join(", "));
-                        }
-                        for item in &diagnosis.diagnostics {
-                            println!(
-                                "{}:{} [{}] {}",
-                                item.stream, item.line, item.kind, item.text
-                            );
-                            if !item.referenced_changed_paths.is_empty() {
-                                println!(
-                                    "  changed paths: {}",
-                                    item.referenced_changed_paths.join(", ")
-                                );
-                            }
-                        }
-                        if diagnosis.diagnostics.is_empty() {
-                            println!("No recognized failure lines");
-                        }
-                        for limitation in &diagnosis.limitations {
-                            println!("Note: {limitation}");
-                        }
-                    }
+                    Output::Text => print_view(&diagnosis)?,
                 }
                 Ok(0)
             }
@@ -4757,7 +4450,7 @@ fn run() -> Result<u8> {
                 )?;
                 match output {
                     Output::Json => emit_json(&report)?,
-                    Output::Text => print_analyzer_report(&report),
+                    Output::Text => print_view(&report)?,
                 }
                 Ok(if report.parsed { 0 } else { 2 })
             }
@@ -4870,19 +4563,10 @@ fn run() -> Result<u8> {
                         crate::local_stores(),
                     );
                     let review = operations::get_review(&workspace, &id)?;
-                    let review = serde_json::to_value(review)?;
                     match output {
-                        Output::Json => emit_json(&review)?,
-                        Output::Text => {
-                            println!("Review {}", review["review_id"].as_str().unwrap_or(&id));
-                            println!("Snapshot: {}", review["snapshot_id"]);
-                            println!("Status: {}", review["status"]);
-                            println!(
-                                "Findings: {}",
-                                review["findings"].as_array().map_or(0, Vec::len)
-                            );
-                            println!("Gate: {}", review["gate"]["status"]);
-                        }
+                        // Through a Value, as before: keys stay sorted, as MCP emits them.
+                        Output::Json => emit_json(&serde_json::to_value(&review)?)?,
+                        Output::Text => print_view(&review)?,
                     }
                     Ok(0)
                 }
@@ -5387,58 +5071,7 @@ fn run() -> Result<u8> {
             let analytics = operations::quality_analytics(&workspace)?;
             match output {
                 Output::Json => emit_json(&analytics)?,
-                Output::Text => {
-                    println!(
-                        "Local quality analytics ({} reviews)",
-                        analytics.review_count
-                    );
-                    print_count_map("Latest gate decisions", &analytics.latest_gate_decisions);
-                    print_count_map("Findings by lifecycle", &analytics.findings_by_status);
-                    print_count_map("Findings by severity", &analytics.findings_by_severity);
-                    println!("Verification profile outcomes");
-                    for (profile, outcomes) in &analytics.verification_runs_by_profile {
-                        print_count_map(&format!("  {profile}"), outcomes);
-                    }
-                    println!("Recognized test log events by profile (observed event counts)");
-                    for (profile, events) in &analytics.test_diagnostics_by_profile {
-                        print_count_map(&format!("  {profile}"), events);
-                    }
-                    for limitation in &analytics.test_diagnostics_limitations {
-                        println!("Test analytics limitation: {limitation}");
-                    }
-                    print_count_map(
-                        "Reviewed feedback labels",
-                        &analytics.reviewed_feedback_by_label,
-                    );
-                    print_feedback_rate(
-                        "Finding accuracy",
-                        &analytics.reviewed_feedback_metrics.finding_accuracy,
-                    );
-                    print_feedback_rate(
-                        "Actionability",
-                        &analytics.reviewed_feedback_metrics.actionability,
-                    );
-                    println!("Provider adapter latency (latest saved reviews)");
-                    for (provider, metric) in &analytics.provider_latency {
-                        println!(
-                            "  {provider}: samples={} p50={}ms p95={}ms unmeasured={} failed={}",
-                            metric.measured_runs,
-                            metric
-                                .median_duration_ms
-                                .map_or_else(|| "n/a".into(), |v| v.to_string()),
-                            metric
-                                .p95_duration_ms
-                                .map_or_else(|| "n/a".into(), |v| v.to_string()),
-                            metric.unmeasured_runs,
-                            metric.failed_runs,
-                        );
-                    }
-                    println!("Provider latency note: {}", analytics.provider_latency_note);
-                    for (provider, usage) in &analytics.provider_usage {
-                        println!("Provider usage {provider}: reported runs {}, unreported runs {}, input tokens {}, output tokens {}, total tokens {}, estimated cost {} USD (priced {}, unpriced {})", usage.reported_runs, usage.unreported_runs, usage.input_tokens, usage.output_tokens, usage.total_tokens, usage.estimated_cost_usd.map_or_else(|| "n/a".into(), |cost| format!("{cost:.6}")), usage.priced_runs, usage.unpriced_runs);
-                    }
-                    println!("Provider usage note: {}", analytics.provider_usage_note);
-                }
+                Output::Text => print_view(&analytics)?,
             }
             Ok(0)
         }
@@ -6930,21 +6563,9 @@ fn run() -> Result<u8> {
                         &operations::Workspace::new(top.clone(), crate::local_stores()),
                         &review,
                     )?;
-                    let waivers = &listed.waivers;
                     match output {
                         Output::Json => emit_json(&listed)?,
-                        Output::Text => {
-                            for waiver in waivers {
-                                println!(
-                                    "{}  {}  expires {}  by {}  {}",
-                                    waiver.id,
-                                    waiver.finding_fingerprint,
-                                    waiver.expires_at_unix,
-                                    waiver.author,
-                                    waiver.reason
-                                );
-                            }
-                        }
+                        Output::Text => print_view(&listed)?,
                     }
                     Ok(0)
                 }
@@ -6978,81 +6599,17 @@ fn run() -> Result<u8> {
                             offset: Some(offset),
                         },
                     )?;
-                    let records = &page.findings;
                     match output {
                         Output::Json => emit_json(&page)?,
-                        Output::Text => {
-                            if records.is_empty() {
-                                println!("No findings");
-                            }
-                            for record in records {
-                                println!(
-                                    "{}  {:?}  {:?}  {}",
-                                    record.finding.id,
-                                    record.finding.severity,
-                                    record.status,
-                                    record.finding.path.as_deref().unwrap_or("<no path>")
-                                );
-                            }
-                            if page.offset + records.len() < page.total {
-                                println!(
-                                    "Showing {}-{} of {}; use --offset {} for more",
-                                    page.offset + 1,
-                                    page.offset + records.len(),
-                                    page.total,
-                                    page.offset + records.len()
-                                );
-                            }
-                        }
+                        Output::Text => print_view(&page)?,
                     }
                     Ok(0)
                 }
                 FindingsCommand::Show { id, output } => {
                     let detail = operations::finding_detail(&workspace, &id)?;
-                    let record = &detail.finding;
-                    let verification_runs = &detail.verification_runs;
                     match output {
                         Output::Json => emit_json(&detail)?,
-                        Output::Text => {
-                            println!(
-                                "{} {:?} ({:?})",
-                                record.finding.id, record.finding.severity, record.status
-                            );
-                            if let Some(path) = &record.finding.path {
-                                println!("Location: {}:{}", path, record.finding.line.unwrap_or(0));
-                            }
-                            println!(
-                                "Confidence: {}",
-                                record
-                                    .finding
-                                    .confidence
-                                    .map_or_else(|| "unknown".into(), |v| format!("{v}%"))
-                            );
-                            println!("{}", record.finding.rationale);
-                            println!("Occurrences: {}", record.occurrence_count);
-                            if let Some(reason) = &record.status_reason {
-                                println!("Status reason: {reason}");
-                            }
-                            if verification_runs.is_empty() {
-                                println!("Finding-specific verification: none recorded");
-                            } else {
-                                println!("Finding-specific verification:");
-                                for run in verification_runs {
-                                    println!(
-                                        "  {}  {}  {}  snapshot {}",
-                                        run.run_id,
-                                        run.profile_id,
-                                        match run.status {
-                                            VerificationStatus::Passed => "passed",
-                                            VerificationStatus::Failed => "failed",
-                                            VerificationStatus::TimedOut => "timed out",
-                                            VerificationStatus::Incomplete => "incomplete",
-                                        },
-                                        run.snapshot_id,
-                                    );
-                                }
-                            }
-                        }
+                        Output::Text => print_view(&detail)?,
                     }
                     Ok(0)
                 }
@@ -7064,29 +6621,7 @@ fn run() -> Result<u8> {
                     let task = operations::finding_task(&workspace, &id, context_lines)?;
                     match output {
                         Output::Json => emit_json(&task)?,
-                        Output::Text => {
-                            println!("Task {}", task.task_id);
-                            println!("Review: {}  Snapshot: {}", task.review_id, task.snapshot_id);
-                            println!("Current snapshot: {}", task.snapshot_current);
-                            println!(
-                                "Finding {} {:?} {:?} ({})",
-                                task.finding.finding.id,
-                                task.finding.finding.severity,
-                                task.finding.status,
-                                task.finding.finding.category
-                            );
-                            if let Some(source) = &task.source_context {
-                                println!(
-                                    "Source {}:{}-{}",
-                                    source.path, source.start_line, source.end_line
-                                );
-                                print!("{}", source.content);
-                            }
-                            if let Some(note) = &task.context_note {
-                                println!("Source context: {note}");
-                            }
-                            println!("{}", task.instructions);
-                        }
+                        Output::Text => print_view(&task)?,
                     }
                     Ok(0)
                 }
@@ -7099,24 +6634,7 @@ fn run() -> Result<u8> {
                         operations::finding_work_package(&workspace, &ids, context_lines)?;
                     match output {
                         Output::Json => emit_json(&package)?,
-                        Output::Text => {
-                            println!("Work package {}", package.package_id);
-                            println!(
-                                "Review: {}  Snapshot: {}",
-                                package.review_id, package.snapshot_id
-                            );
-                            println!("Current snapshot: {}", package.snapshot_current);
-                            for task in &package.findings {
-                                println!(
-                                    "{} {:?} {:?} ({})",
-                                    task.finding.finding.id,
-                                    task.finding.finding.severity,
-                                    task.finding.status,
-                                    task.finding.finding.category
-                                );
-                            }
-                            println!("{}", package.instructions);
-                        }
+                        Output::Text => print_view(&package)?,
                     }
                     Ok(0)
                 }
@@ -7415,10 +6933,7 @@ fn run() -> Result<u8> {
                         operations::set_finding_status(&workspace, &id, status.into(), &reason)?;
                     match output {
                         Output::Json => emit_json(&update)?,
-                        Output::Text => println!(
-                            "Updated finding {} to {:?}. {}",
-                            update.finding_id, update.status, update.note
-                        ),
+                        Output::Text => print_view(&update)?,
                     }
                     Ok(0)
                 }
@@ -7443,12 +6958,7 @@ fn run() -> Result<u8> {
                         )?;
                         match output {
                             Output::Json => emit_json(&feedback)?,
-                            Output::Text => println!(
-                                "Recorded {} feedback for finding {} on snapshot {}",
-                                feedback_label_text(feedback.label),
-                                feedback.finding_id,
-                                feedback.snapshot_id
-                            ),
+                            Output::Text => print_view(&feedback)?,
                         }
                         Ok(0)
                     }
@@ -7624,33 +7134,6 @@ fn print_verification_artifacts(run: &VerificationRun) {
     }
     if let Some(artifact) = &run.stderr_artifact {
         println!("stderr artifact: {} ({})", artifact.path, artifact.digest);
-    }
-}
-
-fn print_count_map(label: &str, counts: &std::collections::BTreeMap<String, usize>) {
-    println!("{label}:");
-    if counts.is_empty() {
-        println!("  none");
-    } else {
-        for (name, count) in counts {
-            println!("  {name}: {count}");
-        }
-    }
-}
-
-fn print_feedback_rate(label: &str, metric: &analytics::FeedbackRate) {
-    match metric.observed_rate {
-        Some(rate) => println!(
-            "{label}: {:.1}% ({}/{} labeled occurrences; {} disputed)",
-            rate * 100.0,
-            metric.positive_occurrences,
-            metric.denominator,
-            metric.disputed_occurrences
-        ),
-        None => println!(
-            "{label}: unavailable (no unambiguous labels; {} disputed)",
-            metric.disputed_occurrences
-        ),
     }
 }
 

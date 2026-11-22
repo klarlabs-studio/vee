@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use vee_core::{FindingFeedback, FindingFeedbackLabel, FindingRecord};
@@ -35,7 +35,7 @@ pub struct RuleCandidate {
     pub approval_status: &'static str,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FeedbackExample {
     pub source_kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -338,14 +338,14 @@ fn external_comment_identity(item: &super::imported_history::ExternalReviewFeedb
     )
 }
 
-#[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RuleEffectivenessReport {
     pub schema_version: u32,
     pub approvals: Vec<RuleEffectiveness>,
     pub limitations: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RuleEffectiveness {
     pub approval_id: String,
     pub version: u32,
@@ -356,7 +356,7 @@ pub struct RuleEffectiveness {
     pub after_activation: EffectivenessWindow,
 }
 
-#[derive(Clone, Debug, Serialize, schemars::JsonSchema, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct EffectivenessWindow {
     pub accuracy_denominator: usize,
     pub false_positive_count: usize,

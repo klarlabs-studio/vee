@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use vee_core::ports::*;
 use vee_core::{FindingFeedbackLabel, FindingStatus, GateStatus, Severity, VerificationStatus};
@@ -7,7 +7,7 @@ const MAX_DIAGNOSTIC_RUNS: usize = 500;
 const MAX_DIAGNOSTIC_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_PROVIDER_LATENCY_REVIEWS: usize = 500;
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QualityAnalytics {
     pub schema_version: u32,
     pub review_count: usize,
@@ -37,7 +37,7 @@ pub struct QualityAnalytics {
     pub provider_usage_note: String,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema, Default)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct ProviderUsageAnalytics {
     pub reported_runs: usize,
     pub unreported_runs: usize,
@@ -51,7 +51,7 @@ pub struct ProviderUsageAnalytics {
     pub unpriced_runs: usize,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema, Default)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct ProviderLatency {
     pub measured_runs: usize,
     pub unmeasured_runs: usize,
@@ -60,13 +60,13 @@ pub struct ProviderLatency {
     pub p95_duration_ms: Option<u64>,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema, Default)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct ReviewedFeedbackMetrics {
     pub finding_accuracy: FeedbackRate,
     pub actionability: FeedbackRate,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema, Default)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct FeedbackRate {
     pub positive_occurrences: usize,
     pub negative_occurrences: usize,

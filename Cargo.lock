@@ -2541,6 +2541,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 name = "vee"
 version = "0.1.0"
 dependencies = [
+ "anstream",
  "anyhow",
  "base64 0.22.1",
  "clap",
@@ -2570,6 +2571,7 @@ dependencies = [
  "vee-git",
  "vee-hosting",
  "vee-http",
+ "vee-present",
  "vee-process",
  "vee-store-sqlite",
 ]
@@ -2657,6 +2659,17 @@ dependencies = [
  "vee-git",
  "vee-hosting",
  "vee-store-sqlite",
+]
+
+[[package]]
+name = "vee-present"
+version = "0.1.0"
+dependencies = [
+ "anstyle",
+ "serde",
+ "serde_json",
+ "vee-application",
+ "vee-core",
 ]
 
 [[package]]

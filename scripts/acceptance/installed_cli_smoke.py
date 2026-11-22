@@ -104,8 +104,13 @@ def mcp_review(executable: str, root: Path, review_id: str) -> dict[str, object]
         )
         if "error" in called:
             raise RuntimeError(f"installed MCP get_review failed: {called['error']}")
+        # The text block is the shared Markdown view; the document is structured content.
         text = called["result"]["content"][0]["text"]
-        payload = json.loads(text)
+        if not text.startswith("## Review "):
+            raise RuntimeError(f"MCP text is not the review view: {text[:200]!r}")
+        payload = called["result"].get("structuredContent")
+        if not isinstance(payload, dict):
+            raise RuntimeError("MCP get_review returned no structured content")
         if payload.get("review_id") != review_id:
             raise RuntimeError(f"MCP returned a different review: {payload}")
         if payload.get("gate", {}).get("status") != "pass":

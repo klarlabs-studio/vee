@@ -5,7 +5,7 @@
 use crate::failure::usage_failure;
 use crate::operations::Workspace;
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use vee_core::packs::{self, PackReviewer, PolicyPack, PACK_MANIFEST};
 
@@ -31,13 +31,13 @@ pub struct PackSummary {
 }
 
 /// `packs-list-v1`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PackList {
     pub schema_version: u32,
     pub packs: Vec<PinnedPack>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PinnedPack {
     pub path: String,
     pub pinned_digest: String,
