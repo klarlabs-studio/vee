@@ -437,32 +437,13 @@ struct RepositoryContextOutput {
 }
 
 fn scope_request(input: &StartReviewInput) -> anyhow::Result<ScopeRequest> {
-    let has_base = input.base.is_some();
-    let has_commit = input.commit.is_some();
-    let invalid = |message: &str| crate::usage_failure(message.to_owned());
-    match input.scope {
-        ReviewScope::Staged | ReviewScope::WorkingTree if has_base || has_commit => Err(invalid(
-            "staged/working_tree scope cannot be combined with base or commit",
-        )),
-        ReviewScope::Staged => Ok(ScopeRequest::Staged),
-        ReviewScope::WorkingTree => Ok(ScopeRequest::WorkingTree),
-        ReviewScope::Base if has_commit => {
-            Err(invalid("base scope cannot be combined with commit"))
-        }
-        ReviewScope::Base => match &input.base {
-            Some(base) => Ok(ScopeRequest::BaseAndWorktree {
-                base: Some(base.clone()),
-            }),
-            None => Err(invalid("base scope requires a base ref")),
-        },
-        ReviewScope::Commit if has_base => {
-            Err(invalid("commit scope cannot be combined with base"))
-        }
-        ReviewScope::Commit => match &input.commit {
-            Some(commit) => Ok(ScopeRequest::Commit(commit.clone())),
-            None => Err(invalid("commit scope requires a commit ref")),
-        },
-    }
+    let kind = match input.scope {
+        ReviewScope::WorkingTree => operations::ScopeKind::WorkingTree,
+        ReviewScope::Staged => operations::ScopeKind::Staged,
+        ReviewScope::Base => operations::ScopeKind::Base,
+        ReviewScope::Commit => operations::ScopeKind::Commit,
+    };
+    ScopeRequest::from_kind(kind, input.base.clone(), input.commit.clone())
 }
 
 fn run_review(

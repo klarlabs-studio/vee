@@ -3213,19 +3213,8 @@ fn run() -> Result<u8> {
                 let root = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
                 let mut config = load_repository_config(&root)?;
                 apply_protected_policy(&root, &mut config)?;
-                let scope = if staged {
-                    vee_git::ChangeScope::Staged
-                } else if working_tree {
-                    vee_git::ChangeScope::WorkingTree
-                } else {
-                    vee_git::ChangeScope::BaseAndWorktree {
-                        base_oid: base
-                            .as_deref()
-                            .map(|base_ref| vee_git::merge_base(&root, base_ref))
-                            .transpose()
-                            .map_err(usage_failure)?,
-                    }
-                };
+                let scope = operations::ScopeRequest::from_flags(base, None, staged, working_tree)?
+                    .resolve(&root)?;
                 let snapshot = vee_application::capture_change_set(&root, scope)
                     .map_err(anyhow::Error::msg)?;
                 let plan = vee_application::plan_impacted_test_verification(
@@ -3296,21 +3285,9 @@ fn run() -> Result<u8> {
             } => {
                 let cwd = std::env::current_dir()?;
                 let root = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
-                let scope = if let Some(oid) = commit {
-                    vee_git::commit_scope(&oid).map_err(usage_failure)?
-                } else if staged {
-                    vee_git::ChangeScope::Staged
-                } else if working_tree {
-                    vee_git::ChangeScope::WorkingTree
-                } else {
-                    vee_git::ChangeScope::BaseAndWorktree {
-                        base_oid: base
-                            .as_deref()
-                            .map(|base_ref| vee_git::merge_base(&root, base_ref))
-                            .transpose()
-                            .map_err(usage_failure)?,
-                    }
-                };
+                let scope =
+                    operations::ScopeRequest::from_flags(base, commit, staged, working_tree)?
+                        .resolve(&root)?;
                 let change_set = vee_application::capture_change_set(&root, scope)
                     .map_err(anyhow::Error::msg)?;
                 anyhow::ensure!(

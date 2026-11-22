@@ -127,6 +127,15 @@ fn require_text(field: &str, value: &str, max_chars: usize) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Change scope and review
 
+/// The scope kinds a tool input names explicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScopeKind {
+    WorkingTree,
+    Staged,
+    Base,
+    Commit,
+}
+
 /// Which changes to capture.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScopeRequest {
@@ -165,6 +174,37 @@ impl ScopeRequest {
             (None, false, true) => Self::WorkingTree,
             (None, false, false) => Self::BaseAndWorktree { base },
         })
+    }
+
+    /// Build a scope from an explicit kind and its ref, as tool inputs give it.
+    /// Unlike the CLI's default, `Base` requires a ref.
+    pub fn from_kind(
+        kind: ScopeKind,
+        base: Option<String>,
+        commit: Option<String>,
+    ) -> Result<Self> {
+        let invalid = |message: &str| usage_failure(message.to_owned());
+        match kind {
+            ScopeKind::Staged | ScopeKind::WorkingTree if base.is_some() || commit.is_some() => {
+                Err(invalid(
+                    "staged/working_tree scope cannot be combined with base or commit",
+                ))
+            }
+            ScopeKind::Staged => Ok(Self::Staged),
+            ScopeKind::WorkingTree => Ok(Self::WorkingTree),
+            ScopeKind::Base if commit.is_some() => {
+                Err(invalid("base scope cannot be combined with commit"))
+            }
+            ScopeKind::Base => base
+                .map(|base| Self::BaseAndWorktree { base: Some(base) })
+                .ok_or_else(|| invalid("base scope requires a base ref")),
+            ScopeKind::Commit if base.is_some() => {
+                Err(invalid("commit scope cannot be combined with base"))
+            }
+            ScopeKind::Commit => commit
+                .map(Self::Commit)
+                .ok_or_else(|| invalid("commit scope requires a commit ref")),
+        }
     }
 
     pub fn resolve(&self, root: &Path) -> Result<vee_git::ChangeScope> {
