@@ -279,6 +279,42 @@
       "reason": "Accepted: vendored MCP library dev tooling (examples/client_probe.rs, tests/conformance.py, tests/network_interop.py) executes the program named on its own command line by design; the operator who runs it supplies that argv. Not shipped in Vee.",
       "owner": "vee-maintainers",
       "created_at": "2026-11-18T10:58:40.505026Z"
+    },
+    {
+      "fingerprint": "8155e83403b3eb9b3c4d9de2811da1f1a0cfcb1f637704e8c7d00b49df3078b2",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: the historical-benchmark acceptance fixture runs argument lists it builds from temporary paths and the operator's own vee path (sys.argv[1]) through subprocess.run without a shell.",
+      "owner": "vee-maintainers",
+      "created_at": "2026-11-21T15:53:05.487437Z"
+    },
+    {
+      "fingerprint": "b89f46552a794679f93550db1558cde5b0c0aa9342a6fd3ef5e8ae6003ffad46",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
+      "owner": "vee-maintainers",
+      "created_at": "2026-11-21T15:54:21.751328Z"
+    },
+    {
+      "fingerprint": "b89f46552a794679f93550db1558cde5b0c0aa9342a6fd3ef5e8ae6003ffad46",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
+      "owner": "vee-maintainers",
+      "created_at": "2026-11-21T15:54:21.751328Z"
+    },
+    {
+      "fingerprint": "8155e83403b3eb9b3c4d9de2811da1f1a0cfcb1f637704e8c7d00b49df3078b2",
+      "rule_id": "",
+      "file_path": "",
+      "severity": "",
+      "reason": "False positive: the historical-benchmark acceptance fixture runs argument lists it builds from temporary paths and the operator's own vee path (sys.argv[1]) through subprocess.run without a shell.",
+      "owner": "vee-maintainers",
+      "created_at": "2026-11-21T15:54:21.751328Z"
     }
   ]
 }

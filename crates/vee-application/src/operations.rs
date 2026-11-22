@@ -420,10 +420,7 @@ fn later_review_of_same_base(
         review
             .reviewer_outcomes
             .iter()
-            .filter(|outcome| {
-                crate::local_analytics::SUCCESSFUL_REVIEWER_STATUSES
-                    .contains(&outcome.status.as_str())
-            })
+            .filter(|outcome| outcome.succeeded())
             .map(|outcome| outcome.reviewer_id.clone())
             .collect()
     };
