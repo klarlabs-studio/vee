@@ -53,12 +53,18 @@ const selectedAnalyticsDay = ref('')
 const selectedAnalyticsSeverity = ref('')
 const selectedVerificationDay = ref('')
 const activeTab = ref('overview')
+const analyticsLoading = ref(false)
 const statusTone = value => ({ pass: 'good', block: 'bad', incomplete: 'warn' }[String(value).toLowerCase()] || 'muted')
 const findings = computed(() => selected.value?.findings || [])
 const supersession = computed(() => selected.value?.superseded_by || null)
 const isOutdated = record => Boolean(supersession.value?.outdated_finding_ids?.includes(record.finding.id))
 const impactPaths = computed(() => selected.value?.impact?.paths || [])
+const impactedFiles = computed(() => new Set(impactPaths.value.map(path => path.affected_path)).size)
 const analyticsDimensions = computed(() => analytics.value?.review_dimensions || [])
+// The latest gate evaluation outranks the status stored when the review ran:
+// a review that awaited verification passes once that verification completes.
+const currentGateStatus = computed(() => new Map(analyticsDimensions.value.map(item => [item.review_id, item.status])))
+const reviewStatus = review => currentGateStatus.value.get(review.review_id) || review.status
 const queueItems = computed(() => {
   const dimensions = new Map(analyticsDimensions.value.map(item => [item.review_id, item]))
   const query = queueQuery.value.trim().toLowerCase()
@@ -361,15 +367,18 @@ async function refreshReviews(keep = true) {
 }
 async function loadAnalytics() {
   const requestId = ++analyticsRequestId
+  analyticsLoading.value = true
   let next
   try { next = await api('/api/analytics') }
   catch (cause) {
     if (requestId === analyticsRequestId) {
+      analyticsLoading.value = false
       analyticsError.value = `Analytics could not be refreshed: ${cause.message}. ${analytics.value ? 'Showing the last saved report.' : 'Try again to load the report.'}`
     }
     return
   }
   if (requestId !== analyticsRequestId) return
+  analyticsLoading.value = false
   analytics.value = next
   analyticsError.value = ''
   queueReviewerOptions.value = [...new Set((next.review_dimensions || []).flatMap(item => item.reviewer_ids || []))].sort()
@@ -695,7 +704,7 @@ onMounted(async () => {
       <div class="rail-label history-label">HISTORY <span>{{ reviews.length }}</span></div>
       <div class="review-history" aria-label="Saved review history">
         <button v-for="item in reviews" :key="item.review_id" class="review-link" :class="{ chosen: selected?.review?.review_id === item.review_id }" :disabled="loading" @click="activeTab = 'overview'; openReview(item.review_id)">
-          <span class="dot" :class="statusTone(item.status)"></span><span class="review-link-text"><b>{{ item.review_id.slice(0, 17) }}</b><small>{{ item.created_at }}</small></span>
+          <span class="dot" :class="statusTone(reviewStatus(item))" :title="`Gate: ${reviewStatus(item)}`"></span><span class="review-link-text"><b>{{ item.review_id.slice(0, 17) }}</b><small>{{ item.created_at }}</small></span>
         </button>
         <div v-if="!reviews.length" class="empty-history">No reviews yet</div>
       </div>
@@ -728,7 +737,7 @@ onMounted(async () => {
         <p class="queue-scope hint">Showing {{ queueItems.length }} matching reviews from the latest {{ Math.min(reviews.length, 500) }} saved records<template v-if="reviews.length > 500">; older records are omitted</template>. “Status unavailable” means Vee could not load the review's retained analytics dimensions; it does not mean ungated.</p>
         <div v-if="queueItems.length" class="queue-list">
           <article v-for="item in queueItems" :key="item.review_id" class="queue-card">
-            <div class="queue-card-main"><span class="status-pill" :class="statusTone(item.gate_status)">{{ item.gate_status_stale ? 'possibly outdated' : item.gate_status === 'unknown' ? 'status unavailable' : item.gate_status === 'ungated' ? 'no gate' : item.gate_status }}</span><div><strong>{{ item.review_id }}</strong><small>{{ item.created_at }} · snapshot {{ item.snapshot_id }}</small><small>Review state: {{ item.status }}</small><small v-if="item.next_action" class="next-action" :data-kind="item.next_action.kind">Next: {{ item.next_action.summary }}</small></div></div>
+            <div class="queue-card-main"><span class="status-pill" :class="statusTone(item.gate_status)">{{ item.gate_status_stale ? 'possibly outdated' : item.gate_status === 'unknown' ? 'status unavailable' : item.gate_status === 'ungated' ? 'no gate' : item.gate_status }}</span><div><strong>{{ item.review_id }}</strong><small>{{ item.created_at }} · snapshot {{ item.snapshot_id }}</small><small v-if="item.status !== item.gate_status && !['unknown', 'ungated'].includes(item.gate_status)">Reviewed as {{ item.status }}; gate re-evaluated since</small><small v-if="item.next_action" class="next-action" :data-kind="item.next_action.kind">Next: {{ item.next_action.summary }}</small></div></div>
             <div class="queue-tags"><span v-for="id in item.reviewer_ids" :key="`reviewer:${id}`">{{ id }}</span><span v-for="id in item.provider_ids" :key="`provider:${id}`" class="provider-tag">{{ id }}</span><span v-if="!item.reviewer_ids.length && !item.provider_ids.length" class="queue-no-tags">No reviewer dimensions available</span></div>
             <button class="text-button" :disabled="loading" @click="activeTab = 'overview'; openReview(item.review_id)">Open review →</button>
           </article>
@@ -739,6 +748,7 @@ onMounted(async () => {
       <section v-else-if="activeTab === 'analytics'" class="analytics-view">
         <div class="section-head"><div><h2>Local review analytics</h2><p>Trends from saved reviews in this repository.</p></div><div class="analytics-actions"><button class="text-button" @click="exportAnalytics('json')">Export JSON</button><button class="text-button" @click="exportAnalytics('csv')">Export CSV</button><button class="text-button" @click="loadAnalytics">Refresh ↻</button></div></div>
         <p v-if="analyticsError" class="hint" role="alert">{{ analyticsError }} <button class="text-button" @click="loadAnalytics">Try again ↻</button></p>
+        <div v-if="analyticsLoading && !analytics" class="analytics-loading" role="status"><span class="spinner" aria-hidden="true"></span>Computing insights from saved reviews…</div>
         <div v-if="analytics" class="analytics-filters" aria-label="Analytics filters">
           <label>Reviewer<select v-model="analyticsReviewer" aria-label="Filter by reviewer"><option value="">All reviewers</option><option v-for="id in analyticsOptions('reviewer_ids')" :key="id" :value="id">{{ id }}</option></select></label>
           <label>Provider<select v-model="analyticsProvider" aria-label="Filter by provider"><option value="">All providers</option><option v-for="id in analyticsOptions('provider_ids')" :key="id" :value="id">{{ id }}</option></select></label>
@@ -843,7 +853,7 @@ onMounted(async () => {
           <section class="summary-row">
             <div class="summary-card gate-card"><div class="card-label">GATE DECISION</div><div class="gate-line"><span class="status-pill" :class="statusTone(selected.review.status)">{{ selected.review.status }}</span><strong>{{ selected.review.status === 'pass' ? 'Policy satisfied' : selected.review.status === 'block' ? 'Action required' : 'Analysis incomplete' }}</strong></div><small>{{ selected.review.review_id }} · {{ selected.review.snapshot_id }}</small></div>
             <div class="summary-card"><div class="card-label">FINDINGS</div><strong class="metric">{{ findings.length }}</strong><small>reported in this review</small></div>
-            <div class="summary-card"><div class="card-label">IMPACT PATHS</div><strong class="metric">{{ impactPaths.length }}</strong><small>{{ selected.impact?.coverage_complete ? 'coverage complete' : 'coverage has limitations' }}</small></div>
+            <div class="summary-card"><div class="card-label">AFFECTED FILES</div><strong class="metric">{{ impactedFiles }}</strong><small>{{ impactPaths.length }} {{ impactPaths.length === 1 ? 'reference' : 'references' }} · {{ selected.impact?.coverage_complete ? 'coverage complete' : 'coverage has limitations' }}</small></div>
           </section>
           <section v-if="selected.review.unreviewed_paths?.length" class="alert" role="note" aria-label="Not reviewed"><strong>No reviewer received {{ selected.review.unreviewed_paths.length }} changed file{{ selected.review.unreviewed_paths.length === 1 ? '' : 's' }}.</strong> No reviewer's include rules matched them<template v-if="!selected.review.analysis_complete">, so the analysis is incomplete</template>. Add or widen a reviewer, or set <code>policy.on_unreviewed: allow</code>.<ul class="unreviewed-list"><li v-for="path in selected.review.unreviewed_paths" :key="path"><code>{{ path }}</code></li></ul></section>
           <p v-if="supersession" class="alert supersession-note" role="note">A later review of the same base, {{ supersession.review_id }}, exists ({{ supersession.created_at }}). {{ supersession.outdated_finding_ids.length }} of this review's findings were not reported again there and are marked Outdated. This is display only; it does not change gates or dispositions. <button class="text-button" @click="openReview(supersession.review_id)">Open later review →</button></p>
@@ -877,7 +887,7 @@ onMounted(async () => {
         <p v-if="!drawerView.task.snapshot_current" class="alert">This snapshot no longer matches the working tree.<template v-if="drawerView.task.source_context"> The source below is the reviewed snapshot, not the current file.</template><template v-else> The reviewed source is no longer available.</template></p>
         <section class="drawer-section">
           <h4>Code reference</h4>
-          <small>{{ drawerRecord.finding.path || 'No location' }}<template v-if="drawerRecord.finding.line">:{{ drawerRecord.finding.line }}</template></small>
+          <small>{{ drawerRecord.finding.path || 'No location' }}<template v-if="drawerRecord.finding.line">:{{ drawerRecord.finding.line }}</template><template v-else-if="drawerRecord.finding.path"> · no line given; showing the start of the file</template></small>
           <pre v-if="drawerSourceLines.length" class="source-excerpt"><code><span v-for="line in drawerSourceLines" :key="line.number" class="source-line" :class="{ flagged: line.flagged }"><span class="line-number">{{ line.number }}</span>{{ line.text }}
 </span></code></pre>
           <small v-if="drawerView.task.context_note" class="hint">{{ drawerView.task.context_note }}</small>
@@ -886,7 +896,7 @@ onMounted(async () => {
           <h4>Evidence</h4>
           <p class="hint">Model findings are inferences from the reviewed source; evidence below records where Vee anchored them and how each item was obtained.</p>
           <article v-for="item in drawerView.task.evidence" :key="item.id" class="evidence-item">
-            <strong>{{ item.source_path }}[{{ item.start_line ?? '?' }}–{{ item.end_line ?? '?' }}]</strong>
+            <strong>{{ item.source_path }}<template v-if="item.start_line">:{{ item.start_line }}<template v-if="item.end_line && item.end_line !== item.start_line">–{{ item.end_line }}</template></template><template v-else> · whole file</template></strong>
             <small>{{ item.classification }} · {{ item.provenance }} · {{ item.verification }}</small>
           </article>
           <p v-if="!drawerView.task.evidence.length" class="hint">No evidence records are attached to this finding.</p>

@@ -761,7 +761,7 @@ test('finding drawer shows title, snapshot source, evidence, verification, and c
   await page.getByRole('button', { name: 'Open details for FIND-001' }).click()
   const drawer = page.getByRole('dialog', { name: 'Finding details' })
   await expect(drawer.getByRole('heading', { name: 'The changed branch skips validation.' })).toBeVisible()
-  await expect(drawer.getByText('src/lib.rs:42')).toBeVisible()
+  await expect(drawer.locator('.drawer-section small').first()).toHaveText('src/lib.rs:42')
   const highlighted = drawer.locator('.source-line.flagged')
   await expect(highlighted).toHaveCount(1)
   await expect(highlighted).toContainText('42')
@@ -770,7 +770,7 @@ test('finding drawer shows title, snapshot source, evidence, verification, and c
   await expect(highlighted.locator('.line-number')).toHaveText('42')
   await expect(highlighted).not.toContainText('| ')
   await expect(drawer.getByText(/This snapshot no longer matches the working tree/)).toBeVisible()
-  await expect(drawer.getByText('src/lib.rs[42–42]')).toBeVisible()
+  await expect(drawer.locator('.evidence-item strong').first()).toHaveText('src/lib.rs:42')
   await expect(drawer.getByText(/observed · source_snapshot/)).toBeVisible()
   await expect(drawer.getByText(/unit · failed/)).toBeVisible()
   await drawer.getByRole('button', { name: 'Copy work package' }).click()
@@ -779,6 +779,27 @@ test('finding drawer shows title, snapshot source, evidence, verification, and c
   expect(copied.task_id).toBe('task_find001')
   await drawer.getByRole('button', { name: 'Close finding details' }).click()
   await expect(drawer).toBeHidden()
+})
+
+test('the drawer code panel is readable on the dark theme', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: /Findings/ }).click()
+  await page.getByRole('button', { name: 'Open details for FIND-001' }).click()
+  const excerpt = page.locator('.source-excerpt')
+  await expect(excerpt).toBeVisible()
+  const [background, color] = await excerpt.evaluate(element => {
+    const style = getComputedStyle(element)
+    return [style.backgroundColor, style.color]
+  })
+  const luminance = rgb => {
+    const [r, g, b] = rgb.match(/\d+/g).slice(0, 3).map(Number).map(value => {
+      const channel = value / 255
+      return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
+    })
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+  }
+  const [light, dark] = [luminance(color), luminance(background)].sort((a, b) => b - a)
+  expect((light + 0.05) / (dark + 0.05)).toBeGreaterThan(7)
 })
 
 test('an older review marks findings the later review of the same base no longer reported', async ({ page }) => {
