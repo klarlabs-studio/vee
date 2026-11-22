@@ -8276,7 +8276,7 @@ esac
         value["effective_config_digest"]
     );
     let markdown = fs::read_to_string(markdown_report).unwrap();
-    assert!(markdown.starts_with("## Review rev\\_"), "{markdown}");
+    assert!(markdown.starts_with("## Review rev_"), "{markdown}");
     assert!(
         markdown
             .lines()
@@ -10346,7 +10346,7 @@ fn mcp_stdio_supports_legacy_initialize_and_read_only_tool_calls() {
     assert!(called.get("error").is_none(), "tool call failed: {called}");
     let text = called["result"]["content"][0]["text"].as_str().unwrap();
     assert_eq!(
-        text, "## Findings \\(0\\)\n\n_No findings\\._\n",
+        text, "## Findings (0)\n\n_No findings._\n",
         "the text is the shared view"
     );
     assert_eq!(called["result"]["structuredContent"]["total"], 0);

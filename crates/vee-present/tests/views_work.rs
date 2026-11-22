@@ -287,7 +287,7 @@ fn recorded_feedback_shows_label_and_how_to_list_it() {
     );
     let md = markdown::render(&feedback.to_view());
     assert!(
-        md.starts_with("## Feedback recorded for finding find\\_a"),
+        md.starts_with("## Feedback recorded for finding find_a"),
         "{md}"
     );
 }

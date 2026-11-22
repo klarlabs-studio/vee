@@ -86,7 +86,7 @@ fn standards_view_lists_sources_conflicts_and_limitations() {
         text.contains("  • Remote standards are not refreshed automatically."),
         "{text}"
     );
-    assert!(md(&report).contains("| `AGENTS.md` | agents\\_md | 10 |"));
+    assert!(md(&report).contains("| `AGENTS.md` | agents_md | 10 |"));
     assert_round_trip(&report);
 }
 
@@ -394,7 +394,7 @@ fn packs_view_reports_matching_pins_and_empty_lists() {
         self::text(&empty),
         "Pinned packs (0)\n\nNo packs are pinned in .vee.yaml.\n"
     );
-    assert!(md(&empty).starts_with("## Pinned packs \\(0\\)\n"));
+    assert!(md(&empty).starts_with("## Pinned packs (0)\n"));
     assert_round_trip(&empty);
 }
 

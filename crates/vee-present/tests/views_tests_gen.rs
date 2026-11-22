@@ -76,7 +76,7 @@ fn plan_lists_each_command_and_target_without_running_them() {
     );
     let markdown = markdown::render(&plan.to_view());
     assert!(
-        markdown.starts_with("## Impacted test plan for rust\\-unit · 🔵 **not run**\n"),
+        markdown.starts_with("## Impacted test plan for rust-unit · 🔵 **not run**\n"),
         "{markdown}"
     );
     assert!(
@@ -509,7 +509,7 @@ fn corpus_shows_counts_provenance_and_each_mutant() {
     assert!(text.contains("Saved report\n"), "{text}");
     let markdown = markdown::render(&assessment.to_view());
     assert!(
-        markdown.starts_with("## Mutant corpus retry\\-boundaries · 🔴 **1/2 killed**\n"),
+        markdown.starts_with("## Mutant corpus retry-boundaries · 🔴 **1/2 killed**\n"),
         "{markdown}"
     );
     assert_round_trip(&assessment);

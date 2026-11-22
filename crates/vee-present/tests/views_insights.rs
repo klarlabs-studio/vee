@@ -205,7 +205,7 @@ fn pr_draft_view_shows_title_body_and_provenance() {
     );
     let md = md(&report);
     assert!(
-        md.contains("See \\[docs\\]\\(https://example\\.com\\) \\<b\\>now\\</b\\>\\."),
+        md.contains("See \\[docs\\](https\\://example.com) \\<b\\>now\\</b\\>."),
         "model-authored Markdown is escaped: {md}"
     );
     assert!(!md.contains("\n## Summary"), "{md}");
