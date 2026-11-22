@@ -2396,7 +2396,7 @@ fn run() -> Result<u8> {
                     working_tree,
                 )?),
             };
-            let run = operations::verify(
+            let result = operations::verify(
                 &workspace,
                 operations::VerifyRequest {
                     target,
@@ -2405,10 +2405,10 @@ fn run() -> Result<u8> {
                 },
             )?;
             match output {
-                Output::Json => emit_json(&run)?,
-                Output::Text => print_view(&run)?,
+                Output::Json => emit_json(&result)?,
+                Output::Text => print_view(&result)?,
             }
-            Ok(match run.status {
+            Ok(match result.run.status {
                 VerificationStatus::Passed => 0,
                 VerificationStatus::Failed => 1,
                 VerificationStatus::TimedOut => 2,

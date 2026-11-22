@@ -906,8 +906,45 @@ pub struct VerifyRequest<'a> {
     pub impacted_tests: bool,
 }
 
-pub fn verify(workspace: &Workspace, request: VerifyRequest<'_>) -> Result<VerificationRun> {
+/// A verification run with, for a SARIF analyzer profile, the report the
+/// gate evaluates. It serializes as the run alone (`verification-run-v1`);
+/// the report only informs the view, since an analyzer's non-zero exit is how
+/// it reports results, not a failure of the check.
+#[derive(Clone, Debug)]
+pub struct VerificationResult {
+    pub run: VerificationRun,
+    pub analyzer: Option<vee_core::AnalyzerReport>,
+}
+
+impl serde::Serialize for VerificationResult {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        self.run.serialize(serializer)
+    }
+}
+
+pub fn verify(workspace: &Workspace, request: VerifyRequest<'_>) -> Result<VerificationResult> {
     let config = workspace.effective_config(None)?;
+    let run = run_verify(workspace, &config, request)?;
+    let analyzer = if config
+        .verification
+        .get(&run.profile_id)
+        .is_some_and(|profile| profile.sarif.is_some())
+    {
+        Some(analyzer_report_for(workspace, &run)?)
+    } else {
+        None
+    };
+    Ok(VerificationResult { run, analyzer })
+}
+
+fn run_verify(
+    workspace: &Workspace,
+    config: &RepositoryConfig,
+    request: VerifyRequest<'_>,
+) -> Result<VerificationRun> {
     let mut store = workspace.store()?;
     let root = workspace.root();
     match request.target {
@@ -935,7 +972,7 @@ pub fn verify(workspace: &Workspace, request: VerifyRequest<'_>) -> Result<Verif
                 &current,
                 &finding_id,
                 request.profile_id,
-                &config,
+                config,
                 &mut *store,
             )
         }
@@ -947,11 +984,11 @@ pub fn verify(workspace: &Workspace, request: VerifyRequest<'_>) -> Result<Verif
                     root,
                     &snapshot,
                     request.profile_id,
-                    &config,
+                    config,
                     &mut *store,
                 )
             } else {
-                crate::run_verification(root, &snapshot, request.profile_id, &config, &mut *store)
+                crate::run_verification(root, &snapshot, request.profile_id, config, &mut *store)
             }
         }
     }
@@ -1909,6 +1946,15 @@ pub fn analyzer_findings(workspace: &Workspace, run_id: &str) -> Result<vee_core
             run.profile_id
         )));
     }
+    analyzer_report_for(workspace, &run)
+}
+
+fn analyzer_report_for(
+    workspace: &Workspace,
+    run: &VerificationRun,
+) -> Result<vee_core::AnalyzerReport> {
+    let store = workspace.store()?;
+    let run_id = &run.run_id;
     let manifest = store
         .snapshot_manifest(&run.snapshot_id)
         .map_err(anyhow::Error::msg)?
@@ -1918,7 +1964,7 @@ pub fn analyzer_findings(workspace: &Workspace, run_id: &str) -> Result<vee_core
     Ok(crate::sarif::analyze_run(
         workspace.root(),
         &change_set,
-        &run,
+        run,
     ))
 }
 

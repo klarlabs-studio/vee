@@ -12,32 +12,84 @@ pub(crate) fn verification_status(status: VerificationStatus) -> Cell {
 
 impl ToView for VerificationRun {
     fn to_view(&self) -> View {
-        let mut view = View::new()
-            .title(
-                format!("Verification {}", self.profile_id),
-                Some(verification_status(self.status)),
+        run_view(self, verification_status(self.status))
+    }
+}
+
+/// A SARIF analyzer exits non-zero when it reports results, so a finished run
+/// is judged by its results on changed lines, as the gate does, not by its
+/// exit code.
+impl ToView for vee_application::operations::VerificationResult {
+    fn to_view(&self) -> View {
+        let run = &self.run;
+        let Some(report) = self.analyzer.as_ref().filter(|_| {
+            matches!(
+                run.status,
+                VerificationStatus::Passed | VerificationStatus::Failed
             )
+        }) else {
+            return run.to_view();
+        };
+        let badge = if !report.parsed {
+            Cell::badge(Tone::Danger, "not evaluable")
+        } else if report.findings.is_empty() {
+            Cell::badge(Tone::Success, "clean on changed lines")
+        } else {
+            Cell::badge(
+                Tone::Warning,
+                format!("{} on changed lines", report.findings.len()),
+            )
+        };
+        let mut view = run_view(run, badge).note(
+            Tone::Info,
+            Cell::plain(format!(
+                "Analyzer: {} results, {} on changed lines, {} pre-existing (never blocking).",
+                report.results_total,
+                report.findings.len(),
+                report.results_outside_changes
+            )),
+        );
+        if run.exit_code.is_some_and(|code| code != 0) && report.parsed {
+            view = view.note(
+                Tone::Neutral,
+                Cell::plain(
+                    "A non-zero exit is how the analyzer reports results; the gate reads its SARIF on changed lines.",
+                ),
+            );
+        }
+        view.next_action(
+            format!("vee verification findings {}", run.run_id),
+            "get_analyzer_findings",
+            serde_json::json!({ "run_id": run.run_id }),
+        )
+    }
+}
+
+fn run_view(run: &VerificationRun, badge: Cell) -> View {
+    {
+        let mut view = View::new()
+            .title(format!("Verification {}", run.profile_id), Some(badge))
             .fields(vec![
-                ("Run".into(), Cell::id(&self.run_id)),
-                ("Snapshot".into(), Cell::code(&self.snapshot_id)),
+                ("Run".into(), Cell::id(&run.run_id)),
+                ("Snapshot".into(), Cell::code(&run.snapshot_id)),
                 (
                     "Finding".into(),
-                    self.finding_id.clone().map(Cell::code).unwrap_or_default(),
+                    run.finding_id.clone().map(Cell::code).unwrap_or_default(),
                 ),
                 (
                     "Exit code".into(),
-                    self.exit_code
+                    run.exit_code
                         .map_or_else(Cell::default, |code| Cell::plain(code.to_string())),
                 ),
             ]);
-        if !self.targets.is_empty() {
+        if !run.targets.is_empty() {
             view = view
                 .section("Targets")
-                .list(self.targets.iter().map(Cell::code).collect());
+                .list(run.targets.iter().map(Cell::code).collect());
         }
         let artifacts: Vec<Cell> = [
-            ("stdout", &self.stdout_artifact),
-            ("stderr", &self.stderr_artifact),
+            ("stdout", &run.stdout_artifact),
+            ("stderr", &run.stderr_artifact),
         ]
         .into_iter()
         .filter_map(|(name, artifact)| {

@@ -337,3 +337,67 @@ fn clean_analyzer_report_says_so() {
 fn analyzer_report_round_trips_through_json() {
     assert_round_trip(&analyzer_report());
 }
+
+fn analyzer_run(exit_code: i32) -> vee_core::VerificationRun {
+    serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "run_id": "run_lint",
+        "snapshot_id": "sha256:snap",
+        "profile_id": "clippy",
+        "targets": [],
+        "command_digest": "sha256:cmd",
+        "status": if exit_code == 0 { "passed" } else { "failed" },
+        "exit_code": exit_code,
+        "stdout_digest": "sha256:out",
+        "stderr_digest": "sha256:err",
+        "stdout_artifact": null,
+        "stderr_artifact": null
+    }))
+    .unwrap()
+}
+
+#[test]
+fn an_analyzer_run_is_judged_by_its_results_on_changed_lines_not_its_exit_code() {
+    let mut report = analyzer_report();
+    report.findings.clear();
+    let result = vee_application::operations::VerificationResult {
+        run: analyzer_run(1),
+        analyzer: Some(report),
+    };
+    let text = ansi::render(&result.to_view(), false);
+    assert!(
+        text.starts_with("Verification clippy  ✔ clean on changed lines\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("5 results, 0 on changed lines, 3 pre-existing"),
+        "{text}"
+    );
+    assert!(
+        text.contains("A non-zero exit is how the analyzer reports results"),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("→ vee verification findings run_lint\n"),
+        "{text}"
+    );
+    assert!(markdown::render(&result.to_view()).contains("`get_analyzer_findings`"));
+    // The document stays the run itself.
+    assert_eq!(
+        serde_json::to_value(&result).unwrap(),
+        serde_json::to_value(&result.run).unwrap()
+    );
+}
+
+#[test]
+fn a_run_without_an_analyzer_report_keeps_its_exit_status() {
+    let result = vee_application::operations::VerificationResult {
+        run: analyzer_run(1),
+        analyzer: None,
+    };
+    let text = ansi::render(&result.to_view(), false);
+    assert!(
+        text.starts_with("Verification clippy  ✖ failed\n"),
+        "{text}"
+    );
+}
