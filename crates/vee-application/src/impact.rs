@@ -151,6 +151,9 @@ pub struct ImpactGroup {
     pub certainty: String,
 }
 
+/// Version of the impact assessment document (`impact-assessment-v4`).
+pub const IMPACT_SCHEMA_VERSION: u32 = 4;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImpactAssessment {
     pub schema_version: u32,
@@ -954,7 +957,7 @@ pub(crate) fn analyze_impact_with_typescript_server(
         limitations.push("Impact scanning is bounded to 10,000 source files and 32 MiB of decoded source content per assessment.".into());
     }
     Ok(ImpactAssessment {
-        schema_version: 4,
+        schema_version: IMPACT_SCHEMA_VERSION,
         snapshot_id: change_set.digest.clone(),
         coverage_complete,
         analyzers,

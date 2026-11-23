@@ -516,7 +516,7 @@ fn current_impact(root: &Path, review: &ReviewResult) -> crate::ImpactAssessment
         Err(error) => format!("saved review is available, but impact could not be recomputed from the current checkout: {error}"),
     };
     crate::ImpactAssessment {
-        schema_version: 3,
+        schema_version: crate::impact::IMPACT_SCHEMA_VERSION,
         snapshot_id: review.snapshot_id.clone(),
         coverage_complete: false,
         analyzers: Vec::new(),
