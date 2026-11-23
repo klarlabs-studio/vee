@@ -1742,6 +1742,8 @@ fn files_that_repeatedly_change_together_are_co_change_edges() {
         );
         write("schemas/api.json", format!("{{\"version\": {round}}}\n"));
         write("CHANGELOG.md", format!("paired {round}\n"));
+        // Documentation that always changes with the code is not coupling.
+        write("docs/api.md", format!("version {round}\n"));
         if round == 0 {
             write("README.md", "docs\n".into());
         }

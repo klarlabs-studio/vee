@@ -133,8 +133,13 @@ pub fn assess_change_risk(
         ));
     }
 
-    let subsystems: std::collections::BTreeSet<String> =
-        paths.iter().map(|path| subsystem(path)).collect();
+    // Diffusion is measured over code: documentation changes alongside
+    // features without spreading the change's behavior.
+    let subsystems: std::collections::BTreeSet<String> = paths
+        .iter()
+        .filter(|path| !crate::impact::is_documentation_path(path))
+        .map(|path| subsystem(path))
+        .collect();
 
     let path_bufs: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
     let current = vee_git::read_snapshot_files(root, change_set, &path_bufs)?;
@@ -228,7 +233,7 @@ pub fn assess_change_risk(
     let factors = vec![
         factor(
             "subsystems",
-            "Subsystems touched",
+            "Code subsystems touched",
             subsystems.len() as u64,
             SUBSYSTEMS_THRESHOLD,
             list(&mut subsystems.iter().map(String::as_str)),
@@ -354,9 +359,13 @@ mod tests {
 
         let factor = |id: &str| risk.factors.iter().find(|factor| factor.id == id).unwrap();
         assert_eq!(risk.tier, RiskTier::Elevated, "{risk:#?}");
-        assert_eq!(factor("subsystems").value, 3);
-        assert!(factor("subsystems").flagged);
-        assert_eq!(factor("subsystems").detail, "api, docs, store");
+        assert_eq!(
+            factor("subsystems").value,
+            2,
+            "documentation is not a subsystem"
+        );
+        assert!(!factor("subsystems").flagged);
+        assert_eq!(factor("subsystems").detail, "api, store");
         assert_eq!(factor("files").value, 3);
         assert!(!factor("files").flagged);
         assert_eq!(factor("lines").value, 7, "{risk:#?}");

@@ -333,7 +333,9 @@ fn impact_context(
             // repeating them in every task buried the notes about this finding.
             let mut notes = Vec::new();
             if !assessment.coverage_complete {
-                notes.push("Impact coverage is incomplete for this snapshot; `vee impact` lists why.");
+                notes.push(
+                    "Impact coverage is incomplete for this snapshot; `vee impact` lists why.",
+                );
             }
             if capped {
                 notes.push("Related impact paths were capped at 50.");

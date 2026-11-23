@@ -43,6 +43,7 @@ references, a union with labelled provenance.
 | Minimum confidence | 30% of the changed file's commits | directional rule |
 | Minimum lift | 2× the other file's base rate | drops hub files such as changelogs and registries |
 | Edges kept per changed file | 5, strongest first | depth-1 and ranking evidence |
+| Documentation (Markdown, text, `docs/`) | never a source or target | it changes alongside features, which is not coupling |
 
 **Where co-change edges appear:**
 - impact report schema v4 adds `co_change`, `historical`, the analyzer ID

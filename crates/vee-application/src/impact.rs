@@ -66,7 +66,7 @@ pub(crate) fn co_change_edges(
         }
     }
     let mut edges = Vec::new();
-    for source in changed {
+    for source in changed.iter().filter(|path| !is_documentation_path(path)) {
         let mut source_commits = 0u32;
         let mut together = std::collections::BTreeMap::<&str, u32>::new();
         for paths in &commits {
@@ -75,7 +75,11 @@ pub(crate) fn co_change_edges(
             }
             source_commits += 1;
             for path in paths.iter() {
-                if path != source && !changed.contains(path) && eligible(path) {
+                if path != source
+                    && !changed.contains(path)
+                    && !is_documentation_path(path)
+                    && eligible(path)
+                {
                     *together.entry(path.as_str()).or_default() += 1;
                 }
             }
@@ -3337,6 +3341,18 @@ pub(crate) fn is_test_context_attribute(attributes: &[syn::Attribute]) -> bool {
                     .parse_args::<syn::Ident>()
                     .is_ok_and(|ident| ident == "test")
         })
+}
+
+/// Prose documentation: Markdown and text files, and anything under a
+/// `docs/` directory. Documentation is updated alongside features, so it says
+/// nothing about code coupling or code diffusion.
+pub(crate) fn is_documentation_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.starts_with("docs/")
+        || lower.contains("/docs/")
+        || [".md", ".mdx", ".markdown", ".rst", ".adoc", ".txt"]
+            .iter()
+            .any(|extension| lower.ends_with(extension))
 }
 
 pub(crate) fn is_vue_path(path: &str) -> bool {

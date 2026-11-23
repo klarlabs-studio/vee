@@ -33,7 +33,7 @@ carries its value, its threshold, what was counted, and its research basis.
 
 | Factor | Flag at | Basis |
 |---|---|---|
-| Subsystems touched (top-level directory, or two levels under `crates/`, `packages/` and similar) | ≥ 3 | Mockus & Weiss 2000; Kamei 2013 |
+| Code subsystems touched (top-level directory, or two levels under `crates/`, `packages/` and similar; documentation excluded) | ≥ 3 | Mockus & Weiss 2000; Kamei 2013 |
 | Files changed | ≥ 20 | Kamei 2013; Czerwonka 2015 |
 | Lines added and deleted | ≥ 400 | Kamei 2013; Cisco case study (weak evidence) |
 | Production files referencing changed code | ≥ 10 | Hattori 2008; impact analysis |
