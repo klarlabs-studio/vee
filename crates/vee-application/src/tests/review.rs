@@ -278,6 +278,7 @@ fn reviewer_impact_context_prioritizes_production_references_over_tests() {
         symbol: "changed".into(),
         certainty: certainty.into(),
         evidence_line: 1,
+        co_change: None,
     };
     let ordered = [
         edge("resolved_symbol_reference", "resolved_semantic"),

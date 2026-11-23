@@ -91,10 +91,28 @@ impl ToView for ImpactAssessment {
                 self.paths
                     .iter()
                     .map(|edge| {
+                        // A co-change edge has no line or symbol; its
+                        // evidence is how often the files changed together.
+                        let (location, via) = match edge.co_change {
+                            Some(history) => (
+                                Cell::code(&edge.affected_path),
+                                Cell::muted(format!(
+                                    "changed together in {} of {} commits",
+                                    history.together, history.source_commits
+                                )),
+                            ),
+                            None => (
+                                Cell::code(format!(
+                                    "{}:{}",
+                                    edge.affected_path, edge.evidence_line
+                                )),
+                                Cell::code(&edge.symbol),
+                            ),
+                        };
                         vec![
-                            Cell::code(format!("{}:{}", edge.affected_path, edge.evidence_line)),
+                            location,
                             Cell::code(&edge.source_path),
-                            Cell::code(&edge.symbol),
+                            via,
                             Cell::plain(&edge.relationship),
                             Cell::plain(&edge.certainty),
                         ]

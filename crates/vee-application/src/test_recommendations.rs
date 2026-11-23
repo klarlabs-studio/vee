@@ -171,6 +171,7 @@ mod tests {
             symbol: "important_fn".into(),
             certainty: "inferred_syntax".into(),
             evidence_line: 12,
+            co_change: None,
         }
     }
 

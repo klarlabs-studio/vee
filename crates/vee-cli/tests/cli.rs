@@ -6990,7 +6990,7 @@ fn impact_cli_emits_snapshot_bound_evidence_paths() {
     );
     let impact: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let schema: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../schemas/impact-assessment-v3.schema.json"
+        "../../../schemas/impact-assessment-v4.schema.json"
     ))
     .unwrap();
     let validator = jsonschema::validator_for(&schema).unwrap();
@@ -7003,7 +7003,7 @@ fn impact_cli_emits_snapshot_bound_evidence_paths() {
             .collect::<Vec<_>>()
             .join("\n")
     );
-    assert_eq!(impact["schema_version"], 3);
+    assert_eq!(impact["schema_version"], 4);
     assert_eq!(impact["changed_paths"][0], "src/lib.rs");
     assert!(impact["changed_paths"]
         .as_array()
@@ -7510,7 +7510,7 @@ fn mcp_stdio_exposes_findings_tool_over_the_pinned_protocol() {
             )
             .await
             .unwrap();
-        assert_eq!(impact["schema_version"], 3);
+        assert_eq!(impact["schema_version"], 4);
         assert_eq!(impact["snapshot_id"], review["snapshot_id"]);
         let committed: serde_json::Value = client
             .call(

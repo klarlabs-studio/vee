@@ -310,6 +310,9 @@ fn impact_context(
             let mut paths: Vec<_> = assessment
                 .paths
                 .into_iter()
+                // Finding tasks carry code references with a source line;
+                // history-only co-change leads stay in the impact report.
+                .filter(|edge| edge.co_change.is_none())
                 .filter(|edge| edge.source_path == path || edge.affected_path == path)
                 .take(MAX_IMPACT_PATHS + 1)
                 .collect();

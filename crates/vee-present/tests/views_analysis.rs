@@ -401,3 +401,27 @@ fn a_run_without_an_analyzer_report_keeps_its_exit_status() {
         "{text}"
     );
 }
+
+#[test]
+fn co_change_edges_show_how_often_the_files_changed_together() {
+    let mut impact = impact();
+    impact.paths.push(
+        serde_json::from_value(serde_json::json!({
+            "source_path": "domain/lockout.go",
+            "affected_path": "schemas/lockout.json",
+            "relationship": "co_change",
+            "symbol": "",
+            "certainty": "historical",
+            "evidence_line": 0,
+            "co_change": {"together": 4, "source_commits": 6},
+        }))
+        .unwrap(),
+    );
+    let text = ansi::render(&impact.to_view(), false);
+    assert!(
+        text.contains("changed together in 4 of 6 commits"),
+        "{text}"
+    );
+    assert!(!text.contains("schemas/lockout.json:0"), "{text}");
+    assert_round_trip(&impact);
+}

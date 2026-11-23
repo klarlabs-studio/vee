@@ -58,6 +58,7 @@ fn task(id: &str, current: bool) -> FindingTask {
             symbol: "Fail".into(),
             certainty: "inferred_heuristic".into(),
             evidence_line: 12,
+            co_change: None,
         }],
         impact_coverage_complete: Some(true),
         evidence: vec![serde_json::from_value(serde_json::json!({

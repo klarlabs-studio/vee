@@ -33,7 +33,7 @@ const SCHEMAS: &[(&str, &str)] = schemas![
     "gate-check-v1",
     "gate-decision-v1",
     "gate-history-v1",
-    "impact-assessment-v3",
+    "impact-assessment-v4",
     "init-report-v1",
     "ownership-report-v1",
     "pack-summary-v1",

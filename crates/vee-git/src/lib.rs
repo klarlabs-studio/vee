@@ -91,6 +91,40 @@ pub fn merge_base(path: &Path, base_ref: &str) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
+/// The paths each of the newest `limit` commits reachable from `revision`
+/// changed, newest first, following first parents only and without rename
+/// detection. Merge commits contribute no paths. Bound to `revision`, the
+/// result is the same on every run.
+pub fn commit_paths(root: &Path, revision: &str, limit: usize) -> Result<Vec<Vec<String>>, String> {
+    validate_revision(revision)?;
+    let limit = format!("--max-count={limit}");
+    let output = git(
+        root,
+        &[
+            "log",
+            "-z",
+            "--first-parent",
+            "--no-renames",
+            "--format=%x01",
+            "--name-only",
+            &limit,
+            revision,
+            "--",
+        ],
+    )?;
+    let mut commits = Vec::new();
+    for record in output.split(|byte| *byte == 0x01).skip(1) {
+        let paths = record
+            .split(|byte| *byte == 0)
+            .map(|path| path.strip_prefix(b"\n").unwrap_or(path))
+            .filter(|path| !path.is_empty())
+            .map(|path| String::from_utf8(path.to_vec()).map_err(|error| error.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        commits.push(paths);
+    }
+    Ok(commits)
+}
+
 pub fn tracked_paths(path: &Path) -> Result<Vec<PathBuf>, String> {
     let root = repository_root(path)?;
     let output = git(&root, &["ls-files", "-z"])?;
@@ -1187,6 +1221,41 @@ fn git_index_tree(root: &Path) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn commit_paths_lists_each_commit_newest_first() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "vee@example.invalid"]);
+        git(&["config", "user.name", "Vee test"]);
+        std::fs::write(root.join("a.rs"), "1").unwrap();
+        std::fs::write(root.join("b c.rs"), "1").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "first"]);
+        std::fs::write(root.join("a.rs"), "2").unwrap();
+        git(&["commit", "-qam", "second"]);
+
+        let commits = super::commit_paths(root, "HEAD", 10).unwrap();
+
+        assert_eq!(
+            commits,
+            vec![
+                vec!["a.rs".to_owned()],
+                vec!["a.rs".to_owned(), "b c.rs".to_owned()]
+            ]
+        );
+        assert_eq!(super::commit_paths(root, "HEAD", 1).unwrap().len(), 1);
+    }
 
     #[test]
     fn batched_snapshot_reads_match_single_reads() {

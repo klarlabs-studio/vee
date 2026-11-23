@@ -653,7 +653,7 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         |ws, input: DiagnoseVerificationInput| operations::diagnose_verification(&ws, &input.run_id));
 
     viewed_tool!(server, workspace, "analyze_impact", "Analyze impact", read_only_tool(),
-        "impact-assessment-v3",
+        "impact-assessment-v4",
         "Analyze files and tests likely affected by a saved review's snapshot, with evidence paths and uncertainty. Same document as `vee impact --review <id> --output json`.",
         |ws, input: ReviewInput| operations::impact(&ws, operations::ChangeTarget::Review(input.review_id)));
 

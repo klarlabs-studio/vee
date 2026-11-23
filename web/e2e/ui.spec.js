@@ -37,9 +37,12 @@ const detail = (summary = latest) => ({
   },
   findings: [findingRecord],
   impact: {
-    schema_version: 3, snapshot_id: summary.snapshot_id, coverage_complete: false,
+    schema_version: 4, snapshot_id: summary.snapshot_id, coverage_complete: false,
     changed_paths: ['src/lib.rs'], changed_symbols: ['validate'],
-    paths: [{ affected_path: 'src/handler.rs', source_path: 'src/lib.rs', symbol: 'validate', relationship: 'resolved_symbol_reference', certainty: 'resolved_semantic', evidence_line: 18 }],
+    paths: [
+      { affected_path: 'src/handler.rs', source_path: 'src/lib.rs', symbol: 'validate', relationship: 'resolved_symbol_reference', certainty: 'resolved_semantic', evidence_line: 18 },
+      { affected_path: 'schemas/api.json', source_path: 'src/lib.rs', symbol: '', relationship: 'co_change', certainty: 'historical', evidence_line: 0, co_change: { together: 4, source_commits: 6 } },
+    ],
     limitations: ['Dynamic dispatch is not modeled.'],
   },
 })
@@ -655,6 +658,8 @@ test('impact view renders relationship certainty and limitations', async ({ page
   await expect(page.getByText(/src\/handler.rs/)).toBeVisible()
   await expect(page.getByText(/resolved_semantic/)).toBeVisible()
   await expect(page.getByText('Dynamic dispatch is not modeled.')).toBeVisible()
+  await expect(page.getByText(/changed together in 4 of 6 commits/)).toBeVisible()
+  await expect(page.getByText(/line 0/)).toHaveCount(0)
 })
 
 test('reviewer view shows provider identity, version, and outcome', async ({ page }) => {
