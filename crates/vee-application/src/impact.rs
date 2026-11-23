@@ -106,9 +106,91 @@ pub(crate) type TypeScriptReferenceQuery = (
     bool,
 );
 
+/// Analyze the likely impact of `change_set`.
+///
+/// The analysis parses every candidate source file, and the dashboard and MCP
+/// server ask for the same snapshot repeatedly (each review and finding open),
+/// so results are memoized per process while their inputs are unchanged: the
+/// change set, the tracked paths, the live checkout state (which covers the
+/// `Cargo.toml` files and, for semantic analyzers, the workspace they read),
+/// and the tool lookup path. Results from a failed or partial semantic
+/// analyzer are not memoized, so a timeout is retried on the next request.
 pub fn analyze_impact(root: &Path, change_set: &ChangeSet) -> Result<ImpactAssessment, String> {
     let typescript_server = find_typescript_server();
-    analyze_impact_with_typescript_server(root, change_set, typescript_server.as_deref())
+    let key = impact_memo_key(root, change_set, typescript_server.as_deref());
+    if let Some(hit) = key.as_ref().and_then(memoized_impact) {
+        return Ok(hit);
+    }
+    let assessment =
+        analyze_impact_with_typescript_server(root, change_set, typescript_server.as_deref())?;
+    if let Some(key) = key {
+        memoize_impact(key, &assessment);
+    }
+    Ok(assessment)
+}
+
+const IMPACT_MEMO_CAPACITY: usize = 8;
+
+type ImpactMemoKey = [u8; 32];
+
+fn impact_memo(
+) -> &'static std::sync::Mutex<std::collections::VecDeque<(ImpactMemoKey, ImpactAssessment)>> {
+    static MEMO: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::VecDeque<(ImpactMemoKey, ImpactAssessment)>>,
+    > = std::sync::OnceLock::new();
+    MEMO.get_or_init(Default::default)
+}
+
+/// `None` when an input cannot be read; the analysis then runs unmemoized.
+fn impact_memo_key(
+    root: &Path,
+    change_set: &ChangeSet,
+    typescript_server: Option<&Path>,
+) -> Option<ImpactMemoKey> {
+    use sha2::{Digest, Sha256};
+    let change = serde_json::to_vec(change_set).ok()?;
+    let tracked = vee_git::tracked_paths(root).ok()?;
+    let live = vee_git::workspace_state(root).ok()?;
+    let lookup_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut hasher = Sha256::new();
+    let mut part = |bytes: &[u8]| {
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    };
+    part(root.as_os_str().as_encoded_bytes());
+    part(&change);
+    part(&live);
+    part(typescript_server.map_or(&[][..], |path| path.as_os_str().as_encoded_bytes()));
+    part(lookup_path.as_encoded_bytes());
+    for path in &tracked {
+        part(path.as_os_str().as_encoded_bytes());
+    }
+    Some(hasher.finalize().into())
+}
+
+fn memoized_impact(key: &ImpactMemoKey) -> Option<ImpactAssessment> {
+    let memo = impact_memo().lock().ok()?;
+    memo.iter()
+        .find(|(entry, _)| entry == key)
+        .map(|(_, assessment)| assessment.clone())
+}
+
+fn memoize_impact(key: ImpactMemoKey, assessment: &ImpactAssessment) {
+    if assessment
+        .analyzers
+        .iter()
+        .any(|analyzer| matches!(analyzer.status.as_str(), "failed" | "partial"))
+    {
+        return;
+    }
+    let Ok(mut memo) = impact_memo().lock() else {
+        return;
+    };
+    memo.retain(|(entry, _)| *entry != key);
+    if memo.len() >= IMPACT_MEMO_CAPACITY {
+        memo.pop_front();
+    }
+    memo.push_back((key, assessment.clone()));
 }
 
 pub(crate) fn analyze_impact_with_typescript_server(

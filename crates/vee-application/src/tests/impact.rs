@@ -1348,3 +1348,72 @@ fn crate_private_and_cross_language_matches_are_not_impact() {
         "a pub fn stays visible to other packages"
     );
 }
+
+/// The dashboard reopens the same snapshot often, so impact is memoized, but
+/// never past a change to what the analysis reads from the live checkout.
+#[test]
+fn impact_memo_reuses_results_until_the_live_checkout_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"first\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "pub fn changed() -> u8 { 1 }\nmod caller;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/caller.rs"),
+        "fn call() -> u8 { crate::changed() }\n",
+    )
+    .unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "baseline"]);
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "pub fn changed(extra: u8) -> u8 { extra }\nmod caller;\n",
+    )
+    .unwrap();
+    let change_set = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
+
+    let first = analyze_impact(root, &change_set).unwrap();
+    let key = impact_memo_key(root, &change_set, find_typescript_server().as_deref()).unwrap();
+    assert_eq!(memoized_impact(&key), Some(first.clone()));
+    assert_eq!(analyze_impact(root, &change_set).unwrap(), first);
+    assert!(first
+        .groups
+        .iter()
+        .any(|group| group.package_id.ends_with(":first")));
+
+    // Package names come from the live manifest, outside the reviewed snapshot.
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"second\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let second = analyze_impact(root, &change_set).unwrap();
+    assert!(
+        second
+            .groups
+            .iter()
+            .any(|group| group.package_id.ends_with(":second")),
+        "{:?}",
+        second.groups
+    );
+}

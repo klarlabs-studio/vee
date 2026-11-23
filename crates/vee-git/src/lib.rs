@@ -101,6 +101,45 @@ pub fn tracked_paths(path: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(paths)
 }
 
+/// Bytes that change whenever the live checkout changes in a way Git can see:
+/// the current `HEAD`, the porcelain status including untracked files, and the
+/// size and modification time of every path that status lists. Callers hash it
+/// to tell whether a result derived from the live workspace is still current.
+pub fn workspace_state(path: &Path) -> Result<Vec<u8>, String> {
+    let root = repository_root(path)?;
+    // An unborn branch has no HEAD; the status below still describes the tree.
+    let mut state = git(&root, &["rev-parse", "--verify", "--quiet", "HEAD"]).unwrap_or_default();
+    let status = git(
+        &root,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )?;
+    for entry in status
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        state.extend_from_slice(entry);
+        state.push(0);
+        // Rename sources follow their entry without a status prefix; statting
+        // them as `XY path` simply finds nothing, which is still deterministic.
+        let Some(relative) = entry
+            .get(3..)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        else {
+            continue;
+        };
+        if let Ok(metadata) = std::fs::symlink_metadata(root.join(relative)) {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |duration| duration.as_nanos());
+            state.extend_from_slice(&metadata.len().to_le_bytes());
+            state.extend_from_slice(&modified.to_le_bytes());
+        }
+    }
+    Ok(state)
+}
+
 /// Whether commands run from the checkout would observe the staged index tree for
 /// tracked files, with no non-ignored untracked files that could affect results.
 pub fn working_tree_matches_index(path: &Path) -> Result<bool, String> {
