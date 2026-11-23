@@ -20,7 +20,9 @@ pub struct ReviewerProgress {
     pub runs: u32,
     /// Runs that have finished, including failed and cached ones.
     pub finished: u32,
-    /// Finished runs whose provider failed to execute.
+    /// Finished runs whose provider failed to execute or exited non-zero.
+    /// A run whose output is later rejected as invalid is not counted here;
+    /// the saved review's reviewer outcome is authoritative.
     pub failed: u32,
     /// Finished runs answered from the provider cache.
     pub cached: u32,

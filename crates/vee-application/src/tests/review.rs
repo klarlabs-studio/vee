@@ -1568,8 +1568,18 @@ fn review_progress_reports_each_reviewer_run_as_it_finishes() {
             request: &ProviderRequest,
             _cancellation: Option<&tokio_util::sync::CancellationToken>,
         ) -> Result<ProviderResult, String> {
-            if String::from_utf8_lossy(&request.stdin).contains("Always fail.") {
+            let input = String::from_utf8_lossy(&request.stdin);
+            if input.contains("Always fail.") {
                 return Err("provider unavailable".into());
+            }
+            if input.contains("Exit non-zero.") {
+                // Process adapters report a failed process as `Ok` with its exit code.
+                return Ok(ProviderResult {
+                    stdout: Vec::new(),
+                    stderr: b"usage limit reached".to_vec(),
+                    exit_code: Some(1),
+                    usage: None,
+                });
             }
             Ok(ProviderResult {
                 stdout: br#"{"schema_version":1,"findings":[]}"#.to_vec(),
@@ -1604,12 +1614,13 @@ fn review_progress_reports_each_reviewer_run_as_it_finishes() {
     std::fs::write(root.join("lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();
     std::fs::write(root.join("passing.md"), "Review the change.\n").unwrap();
     std::fs::write(root.join("failing.md"), "Always fail.\n").unwrap();
+    std::fs::write(root.join("exiting.md"), "Exit non-zero.\n").unwrap();
     git(&["add", "."]);
     git(&["commit", "-qm", "initial"]);
     std::fs::write(root.join("lib.rs"), "pub fn value() -> u8 { 2 }\n").unwrap();
     std::fs::write(
         root.join(".vee.yaml"),
-        "version: 1\nproviders:\n  p: { kind: cli, executable: unused }\nreviewers:\n  passing:\n    provider: p\n    instructions_file: passing.md\n    samples: 2\n  failing:\n    provider: p\n    instructions_file: failing.md\n",
+        "version: 1\nproviders:\n  p: { kind: cli, executable: unused }\nreviewers:\n  passing:\n    provider: p\n    instructions_file: passing.md\n    samples: 2\n  failing:\n    provider: p\n    instructions_file: failing.md\n  exiting:\n    provider: p\n    instructions_file: exiting.md\n",
     )
     .unwrap();
     let config = RepositoryConfig::load(&root.join(".vee.yaml")).unwrap();
@@ -1636,7 +1647,7 @@ fn review_progress_reports_each_reviewer_run_as_it_finishes() {
 
     let reports = recorder.0.lock().unwrap().clone();
     // One report when execution starts, then one per finished run.
-    assert_eq!(reports.len(), 4, "{reports:?}");
+    assert_eq!(reports.len(), 5, "{reports:?}");
     let reviewer = |report: &ReviewProgress, id: &str| {
         report
             .reviewers
@@ -1656,4 +1667,5 @@ fn review_progress_reports_each_reviewer_run_as_it_finishes() {
     assert!(last.reviewers.iter().all(ReviewerProgress::is_finished));
     assert_eq!(reviewer(last, "passing").failed, 0);
     assert_eq!(reviewer(last, "failing").failed, 1);
+    assert_eq!(reviewer(last, "exiting").failed, 1);
 }

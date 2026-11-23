@@ -453,7 +453,9 @@ pub(crate) fn execute_prepared_reviewers(
                 }))
                 .unwrap_or_else(|_| Err("provider adapter panicked during execution".into()));
                 let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                let succeeded = result.is_ok();
+                // Process adapters return `Ok` with the exit code of a failed
+                // provider process; only a zero exit counts as a successful run.
+                let succeeded = matches!(&result, Ok(output) if output.exit_code == Some(0));
                 results.lock().unwrap_or_else(|poison| poison.into_inner())[index] =
                     Some((result, elapsed_ms));
                 on_finished(index, succeeded);
