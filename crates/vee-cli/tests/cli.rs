@@ -11446,3 +11446,103 @@ fn review_session_reads_several_reviews_with_one_verdict() {
     assert_eq!(value["reviews"][1]["gate"], "block");
     assert_eq!(value["reviews"][1]["open_findings"]["high"], 1);
 }
+
+/// MCP clients that send a progress token see each reviewer run finish as
+/// a `notifications/progress` message before the review result.
+#[cfg(unix)]
+#[test]
+fn mcp_review_changes_reports_progress_notifications() {
+    use std::io::{BufRead, Write};
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    fs::write(root.join("lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();
+    fs::write(root.join("reviewer.md"), "Review changed code.\n").unwrap();
+    let provider = directory.path().join("fake-provider");
+    fs::write(
+        &provider,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s' '{\"schema_version\":1,\"findings\":[]}'\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&provider).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&provider, permissions).unwrap();
+    fs::write(
+        root.join(".vee.yaml"),
+        format!(
+            "version: 1\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\n  security: {{ provider: fake, instructions_file: reviewer.md }}\n",
+            provider.display()
+        ),
+    )
+    .unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "baseline"]);
+    fs::write(root.join("lib.rs"), "pub fn value() -> u8 { 2 }\n").unwrap();
+
+    let mut server = vee()
+        .args(["mcp", "serve", "--transport", "stdio"])
+        .current_dir(root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = server.stdin.take().unwrap();
+    let mut stdout = std::io::BufReader::new(server.stdout.take().unwrap());
+    let mut send = |message: serde_json::Value| {
+        writeln!(stdin, "{message}").unwrap();
+        stdin.flush().unwrap();
+    };
+    let mut read_until = |id: u64, seen: &mut Vec<serde_json::Value>| loop {
+        let mut line = String::new();
+        assert!(stdout.read_line(&mut line).unwrap() > 0, "server closed");
+        let message: serde_json::Value = serde_json::from_str(&line).unwrap();
+        if message["id"] == id {
+            return message;
+        }
+        seen.push(message);
+    };
+    let mut seen = Vec::new();
+    send(
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}),
+    );
+    read_until(1, &mut seen);
+    send(serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    send(
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"review_changes","arguments":{"scope":"working_tree"},"_meta":{"progressToken":"review-1"}}}),
+    );
+    let response = read_until(2, &mut seen);
+    drop(stdin);
+    let _ = server.wait();
+
+    assert!(
+        response["result"]["structuredContent"]["review_id"].is_string(),
+        "{response:#}"
+    );
+    let progress: Vec<&serde_json::Value> = seen
+        .iter()
+        .filter(|message| message["method"] == "notifications/progress")
+        .map(|message| &message["params"])
+        .collect();
+    // The start of execution, then one per finished run.
+    assert_eq!(progress.len(), 3, "{seen:#?}");
+    assert!(progress
+        .iter()
+        .all(|params| params["progressToken"] == "review-1" && params["total"] == 2.0));
+    assert_eq!(
+        progress.last().unwrap()["message"],
+        "2 of 2 reviewer runs finished"
+    );
+}

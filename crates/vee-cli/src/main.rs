@@ -2094,6 +2094,11 @@ fn run() -> Result<u8> {
         } => {
             let workspace = operations::Workspace::discover(crate::local_stores())?;
             let scope = operations::ScopeRequest::from_flags(base, commit, staged, working_tree)?;
+            // A progress line on an interactive terminal only, so pipes, logs
+            // and JSON output stay clean.
+            let terminal_progress = (matches!(output, Output::Text)
+                && std::io::IsTerminal::is_terminal(&std::io::stderr()))
+            .then_some(TerminalProgress);
             let out = operations::review(
                 &workspace,
                 operations::ReviewRequest {
@@ -2108,10 +2113,16 @@ fn run() -> Result<u8> {
                         api_base: hosting_api_base,
                         token_env: hosting_token_env,
                     },
-                    progress: None,
+                    progress: terminal_progress
+                        .as_ref()
+                        .map(|sink| sink as &dyn vee_application::ReviewProgressSink),
                 },
                 None,
-            )?;
+            );
+            if terminal_progress.is_some() {
+                TerminalProgress::clear();
+            }
+            let out = out?;
             if let Some(path) = markdown {
                 let report = vee_present::markdown::render(&vee_present::review_report(&out));
                 write_markdown_report(&path, report.as_bytes())?;
@@ -3676,6 +3687,33 @@ fn install_agent_skills(root: &std::path::Path, force: bool) -> Result<()> {
         println!("Installed {}", target.strip_prefix(&root)?.display());
     }
     Ok(())
+}
+
+/// Redraws one stderr line with the review's progress as reviewer runs finish.
+struct TerminalProgress;
+
+impl TerminalProgress {
+    fn clear() {
+        use std::io::Write;
+        let mut stderr = std::io::stderr().lock();
+        let _ = write!(stderr, "\r\x1b[2K");
+        let _ = stderr.flush();
+    }
+}
+
+impl vee_application::ReviewProgressSink for TerminalProgress {
+    fn report(&self, progress: &vee_application::ReviewProgress) {
+        use std::io::Write;
+        // Reviewer IDs come from repository configuration; keep the line inert.
+        let line: String = progress
+            .summary()
+            .chars()
+            .filter(|character| !character.is_control())
+            .collect();
+        let mut stderr = std::io::stderr().lock();
+        let _ = write!(stderr, "\r\x1b[2KReviewing: {line}");
+        let _ = stderr.flush();
+    }
 }
 
 #[cfg(test)]
