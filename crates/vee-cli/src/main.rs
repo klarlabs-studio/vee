@@ -1161,6 +1161,15 @@ enum GateCommand {
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
+    /// Check whether a saved review's change may be approved without a human: snapshot, protected paths, authors, risk, and gate, each with its reason.
+    Approval {
+        /// Saved review ID.
+        #[arg(long)]
+        review: String,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
     /// List persisted gate decisions for a saved review.
     History {
         /// Saved review ID.
@@ -2397,6 +2406,18 @@ fn run() -> Result<u8> {
                     Output::Text => print_view(&response)?,
                 }
                 Ok(response.exit_code())
+            }
+            GateCommand::Approval { review, output } => {
+                let approval = operations::approval_eligibility(
+                    &operations::Workspace::discover(crate::local_stores())?,
+                    &review,
+                )?;
+                match output {
+                    Output::Json => emit_json(&approval)?,
+                    Output::Text => print_view(&approval)?,
+                }
+                // Like `gate check`, a non-zero exit lets scripts branch on it.
+                Ok(if approval.eligible { 0 } else { 1 })
             }
             GateCommand::History { review, output } => {
                 let history = operations::gate_history(

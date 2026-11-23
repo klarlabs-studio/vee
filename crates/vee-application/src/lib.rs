@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 pub mod acceptance;
 pub mod analytics;
+mod approval;
 pub mod attestation;
 mod config;
 pub mod coverage;
@@ -40,6 +41,7 @@ mod verification;
 pub mod verification_diagnosis;
 pub mod work_items;
 
+pub use approval::*;
 pub use config::*;
 pub use gate::*;
 pub use impact::*;

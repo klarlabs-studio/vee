@@ -603,3 +603,26 @@ fn rule_approval_list_view_tabulates_approvals_and_says_when_none_exist() {
     );
     assert!(md(&empty).contains("`list_rule_candidates`"));
 }
+
+#[test]
+fn approval_lists_every_stage_with_its_reason() {
+    let approval: vee_application::ApprovalEligibility = serde_json::from_value(json!({
+        "schema_version": 1,
+        "review_id": "rev_1",
+        "snapshot_id": "sha256:snap",
+        "eligible": false,
+        "stages": [
+            {"id": "snapshot", "passed": true, "detail": "The checkout matches the reviewed snapshot."},
+            {"id": "paths", "passed": false, "detail": "Protected paths changed: db/001.sql (matches db/**)."},
+            {"id": "gate", "passed": true, "detail": "The gate passed."},
+        ],
+    }))
+    .unwrap();
+    let text = ansi::render(&approval.to_view(), false);
+    assert!(text.starts_with("Approval  ▲ needs a human\n"), "{text}");
+    assert!(
+        text.contains("Protected paths changed: db/001.sql (matches db/**)."),
+        "{text}"
+    );
+    assert!(markdown::render(&approval.to_view()).contains("needs a human"));
+}

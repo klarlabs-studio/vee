@@ -85,6 +85,16 @@
     "hosting": {
       "$ref": "#/$defs/hosting"
     },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Guards on when a change whose gate passes may be approved without a human (vee gate approval).",
+      "properties": {
+        "never_paths": { "type": "array", "maxItems": 256, "items": { "type": "string", "minLength": 1, "maxLength": 512 }, "description": "Changes touching these paths (globs) always need a human." },
+        "never_authors": { "type": "array", "maxItems": 256, "items": { "type": "string", "minLength": 1, "maxLength": 512 }, "description": "Changes with a commit by an author whose name or email matches (globs) always need a human." },
+        "max_risk": { "enum": ["low", "elevated"], "default": "low", "description": "Highest change-risk tier still eligible." }
+      }
+    },
     "policy": {
       "$ref": "#/$defs/policy"
     },

@@ -2703,6 +2703,10 @@ pub struct RepositoryConfig {
     /// webhook secrets are always read from the named environment variables.
     #[serde(default)]
     pub hosting: HostingConfig,
+    /// Guards on when a passing change is eligible for approval without a
+    /// human. Absent when unset, so existing configuration digests stay the same.
+    #[serde(default, skip_serializing_if = "ApprovalConfig::is_unset")]
+    pub approval: ApprovalConfig,
     #[serde(skip)]
     pub active_policy_profile: Option<String>,
     /// Digest-pinned policy packs merged into this configuration at load time.
@@ -2711,6 +2715,34 @@ pub struct RepositoryConfig {
     /// Approved rules contributed by packs; their pins are covered by `packs`.
     #[serde(skip)]
     pub pack_rules: Vec<RuleApproval>,
+}
+
+/// When a change whose gate passes may be approved without a human: layered
+/// guards checked before and after the gate, so approval is never a side
+/// effect of a passing review alone.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalConfig {
+    /// Changes touching any of these paths (globs) always need a human.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub never_paths: Vec<String>,
+    /// Changes with a commit by an author matching any of these (globs on the
+    /// author's name or email) always need a human.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub never_authors: Vec<String>,
+    /// Highest change-risk tier still eligible: `low` (default) or `elevated`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_risk: Option<String>,
+}
+
+impl ApprovalConfig {
+    pub fn is_unset(&self) -> bool {
+        self == &Self::default()
+    }
+
+    pub fn max_risk(&self) -> &str {
+        self.max_risk.as_deref().unwrap_or("low")
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -3281,6 +3313,25 @@ impl RepositoryConfig {
         }
         if config.policy.on_unreviewed != "block" && config.policy.on_unreviewed != "allow" {
             return Err("policy.on_unreviewed must be 'block' or 'allow'".into());
+        }
+        if !matches!(config.approval.max_risk(), "low" | "elevated") {
+            return Err("approval.max_risk must be 'low' or 'elevated'".into());
+        }
+        for (field, patterns) in [
+            ("approval.never_paths", &config.approval.never_paths),
+            ("approval.never_authors", &config.approval.never_authors),
+        ] {
+            if patterns.len() > 256
+                || patterns.iter().any(|pattern| {
+                    pattern.trim().is_empty()
+                        || pattern.len() > 512
+                        || pattern.chars().any(char::is_control)
+                })
+            {
+                return Err(format!(
+                    "{field} has an empty, invalid, or too long pattern"
+                ));
+            }
         }
         for severity in &config.policy.block_severities {
             if !matches!(

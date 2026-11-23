@@ -657,6 +657,11 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         "Analyze files and tests likely affected by a saved review's snapshot, with evidence paths and uncertainty. Same document as `vee impact --review <id> --output json`.",
         |ws, input: ReviewInput| operations::impact(&ws, operations::ChangeTarget::Review(input.review_id)));
 
+    viewed_tool!(server, workspace, "check_approval_eligibility", "Check approval eligibility", read_only_tool(),
+        "approval-eligibility-v1",
+        "Check whether a saved review's change may be approved without a human. Every guard stage is reported in order (snapshot still current, protected paths, commit authors, change risk within approval.max_risk, gate passed); the change is eligible only when all pass. Same document as `vee gate approval --review <id> --output json`.",
+        |ws, input: ReviewInput| operations::approval_eligibility(&ws, &input.review_id));
+
     viewed_tool!(server, workspace, "assess_change_risk", "Assess change risk", read_only_tool(),
         "change-risk-v1",
         "Assess a saved review's change risk: a low, elevated, or high tier from measured factors (subsystems, files, lines, blast radius, untested source), each with its value, threshold, and research basis. Informational; it never changes the gate. Same document as `vee risk --review <id> --output json`.",

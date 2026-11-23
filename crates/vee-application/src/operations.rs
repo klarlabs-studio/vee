@@ -473,6 +473,14 @@ fn later_review_of_same_base(
 /// impact assessment recomputed from the current checkout when the checkout
 /// still matches the review's snapshot.
 pub fn review_detail(workspace: &Workspace, review_id: &str) -> Result<ReviewDetail> {
+    review_detail_and_currency(workspace, review_id).map(|(detail, _)| detail)
+}
+
+/// The review detail, and whether the checkout still matches its snapshot.
+fn review_detail_and_currency(
+    workspace: &Workspace,
+    review_id: &str,
+) -> Result<(ReviewDetail, bool)> {
     let store = workspace.store()?;
     let mut review = workspace.saved_review(&*store, review_id)?;
     if let Some(latest_gate) = store
@@ -498,13 +506,16 @@ pub fn review_detail(workspace: &Workspace, review_id: &str) -> Result<ReviewDet
         .then(|| crate::assess_change_risk(workspace.root(), &review.change_set, &impact).ok())
         .flatten();
     let superseded_by = later_review_of_same_base(workspace, &*store, &review)?;
-    Ok(ReviewDetail {
-        review,
-        findings,
-        impact,
-        risk,
-        superseded_by,
-    })
+    Ok((
+        ReviewDetail {
+            review,
+            findings,
+            impact,
+            risk,
+            superseded_by,
+        },
+        current,
+    ))
 }
 
 /// Impact for a saved review. Impact is computed from source, so it is only
@@ -1111,6 +1122,23 @@ impl ChangeTarget {
 pub fn impact(workspace: &Workspace, target: ChangeTarget) -> Result<crate::ImpactAssessment> {
     let change_set = target.change_set(workspace)?;
     crate::analyze_impact(workspace.root(), &change_set).map_err(anyhow::Error::msg)
+}
+
+/// `approval-eligibility-v1`: whether a saved review's change may be approved
+/// without a human, with every guard stage and its reason.
+pub fn approval_eligibility(
+    workspace: &Workspace,
+    review_id: &str,
+) -> Result<crate::ApprovalEligibility> {
+    let config = crate::load_repository_config(workspace.root()).map_err(configuration_failure)?;
+    let (detail, current) = review_detail_and_currency(workspace, review_id)?;
+    Ok(crate::evaluate_approval(
+        workspace.root(),
+        &config.approval,
+        &detail.review,
+        current,
+        detail.risk.as_ref(),
+    ))
 }
 
 /// `change-risk-v1`: the change's risk tier with every measured factor.

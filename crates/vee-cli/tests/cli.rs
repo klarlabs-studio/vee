@@ -10205,6 +10205,7 @@ fn mcp_tools_declare_titles_safety_annotations_and_documented_inputs() {
         "diagnose_verification",
         "analyze_impact",
         "assess_change_risk",
+        "check_approval_eligibility",
         "analyze_cross_repository_impact",
         "acceptance_traceability",
         "get_repository_context",
@@ -11087,4 +11088,135 @@ fn risk_cli_emits_a_schema_valid_tier_with_named_factors() {
         .output()
         .unwrap();
     assert!(String::from_utf8_lossy(&text.stdout).starts_with("Change risk  ▲ elevated"));
+}
+
+#[cfg(unix)]
+#[test]
+fn gate_approval_layers_snapshot_path_author_risk_and_gate_guards() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join("tests")).unwrap();
+    fs::write(root.join("src/lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();
+    fs::write(
+        root.join("tests/value.rs"),
+        "#[test]\nfn value_is_one() { assert_eq!(app::value(), 1); }\n",
+    )
+    .unwrap();
+    fs::write(root.join("reviewer.md"), "Review changed code.\n").unwrap();
+    let provider = directory.path().join("fake-provider");
+    fs::write(
+        &provider,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s' '{\"schema_version\":1,\"findings\":[]}'\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&provider).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&provider, permissions).unwrap();
+    let config = format!(
+        "version: 1\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\npolicy:\n  required_reviewers: [correctness]\n  on_incomplete: block\n",
+        provider.display()
+    );
+    fs::write(root.join(".vee.yaml"), &config).unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "baseline"]);
+    fs::write(root.join("src/lib.rs"), "pub fn value() -> u8 { 2 }\n").unwrap();
+    fs::write(
+        root.join("tests/value.rs"),
+        "#[test]\nfn value_is_two() { assert_eq!(app::value(), 2); }\n",
+    )
+    .unwrap();
+    git(&["commit", "-qam", "change"]);
+
+    let review = vee()
+        .args(["review", "--commit", "HEAD", "--output", "json"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        review.status.success(),
+        "{}",
+        String::from_utf8_lossy(&review.stderr)
+    );
+    let review: serde_json::Value = serde_json::from_slice(&review.stdout).unwrap();
+    let review_id = review["review_id"].as_str().unwrap();
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/approval-eligibility-v1.schema.json"
+    ))
+    .unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let approval = |expected_exit: i32| {
+        let output = vee()
+            .args([
+                "gate", "approval", "--review", review_id, "--output", "json",
+            ])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(expected_exit),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(validator.is_valid(&value), "{value:#}");
+        value
+    };
+    let stage = |value: &serde_json::Value, id: &str| {
+        value["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|stage| stage["id"] == id)
+            .unwrap()
+            .clone()
+    };
+
+    let eligible = approval(0);
+    assert_eq!(eligible["eligible"], true, "{eligible:#}");
+    let order: Vec<_> = eligible["stages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|stage| stage["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(order, ["snapshot", "paths", "authors", "risk", "gate"]);
+
+    fs::write(
+        root.join(".vee.yaml"),
+        format!("{config}approval:\n  never_paths: [\"src/**\"]\n  never_authors: [\"*@example.invalid\"]\n"),
+    )
+    .unwrap();
+    let guarded = approval(1);
+    assert_eq!(guarded["eligible"], false);
+    assert_eq!(
+        stage(&guarded, "paths")["detail"],
+        "Protected paths changed: src/lib.rs (matches src/**)."
+    );
+    let authors = stage(&guarded, "authors");
+    assert_eq!(authors["passed"], false);
+    assert_eq!(
+        authors["detail"],
+        "A commit author matches: *@example.invalid."
+    );
+    assert!(
+        !guarded.to_string().contains("Vee test"),
+        "no author identity is reported"
+    );
+    assert_eq!(stage(&guarded, "gate")["passed"], true);
 }

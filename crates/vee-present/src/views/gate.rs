@@ -126,3 +126,37 @@ impl ToView for vee_core::Waiver {
             )
     }
 }
+
+impl ToView for vee_application::ApprovalEligibility {
+    fn to_view(&self) -> View {
+        let badge = if self.eligible {
+            Cell::badge(Tone::Success, "eligible")
+        } else {
+            Cell::badge(Tone::Warning, "needs a human")
+        };
+        View::new()
+            .title("Approval", Some(badge))
+            .fields(vec![
+                ("Review".into(), Cell::id(&self.review_id)),
+                ("Snapshot".into(), Cell::code(&self.snapshot_id)),
+            ])
+            .section("Stages")
+            .table(
+                &["Stage", "Result", "Reason"],
+                self.stages
+                    .iter()
+                    .map(|stage| {
+                        vec![
+                            Cell::plain(&stage.id),
+                            if stage.passed {
+                                Cell::badge(Tone::Success, "passed")
+                            } else {
+                                Cell::badge(Tone::Danger, "failed")
+                            },
+                            Cell::plain(&stage.detail),
+                        ]
+                    })
+                    .collect(),
+            )
+    }
+}

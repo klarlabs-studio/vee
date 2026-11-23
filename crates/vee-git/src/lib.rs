@@ -125,6 +125,40 @@ pub fn commit_paths(root: &Path, revision: &str, limit: usize) -> Result<Vec<Vec
     Ok(commits)
 }
 
+/// The author name and email of every commit in `base..head`, oldest first.
+pub fn commit_authors(
+    root: &Path,
+    base: &str,
+    head: &str,
+) -> Result<Vec<(String, String)>, String> {
+    validate_revision(base)?;
+    validate_revision(head)?;
+    let range = format!("{base}..{head}");
+    let output = git(
+        root,
+        &[
+            "log",
+            "-z",
+            "--reverse",
+            "--format=%an%x01%ae",
+            &range,
+            "--",
+        ],
+    )?;
+    output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .map(|record| {
+            let text = String::from_utf8(record.to_vec()).map_err(|error| error.to_string())?;
+            let (name, email) = text
+                .trim_start_matches('\n')
+                .split_once('\u{1}')
+                .ok_or("unexpected git log author record")?;
+            Ok((name.to_owned(), email.to_owned()))
+        })
+        .collect()
+}
+
 pub fn tracked_paths(path: &Path) -> Result<Vec<PathBuf>, String> {
     let root = repository_root(path)?;
     let output = git(&root, &["ls-files", "-z"])?;
@@ -1255,6 +1289,20 @@ mod tests {
             ]
         );
         assert_eq!(super::commit_paths(root, "HEAD", 1).unwrap().len(), 1);
+        let first = String::from_utf8(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(["rev-list", "--max-parents=0", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        assert_eq!(
+            super::commit_authors(root, first.trim(), "HEAD").unwrap(),
+            vec![("Vee test".to_owned(), "vee@example.invalid".to_owned())]
+        );
     }
 
     #[test]
