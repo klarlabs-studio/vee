@@ -666,30 +666,37 @@ where
         {
             return Err("provider finding confidence must be 0..=100".into());
         }
-        if let Some(path) = finding.path.as_mut() {
-            let parsed = Path::new(path);
-            if parsed.is_absolute()
-                || parsed.components().any(|component| {
-                    matches!(
-                        component,
-                        Component::ParentDir | Component::RootDir | Component::Prefix(_)
-                    )
-                })
-            {
-                return Err(format!("provider finding path escapes repository: {path}"));
-            }
-            *path = parsed.to_string_lossy().replace('\\', "/");
-            let absolute = repository_root.join(path.as_str());
-            if let Ok(canonical_root) = crate::paths::canonicalize(repository_root) {
-                if let Ok(canonical_parent) =
-                    crate::paths::canonicalize(absolute.parent().unwrap_or(repository_root))
-                {
-                    if !canonical_parent.starts_with(canonical_root) {
-                        return Err(format!(
-                            "provider finding path escapes repository through symlink: {path}"
-                        ));
+        if let Some(raw) = finding.path.take() {
+            // Models sometimes cite `dir/../other/file`. Resolve `.` and `..`
+            // lexically; a path that climbs above the root, or is absolute,
+            // escapes the repository. One that resolves to the root itself
+            // (`.`, `dir/..`) names no file, so the finding stays unanchored.
+            let mut parts: Vec<String> = Vec::new();
+            for component in Path::new(raw.as_str()).components() {
+                match component {
+                    Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+                    Component::CurDir => {}
+                    Component::ParentDir if parts.pop().is_some() => {}
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                        return Err(format!("provider finding path escapes repository: {raw}"));
                     }
                 }
+            }
+            if !parts.is_empty() {
+                let path = parts.join("/").replace('\\', "/");
+                let absolute = repository_root.join(path.as_str());
+                if let Ok(canonical_root) = crate::paths::canonicalize(repository_root) {
+                    if let Ok(canonical_parent) =
+                        crate::paths::canonicalize(absolute.parent().unwrap_or(repository_root))
+                    {
+                        if !canonical_parent.starts_with(canonical_root) {
+                            return Err(format!(
+                                "provider finding path escapes repository through symlink: {path}"
+                            ));
+                        }
+                    }
+                }
+                finding.path = Some(path);
             }
         }
         if finding.line == Some(0) {
@@ -1939,6 +1946,31 @@ mod tests {
         candidate.confidence = Some(80);
         candidate.path = Some("../outside.rs".into());
         assert!(normalize_provider_findings(vec![candidate], dir.path()).is_err());
+    }
+
+    #[test]
+    fn provider_finding_paths_resolve_parent_steps_inside_the_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut candidate = finding("id", Severity::High, Some(80));
+        candidate.rationale = "wrong chart bounds".into();
+        candidate.path = Some("app/widgets/table/../card/./chart.tsx".into());
+        let output = normalize_provider_findings(vec![candidate.clone()], dir.path()).unwrap();
+        assert_eq!(
+            output[0].path.as_deref(),
+            Some("app/widgets/card/chart.tsx")
+        );
+        for escaping in ["app/../../outside.rs", "/etc/passwd", "..", "./.."] {
+            candidate.path = Some(escaping.into());
+            assert!(
+                normalize_provider_findings(vec![candidate.clone()], dir.path()).is_err(),
+                "{escaping} was accepted"
+            );
+        }
+        for unanchored in ["./", "app/.."] {
+            candidate.path = Some(unanchored.into());
+            let output = normalize_provider_findings(vec![candidate.clone()], dir.path()).unwrap();
+            assert_eq!(output[0].path, None, "{unanchored}");
+        }
     }
 
     #[test]
