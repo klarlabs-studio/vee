@@ -899,6 +899,40 @@ pub struct GateReevaluation {
     pub decision: vee_core::GateDecision,
 }
 
+/// The gate for a saved review as of now (current snapshot, configuration,
+/// and verification runs), without recording a decision.
+fn current_gate(workspace: &Workspace, review: &ReviewResult) -> Result<vee_core::GateDecision> {
+    let store = workspace.store()?;
+    let current = crate::capture_current_change_set(workspace.root(), &review.change_set)
+        .map_err(anyhow::Error::msg)?;
+    let CurrentReviewConfig {
+        config,
+        digest: config_digest,
+        ..
+    } = current_review_config(workspace, &*store, review, None)?;
+    let verification_runs = store
+        .verifications_for_snapshot(&current.digest)
+        .map_err(anyhow::Error::msg)?;
+    crate::evaluate_gate(
+        &*store,
+        crate::GateEvaluation {
+            review_id: &review.review_id,
+            reviewed_snapshot_id: &review.snapshot_id,
+            current: &current,
+            repository_root: workspace.root(),
+            reviewed_config_digest: &review.effective_config_digest,
+            effective_config_digest: &config_digest,
+            config: &config,
+            findings: &review.findings,
+            policy_findings: review.policy_findings.as_deref(),
+            reviewer_outcomes: &review.reviewer_outcomes,
+            analysis_complete: review.analysis_complete,
+            verification_runs: &verification_runs,
+        },
+    )
+    .map_err(anyhow::Error::msg)
+}
+
 pub fn reevaluate_gate(
     workspace: &Workspace,
     review_id: &str,
@@ -1135,7 +1169,10 @@ pub fn approval_eligibility(
     review_id: &str,
 ) -> Result<crate::ApprovalEligibility> {
     let config = crate::load_repository_config(workspace.root()).map_err(configuration_failure)?;
-    let (detail, current) = review_detail_and_currency(workspace, review_id)?;
+    let (mut detail, current) = review_detail_and_currency(workspace, review_id)?;
+    if let Ok(gate) = current_gate(workspace, &detail.review) {
+        detail.review.gate = gate;
+    }
     Ok(crate::evaluate_approval(
         workspace.root(),
         &config.approval,
@@ -1167,7 +1204,12 @@ pub fn review_session(
     let config = crate::load_repository_config(workspace.root()).map_err(configuration_failure)?;
     let mut lines = Vec::with_capacity(review_ids.len());
     for review_id in review_ids {
-        let (detail, current) = review_detail_and_currency(workspace, review_id)?;
+        let (mut detail, current) = review_detail_and_currency(workspace, review_id)?;
+        // Without the inputs to re-evaluate (for example a work item whose
+        // token is not set), the last recorded decision stands.
+        if let Ok(gate) = current_gate(workspace, &detail.review) {
+            detail.review.gate = gate;
+        }
         let approval = crate::evaluate_approval(
             workspace.root(),
             &config.approval,

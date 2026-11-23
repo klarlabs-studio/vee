@@ -27,7 +27,7 @@ stacked review was found.
 `review-session-v1`) reads 1–20 saved reviews of one repository together.
 
 **Per change:**
-- its own latest gate;
+- its own gate, evaluated now without recording a decision;
 - whether the snapshot is still current;
 - its risk tier ([ADR 0014](0014-change-risk-as-explained-tiers.md));
 - its open findings by severity;

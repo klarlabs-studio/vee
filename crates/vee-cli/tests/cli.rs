@@ -11141,7 +11141,7 @@ fn gate_approval_layers_snapshot_path_author_risk_and_gate_guards() {
     permissions.set_mode(0o755);
     fs::set_permissions(&provider, permissions).unwrap();
     let config = format!(
-        "version: 1\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\npolicy:\n  required_reviewers: [correctness]\n  on_incomplete: block\n",
+        "version: 1\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\nverification:\n  unit: {{ executable: /bin/sh, args: [-c, \"exit 0\"], timeout_seconds: 5 }}\npolicy:\n  required_reviewers: [correctness]\n  required_verifications: [unit]\n  on_incomplete: block\n",
         provider.display()
     );
     fs::write(root.join(".vee.yaml"), &config).unwrap();
@@ -11201,6 +11201,20 @@ fn gate_approval_layers_snapshot_path_author_risk_and_gate_guards() {
             .clone()
     };
 
+    // The required verification has not run: the gate is incomplete.
+    let waiting = approval(1);
+    assert_eq!(stage(&waiting, "gate")["passed"], false, "{waiting:#}");
+    let verify = vee()
+        .args(["verify", "--profile", "unit", "--commit", "HEAD"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        verify.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    // Approval evaluates the gate as of now, so no `gate check` is needed.
     let eligible = approval(0);
     assert_eq!(eligible["eligible"], true, "{eligible:#}");
     let order: Vec<_> = eligible["stages"]
@@ -11233,6 +11247,18 @@ fn gate_approval_layers_snapshot_path_author_risk_and_gate_guards() {
         "no author identity is reported"
     );
     assert_eq!(stage(&guarded, "gate")["passed"], true);
+    // Approval is read-only: it evaluates the gate without recording a decision.
+    let history = vee()
+        .args(["gate", "history", "--review", review_id, "--output", "json"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let history: serde_json::Value = serde_json::from_slice(&history.stdout).unwrap();
+    assert_eq!(
+        history["decisions"].as_array().map(Vec::len),
+        Some(1),
+        "{history:#}"
+    );
 }
 
 /// The Claude Code and Codex plugins package the bundled skills and the MCP

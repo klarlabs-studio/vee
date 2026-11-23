@@ -38,15 +38,15 @@ every one with its reason. A change is eligible only when all pass.
 | `paths` | No changed path matches `approval.never_paths`. |
 | `authors` | No commit in the change has an author whose name or email matches `approval.never_authors`. |
 | `risk` | The change-risk tier ([ADR 0014](0014-change-risk-as-explained-tiers.md)) is within `approval.max_risk` (`low` by default, or `elevated`). Missing risk fails. |
-| `gate` | The latest gate decision passed. |
+| `gate` | The gate passes when evaluated now, against the current snapshot, configuration and verification runs. The decision is not recorded, so approval stays read-only, and a verification run since the last `gate check` counts. |
 
 **Output:**
 - The command exits 0 when the change is eligible and 1 otherwise, like
   `gate check`.
 - The author stage reports only the pattern that matched, never an
   author's name or email.
-- `approval` is omitted from the effective configuration when unset, so
-  existing configuration digests do not change.
+- `approval` is left out of the effective configuration digest, so adding
+  or changing guards never makes existing reviews stale.
 
 ## Consequences
 
