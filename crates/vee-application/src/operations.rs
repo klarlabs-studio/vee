@@ -530,10 +530,45 @@ fn current_impact(root: &Path, review: &ReviewResult) -> crate::ImpactAssessment
     }
 }
 
-/// `local-review-analytics-v9`
+/// `local-review-analytics-v10`
 pub fn local_analytics(workspace: &Workspace) -> Result<crate::local_analytics::LocalAnalytics> {
     let store = workspace.store()?;
-    crate::local_analytics::build(workspace.root(), &*store).map_err(anyhow::Error::msg)
+    let mut analytics =
+        crate::local_analytics::build(workspace.root(), &*store).map_err(anyhow::Error::msg)?;
+    annotate_analyzer_runs(workspace, &mut analytics.verification_runs);
+    Ok(analytics)
+}
+
+/// SARIF analyzers exit non-zero whenever they report anything, so a run's
+/// status reads "failed" even when nothing lands on the changed lines. Record
+/// what the gate evaluates, so trends do not contradict the gate. Runs whose
+/// output or configuration cannot be read keep only their process status.
+fn annotate_analyzer_runs(
+    workspace: &Workspace,
+    runs: &mut [crate::local_analytics::AnalyticsVerificationRun],
+) {
+    // Analytics also serves repositories without a configuration; their runs
+    // keep only their process status.
+    let (Ok(config), Ok(store)) = (workspace.effective_config(None), workspace.store()) else {
+        return;
+    };
+    for entry in runs.iter_mut().filter(|entry| entry.status == "failed") {
+        let is_analyzer = config
+            .verification
+            .get(&entry.profile_id)
+            .is_some_and(|profile| profile.sarif.is_some());
+        if !is_analyzer {
+            continue;
+        }
+        let Ok(Some(run)) = store.verification(&entry.run_id) else {
+            continue;
+        };
+        if let Ok(report) = analyzer_report_for(workspace, &run) {
+            if report.parsed {
+                entry.analyzer_findings_on_changed_lines = Some(report.findings.len());
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1082,7 +1082,7 @@ mod tests {
             .await
             .unwrap();
         let report: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(report["schema_version"], 9);
+        assert_eq!(report["schema_version"], 10);
         assert_eq!(report["review_count"], 0);
         assert_eq!(report["reviews_by_day"], serde_json::json!([]));
         assert_eq!(report["review_dimensions"], serde_json::json!([]));
@@ -1249,7 +1249,7 @@ mod tests {
             .await
             .unwrap();
         let report: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(report["schema_version"], 9);
+        assert_eq!(report["schema_version"], 10);
         assert_eq!(report["verification_run_count"], 2);
         assert_eq!(report["verification_history_complete"], true);
         assert_eq!(report["verification_runs"].as_array().unwrap().len(), 2);
@@ -1261,13 +1261,13 @@ mod tests {
         assert_eq!(report["verification_runs"][0]["profile_id"], "integration");
         assert_eq!(report["verification_runs"][0]["status"], "incomplete");
         let schema: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../schemas/local-review-analytics-v9.schema.json"
+            "../../../schemas/local-review-analytics-v10.schema.json"
         ))
         .unwrap();
         let validator = jsonschema::validator_for(&schema).unwrap();
         assert!(
             validator.validate(&report).is_ok(),
-            "local analytics output must match v9 schema"
+            "local analytics output must match v10 schema"
         );
         assert!(report["verification_runs"][0]["created_at"]
             .as_str()
@@ -1487,7 +1487,7 @@ mod tests {
             .iter()
             .all(|item| item["next_action"]["summary"].as_str().is_some()));
         let schema: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../schemas/local-review-analytics-v9.schema.json"
+            "../../../schemas/local-review-analytics-v10.schema.json"
         ))
         .unwrap();
         let errors: Vec<String> = jsonschema::validator_for(&schema)
@@ -1497,7 +1497,7 @@ mod tests {
             .collect();
         assert!(
             errors.is_empty(),
-            "analytics with saved reviews must match v9: {errors:?}"
+            "analytics with saved reviews must match v10: {errors:?}"
         );
         assert_eq!(
             report["provider_latency"],
