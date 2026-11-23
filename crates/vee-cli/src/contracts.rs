@@ -17,6 +17,7 @@ const SCHEMAS: &[(&str, &str)] = schemas![
     "acceptance-traceability-v1",
     "analyzer-report-v1",
     "attestation-verification-v1",
+    "change-risk-v1",
     "cross-repository-impact-v16",
     "doctor-report-v1",
     "evidence-v1",

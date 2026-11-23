@@ -335,6 +335,16 @@ fn cli_and_mcp_return_identical_documents_for_shared_operations() {
         &text,
     );
 
+    let cli = cli_json(root, &["risk", "--review", &review_id]);
+    let (via_mcp, text) = mcp.call_with_text("assess_change_risk", json!({"review_id": review_id}));
+    assert_same(&cli, &via_mcp, "risk", "change-risk-v1");
+    assert_same_view::<vee_application::ChangeRisk>(
+        root,
+        &["risk", "--review", &review_id],
+        &via_mcp,
+        &text,
+    );
+
     let cli = cli_json(root, &["impact", "--review", &review_id]);
     let (via_mcp, text) = mcp.call_with_text("analyze_impact", json!({"review_id": review_id}));
     assert_same(&cli, &via_mcp, "impact", "impact-assessment-v4");

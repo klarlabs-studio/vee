@@ -1042,3 +1042,26 @@ test('opening a finding moves focus into the drawer and Escape closes it', async
   await expect(drawer).toBeHidden()
   await expect(opener).toBeFocused()
 })
+
+test('change risk card names the tier and the flagged factors', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByLabel('Change risk')).toHaveCount(0)
+  await page.route('**/api/reviews/rev_latest', route => route.fulfill({
+    json: {
+      ...detail(latest),
+      risk: {
+        schema_version: 1, snapshot_id: latest.snapshot_id, tier: 'elevated', limitations: [],
+        factors: [
+          { id: 'subsystems', label: 'Subsystems touched', value: 3, threshold: 3, flagged: true, detail: 'api, docs, store', basis: 'Mockus & Weiss 2000' },
+          { id: 'files', label: 'Files changed', value: 3, threshold: 20, flagged: false, detail: '3 file(s)', basis: 'Kamei et al. 2013' },
+        ],
+      },
+    },
+  }))
+  await page.reload()
+  const card = page.getByLabel('Change risk')
+  await expect(card).toContainText('elevated')
+  await expect(card).toContainText('subsystems touched: 3')
+  await expect(card).not.toContainText('files changed')
+  await expect(card.locator('small')).toHaveAttribute('title', /Basis: Mockus & Weiss 2000/)
+})

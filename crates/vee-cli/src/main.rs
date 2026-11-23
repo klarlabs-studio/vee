@@ -239,6 +239,27 @@ enum Command {
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
+    /// Assess a change's risk tier from measured factors, each with its research basis.
+    Risk {
+        /// Assess a saved review's exact snapshot instead of capturing a scope; fails if the source changed.
+        #[arg(long, value_name = "REVIEW_ID", conflicts_with_all = ["base", "commit", "staged", "working_tree"])]
+        review: Option<String>,
+        /// Use changes since the merge base with this Git ref.
+        #[arg(long, conflicts_with_all = ["staged", "working_tree"])]
+        base: Option<String>,
+        /// Use the changes introduced by this commit.
+        #[arg(long, conflicts_with_all = ["base", "staged", "working_tree"])]
+        commit: Option<String>,
+        /// Use only staged changes.
+        #[arg(long, conflicts_with = "working_tree")]
+        staged: bool,
+        /// Use staged and unstaged working-tree changes.
+        #[arg(long)]
+        working_tree: bool,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
     /// Analyze which files and tests a change is likely to affect.
     Impact {
         /// Analyze a saved review's exact snapshot instead of capturing a scope; fails if the source changed.
@@ -2099,6 +2120,23 @@ fn run() -> Result<u8> {
             } else {
                 0
             })
+        }
+        Command::Risk {
+            review,
+            base,
+            commit,
+            staged,
+            working_tree,
+            output,
+        } => {
+            let workspace = operations::Workspace::discover(crate::local_stores())?;
+            let target = change_target(review, base, commit, staged, working_tree)?;
+            let risk = operations::change_risk(&workspace, target)?;
+            match output {
+                Output::Json => emit_json(&risk)?,
+                Output::Text => print_view(&risk)?,
+            }
+            Ok(0)
         }
         Command::Impact {
             review,

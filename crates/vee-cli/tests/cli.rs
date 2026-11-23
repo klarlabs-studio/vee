@@ -10194,6 +10194,7 @@ fn mcp_tools_declare_titles_safety_annotations_and_documented_inputs() {
         "get_review",
         "diagnose_verification",
         "analyze_impact",
+        "assess_change_risk",
         "analyze_cross_repository_impact",
         "acceptance_traceability",
         "get_repository_context",
@@ -11001,4 +11002,79 @@ fn cross_repository_impact_rejects_unbounded_input_like_the_mcp_tool() {
         String::from_utf8_lossy(&output.stderr).contains("between 1 and 128"),
         "{output:?}"
     );
+}
+
+#[test]
+fn risk_cli_emits_a_schema_valid_tier_with_named_factors() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(Command::new("git")
+        .args(["init", "-q"])
+        .arg(root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(git(&["config", "user.email", "vee@example.invalid"])
+        .status
+        .success());
+    assert!(git(&["config", "user.name", "Vee test"]).status.success());
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/lib.rs"), "pub fn changed_api() {}\n").unwrap();
+    git(&["add", "."]);
+    assert!(git(&["commit", "-qm", "initial"]).status.success());
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub fn changed_api() { assert!(true); }\n",
+    )
+    .unwrap();
+
+    let output = vee()
+        .args(["risk", "--working-tree", "--output", "json"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let risk: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../../schemas/change-risk-v1.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    assert!(
+        validator.is_valid(&risk),
+        "{}",
+        validator
+            .iter_errors(&risk)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    // One untested source file is the only flag: elevated, and named.
+    assert_eq!(risk["tier"], "elevated", "{risk:#}");
+    let untested = risk["factors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|factor| factor["id"] == "untested_source")
+        .unwrap();
+    assert_eq!(untested["detail"], "src/lib.rs");
+
+    let text = vee()
+        .args(["risk", "--working-tree", "--color", "never"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&text.stdout).starts_with("Change risk  ▲ elevated"));
 }

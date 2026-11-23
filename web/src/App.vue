@@ -62,6 +62,17 @@ const supersession = computed(() => selected.value?.superseded_by || null)
 const isOutdated = record => Boolean(supersession.value?.outdated_finding_ids?.includes(record.finding.id))
 const impactPaths = computed(() => selected.value?.impact?.paths || [])
 const impactedFiles = computed(() => new Set(impactPaths.value.map(path => path.affected_path)).size)
+// Change risk is an ordinal tier over measured factors (see the research
+// basis on each factor); it informs where to look and never changes the gate.
+const risk = computed(() => selected.value?.risk || null)
+const riskFlags = computed(() => (risk.value?.factors || []).filter(factor => factor.flagged))
+const riskSummary = computed(() => riskFlags.value.length
+  ? riskFlags.value.map(factor => `${factor.label.toLowerCase()}: ${factor.value}`).join(' · ')
+  : 'no factor at its threshold')
+const riskTitle = computed(() => (risk.value?.factors || [])
+  .map(factor => `${factor.label}: ${factor.value} (flag at ${factor.threshold}) — ${factor.detail || 'none'}. Basis: ${factor.basis}`)
+  .join('\n'))
+const riskTone = tier => tier === 'high' ? 'bad' : tier === 'elevated' ? 'warn' : 'good'
 const analyticsDimensions = computed(() => analytics.value?.review_dimensions || [])
 // The latest gate evaluation outranks the status stored when the review ran:
 // a review that awaited verification passes once that verification completes.
@@ -934,7 +945,7 @@ onMounted(async () => {
           <section class="summary-row">
             <div class="summary-card gate-card"><div class="card-label">GATE DECISION</div><div class="gate-line"><span class="status-pill" :class="statusTone(selected.review.status)">{{ selected.review.status }}</span><strong>{{ selected.review.status === 'pass' ? 'Policy satisfied' : selected.review.status === 'block' ? 'Action required' : 'Analysis incomplete' }}</strong></div><small :title="`${selected.review.review_id} · ${selected.review.snapshot_id}`">{{ scopeName(selected.review.change_set?.scope) }} · snapshot {{ shortHash(selected.review.snapshot_id) }}</small></div>
             <div class="summary-card"><div class="card-label">FINDINGS</div><strong class="metric">{{ findings.length }}</strong><small>reported in this review</small></div>
-            <div class="summary-card"><div class="card-label">AFFECTED FILES</div><strong class="metric">{{ impactedFiles }}</strong><small>{{ impactPaths.length }} {{ impactPaths.length === 1 ? 'reference' : 'references' }} · {{ selected.impact?.coverage_complete ? 'coverage complete' : 'coverage has limitations' }}</small></div>
+            <div v-if="risk" class="summary-card risk-card" aria-label="Change risk"><div class="card-label">CHANGE RISK</div><div class="gate-line"><span class="status-pill" :class="riskTone(risk.tier)">{{ risk.tier }}</span></div><small :title="riskTitle">{{ riskSummary }}</small></div><div class="summary-card"><div class="card-label">AFFECTED FILES</div><strong class="metric">{{ impactedFiles }}</strong><small>{{ impactPaths.length }} {{ impactPaths.length === 1 ? 'reference' : 'references' }} · {{ selected.impact?.coverage_complete ? 'coverage complete' : 'coverage has limitations' }}</small></div>
           </section>
           <section v-if="selected.review.unreviewed_paths?.length" class="alert" role="note" aria-label="Not reviewed"><strong>No reviewer received {{ selected.review.unreviewed_paths.length }} changed file{{ selected.review.unreviewed_paths.length === 1 ? '' : 's' }}.</strong> No reviewer's include rules matched them<template v-if="!selected.review.analysis_complete">, so the analysis is incomplete</template>. Add or widen a reviewer, or set <code>policy.on_unreviewed: allow</code>.<ul class="unreviewed-list"><li v-for="path in selected.review.unreviewed_paths" :key="path"><code>{{ path }}</code></li></ul></section>
           <p v-if="supersession" class="alert supersession-note" role="note">A later review of the same base, {{ supersession.review_id }}, exists ({{ supersession.created_at }}). {{ supersession.outdated_finding_ids.length }} of this review's findings were not reported again there and are marked Outdated. This is display only; it does not change gates or dispositions. <button class="text-button" @click="openReview(supersession.review_id)">Open later review →</button></p>

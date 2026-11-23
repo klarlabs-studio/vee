@@ -387,6 +387,9 @@ pub struct ReviewDetail {
     pub review: ReviewResult,
     pub findings: Vec<FindingRecord>,
     pub impact: crate::ImpactAssessment,
+    /// Change risk, available while the checkout matches the reviewed snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk: Option<crate::ChangeRisk>,
     /// The newest later complete review of the same scope and base, when one exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<Supersession>,
@@ -489,12 +492,17 @@ pub fn review_detail(workspace: &Workspace, review_id: &str) -> Result<ReviewDet
     let findings = store
         .list_findings(None, None, Some(review_id))
         .map_err(anyhow::Error::msg)?;
-    let impact = current_impact(workspace.root(), &review);
+    let (impact, current) = current_impact(workspace.root(), &review);
+    // Risk reads the snapshot's files, so it needs the same live checkout.
+    let risk = current
+        .then(|| crate::assess_change_risk(workspace.root(), &review.change_set, &impact).ok())
+        .flatten();
     let superseded_by = later_review_of_same_base(workspace, &*store, &review)?;
     Ok(ReviewDetail {
         review,
         findings,
         impact,
+        risk,
         superseded_by,
     })
 }
@@ -502,11 +510,12 @@ pub fn review_detail(workspace: &Workspace, review_id: &str) -> Result<ReviewDet
 /// Impact for a saved review. Impact is computed from source, so it is only
 /// available while the checkout still matches the reviewed snapshot; otherwise
 /// the assessment is empty and says why.
-fn current_impact(root: &Path, review: &ReviewResult) -> crate::ImpactAssessment {
+/// The flag is true when the impact was computed from a checkout matching the snapshot.
+fn current_impact(root: &Path, review: &ReviewResult) -> (crate::ImpactAssessment, bool) {
     let limitation = match crate::capture_current_change_set(root, &review.change_set) {
         Ok(current) if current.digest == review.snapshot_id => {
             match crate::analyze_impact(root, &review.change_set) {
-                Ok(impact) => return impact,
+                Ok(impact) => return (impact, true),
                 Err(error) => {
                     format!("saved review is available, but impact analysis failed: {error}")
                 }
@@ -515,7 +524,7 @@ fn current_impact(root: &Path, review: &ReviewResult) -> crate::ImpactAssessment
         Ok(_) => "current checkout differs from saved review snapshot; impact is unavailable for this historical review".into(),
         Err(error) => format!("saved review is available, but impact could not be recomputed from the current checkout: {error}"),
     };
-    crate::ImpactAssessment {
+    let unavailable = crate::ImpactAssessment {
         schema_version: crate::impact::IMPACT_SCHEMA_VERSION,
         snapshot_id: review.snapshot_id.clone(),
         coverage_complete: false,
@@ -530,7 +539,8 @@ fn current_impact(root: &Path, review: &ReviewResult) -> crate::ImpactAssessment
         groups: Vec::new(),
         paths: Vec::new(),
         limitations: vec![limitation],
-    }
+    };
+    (unavailable, false)
 }
 
 /// `local-review-analytics-v10`
@@ -1101,6 +1111,14 @@ impl ChangeTarget {
 pub fn impact(workspace: &Workspace, target: ChangeTarget) -> Result<crate::ImpactAssessment> {
     let change_set = target.change_set(workspace)?;
     crate::analyze_impact(workspace.root(), &change_set).map_err(anyhow::Error::msg)
+}
+
+/// `change-risk-v1`: the change's risk tier with every measured factor.
+pub fn change_risk(workspace: &Workspace, target: ChangeTarget) -> Result<crate::ChangeRisk> {
+    let change_set = target.change_set(workspace)?;
+    let impact =
+        crate::analyze_impact(workspace.root(), &change_set).map_err(anyhow::Error::msg)?;
+    crate::assess_change_risk(workspace.root(), &change_set, &impact).map_err(anyhow::Error::msg)
 }
 
 /// Trace saved work-item criteria to the review's changes. Impact candidates are

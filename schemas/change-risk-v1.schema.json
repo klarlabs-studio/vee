@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vee.klarlabs.de/schemas/change-risk-v1.schema.json",
+  "title": "Vee Change Risk v1",
+  "description": "A rule-based risk tier over measured change metrics. The tier is ordinal, not a calibrated probability, and never changes the gate.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "snapshot_id",
+    "tier",
+    "factors",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "snapshot_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tier": {
+      "enum": [
+        "low",
+        "elevated",
+        "high"
+      ],
+      "description": "low: no factor flagged; elevated: one or two; high: three or more."
+    },
+    "factors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "label",
+          "value",
+          "threshold",
+          "flagged",
+          "detail",
+          "basis"
+        ],
+        "properties": {
+          "id": {
+            "enum": [
+              "subsystems",
+              "files",
+              "lines",
+              "blast_radius",
+              "untested_source"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "value": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "threshold": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "flagged": {
+            "type": "boolean",
+            "description": "value >= threshold"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "basis": {
+            "type": "string",
+            "description": "The research the factor and its threshold come from."
+          }
+        }
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

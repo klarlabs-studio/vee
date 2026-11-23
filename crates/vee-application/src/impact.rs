@@ -253,7 +253,7 @@ pub fn analyze_impact(root: &Path, change_set: &ChangeSet) -> Result<ImpactAsses
 
 /// The repository review filter, or `None` when the configuration cannot be
 /// read (an unconfigured repository is analyzed unfiltered).
-fn impact_review_filter(root: &Path) -> Option<vee_core::ReviewConfig> {
+pub(crate) fn impact_review_filter(root: &Path) -> Option<vee_core::ReviewConfig> {
     crate::load_repository_config(root)
         .ok()
         .map(|config| config.review)
@@ -970,7 +970,7 @@ pub(crate) fn analyze_impact_with_typescript_server(
 }
 
 /// Whether impact analysis extracts declared symbols from files at `path`.
-fn declares_symbols(path: &str) -> bool {
+pub(crate) fn declares_symbols(path: &str) -> bool {
     is_vue_path(path)
         || path.ends_with(".rs")
         || path.ends_with(".go")

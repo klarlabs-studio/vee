@@ -657,6 +657,11 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         "Analyze files and tests likely affected by a saved review's snapshot, with evidence paths and uncertainty. Same document as `vee impact --review <id> --output json`.",
         |ws, input: ReviewInput| operations::impact(&ws, operations::ChangeTarget::Review(input.review_id)));
 
+    viewed_tool!(server, workspace, "assess_change_risk", "Assess change risk", read_only_tool(),
+        "change-risk-v1",
+        "Assess a saved review's change risk: a low, elevated, or high tier from measured factors (subsystems, files, lines, blast radius, untested source), each with its value, threshold, and research basis. Informational; it never changes the gate. Same document as `vee risk --review <id> --output json`.",
+        |ws, input: ReviewInput| operations::change_risk(&ws, operations::ChangeTarget::Review(input.review_id)));
+
     // MCP confines consumers beneath the server's root; the input bounds are shared.
     viewed_tool!(server, workspace, "analyze_cross_repository_impact", "Analyze cross-repository impact", read_only_tool(),
         "cross-repository-impact-v16",
