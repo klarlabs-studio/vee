@@ -822,8 +822,11 @@ enum ReviewsCommand {
     },
     /// Read several saved reviews together, such as one agent session's changes: each change's gate, risk, open findings, and approval eligibility, and one verdict.
     Session {
-        /// Saved review IDs (1 to 20), in the order to show them.
-        #[arg(long = "review", value_name = "REVIEW_ID", required = true)]
+        /// Saved reviews (1 to 20), in the order to show them: a review ID in
+        /// this repository, or `REPO:REVIEW_ID` for a review saved in another
+        /// checkout, with REPO relative to this repository's root (such as
+        /// `../api`).
+        #[arg(long = "review", value_name = "[REPO:]REVIEW_ID", required = true)]
         reviews: Vec<String>,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
@@ -2591,7 +2594,11 @@ fn run() -> Result<u8> {
                         std::path::PathBuf::from(&top),
                         crate::local_stores(),
                     );
-                    let session = operations::review_session(&workspace, &reviews)?;
+                    let session = operations::review_session(
+                        &workspace,
+                        &reviews,
+                        operations::RepositoryPaths::Relative,
+                    )?;
                     match output {
                         Output::Json => emit_json(&session)?,
                         Output::Text => print_view(&session)?,

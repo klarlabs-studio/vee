@@ -11622,3 +11622,112 @@ fn hosting_publish_refuses_an_approval_check_on_gerrit() {
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("publish without --approval"));
 }
+
+/// A session can combine reviews from several repositories: `REPO:REVIEW_ID`
+/// names a checkout relative to this repository's root, and each change is
+/// read from its own repository's store and configuration.
+#[cfg(unix)]
+#[test]
+fn review_session_combines_reviews_from_several_repositories() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let provider = directory.path().join("fake-provider");
+    fs::write(
+        &provider,
+        "#!/bin/sh\ninput=$(cat)\nif printf '%s' \"$input\" | grep -q 'value() -> u8 { 3 }'; then printf '%s' '{\"schema_version\":1,\"findings\":[{\"category\":\"correctness\",\"severity\":\"high\",\"confidence\":95,\"rationale\":\"Three is wrong.\",\"path\":\"src/lib.rs\",\"line\":1}]}'; else printf '%s' '{\"schema_version\":1,\"findings\":[]}'; fi\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&provider).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&provider, permissions).unwrap();
+    // Reviews one change to `value` in a new repository at `root`.
+    let reviewed_repository = |root: &std::path::Path, value: u8| -> String {
+        fs::create_dir_all(root.join("src")).unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "vee@example.invalid"]);
+        git(&["config", "user.name", "Vee test"]);
+        fs::write(root.join("src/lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();
+        fs::write(root.join("reviewer.md"), "Review changed code.\n").unwrap();
+        fs::write(
+            root.join(".vee.yaml"),
+            format!(
+                "version: 1\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\npolicy:\n  required_reviewers: [correctness]\n  block_severities: [high]\n  on_incomplete: block\n",
+                provider.display()
+            ),
+        )
+        .unwrap();
+        fs::write(root.join(".gitignore"), "/api/\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "baseline"]);
+        fs::write(
+            root.join("src/lib.rs"),
+            format!("pub fn value() -> u8 {{ {value} }}\n"),
+        )
+        .unwrap();
+        git(&["commit", "-qam", "change"]);
+        let review = vee()
+            .args(["review", "--commit", "HEAD", "--output", "json"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        let review: serde_json::Value = serde_json::from_slice(&review.stdout).unwrap();
+        review["review_id"].as_str().unwrap().to_owned()
+    };
+    let root = directory.path().join("app");
+    let blocking = reviewed_repository(&root, 3);
+    let passing = reviewed_repository(&root.join("api"), 2);
+
+    let session = |references: &[String]| {
+        let mut command = vee();
+        command.args(["reviews", "session", "--output", "json"]);
+        for reference in references {
+            command.args(["--review", reference.as_str()]);
+        }
+        command.current_dir(&root).output().unwrap()
+    };
+    let output = session(&[blocking.clone(), format!("api:{passing}")]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["verdict"], "block");
+    assert!(document["reviews"][0].get("repository").is_none());
+    assert_eq!(document["reviews"][0]["gate"], "block");
+    assert_eq!(document["reviews"][1]["repository"], "api");
+    assert_eq!(document["reviews"][1]["review_id"], passing.as_str());
+    assert_eq!(document["reviews"][1]["gate"], "pass");
+    assert_eq!(document["reviews"][1]["snapshot_current"], true);
+
+    // The other repository's review alone passes.
+    let output = session(&[format!("api:{passing}")]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // A review that exists only in the other repository is not found here.
+    let output = session(std::slice::from_ref(&passing));
+    assert_ne!(output.status.code(), Some(0));
+    // A path that is not a checkout root is a usage error.
+    let output = session(&[format!("src:{passing}")]);
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
