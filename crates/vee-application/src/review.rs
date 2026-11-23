@@ -909,6 +909,9 @@ pub fn run_review_with_provider_and_selection_context(
     }
     for (reviewer, result) in prepared.iter().zip(provider_results) {
         let result = result.unwrap_or_else(|| Err("provider execution did not complete".into()));
+        // A run that hit, or was skipped after, a provider usage or rate limit
+        // is recorded as such, so a rerun later is the obvious remedy.
+        let rate_limited = crate::providers::reports_usage_limit(&result);
         match result {
             Ok(provider_result) => {
                 accumulate_usage(
@@ -1020,6 +1023,12 @@ pub fn run_review_with_provider_and_selection_context(
                     duration_ms: None,
                     usage: None,
                 });
+            }
+        }
+        if rate_limited {
+            complete = false;
+            if let Some(outcome) = reviewer_outcomes[reviewer.index].as_mut() {
+                outcome.status = "rate_limited".into();
             }
         }
     }

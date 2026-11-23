@@ -1577,7 +1577,8 @@ fn review_progress_reports_each_reviewer_run_as_it_finishes() {
                 // Process adapters report a failed process as `Ok` with its exit code.
                 return Ok(ProviderResult {
                     stdout: Vec::new(),
-                    stderr: b"usage limit reached".to_vec(),
+                    // Not a usage limit, which would skip the provider's other runs.
+                    stderr: b"provider crashed".to_vec(),
                     exit_code: Some(1),
                     usage: None,
                 });
@@ -1669,4 +1670,114 @@ fn review_progress_reports_each_reviewer_run_as_it_finishes() {
     assert_eq!(reviewer(last, "passing").failed, 0);
     assert_eq!(reviewer(last, "failing").failed, 1);
     assert_eq!(reviewer(last, "exiting").failed, 1);
+}
+
+/// After a provider reports a usage or rate limit, its runs that have not
+/// started are skipped instead of each failing the same way; other
+/// providers keep running.
+#[test]
+fn a_provider_usage_limit_skips_its_remaining_runs() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct LimitedProvider {
+        limited_calls: AtomicUsize,
+        other_calls: AtomicUsize,
+    }
+    impl ReviewProvider for LimitedProvider {
+        fn execute(
+            &self,
+            request: &ProviderRequest,
+            _cancellation: Option<&tokio_util::sync::CancellationToken>,
+        ) -> Result<ProviderResult, String> {
+            if request.executable == "limited" {
+                self.limited_calls.fetch_add(1, Ordering::SeqCst);
+                return Ok(ProviderResult {
+                    stdout: Vec::new(),
+                    stderr: b"Claude AI usage limit reached|1795440000".to_vec(),
+                    exit_code: Some(1),
+                    usage: None,
+                });
+            }
+            self.other_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ProviderResult {
+                stdout: br#"{"schema_version":1,"findings":[]}"#.to_vec(),
+                stderr: Vec::new(),
+                exit_code: Some(0),
+                usage: None,
+            })
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    std::fs::write(root.join("lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();
+    for name in ["a", "b", "c", "d"] {
+        std::fs::write(
+            root.join(format!("{name}.md")),
+            format!("Reviewer {name}.\n"),
+        )
+        .unwrap();
+    }
+    git(&["add", "."]);
+    git(&["commit", "-qm", "initial"]);
+    std::fs::write(root.join("lib.rs"), "pub fn value() -> u8 { 2 }\n").unwrap();
+    // One worker, so runs start one after another.
+    std::fs::write(
+        root.join(".vee.yaml"),
+        "version: 1\nreview:\n  max_concurrency: 1\nproviders:\n  limited: { kind: cli, executable: limited }\n  other: { kind: cli, executable: other }\nreviewers:\n  a: { provider: limited, instructions_file: a.md }\n  b: { provider: limited, instructions_file: b.md }\n  c: { provider: limited, instructions_file: c.md }\n  d: { provider: other, instructions_file: d.md }\n",
+    )
+    .unwrap();
+    let config = RepositoryConfig::load(&root.join(".vee.yaml")).unwrap();
+    let snapshot = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
+    std::fs::create_dir_all(root.join(".vee")).unwrap();
+    let mut store = ReviewStore::open(&root.join(".vee/vee.sqlite")).unwrap();
+    let provider = LimitedProvider {
+        limited_calls: AtomicUsize::new(0),
+        other_calls: AtomicUsize::new(0),
+    };
+
+    let review = run_review_with_provider_and_selection_context(
+        root,
+        snapshot,
+        &config,
+        &mut store,
+        ReviewRunOptions {
+            provider_adapter: &provider,
+            requested_reviewers: None,
+            cancellation: None,
+            work_item: None,
+            work_item_token_env: None,
+            progress: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(provider.limited_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.other_calls.load(Ordering::SeqCst), 1);
+    let outcome = |id: &str| {
+        review
+            .reviewer_outcomes
+            .iter()
+            .find(|outcome| outcome.reviewer_id == id)
+            .unwrap()
+            .status
+            .clone()
+    };
+    assert_eq!(outcome("d"), "completed");
+    for id in ["a", "b", "c"] {
+        assert_eq!(outcome(id), "rate_limited", "{id}");
+    }
+    assert!(!review.analysis_complete);
 }

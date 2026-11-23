@@ -438,6 +438,10 @@ pub(crate) fn execute_prepared_reviewers(
     };
 
     let results = Mutex::new(vec![None; reviewers.len()]);
+    // Providers that reported a usage or rate limit in this review; their
+    // runs that have not started are skipped, since each would fail the same
+    // way after spending its own wait.
+    let limited = Mutex::new(std::collections::HashSet::<String>::new());
     let next = AtomicUsize::new(0);
     let worker_count = max_concurrency.min(reviewers.len());
     std::thread::scope(|scope| {
@@ -448,10 +452,27 @@ pub(crate) fn execute_prepared_reviewers(
                     break;
                 };
                 let started = std::time::Instant::now();
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    provider.execute(&reviewer.request, cancellation)
-                }))
-                .unwrap_or_else(|_| Err("provider adapter panicked during execution".into()));
+                let skip = limited
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .contains(&reviewer.provider_id);
+                let result = if skip {
+                    Err(format!(
+                        "skipped after provider {} reported a usage or rate limit earlier in this review",
+                        reviewer.provider_id
+                    ))
+                } else {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        provider.execute(&reviewer.request, cancellation)
+                    }))
+                    .unwrap_or_else(|_| Err("provider adapter panicked during execution".into()))
+                };
+                if !skip && reports_usage_limit(&result) {
+                    limited
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .insert(reviewer.provider_id.clone());
+                }
                 let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 // Process adapters return `Ok` with the exit code of a failed
                 // provider process; only a zero exit counts as a successful run.
@@ -465,6 +486,36 @@ pub(crate) fn execute_prepared_reviewers(
     results
         .into_inner()
         .unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// Whether a failed provider run reports a usage, quota, or rate limit: an
+/// HTTP 429 from an API adapter, or the limit message an agent CLI prints
+/// when it exits non-zero. A successful run never counts.
+pub(crate) fn reports_usage_limit(result: &Result<ProviderResult, String>) -> bool {
+    const MARKERS: &[&str] = &[
+        "usage limit",
+        "rate limit",
+        "rate-limit",
+        "quota exceeded",
+        "exceeded your current quota",
+        "too many requests",
+        "http 429",
+    ];
+    let mentions = |text: &str| {
+        let text = text.to_ascii_lowercase();
+        MARKERS.iter().any(|marker| text.contains(marker))
+    };
+    match result {
+        Err(message) => mentions(message),
+        Ok(output) if output.exit_code != Some(0) => {
+            // The limit message is short and printed last; read only the tail.
+            let tail = |bytes: &[u8]| {
+                String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(4096)..]).into_owned()
+            };
+            mentions(&tail(&output.stderr)) || mentions(&tail(&output.stdout))
+        }
+        Ok(_) => false,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
