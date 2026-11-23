@@ -618,14 +618,32 @@ const reviewElapsed = computed(() => {
   const seconds = Math.max(0, Math.floor((clock.value - reviewStartedAt.value) / 1000))
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
 })
-const stopReviewClock = () => { clearInterval(reviewClock); reviewClock = null }
+// Live reviewer progress of the running review, polled once a second.
+const reviewProgress = ref(null)
+let progressRequest = null
+function pollReviewProgress() {
+  if (progressRequest) return
+  progressRequest = api('/api/reviews/progress')
+    .then(report => { if (loading.value) reviewProgress.value = report.reviews?.at(-1) || null })
+    .catch(() => {})
+    .finally(() => { progressRequest = null })
+}
+const reviewerState = reviewer => reviewer.finished < reviewer.runs ? 'running' : reviewer.failed ? 'failed' : 'done'
+const reviewerStateIcon = { running: '◌', failed: '✖', done: '✓' }
+const progressSummary = computed(() => {
+  const reviewers = reviewProgress.value?.reviewers || []
+  if (!reviewers.length) return reviewProgress.value ? 'Preparing review context…' : ''
+  const done = reviewers.filter(reviewer => reviewerState(reviewer) !== 'running').length
+  return `${done} of ${reviewers.length} reviewers finished`
+})
+const stopReviewClock = () => { clearInterval(reviewClock); reviewClock = null; reviewProgress.value = null }
 onBeforeUnmount(stopReviewClock)
 async function startReview() {
   historyRequestId++
   detailRequestId++
   loading.value = true; error.value = ''; closeFinding()
   reviewStartedAt.value = clock.value = Date.now()
-  reviewClock = setInterval(() => { clock.value = Date.now() }, 1000)
+  reviewClock = setInterval(() => { clock.value = Date.now(); pollReviewProgress() }, 1000)
   try {
     const request = { scope: scope.value, reviewer_ids: [] }
     if (scope.value === 'base' && base.value.trim()) request.base = base.value.trim()
@@ -895,7 +913,7 @@ onMounted(async () => {
 
       <template v-else>
         <section class="launch-card" :class="{ running: loading }">
-          <div class="launch-copy"><div class="launch-icon">⌁</div><div><strong>{{ loading ? `Reviewing ${scopeLabels[scope]}…` : 'Start a local review' }}</strong><small role="status">{{ loading ? (selected ? 'Reviewers run in parallel. The previous review stays visible until this one finishes.' : 'Reviewers run in parallel; this can take a few minutes.') : 'Capture changes and evaluate the repository policy.' }}</small><small v-if="loading" class="review-elapsed" aria-hidden="true">{{ reviewElapsed }} elapsed</small></div></div>
+          <div class="launch-copy"><div class="launch-icon">⌁</div><div><strong>{{ loading ? `Reviewing ${scopeLabels[scope]}…` : 'Start a local review' }}</strong><small role="status">{{ loading ? (selected ? 'Reviewers run in parallel. The previous review stays visible until this one finishes.' : 'Reviewers run in parallel; this can take a few minutes.') : 'Capture changes and evaluate the repository policy.' }}</small><small v-if="loading" class="review-elapsed" aria-hidden="true">{{ reviewElapsed }} elapsed</small><small v-if="loading && progressSummary" class="review-progress-summary" role="status">{{ progressSummary }}</small><ul v-if="loading && reviewProgress?.reviewers?.length" class="reviewer-progress" aria-label="Reviewer progress"><li v-for="reviewer in reviewProgress.reviewers" :key="reviewer.reviewer_id" :class="reviewerState(reviewer)"><span aria-hidden="true">{{ reviewerStateIcon[reviewerState(reviewer)] }}</span> {{ reviewer.reviewer_id }}<span class="reviewer-progress-detail">{{ reviewerState(reviewer) === 'running' ? (reviewer.runs > 1 ? `running · ${reviewer.finished}/${reviewer.runs} runs` : 'running') : reviewerState(reviewer) === 'failed' ? `failed${reviewer.runs > 1 ? ` · ${reviewer.failed}/${reviewer.runs} runs` : ''}` : reviewer.cached === reviewer.runs ? 'cached' : 'done' }}</span></li></ul></div></div>
           <div class="launch-controls"><select v-model="scope" aria-label="Change scope"><option value="base">Branch changes</option><option value="staged">Staged changes</option><option value="working_tree">Working tree</option></select><input v-if="scope === 'base'" v-model="base" aria-label="Base branch" placeholder="Base ref"/><button class="primary" :class="{ quiet: selected }" :disabled="loading || initializing" @click="startReview">{{ initializing ? 'Loading…' : loading ? 'Reviewing…' : 'Run review' }} <span>→</span></button></div>
         </section>
 

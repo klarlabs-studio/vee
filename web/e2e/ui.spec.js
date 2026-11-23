@@ -139,6 +139,7 @@ test.beforeEach(async ({ page }) => {
       latestDetail.findings = [{ ...latestDetail.findings[0], status: update.status, status_reason: update.reason }]
       body = { schema_version: 1, finding_id: 'FIND-001', ...update, note: 'Lifecycle status is audit metadata. Use the waiver workflow for a scoped gate exception.' }
     }
+    else if (url.pathname === '/api/reviews/progress') body = { schema_version: 1, reviews: [] }
     else if (url.pathname === '/api/findings/FIND-001/task') body = findingTask
     else if (url.pathname === '/api/reviews/rev_latest') body = latestDetail
     else if (url.pathname === '/api/reviews/rev_prior') body = { ...detail(prior), superseded_by: { review_id: 'rev_latest', created_at: '2026-11-14 09:00:00', outdated_finding_ids: ['FIND-001'] } }
@@ -716,6 +717,43 @@ test('saved-review and Insights drilldown links are disabled while a new review 
   await expect(findingReview).toBeDisabled()
   releaseReview()
   await expect(page.getByRole('button', { name: /rev_started/ })).toBeVisible()
+})
+
+test('a running review shows each reviewer as it finishes', async ({ page }) => {
+  let releaseReview
+  let reviewRequested
+  const reviewGate = new Promise(resolve => { releaseReview = resolve })
+  const requestSeen = new Promise(resolve => { reviewRequested = resolve })
+  let reviewers = []
+  await page.route('**/api/reviews', async route => {
+    if (route.request().method() === 'POST') {
+      reviewRequested()
+      await reviewGate
+    }
+    await route.fallback()
+  })
+  await page.route('**/api/reviews/progress', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ schema_version: 1, reviews: [{ phase: reviewers.length ? 'reviewing' : 'preparing', elapsed_ms: 1000, reviewers }] }),
+  }))
+  await page.goto('/')
+  await page.getByRole('button', { name: /Run review/ }).click()
+  await requestSeen
+  await expect(page.getByRole('status').filter({ hasText: 'Preparing review context…' })).toBeVisible()
+  reviewers = [
+    { reviewer_id: 'correctness', runs: 3, finished: 3, failed: 0, cached: 0 },
+    { reviewer_id: 'security', runs: 1, finished: 0, failed: 0, cached: 0 },
+    { reviewer_id: 'style', runs: 1, finished: 1, failed: 1, cached: 0 },
+  ]
+  const progress = page.getByRole('list', { name: 'Reviewer progress' })
+  await expect(page.getByRole('status').filter({ hasText: '2 of 3 reviewers finished' })).toBeVisible()
+  await expect(progress.getByRole('listitem').filter({ hasText: 'correctness' })).toContainText('done')
+  await expect(progress.getByRole('listitem').filter({ hasText: 'security' })).toContainText('running')
+  await expect(progress.getByRole('listitem').filter({ hasText: 'style' })).toContainText('failed')
+  releaseReview()
+  await expect(page.getByText('Policy satisfied')).toBeVisible()
+  await expect(progress).toBeHidden()
 })
 
 test('a running review keeps the previous review visible and shows elapsed time', async ({ page }) => {

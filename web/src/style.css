@@ -45,3 +45,4 @@
 /* Drawer metadata on the page's type scale. */
 .drawer-head small,.drawer-section>small,.evidence-item small{font-size:12px;color:#9a9da6}
 .chart-empty{min-height:110px}
+.reviewer-progress{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px}.reviewer-progress li{display:flex;align-items:center;gap:6px;color:#d6d8de}.reviewer-progress li.done>span:first-child{color:#a8dfc0}.reviewer-progress li.failed>span:first-child{color:#ff9b9b}.reviewer-progress li.running>span:first-child{color:#9a9da6}.reviewer-progress-detail{color:#9a9da6;font-family:'DM Mono',monospace;font-size:11px}
