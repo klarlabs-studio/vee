@@ -91,11 +91,21 @@ pub fn merge_base(path: &Path, base_ref: &str) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
-/// The paths each of the newest `limit` commits reachable from `revision`
-/// changed, newest first, following first parents only and without rename
-/// detection. Merge commits contribute no paths. Bound to `revision`, the
-/// result is the same on every run.
-pub fn commit_paths(root: &Path, revision: &str, limit: usize) -> Result<Vec<Vec<String>>, String> {
+/// One commit in first-parent history: its author's email and the paths it changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryCommit {
+    pub author_email: String,
+    pub paths: Vec<String>,
+}
+
+/// The newest `limit` commits reachable from `revision`, newest first,
+/// following first parents only and without rename detection. Merge commits
+/// contribute no paths. Bound to `revision`, the result is the same on every run.
+pub fn commit_history(
+    root: &Path,
+    revision: &str,
+    limit: usize,
+) -> Result<Vec<HistoryCommit>, String> {
     validate_revision(revision)?;
     let limit = format!("--max-count={limit}");
     let output = git(
@@ -105,7 +115,7 @@ pub fn commit_paths(root: &Path, revision: &str, limit: usize) -> Result<Vec<Vec
             "-z",
             "--first-parent",
             "--no-renames",
-            "--format=%x01",
+            "--format=%x01%ae%x02",
             "--name-only",
             &limit,
             revision,
@@ -114,15 +124,33 @@ pub fn commit_paths(root: &Path, revision: &str, limit: usize) -> Result<Vec<Vec
     )?;
     let mut commits = Vec::new();
     for record in output.split(|byte| *byte == 0x01).skip(1) {
-        let paths = record
+        let split = record
+            .iter()
+            .position(|byte| *byte == 0x02)
+            .ok_or("unexpected git log record")?;
+        let author_email =
+            String::from_utf8(record[..split].to_vec()).map_err(|error| error.to_string())?;
+        let paths = record[split + 1..]
             .split(|byte| *byte == 0)
             .map(|path| path.strip_prefix(b"\n").unwrap_or(path))
             .filter(|path| !path.is_empty())
             .map(|path| String::from_utf8(path.to_vec()).map_err(|error| error.to_string()))
             .collect::<Result<Vec<_>, _>>()?;
-        commits.push(paths);
+        commits.push(HistoryCommit {
+            author_email,
+            paths,
+        });
     }
     Ok(commits)
+}
+
+/// The paths each of the newest `limit` commits reachable from `revision`
+/// changed (see [`commit_history`]).
+pub fn commit_paths(root: &Path, revision: &str, limit: usize) -> Result<Vec<Vec<String>>, String> {
+    Ok(commit_history(root, revision, limit)?
+        .into_iter()
+        .map(|commit| commit.paths)
+        .collect())
 }
 
 /// The author name and email of every commit in `base..head`, oldest first.
@@ -1289,6 +1317,10 @@ mod tests {
             ]
         );
         assert_eq!(super::commit_paths(root, "HEAD", 1).unwrap().len(), 1);
+        assert_eq!(
+            super::commit_history(root, "HEAD", 1).unwrap()[0].author_email,
+            "vee@example.invalid"
+        );
         let first = String::from_utf8(
             std::process::Command::new("git")
                 .arg("-C")
