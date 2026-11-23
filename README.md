@@ -355,8 +355,6 @@ Run `vee mcp serve --transport stdio` inside a Git checkout to expose review ope
 
 Every tool declares a title and MCP safety annotations so clients can auto-approve safe calls and confirm the rest. Read-only tools (`list_*`, `get_*`, `search_*`, `analyze_*`, `diagnose_verification`, `acceptance_traceability`, `rule_effectiveness`) set `readOnlyHint: true`. Tools that persist local records set `readOnlyHint: false`; `revoke_rule_approval` is marked destructive, and `review_changes`, `start_review`, and `evaluate_gate` are marked open-world because they may call network-backed reviewers or hosting APIs, depending on `.vee.yaml`. Input fields are documented in each tool's schema, and enumerated values (`scope`, `severity`, `status`, `label`) are declared as JSON Schema enums. Tools that share an operation with the CLI return exactly the document that the matching `vee ... --output json` command prints, and declare the published schema from `schemas/` as their `outputSchema`; the server validates every structured result against it and also returns it as a text block. Both transports call one shared operations layer, so validation rules, error messages, and staleness behavior are identical. The server sends `instructions` describing the review → investigate → verify → gate loop. Tool work runs on blocking worker threads, and a client cancellation of `review_changes` stops its reviewer subprocesses.
 
-### Coding-agent skills
-
 ### Plugins for Claude Code and Codex
 
 `plugins/vee/` packages Vee's MCP server and its six skills as one plugin for both agents. The plugin starts `vee mcp serve --transport stdio`, so install the `vee` binary on `PATH` first.
@@ -365,6 +363,8 @@ Every tool declares a title and MCP safety annotations so clients can auto-appro
 - **Codex:** the repository marketplace at `.agents/plugins/marketplace.json` lists the plugin under Developer Tools. Its root `plugin.json` and `mcp.json` follow the portable Agent Plugins 1.0 format.
 
 A test keeps the plugin's skills identical to the ones bundled in the binary, and its version equal to the crate version. `claude plugin validate .` checks the Claude Code marketplace.
+
+### Coding-agent skills
 
 `vee skills list` lists bundled portable agent skills. Run `vee skills install` from a checkout to install six skills under `.agents/skills/`: codebase context, standards retrieval, independent local review, finding investigation, finding resolution, and requirement traceability. Installation refuses existing files; `--force` replaces only the known `SKILL.md` targets. It refuses symlinked destination directories/files and writes only inside the current checkout. The skills use Vee CLI/MCP contracts and retain the rule that the coding agent—not Vee—makes authorized edits. They are plain Markdown and can be adapted for other agent skill-directory conventions.
 

@@ -11240,13 +11240,30 @@ fn agent_plugins_match_the_bundled_skills_version_and_mcp_command() {
         .collect();
     packaged.sort();
     assert_eq!(names, packaged, "plugin skills differ from bundled skills");
-    for name in &names {
-        assert_eq!(
-            fs::read_to_string(bundled.join(name).join("SKILL.md")).unwrap(),
-            fs::read_to_string(plugin.join("skills").join(name).join("SKILL.md")).unwrap(),
-            "{name:?}: copy crates/vee-cli/skills into plugins/vee/skills"
-        );
+    // Every file of every skill, not only SKILL.md.
+    fn files(root: &std::path::Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        let mut found = std::collections::BTreeMap::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(&directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    found.insert(
+                        path.strip_prefix(root).unwrap().to_path_buf(),
+                        fs::read(&path).unwrap(),
+                    );
+                }
+            }
+        }
+        found
     }
+    assert_eq!(
+        files(&bundled),
+        files(&plugin.join("skills")),
+        "copy crates/vee-cli/skills into plugins/vee/skills"
+    );
     let json = |path: std::path::PathBuf| -> serde_json::Value {
         serde_json::from_str(&fs::read_to_string(&path).unwrap())
             .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
@@ -11259,9 +11276,14 @@ fn agent_plugins_match_the_bundled_skills_version_and_mcp_command() {
     );
     let portable = &json(plugin.join("mcp.json"))["mcpServers"]["vee"];
     let claude = &json(plugin.join(".mcp.json"))["mcpServers"]["vee"];
+    // One definition in both files: differing definitions of a server name
+    // look like server shadowing to MCP scanners (OWASP MCP09).
+    assert_eq!(
+        portable, claude,
+        "mcp.json and .mcp.json must define vee identically"
+    );
     assert_eq!(portable["type"], "stdio");
-    assert_eq!(portable["command"], claude["command"]);
-    assert_eq!(portable["args"], claude["args"]);
+    assert_eq!(portable["command"], "vee", "the installed binary's name");
     let args: Vec<String> = serde_json::from_value(claude["args"].clone()).unwrap();
     let mut help_args = args.clone();
     help_args.push("--help".into());
