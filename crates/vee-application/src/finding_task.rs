@@ -329,11 +329,16 @@ fn impact_context(
                 .collect();
             let capped = paths.len() > MAX_IMPACT_PATHS;
             paths.truncate(MAX_IMPACT_PATHS);
-            let mut limitations = assessment.limitations;
-            if capped {
-                limitations.push("Related impact paths were capped at 50.".into());
+            // The analyzers' general limitations belong to the impact report;
+            // repeating them in every task buried the notes about this finding.
+            let mut notes = Vec::new();
+            if !assessment.coverage_complete {
+                notes.push("Impact coverage is incomplete for this snapshot; `vee impact` lists why.");
             }
-            let note = (!limitations.is_empty()).then(|| limitations.join(" "));
+            if capped {
+                notes.push("Related impact paths were capped at 50.");
+            }
+            let note = (!notes.is_empty()).then(|| notes.join(" "));
             (paths, Some(assessment.coverage_complete), note)
         }
         Err(error) => (

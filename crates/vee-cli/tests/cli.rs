@@ -3084,6 +3084,10 @@ fn finding_task_exports_bounded_snapshot_context_and_reports_staleness() {
         .as_str()
         .unwrap()
         .contains("risky_value"));
+    // General analyzer limitations stay in the impact report, not every task.
+    assert!(task["context_note"]
+        .as_str()
+        .is_none_or(|note| !note.contains("syntax-derived")));
     // The flagged line is part of the change, so the task carries its hunk.
     let hunk_lines = task["diff_hunk"]["lines"].as_array().unwrap();
     assert!(hunk_lines.contains(&serde_json::json!({
