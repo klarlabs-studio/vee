@@ -349,7 +349,7 @@ struct StandardsInput {
 #[serde(deny_unknown_fields)]
 struct ReviewSessionInput {
     /// Saved review IDs to read together (1 to 20, no repeats), in display order.
-    #[schemars(length(min = 1, max = 20))]
+    #[schemars(length(min = 1, max = 20), extend("uniqueItems" = true))]
     review_ids: Vec<String>,
 }
 

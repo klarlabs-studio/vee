@@ -40,7 +40,8 @@ stacked review was found.
 - `incomplete` otherwise.
 
 Like the gate, the command exits 0 on `pass`, 1 on `block`, and 2 on
-`incomplete`; a repeated review ID is a usage error. The MCP text and the CLI view are the
+`incomplete`; a repeated review ID is a usage error, which exits 3 like
+every other usage error. The MCP text and the CLI view are the
 same Markdown and terminal rendering, so a session can be exported as text.
 
 ## Consequences

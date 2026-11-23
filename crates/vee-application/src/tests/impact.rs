@@ -1786,3 +1786,23 @@ fn files_that_repeatedly_change_together_are_co_change_edges() {
         .any(|analyzer| analyzer.id == "git-co-change" && analyzer.status == "used"));
     assert_eq!(impact.schema_version, 4);
 }
+
+#[test]
+fn documentation_paths_are_prose_not_build_manifests() {
+    for path in [
+        "README.md",
+        "docs/guide.html",
+        "web/docs/intro.rst",
+        "api/NOTES.adoc",
+    ] {
+        assert!(is_documentation_path(path), "{path}");
+    }
+    for path in [
+        "CMakeLists.txt",
+        "requirements.txt",
+        "src/lib.rs",
+        "schemas/api.json",
+    ] {
+        assert!(!is_documentation_path(path), "{path}");
+    }
+}

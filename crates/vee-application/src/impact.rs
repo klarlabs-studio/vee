@@ -3343,14 +3343,16 @@ pub(crate) fn is_test_context_attribute(attributes: &[syn::Attribute]) -> bool {
         })
 }
 
-/// Prose documentation: Markdown and text files, and anything under a
-/// `docs/` directory. Documentation is updated alongside features, so it says
+/// Prose documentation: Markdown, reStructuredText, and AsciiDoc files, and
+/// anything under a `docs/` directory. Plain `.txt` is not included, since it
+/// also names build and dependency manifests (`CMakeLists.txt`,
+/// `requirements.txt`) that do couple to code. Documentation is updated alongside features, so it says
 /// nothing about code coupling or code diffusion.
 pub(crate) fn is_documentation_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     lower.starts_with("docs/")
         || lower.contains("/docs/")
-        || [".md", ".mdx", ".markdown", ".rst", ".adoc", ".txt"]
+        || [".md", ".mdx", ".markdown", ".rst", ".adoc"]
             .iter()
             .any(|extension| lower.ends_with(extension))
 }

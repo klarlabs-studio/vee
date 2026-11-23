@@ -10259,6 +10259,15 @@ fn mcp_tools_declare_titles_safety_annotations_and_documented_inputs() {
         problems.join("\n")
     );
 
+    // A session's review IDs are bounded and unique, as documented.
+    let session_ids = &tools
+        .iter()
+        .find(|tool| tool["name"] == "review_session")
+        .unwrap()["inputSchema"]["properties"]["review_ids"];
+    assert_eq!(session_ids["minItems"], 1);
+    assert_eq!(session_ids["maxItems"], 20);
+    assert_eq!(session_ids["uniqueItems"], true);
+
     let enum_values = |tool: &str, property: &str| -> Vec<String> {
         let tool = tools.iter().find(|item| item["name"] == tool).unwrap();
         let schema = &tool["inputSchema"];

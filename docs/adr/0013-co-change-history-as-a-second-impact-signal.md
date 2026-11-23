@@ -55,11 +55,13 @@ references, a union with labelled provenance.
 ## Consequences
 
 **Effect on this repository:**
-- With 19 usable commits, the rules keep 4 edges across 4 recent commits.
-  Examples: `App.vue` with `style.css`, and `tests/review.rs` with
-  `review.rs`.
-- Hub files that changed with most commits, such as `README.md` and
-  `vee-core/src/lib.rs`, are dropped.
+- Documentation is removed before any threshold applies, so `README.md`
+  never appears.
+- The lift rule then drops code hub files that change with most commits,
+  such as `vee-core/src/lib.rs`.
+- On five recent commits the rules keep 0–4 edges each, 8 in total. Examples:
+  `App.vue` with `style.css` (3 of 4 commits), and `operations.rs` with
+  `local_analytics.rs`.
 
 **Limits:**
 - A young repository gets few or no edges. That is the correct answer when
