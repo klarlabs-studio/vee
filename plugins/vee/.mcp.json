@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "vee": {
+      "command": "vee",
+      "args": ["mcp", "serve", "--transport", "stdio"]
+    }
+  }
+}

@@ -11220,3 +11220,54 @@ fn gate_approval_layers_snapshot_path_author_risk_and_gate_guards() {
     );
     assert_eq!(stage(&guarded, "gate")["passed"], true);
 }
+
+/// The Claude Code and Codex plugins package the bundled skills and the MCP
+/// server; they must not drift from what the binary ships.
+#[test]
+fn agent_plugins_match_the_bundled_skills_version_and_mcp_command() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let plugin = repo.join("plugins/vee");
+    let bundled = repo.join("crates/vee-cli/skills");
+    let mut names: Vec<_> = fs::read_dir(&bundled)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    names.sort();
+    let mut packaged: Vec<_> = fs::read_dir(plugin.join("skills"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    packaged.sort();
+    assert_eq!(names, packaged, "plugin skills differ from bundled skills");
+    for name in &names {
+        assert_eq!(
+            fs::read_to_string(bundled.join(name).join("SKILL.md")).unwrap(),
+            fs::read_to_string(plugin.join("skills").join(name).join("SKILL.md")).unwrap(),
+            "{name:?}: copy crates/vee-cli/skills into plugins/vee/skills"
+        );
+    }
+    let json = |path: std::path::PathBuf| -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(&path).unwrap())
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+    };
+    let version = env!("CARGO_PKG_VERSION");
+    assert_eq!(json(plugin.join("plugin.json"))["version"], version);
+    assert_eq!(json(plugin.join(".claude-plugin/plugin.json"))["version"], version);
+    let portable = &json(plugin.join("mcp.json"))["mcpServers"]["vee"];
+    let claude = &json(plugin.join(".mcp.json"))["mcpServers"]["vee"];
+    assert_eq!(portable["type"], "stdio");
+    assert_eq!(portable["command"], claude["command"]);
+    assert_eq!(portable["args"], claude["args"]);
+    let args: Vec<String> = serde_json::from_value(claude["args"].clone()).unwrap();
+    let mut help_args = args.clone();
+    help_args.push("--help".into());
+    let help = vee().args(&help_args).output().unwrap();
+    assert!(help.status.success(), "the plugin's MCP command must be valid: {args:?}");
+    for marketplace in [
+        ".claude-plugin/marketplace.json",
+        ".agents/plugins/marketplace.json",
+    ] {
+        let entry = &json(repo.join(marketplace))["plugins"][0];
+        assert_eq!(entry["name"], "vee", "{marketplace}");
+    }
+}
