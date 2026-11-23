@@ -1487,3 +1487,215 @@ fn impact_skips_paths_outside_the_repository_review_filter() {
         .iter()
         .any(|limitation| limitation.contains("review filter")));
 }
+
+fn impact_fixture(
+    files: &[(&str, &str)],
+    changes: &[(&str, &str)],
+) -> (tempfile::TempDir, ImpactAssessment) {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    for (path, contents) in files {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+    git(&["add", "."]);
+    git(&["commit", "-qm", "baseline"]);
+    for (path, contents) in changes {
+        std::fs::write(root.join(path), contents).unwrap();
+    }
+    let change_set = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
+    let impact = analyze_impact(root, &change_set).unwrap();
+    (directory, impact)
+}
+
+fn affected_by(impact: &ImpactAssessment, symbol: &str) -> std::collections::BTreeSet<String> {
+    impact
+        .paths
+        .iter()
+        .filter(|edge| edge.symbol == symbol)
+        .map(|edge| edge.affected_path.clone())
+        .collect()
+}
+
+/// Generic names such as `new`, `report`, or `review` are only references
+/// when they can name the changed declaration: a local variable, another
+/// type's `new`, or a method call on a type the file never mentions is not.
+#[test]
+fn rust_references_match_the_changed_declaration_kind_and_owner() {
+    let progress = |body: &str| {
+        format!(
+            "pub trait Sink {{ fn report(&self) {{ {body} }} }}\n\
+             pub struct Tracker;\n\
+             impl Tracker {{ pub fn new() -> Self {{ {body}; Tracker }} }}\n\
+             pub fn review() {{ {body} }}\n"
+        )
+    };
+    let (_directory, impact) = impact_fixture(
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname='app'\nversion='0.1.0'\nedition='2021'\n",
+            ),
+            (
+                "src/lib.rs",
+                "pub mod progress;\npub mod caller;\npub mod noise;\npub mod shadow;\npub mod review { pub fn helper() {} }\npub use review::helper;\n",
+            ),
+            ("src/progress.rs", &progress("")),
+            (
+                "src/caller.rs",
+                "use crate::progress::{Sink, Tracker};\n\
+                 pub fn call(sink: &dyn Sink) {\n\
+                     sink.report();\n\
+                     let _tracker = Tracker::new();\n\
+                     crate::progress::review();\n\
+                 }\n",
+            ),
+            (
+                "src/noise.rs",
+                "struct Other;\n\
+                 impl Other { fn new() -> Self { Other } fn report(&self) {} }\n\
+                 pub fn noise(review: u8) -> u8 {\n\
+                     let other = Other::new();\n\
+                     other.report();\n\
+                     let total = review + 1;\n\
+                     let review = total;\n\
+                     println!(\"{}\", review);\n\
+                     review\n\
+                 }\n\
+                 pub mod review_module { pub use super::*; }\n\
+                 pub fn macro_locals() { vec![{ let review = 1; review }]; }\n",
+            ),
+            (
+                "src/shadow.rs",
+                "use crate::progress::*;\nfn review() {}\npub fn shadowed() { review(); }\n",
+            ),
+        ],
+        &[("src/progress.rs", &progress("let _ = 1;"))],
+    );
+
+    let caller = std::collections::BTreeSet::from(["src/caller.rs".to_owned()]);
+    assert_eq!(
+        affected_by(&impact, "report"),
+        caller,
+        "{:#?}",
+        impact.paths
+    );
+    assert_eq!(affected_by(&impact, "new"), caller, "{:#?}", impact.paths);
+    assert_eq!(
+        affected_by(&impact, "review"),
+        caller,
+        "{:#?}",
+        impact.paths
+    );
+}
+
+/// Locals inside JavaScript callbacks are not declarations other files can
+/// reference, and a changed file is not impact of itself.
+#[test]
+fn javascript_changes_report_only_top_level_symbols_and_no_self_edges() {
+    let spec = |label: &str| {
+        format!(
+            "export function openReview(page) {{ return page.goto('/'); }}\n\
+             test('{label}', async ({{ page }}) => {{\n\
+                 const report = await openReview(page);\n\
+                 let drilldown = report;\n\
+                 expect(drilldown).toBeTruthy();\n\
+             }});\n"
+        )
+    };
+    let (_directory, impact) = impact_fixture(
+        &[
+            ("web/e2e/ui.spec.js", &spec("before")),
+            (
+                "web/e2e/other.spec.js",
+                "import { openReview } from './ui.spec.js';\nconst report = 1;\n",
+            ),
+        ],
+        &[(
+            "web/e2e/ui.spec.js",
+            &spec("after").replace("goto('/')", "goto('/x')"),
+        )],
+    );
+
+    assert_eq!(
+        impact.changed_symbols,
+        vec!["openReview".to_owned()],
+        "{:#?}",
+        impact.paths
+    );
+    assert!(
+        impact
+            .paths
+            .iter()
+            .all(|edge| edge.source_path != edge.affected_path),
+        "{:#?}",
+        impact.paths
+    );
+    assert_eq!(
+        affected_by(&impact, "openReview"),
+        std::collections::BTreeSet::from(["web/e2e/other.spec.js".to_owned()])
+    );
+}
+
+/// Vue single-file components import TypeScript and JavaScript modules from
+/// their script blocks, and are themselves imported by component name.
+#[test]
+fn vue_script_blocks_are_impact_candidates_with_original_line_numbers() {
+    let component = "<template>\n  <ReviewList :items=\"items\" />\n</template>\n\
+                     <script setup>\n\
+                     import { fetchReviews } from './api.js'\n\
+                     import ReviewList from './ReviewList.vue'\n\
+                     const items = await fetchReviews()\n\
+                     </script>\n";
+    let (_directory, impact) = impact_fixture(
+        &[
+            (
+                "web/src/api.js",
+                "export async function fetchReviews() { return [] }\n",
+            ),
+            ("web/src/App.vue", component),
+            (
+                "web/src/ReviewList.vue",
+                "<template><ul></ul></template>\n<script setup>\ndefineProps(['items'])\n</script>\n",
+            ),
+        ],
+        &[
+            (
+                "web/src/api.js",
+                "export async function fetchReviews() { return [1] }\n",
+            ),
+            (
+                "web/src/ReviewList.vue",
+                "<template><ol></ol></template>\n<script setup>\ndefineProps(['items'])\n</script>\n",
+            ),
+        ],
+    );
+
+    let edges: Vec<_> = impact
+        .paths
+        .iter()
+        .filter(|edge| edge.affected_path == "web/src/App.vue")
+        .map(|edge| (edge.symbol.as_str(), edge.evidence_line))
+        .collect();
+    assert!(edges.contains(&("fetchReviews", 5)), "{:#?}", impact.paths);
+    assert!(edges.contains(&("fetchReviews", 7)), "{:#?}", impact.paths);
+    assert!(edges.contains(&("ReviewList", 6)), "{:#?}", impact.paths);
+    assert!(
+        !edges.iter().any(|(_, line)| *line == 2),
+        "template markup is not script code: {:#?}",
+        impact.paths
+    );
+}
