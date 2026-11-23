@@ -729,6 +729,18 @@ const findingTitle = finding => {
   const sentence = (text.match(/^[\s\S]*?[.!?](\s|$)/)?.[0] || text).trim()
   return sentence.length > 120 ? `${sentence.slice(0, 117)}…` : sentence
 }
+// What kind of issue a finding is. Review research finds defect findings
+// matter most but are acted on least, and maintainability ones are the
+// majority; the kind keeps them apart at a glance. Display only.
+const MAINTAINABILITY = new Set(['design', 'maintainability', 'style', 'readability', 'documentation', 'naming', 'complexity'])
+const findingKind = finding => {
+  if (finding?.advisory) return { label: 'advisory', hint: 'Reported by an advisory reviewer; never blocks the gate.' }
+  if (finding?.rule_attributions?.length) return { label: 'rule', hint: `Violates an approved rule: ${finding.rule_attributions.map(rule => rule.rule_id).join(', ')}` }
+  const category = String(finding?.category || '').toLowerCase()
+  if (category === 'security') return { label: 'security', hint: 'A security defect.' }
+  if (MAINTAINABILITY.has(category)) return { label: 'maintainability', hint: 'Affects how the code can be changed, not what it does.' }
+  return { label: 'defect', hint: 'A behavior defect: the code may do the wrong thing.' }
+}
 const drawerSourceLines = computed(() => {
   const context = drawerView.value?.task?.source_context
   if (!context) return []
@@ -967,6 +979,7 @@ onMounted(async () => {
       <div class="drawer-head">
         <div>
           <span class="severity" :class="statusTone(drawerRecord.finding.severity)">{{ drawerRecord.finding.severity }}</span>
+          <span class="finding-kind" :title="findingKind(drawerRecord.finding).hint">{{ findingKind(drawerRecord.finding).label }}</span>
           <h3>{{ findingTitle(drawerRecord.finding) }}</h3>
           <small>{{ drawerRecord.finding.category }} · {{ drawerRecord.status }} · confidence {{ drawerRecord.finding.confidence ?? 'unknown' }} · {{ drawerRecord.finding.id }}</small>
         </div>
@@ -977,6 +990,13 @@ onMounted(async () => {
       <p v-else-if="!drawerView" class="hint">Loading snapshot context…</p>
       <template v-else>
         <p v-if="!drawerView.task.snapshot_current" class="alert">This snapshot no longer matches the working tree.<template v-if="drawerView.task.source_context"> The source below is the reviewed snapshot, not the current file.</template><template v-else> The reviewed source is no longer available.</template></p>
+        <section v-if="drawerView.task.diff_hunk" class="drawer-section" aria-label="Change">
+          <h4>Change</h4>
+          <small>{{ drawerView.task.diff_hunk.path }} <code>{{ drawerView.task.diff_hunk.header }}</code></small>
+          <pre class="source-excerpt diff-hunk"><code><span v-for="(line, index) in drawerView.task.diff_hunk.lines" :key="index" class="source-line" :class="[line.kind, { flagged: line.line === drawerRecord.finding.line && line.kind !== 'removed' }]"><span class="line-number">{{ line.line ?? line.base_line }}</span><span class="diff-marker" aria-hidden="true">{{ line.kind === 'added' ? '+' : line.kind === 'removed' ? '−' : ' ' }}</span><span class="visually-hidden">{{ line.kind === 'context' ? '' : line.kind + ': ' }}</span>{{ line.text }}
+</span></code></pre>
+          <small v-if="drawerView.task.diff_hunk.truncated" class="hint">The hunk was cut to its first 80 lines.</small>
+        </section>
         <section class="drawer-section">
           <h4>Code reference</h4>
           <small>{{ drawerRecord.finding.path || 'No location' }}<template v-if="drawerRecord.finding.line">:{{ drawerRecord.finding.line }}</template><template v-else-if="drawerRecord.finding.path"> · no line given; showing the start of the file</template></small>

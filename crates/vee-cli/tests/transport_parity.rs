@@ -309,7 +309,7 @@ fn cli_and_mcp_return_identical_documents_for_shared_operations() {
 
     let cli = cli_json(root, &["findings", "task", &finding_id]);
     let (via_mcp, text) = mcp.call_with_text("get_finding_task", json!({"finding_id": finding_id}));
-    assert_same(&cli, &via_mcp, "finding task", "finding-task-v3");
+    assert_same(&cli, &via_mcp, "finding task", "finding-task-v4");
     assert_same_view::<vee_application::finding_task::FindingTask>(
         root,
         &["findings", "task", &finding_id],
@@ -326,7 +326,7 @@ fn cli_and_mcp_return_identical_documents_for_shared_operations() {
         &cli,
         &via_mcp,
         "finding work package",
-        "finding-work-package-v2",
+        "finding-work-package-v3",
     );
     assert_same_view::<vee_application::finding_task::FindingWorkPackage>(
         root,

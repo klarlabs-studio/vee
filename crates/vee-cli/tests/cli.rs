@@ -3065,9 +3065,9 @@ fn finding_task_exports_bounded_snapshot_context_and_reports_staleness() {
     );
     let task: serde_json::Value = serde_json::from_slice(&task.stdout).unwrap();
     let schema: serde_json::Value =
-        serde_json::from_str(include_str!("../../../schemas/finding-task-v3.schema.json")).unwrap();
+        serde_json::from_str(include_str!("../../../schemas/finding-task-v4.schema.json")).unwrap();
     assert!(jsonschema::validator_for(&schema).unwrap().is_valid(&task));
-    assert_eq!(task["schema_version"], 3);
+    assert_eq!(task["schema_version"], 4);
     assert_eq!(task["ownership"]["advisory_only"], true);
     assert_eq!(task["ownership"]["owners"][0], "@team/rust");
     assert_eq!(
@@ -3084,6 +3084,16 @@ fn finding_task_exports_bounded_snapshot_context_and_reports_staleness() {
         .as_str()
         .unwrap()
         .contains("risky_value"));
+    // The flagged line is part of the change, so the task carries its hunk.
+    let hunk_lines = task["diff_hunk"]["lines"].as_array().unwrap();
+    assert!(hunk_lines.contains(&serde_json::json!({
+        "kind": "added", "line": 2, "base_line": null,
+        "text": "    let count = risky_value();"
+    })));
+    assert!(hunk_lines.contains(&serde_json::json!({
+        "kind": "removed", "line": null, "base_line": 2,
+        "text": "    let count = 1;"
+    })));
     assert!(task["instructions"]
         .as_str()
         .unwrap()
@@ -3122,7 +3132,7 @@ fn finding_task_exports_bounded_snapshot_context_and_reports_staleness() {
     let package: serde_json::Value = serde_json::from_slice(&package_output.stdout).unwrap();
     assert_matches_schema(
         &package,
-        include_str!("../../../schemas/finding-work-package-v2.schema.json"),
+        include_str!("../../../schemas/finding-work-package-v3.schema.json"),
         "finding work package",
     );
     assert_eq!(package["findings"].as_array().unwrap().len(), 2);

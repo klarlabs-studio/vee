@@ -1065,3 +1065,35 @@ test('change risk card names the tier and the flagged factors', async ({ page })
   await expect(card).not.toContainText('files changed')
   await expect(card.locator('small')).toHaveAttribute('title', /Basis: Mockus & Weiss 2000/)
 })
+
+test('finding drawer shows the changed hunk and the finding kind', async ({ page }) => {
+  await page.route('**/api/findings/FIND-001/task', route => route.fulfill({ json: {
+    ...findingTask,
+    task: { ...findingTask.task, diff_hunk: {
+      path: 'src/lib.rs', header: '@@ -41,3 +41,3 @@', truncated: false,
+      lines: [
+        { kind: 'context', line: 41, base_line: 41, text: '    if input.is_empty() {' },
+        { kind: 'removed', line: null, base_line: 42, text: '        return Err(Empty);' },
+        { kind: 'added', line: 42, base_line: null, text: '        return process(input);' },
+      ],
+    } },
+  } }))
+  await page.goto('/')
+  await page.getByRole('button', { name: /Findings/ }).click()
+  await page.getByRole('button', { name: 'Open details for FIND-001' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Finding details' })
+  await expect(drawer.locator('.finding-kind')).toHaveText('defect')
+  const change = drawer.getByRole('region', { name: 'Change' })
+  await expect(change).toContainText('@@ -41,3 +41,3 @@')
+  await expect(change.locator('.source-line.removed')).toContainText('return Err(Empty);')
+  await expect(change.locator('.source-line.added.flagged')).toContainText('return process(input);')
+})
+
+test('finding drawer omits the change section when the flagged line is unchanged', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: /Findings/ }).click()
+  await page.getByRole('button', { name: 'Open details for FIND-001' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Finding details' })
+  await expect(drawer.getByText('Code reference')).toBeVisible()
+  await expect(drawer.getByRole('region', { name: 'Change' })).toHaveCount(0)
+})

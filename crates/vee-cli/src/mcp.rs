@@ -588,7 +588,7 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         |ws, input: FindingInput| operations::finding_detail(&ws, &input.finding_id));
 
     viewed_tool!(server, workspace, "get_finding_task", "Get finding task", read_only_tool(),
-        "finding-task-v3",
+        "finding-task-v4",
         "Build a bounded, snapshot-bound investigation task with source context for a coding agent. Same document as `vee findings task --output json`.",
         |ws, input: FindingTaskInput| operations::finding_task(
             &ws,
@@ -597,7 +597,7 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         ));
 
     viewed_tool!(server, workspace, "get_finding_work_package", "Get finding work package", read_only_tool(),
-        "finding-work-package-v2",
+        "finding-work-package-v3",
         "Build one agent work package from findings that share a review and exact source snapshot. Same document as `vee findings package --output json`.",
         |ws, input: FindingPackageInput| operations::finding_work_package(
             &ws,
