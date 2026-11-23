@@ -338,6 +338,8 @@ pub struct ReviewRunOptions<'a> {
     pub cancellation: Option<&'a tokio_util::sync::CancellationToken>,
     pub work_item: Option<vee_hosting::WorkItemSnapshot>,
     pub work_item_token_env: Option<String>,
+    /// Receives live reviewer progress while providers run.
+    pub progress: Option<&'a dyn crate::ReviewProgressSink>,
 }
 
 #[derive(Clone)]
@@ -428,6 +430,7 @@ pub(crate) fn execute_prepared_reviewers(
     provider: &dyn ReviewProvider,
     max_concurrency: usize,
     cancellation: Option<&tokio_util::sync::CancellationToken>,
+    on_finished: &(dyn Fn(usize, bool) + Sync),
 ) -> Vec<Option<(Result<ProviderResult, String>, u64)>> {
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -450,8 +453,10 @@ pub(crate) fn execute_prepared_reviewers(
                 }))
                 .unwrap_or_else(|_| Err("provider adapter panicked during execution".into()));
                 let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                let mut guard = results.lock().unwrap_or_else(|poison| poison.into_inner());
-                guard[index] = Some((result, elapsed_ms));
+                let succeeded = result.is_ok();
+                results.lock().unwrap_or_else(|poison| poison.into_inner())[index] =
+                    Some((result, elapsed_ms));
+                on_finished(index, succeeded);
             });
         }
     });

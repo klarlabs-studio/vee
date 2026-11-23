@@ -2069,6 +2069,7 @@ fn run() -> Result<u8> {
                         api_base: hosting_api_base,
                         token_env: hosting_token_env,
                     },
+                    progress: None,
                 },
                 None,
             )?;

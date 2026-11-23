@@ -237,6 +237,8 @@ pub struct ReviewRequest<'a> {
     pub work_item: Option<&'a str>,
     /// Hosting settings for this review; unset values come from `.vee.yaml`.
     pub hosting: crate::work_items::HostingOverrides,
+    /// Receives live reviewer progress while providers run.
+    pub progress: Option<&'a dyn crate::ReviewProgressSink>,
 }
 
 /// Capture the requested scope, run the configured reviewers, and persist the review.
@@ -280,6 +282,7 @@ pub fn review(
             cancellation,
             work_item,
             work_item_token_env: Some(hosting.token_env),
+            progress: request.progress,
         },
     )
     .map_err(anyhow::Error::msg)

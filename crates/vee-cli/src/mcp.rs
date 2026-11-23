@@ -453,6 +453,7 @@ fn run_review(
             effort: input.effort.map(Into::into),
             work_item: input.work_item.as_deref(),
             hosting: Default::default(),
+            progress: None,
         },
         Some(cancellation),
     )

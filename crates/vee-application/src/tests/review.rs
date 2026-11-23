@@ -1234,6 +1234,7 @@ fn work_item_context_reaches_reviewers_and_binds_effective_configuration() {
             cancellation: None,
             work_item: Some(item.clone()),
             work_item_token_env: Some("CUSTOM_HOSTING_TOKEN".into()),
+            progress: None,
         },
     )
     .unwrap();
@@ -1554,4 +1555,105 @@ fn reviewer_context_file_paths_cannot_escape_repository() {
 
     let error = RepositoryConfig::load(&config_path).unwrap_err();
     assert!(error.contains("unsafe context file path"));
+}
+
+#[test]
+fn review_progress_reports_each_reviewer_run_as_it_finishes() {
+    use std::sync::{Arc, Mutex};
+
+    struct SplitProvider;
+    impl ReviewProvider for SplitProvider {
+        fn execute(
+            &self,
+            request: &ProviderRequest,
+            _cancellation: Option<&tokio_util::sync::CancellationToken>,
+        ) -> Result<ProviderResult, String> {
+            if String::from_utf8_lossy(&request.stdin).contains("Always fail.") {
+                return Err("provider unavailable".into());
+            }
+            Ok(ProviderResult {
+                stdout: br#"{"schema_version":1,"findings":[]}"#.to_vec(),
+                stderr: Vec::new(),
+                exit_code: Some(0),
+                usage: None,
+            })
+        }
+    }
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<ReviewProgress>>);
+    impl ReviewProgressSink for Recorder {
+        fn report(&self, progress: &ReviewProgress) {
+            self.0.lock().unwrap().push(progress.clone());
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    std::fs::write(root.join("lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();
+    std::fs::write(root.join("passing.md"), "Review the change.\n").unwrap();
+    std::fs::write(root.join("failing.md"), "Always fail.\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "initial"]);
+    std::fs::write(root.join("lib.rs"), "pub fn value() -> u8 { 2 }\n").unwrap();
+    std::fs::write(
+        root.join(".vee.yaml"),
+        "version: 1\nproviders:\n  p: { kind: cli, executable: unused }\nreviewers:\n  passing:\n    provider: p\n    instructions_file: passing.md\n    samples: 2\n  failing:\n    provider: p\n    instructions_file: failing.md\n",
+    )
+    .unwrap();
+    let config = RepositoryConfig::load(&root.join(".vee.yaml")).unwrap();
+    let snapshot = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
+    std::fs::create_dir_all(root.join(".vee")).unwrap();
+    let mut store = ReviewStore::open(&root.join(".vee/vee.sqlite")).unwrap();
+    let recorder = Arc::new(Recorder::default());
+
+    run_review_with_provider_and_selection_context(
+        root,
+        snapshot,
+        &config,
+        &mut store,
+        ReviewRunOptions {
+            provider_adapter: &SplitProvider,
+            requested_reviewers: None,
+            cancellation: None,
+            work_item: None,
+            work_item_token_env: None,
+            progress: Some(&*recorder),
+        },
+    )
+    .unwrap();
+
+    let reports = recorder.0.lock().unwrap().clone();
+    // One report when execution starts, then one per finished run.
+    assert_eq!(reports.len(), 4, "{reports:?}");
+    let reviewer = |report: &ReviewProgress, id: &str| {
+        report
+            .reviewers
+            .iter()
+            .find(|reviewer| reviewer.reviewer_id == id)
+            .cloned()
+            .unwrap()
+    };
+    let first = &reports[0];
+    assert_eq!(reviewer(first, "passing").runs, 2);
+    assert_eq!(reviewer(first, "failing").runs, 1);
+    assert!(first
+        .reviewers
+        .iter()
+        .all(|reviewer| reviewer.finished == 0));
+    let last = reports.last().unwrap();
+    assert!(last.reviewers.iter().all(ReviewerProgress::is_finished));
+    assert_eq!(reviewer(last, "passing").failed, 0);
+    assert_eq!(reviewer(last, "failing").failed, 1);
 }

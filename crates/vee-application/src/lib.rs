@@ -24,6 +24,7 @@ mod providers;
 pub mod publication;
 pub mod repository_map;
 mod review;
+pub mod review_progress;
 pub mod rule_candidates;
 pub mod sarif;
 pub mod setup;
@@ -44,6 +45,7 @@ pub use impact::*;
 pub use learning::*;
 pub use providers::*;
 pub use review::*;
+pub use review_progress::{ReviewProgress, ReviewProgressSink, ReviewerProgress};
 pub use source::*;
 pub use verification::*;
 

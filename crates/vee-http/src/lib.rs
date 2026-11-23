@@ -27,6 +27,105 @@ struct AppState {
     origin: String,
     auth_token: Option<Arc<str>>,
     webhook: Option<Arc<WebhookState>>,
+    reviews_in_progress: ReviewsInProgress,
+}
+
+/// Reviews this server is running, keyed by a per-process run number.
+#[derive(Clone, Default)]
+struct ReviewsInProgress {
+    next_run: Arc<std::sync::atomic::AtomicU64>,
+    runs: Arc<std::sync::Mutex<std::collections::BTreeMap<u64, ReviewInProgress>>>,
+}
+
+struct ReviewInProgress {
+    started: std::time::Instant,
+    progress: vee_application::ReviewProgress,
+}
+
+impl ReviewsInProgress {
+    fn lock(&self) -> std::sync::MutexGuard<'_, std::collections::BTreeMap<u64, ReviewInProgress>> {
+        self.runs
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// Register a run; it is removed when the returned guard drops, however
+    /// the review ends.
+    fn start(&self) -> ReviewProgressReporter {
+        let run = self
+            .next_run
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.lock().insert(
+            run,
+            ReviewInProgress {
+                started: std::time::Instant::now(),
+                progress: Default::default(),
+            },
+        );
+        ReviewProgressReporter {
+            reviews: self.clone(),
+            run,
+        }
+    }
+}
+
+struct ReviewProgressReporter {
+    reviews: ReviewsInProgress,
+    run: u64,
+}
+
+impl vee_application::ReviewProgressSink for ReviewProgressReporter {
+    fn report(&self, progress: &vee_application::ReviewProgress) {
+        if let Some(entry) = self.reviews.lock().get_mut(&self.run) {
+            entry.progress = progress.clone();
+        }
+    }
+}
+
+impl Drop for ReviewProgressReporter {
+    fn drop(&mut self) {
+        self.reviews.lock().remove(&self.run);
+    }
+}
+
+/// `review-progress-v1`: live progress of the reviews this server is running.
+#[derive(Serialize)]
+struct ReviewProgressList {
+    schema_version: u32,
+    reviews: Vec<ReviewProgressView>,
+}
+
+#[derive(Serialize)]
+struct ReviewProgressView {
+    /// `preparing` until providers start, then `reviewing`.
+    phase: &'static str,
+    elapsed_ms: u64,
+    reviewers: Vec<vee_application::ReviewerProgress>,
+}
+
+async fn review_progress(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ReviewProgressList>, ApiError> {
+    check_origin(&headers, &state.origin, state.auth_token.as_deref())?;
+    let reviews = state
+        .reviews_in_progress
+        .lock()
+        .values()
+        .map(|review| ReviewProgressView {
+            phase: if review.progress.reviewers.is_empty() {
+                "preparing"
+            } else {
+                "reviewing"
+            },
+            elapsed_ms: u64::try_from(review.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            reviewers: review.progress.reviewers.clone(),
+        })
+        .collect();
+    Ok(Json(ReviewProgressList {
+        schema_version: 1,
+        reviews,
+    }))
 }
 
 struct WebhookState {
@@ -376,6 +475,7 @@ async fn start_review(
             }),
         };
     let workspace = state.workspace.clone();
+    let reporter = state.reviews_in_progress.start();
     blocking(move || {
         let selection =
             (!request.reviewer_ids.is_empty()).then_some(request.reviewer_ids.as_slice());
@@ -388,6 +488,7 @@ async fn start_review(
                 effort: request.effort,
                 work_item: None,
                 hosting: Default::default(),
+                progress: Some(&reporter),
             },
             None,
         )
@@ -461,6 +562,7 @@ fn build_router(
         .route("/api/health", get(health))
         .route("/api/reviews", get(list_reviews).post(start_review))
         .route("/api/analytics", get(get_analytics))
+        .route("/api/reviews/progress", get(review_progress))
         .route("/api/reviews/{id}", get(get_review))
         .route("/api/findings", get(list_findings))
         .route("/api/findings/{id}/task", get(get_finding_task))
@@ -482,6 +584,7 @@ fn build_router(
         origin,
         auth_token: auth_token.map(Arc::from),
         webhook,
+        reviews_in_progress: Default::default(),
     })
 }
 
@@ -1060,6 +1163,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(shell.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn review_progress_endpoint_lists_no_reviews_when_idle() {
+        let directory = tempfile::tempdir().unwrap();
+        let address: SocketAddr = "127.0.0.1:7878".parse().unwrap();
+        let response = router(directory.path().to_owned(), address)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/reviews/progress")
+                    .header(header::HOST, "127.0.0.1:7878")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            report,
+            serde_json::json!({ "schema_version": 1, "reviews": [] })
+        );
+    }
+
+    #[test]
+    fn a_review_in_progress_reports_until_its_reporter_drops() {
+        use vee_application::ReviewProgressSink;
+        let reviews = ReviewsInProgress::default();
+        let reporter = reviews.start();
+        assert!(reviews.lock()[&reporter.run].progress.reviewers.is_empty());
+        reporter.report(&vee_application::ReviewProgress {
+            reviewers: vec![vee_application::ReviewerProgress {
+                reviewer_id: "correctness".into(),
+                runs: 1,
+                finished: 1,
+                failed: 0,
+                cached: 0,
+            }],
+        });
+        assert_eq!(
+            reviews.lock()[&reporter.run].progress.reviewers[0].reviewer_id,
+            "correctness"
+        );
+        drop(reporter);
+        assert!(reviews.lock().is_empty());
     }
 
     #[tokio::test]

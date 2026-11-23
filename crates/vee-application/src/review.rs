@@ -209,6 +209,7 @@ pub fn run_review_with_provider_and_selection(
             cancellation,
             work_item: None,
             work_item_token_env: None,
+            progress: None,
         },
     )
 }
@@ -269,6 +270,7 @@ pub fn run_review_selecting_reviewers_with_work_item_and_token_env(
             cancellation: None,
             work_item,
             work_item_token_env,
+            progress: None,
         },
     )
 }
@@ -286,6 +288,7 @@ pub fn run_review_with_provider_and_selection_context(
         cancellation,
         work_item,
         work_item_token_env,
+        progress,
     } = options;
     let snapshot = change_set.digest.clone();
     if let Some(work_item) = work_item.as_ref() {
@@ -855,6 +858,12 @@ pub fn run_review_with_provider_and_selection_context(
     }
     let mut prepared =
         expand_reviewer_samples(prepared, &enabled_reviewers, &mut executable_fingerprints)?;
+    let progress = crate::review_progress::ProgressTracker::new(
+        progress,
+        prepared
+            .iter()
+            .map(|reviewer| reviewer.reviewer_id.as_str()),
+    );
     let mut provider_results = vec![None; prepared.len()];
     let mut provider_durations_ms = vec![None; enabled_reviewers.len()];
     let mut provider_usage = vec![None; enabled_reviewers.len()];
@@ -868,6 +877,7 @@ pub fn run_review_with_provider_and_selection_context(
             .transpose()?
             .flatten();
         if let Some(stdout) = cached {
+            progress.mark_cached(index);
             reviewer.cache_hit = true;
             provider_results[index] = Some(Ok(ProviderResult {
                 stdout,
@@ -882,11 +892,13 @@ pub fn run_review_with_provider_and_selection_context(
     }
     let mut sample_findings: Vec<Vec<Vec<vee_core::Finding>>> =
         vec![Vec::new(); enabled_reviewers.len()];
+    progress.report();
     let executed = execute_prepared_reviewers(
         &pending,
         provider_adapter,
         config.review.max_concurrency,
         cancellation,
+        &|position, succeeded| progress.mark_finished(pending_indexes[position], succeeded),
     );
     for (index, result) in pending_indexes.into_iter().zip(executed) {
         if let Some((result, duration_ms)) = result {
