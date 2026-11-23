@@ -1130,3 +1130,16 @@ test('a current review shows no moved-checkout notice', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Overview' })).toBeVisible()
   await expect(page.getByText('The checkout has changed since this review')).toHaveCount(0)
 })
+
+test('task-alignment findings are labeled as task findings', async ({ page }) => {
+  const taskFinding = { ...findingRecord, finding: { ...findingRecord.finding, category: 'task-alignment', advisory: false } }
+  await page.route('**/api/findings/FIND-001/task', route => route.fulfill({ json: {
+    ...findingTask, task: { ...findingTask.task, finding: taskFinding },
+  } }))
+  await page.route('**/api/reviews/rev_latest/findings**', route => route.fulfill({ json: [taskFinding] }))
+  await page.route('**/api/reviews/rev_latest', route => route.fulfill({ json: { ...detail(latest), findings: [taskFinding] } }))
+  await page.goto('/')
+  await page.getByRole('button', { name: /Findings/ }).click()
+  await page.getByRole('button', { name: 'Open details for FIND-001' }).click()
+  await expect(page.getByRole('dialog', { name: 'Finding details' }).locator('.finding-kind')).toHaveText('task')
+})

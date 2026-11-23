@@ -742,6 +742,7 @@ const findingKind = finding => {
   if (finding?.rule_attributions?.length) return { label: 'rule', hint: `Violates an approved rule: ${finding.rule_attributions.map(rule => rule.rule_id).join(', ')}` }
   const category = String(finding?.category || '').toLowerCase()
   if (category === 'security') return { label: 'security', hint: 'A security defect.' }
+  if (category === 'task-alignment') return { label: 'task', hint: 'The change differs from what its work item asks.' }
   if (MAINTAINABILITY.has(category)) return { label: 'maintainability', hint: 'Affects how the code can be changed, not what it does.' }
   return { label: 'defect', hint: 'A behavior defect: the code may do the wrong thing.' }
 }

@@ -54,9 +54,11 @@ same Markdown and terminal rendering, so a session can be exported as text.
 **Not yet done:**
 - **Cross-repository sessions.** These need consumer checkouts confined
   beneath the MCP server root, as cross-repository impact already does.
-- **Checking a change against its task.** The research's strongest
-  agent-specific signal is whether the diff does what the task asked. That
-  check is not built.
+- **Checking a change against its task** is available per change, not per
+  session: `vee init` scaffolds an opt-in, advisory `task-alignment`
+  reviewer that reads the work item attached with `--work-item`. It reports
+  missing requirements, changes the task does not ask for, and changes that
+  contradict it.
 - **Using one change's context in another's review.** Parent changes'
   diffs and decisions are not yet passed into the review of the next
   change.
