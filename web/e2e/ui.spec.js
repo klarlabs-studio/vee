@@ -1116,3 +1116,17 @@ test('overview findings use the finding title, not only its category', async ({ 
   await page.goto('/')
   await expect(page.locator('.content-grid .finding-row strong').first()).toHaveText('The changed branch skips validation.')
 })
+
+test('a review whose checkout has moved says why impact and risk are missing', async ({ page }) => {
+  await page.route('**/api/reviews/rev_latest', route => route.fulfill({ json: { ...detail(latest), snapshot_current: false } }))
+  await page.goto('/')
+  await expect(page.getByRole('note').filter({ hasText: 'The checkout has changed since this review' })).toBeVisible()
+  await expect(page.getByLabel('Change risk')).toHaveCount(0)
+})
+
+test('a current review shows no moved-checkout notice', async ({ page }) => {
+  await page.route('**/api/reviews/rev_latest', route => route.fulfill({ json: { ...detail(latest), snapshot_current: true } }))
+  await page.goto('/')
+  await expect(page.getByRole('button', { name: 'Overview' })).toBeVisible()
+  await expect(page.getByText('The checkout has changed since this review')).toHaveCount(0)
+})

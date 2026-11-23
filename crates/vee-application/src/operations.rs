@@ -390,6 +390,9 @@ pub struct ReviewDetail {
     /// Change risk, available while the checkout matches the reviewed snapshot.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub risk: Option<crate::ChangeRisk>,
+    /// Whether the checkout still matches the reviewed snapshot; impact and
+    /// risk are only computed while it does.
+    pub snapshot_current: bool,
     /// The newest later complete review of the same scope and base, when one exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<Supersession>,
@@ -512,6 +515,7 @@ fn review_detail_and_currency(
             findings,
             impact,
             risk,
+            snapshot_current: current,
             superseded_by,
         },
         current,
