@@ -38,6 +38,7 @@ struct ReviewsInProgress {
 }
 
 struct ReviewInProgress {
+    progress_token: Option<String>,
     started: std::time::Instant,
     progress: vee_application::ReviewProgress,
 }
@@ -51,13 +52,14 @@ impl ReviewsInProgress {
 
     /// Register a run; it is removed when the returned guard drops, however
     /// the review ends.
-    fn start(&self) -> ReviewProgressReporter {
+    fn start(&self, progress_token: Option<String>) -> ReviewProgressReporter {
         let run = self
             .next_run
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.lock().insert(
             run,
             ReviewInProgress {
+                progress_token,
                 started: std::time::Instant::now(),
                 progress: Default::default(),
             },
@@ -66,6 +68,23 @@ impl ReviewsInProgress {
             reviews: self.clone(),
             run,
         }
+    }
+
+    /// Running reviews, oldest first.
+    fn views(&self) -> Vec<ReviewProgressView> {
+        self.lock()
+            .values()
+            .map(|review| ReviewProgressView {
+                progress_token: review.progress_token.clone(),
+                phase: if review.progress.reviewers.is_empty() {
+                    "preparing"
+                } else {
+                    "reviewing"
+                },
+                elapsed_ms: u64::try_from(review.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                reviewers: review.progress.reviewers.clone(),
+            })
+            .collect()
     }
 }
 
@@ -97,6 +116,9 @@ struct ReviewProgressList {
 
 #[derive(Serialize)]
 struct ReviewProgressView {
+    /// The `progress_token` the review request carried, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    progress_token: Option<String>,
     /// `preparing` until providers start, then `reviewing`.
     phase: &'static str,
     elapsed_ms: u64,
@@ -108,20 +130,7 @@ async fn review_progress(
     headers: HeaderMap,
 ) -> Result<Json<ReviewProgressList>, ApiError> {
     check_origin(&headers, &state.origin, state.auth_token.as_deref())?;
-    let reviews = state
-        .reviews_in_progress
-        .lock()
-        .values()
-        .map(|review| ReviewProgressView {
-            phase: if review.progress.reviewers.is_empty() {
-                "preparing"
-            } else {
-                "reviewing"
-            },
-            elapsed_ms: u64::try_from(review.started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            reviewers: review.progress.reviewers.clone(),
-        })
-        .collect();
+    let reviews = state.reviews_in_progress.views();
     Ok(Json(ReviewProgressList {
         schema_version: 1,
         reviews,
@@ -192,6 +201,20 @@ struct ReviewRequest {
     policy_profile: Option<String>,
     #[serde(default)]
     effort: Option<vee_core::ReviewEffort>,
+    /// Client-chosen label echoed by `GET /api/reviews/progress`, so a page
+    /// can find its own run among reviews started elsewhere.
+    #[serde(default)]
+    progress_token: Option<String>,
+}
+
+const MAX_PROGRESS_TOKEN_BYTES: usize = 64;
+
+fn valid_progress_token(token: &str) -> bool {
+    !token.is_empty()
+        && token.len() <= MAX_PROGRESS_TOKEN_BYTES
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 #[derive(Deserialize)]
@@ -474,8 +497,21 @@ async fn start_review(
                         .into(),
             }),
         };
+    if request
+        .progress_token
+        .as_deref()
+        .is_some_and(|token| !valid_progress_token(token))
+    {
+        return Err(ApiError {
+            error: format!(
+                "progress_token must be 1 to {MAX_PROGRESS_TOKEN_BYTES} letters, digits, '-' or '_'"
+            ),
+        });
+    }
     let workspace = state.workspace.clone();
-    let reporter = state.reviews_in_progress.start();
+    let reporter = state
+        .reviews_in_progress
+        .start(request.progress_token.clone());
     blocking(move || {
         let selection =
             (!request.reviewer_ids.is_empty()).then_some(request.reviewer_ids.as_slice());
@@ -1190,12 +1226,41 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn review_requests_reject_a_malformed_progress_token() {
+        let directory = tempfile::tempdir().unwrap();
+        let address: SocketAddr = "127.0.0.1:7878".parse().unwrap();
+        let response = router(directory.path().to_owned(), address)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/reviews")
+                    .header(header::HOST, "127.0.0.1:7878")
+                    .header(header::ORIGIN, "http://127.0.0.1:7878")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"progress_token":"not a token!"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("progress_token"));
+    }
+
     #[test]
     fn a_review_in_progress_reports_until_its_reporter_drops() {
         use vee_application::ReviewProgressSink;
         let reviews = ReviewsInProgress::default();
-        let reporter = reviews.start();
-        assert!(reviews.lock()[&reporter.run].progress.reviewers.is_empty());
+        let reporter = reviews.start(Some("tab-1".into()));
+        let _other = reviews.start(None);
+        let views = reviews.views();
+        assert_eq!(views.len(), 2);
+        assert_eq!(views[0].progress_token.as_deref(), Some("tab-1"));
+        assert_eq!(views[0].phase, "preparing");
+        assert_eq!(views[1].progress_token, None);
         reporter.report(&vee_application::ReviewProgress {
             reviewers: vec![vee_application::ReviewerProgress {
                 reviewer_id: "correctness".into(),
@@ -1209,8 +1274,9 @@ mod tests {
             reviews.lock()[&reporter.run].progress.reviewers[0].reviewer_id,
             "correctness"
         );
+        assert_eq!(reviews.views()[0].phase, "reviewing");
         drop(reporter);
-        assert!(reviews.lock().is_empty());
+        assert_eq!(reviews.views().len(), 1);
     }
 
     #[tokio::test]

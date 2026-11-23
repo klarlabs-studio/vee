@@ -725,17 +725,21 @@ test('a running review shows each reviewer as it finishes', async ({ page }) => 
   const reviewGate = new Promise(resolve => { releaseReview = resolve })
   const requestSeen = new Promise(resolve => { reviewRequested = resolve })
   let reviewers = []
+  let token
   await page.route('**/api/reviews', async route => {
     if (route.request().method() === 'POST') {
+      token = route.request().postDataJSON().progress_token
       reviewRequested()
       await reviewGate
     }
     await route.fallback()
   })
+  // Another review (another tab) runs too; the page must follow only its own.
+  const other = { progress_token: 'another-tab', phase: 'reviewing', elapsed_ms: 9000, reviewers: [{ reviewer_id: 'other-reviewer', runs: 1, finished: 1, failed: 0, cached: 0 }] }
   await page.route('**/api/reviews/progress', route => route.fulfill({
     status: 200,
     contentType: 'application/json',
-    body: JSON.stringify({ schema_version: 1, reviews: [{ phase: reviewers.length ? 'reviewing' : 'preparing', elapsed_ms: 1000, reviewers }] }),
+    body: JSON.stringify({ schema_version: 1, reviews: [{ progress_token: token, phase: reviewers.length ? 'reviewing' : 'preparing', elapsed_ms: 1000, reviewers }, other] }),
   }))
   await page.goto('/')
   await page.getByRole('button', { name: /Run review/ }).click()
@@ -751,6 +755,8 @@ test('a running review shows each reviewer as it finishes', async ({ page }) => 
   await expect(progress.getByRole('listitem').filter({ hasText: 'correctness' })).toContainText('done')
   await expect(progress.getByRole('listitem').filter({ hasText: 'security' })).toContainText('running')
   await expect(progress.getByRole('listitem').filter({ hasText: 'style' })).toContainText('failed')
+  await expect(progress.getByText('other-reviewer')).toHaveCount(0)
+  expect(token).toMatch(/^[A-Za-z0-9_-]{1,64}$/)
   releaseReview()
   await expect(page.getByText('Policy satisfied')).toBeVisible()
   await expect(progress).toBeHidden()

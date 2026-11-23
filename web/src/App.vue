@@ -619,12 +619,21 @@ const reviewElapsed = computed(() => {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
 })
 // Live reviewer progress of the running review, polled once a second.
+// Each run sends its own token, so the page follows its own run and not a
+// review another tab or API client started on the same server.
 const reviewProgress = ref(null)
+let progressToken = ''
 let progressRequest = null
+const newProgressToken = () => globalThis.crypto?.randomUUID?.() || `run-${Date.now()}-${Math.random().toString(36).slice(2)}`
 function pollReviewProgress() {
-  if (progressRequest) return
+  if (progressRequest || !progressToken) return
+  const token = progressToken
   progressRequest = api('/api/reviews/progress')
-    .then(report => { if (loading.value) reviewProgress.value = report.reviews?.at(-1) || null })
+    .then(report => {
+      // A response for an earlier run, or one arriving after this run ended, is stale.
+      if (!loading.value || token !== progressToken) return
+      reviewProgress.value = (report.reviews || []).find(review => review.progress_token === token) || null
+    })
     .catch(() => {})
     .finally(() => { progressRequest = null })
 }
@@ -636,16 +645,17 @@ const progressSummary = computed(() => {
   const done = reviewers.filter(reviewer => reviewerState(reviewer) !== 'running').length
   return `${done} of ${reviewers.length} reviewers finished`
 })
-const stopReviewClock = () => { clearInterval(reviewClock); reviewClock = null; reviewProgress.value = null }
+const stopReviewClock = () => { clearInterval(reviewClock); reviewClock = null; reviewProgress.value = null; progressToken = '' }
 onBeforeUnmount(stopReviewClock)
 async function startReview() {
   historyRequestId++
   detailRequestId++
   loading.value = true; error.value = ''; closeFinding()
   reviewStartedAt.value = clock.value = Date.now()
+  progressToken = newProgressToken()
   reviewClock = setInterval(() => { clock.value = Date.now(); pollReviewProgress() }, 1000)
   try {
-    const request = { scope: scope.value, reviewer_ids: [] }
+    const request = { scope: scope.value, reviewer_ids: [], progress_token: progressToken }
     if (scope.value === 'base' && base.value.trim()) request.base = base.value.trim()
     const started = await api('/api/reviews', { method: 'POST', body: JSON.stringify(request) })
     const reviewId = started.review_id
