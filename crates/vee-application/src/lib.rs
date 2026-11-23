@@ -4,6 +4,7 @@ pub mod analytics;
 mod approval;
 pub mod attestation;
 mod config;
+mod context_budget;
 pub mod coverage;
 pub mod evidence_bundle;
 pub mod failure;

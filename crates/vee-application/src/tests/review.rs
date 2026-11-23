@@ -1781,3 +1781,91 @@ fn a_provider_usage_limit_skips_its_remaining_runs() {
     }
     assert!(!review.analysis_complete);
 }
+
+#[test]
+fn a_large_early_file_does_not_crowd_later_files_out_of_the_reviewer_context() {
+    use std::sync::{Arc, Mutex};
+    struct CapturingProvider(Arc<Mutex<Option<serde_json::Value>>>);
+    impl ReviewProvider for CapturingProvider {
+        fn execute(
+            &self,
+            request: &ProviderRequest,
+            _cancellation: Option<&tokio_util::sync::CancellationToken>,
+        ) -> Result<ProviderResult, String> {
+            *self.0.lock().unwrap() =
+                Some(serde_json::from_slice(&request.stdin).map_err(|error| error.to_string())?);
+            Ok(ProviderResult {
+                stdout: br#"{"schema_version":1,"findings":[]}"#.to_vec(),
+                stderr: Vec::new(),
+                exit_code: Some(0),
+                usage: None,
+            })
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    // 40-byte lines; `lines` lines with line `changed` edited when `edit`.
+    let source = |name: &str, lines: usize, edit: bool| {
+        (0..lines)
+            .map(|line| {
+                let marker = if edit && line == lines / 2 {
+                    "new"
+                } else {
+                    "old"
+                };
+                format!("// {name} line {line:04} {marker:<20}\n")
+            })
+            .collect::<String>()
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    for (name, lines) in [("a", 100), ("b", 50), ("c", 50)] {
+        std::fs::write(root.join(format!("{name}.rs")), source(name, lines, false)).unwrap();
+    }
+    std::fs::write(root.join("reviewer.md"), "Review correctness.\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "initial"]);
+    for (name, lines) in [("a", 100), ("b", 50), ("c", 50)] {
+        std::fs::write(root.join(format!("{name}.rs")), source(name, lines, true)).unwrap();
+    }
+    // a.rs alone takes 8,000 of the 10,000 bytes in full; b.rs's diff
+    // (its whole 50 lines) no longer fits after that.
+    std::fs::write(
+        root.join(".vee.yaml"),
+        "version: 1\nreview:\n  include: [\"**/*.rs\"]\n  max_context_bytes: 10000\nproviders:\n  p: { kind: cli, executable: unused }\nreviewers:\n  correctness: { provider: p, instructions_file: reviewer.md }\n",
+    )
+    .unwrap();
+    let config = RepositoryConfig::load(&root.join(".vee.yaml")).unwrap();
+    let snapshot = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
+    std::fs::create_dir_all(root.join(".vee")).unwrap();
+    let mut store = ReviewStore::open(&root.join(".vee/vee.sqlite")).unwrap();
+    let captured = Arc::new(Mutex::new(None));
+
+    let review = run_review_with_provider(
+        root,
+        snapshot,
+        &config,
+        &mut store,
+        &CapturingProvider(captured.clone()),
+        None,
+    )
+    .unwrap();
+
+    let input = captured.lock().unwrap().clone().unwrap();
+    for file in input["context_files"].as_array().unwrap() {
+        let supplied = file["content"].is_string() || file["diff"].is_string();
+        assert!(supplied, "{} was left out: {}", file["path"], file["note"]);
+    }
+    assert_eq!(input["context_complete"], true);
+    assert!(review.analysis_complete);
+}

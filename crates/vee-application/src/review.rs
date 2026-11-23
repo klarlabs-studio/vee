@@ -438,13 +438,27 @@ pub fn run_review_with_provider_and_selection_context(
                 "context_role": "reviewer_configured_supplemental",
             }));
         }
+        // Changed files. Binary, LFS and unreadable files are settled first;
+        // text files then share the remaining budget so that every file's
+        // diff is reserved before any file gets full contents
+        // (see `context_budget`).
+        enum ChangedContext {
+            Settled(serde_json::Value),
+            Text {
+                path: String,
+                changed_line_ranges: Option<Vec<(u64, u64)>>,
+                cost: crate::context_budget::ContextCost,
+                diff: Option<String>,
+            },
+        }
+        let mut changed = Vec::new();
         for file in &change_set.files {
             if !review_path_is_included(&file.path, &config.review)
                 || !reviewer_path_is_included(&file.path, reviewer)
             {
                 continue;
             }
-            if context_files.len() >= config.review.max_context_files {
+            if context_files.len() + changed.len() >= config.review.max_context_files {
                 context_limited = true;
                 omitted_context_files += 1;
                 continue;
@@ -452,89 +466,143 @@ pub fn run_review_with_provider_and_selection_context(
             let relative = Path::new(&file.path);
             let base_bytes = vee_git::read_snapshot_base_file(root, &change_set, relative)?;
             let source_bytes = vee_git::read_snapshot_file(root, &change_set, relative)?;
-            let base_len = base_bytes.as_ref().map_or(0, Vec::len);
-            let source_len = source_bytes.as_ref().map_or(0, Vec::len);
             let changed_line_ranges = changed_line_ranges(
                 base_bytes.as_deref(),
                 source_bytes.as_deref(),
                 config.review.max_context_file_bytes,
             )?;
-            let total_size = base_len.saturating_add(source_len);
-            let size_exceeded = total_size > config.review.max_context_file_bytes
-                || context_bytes.saturating_add(total_size) > config.review.max_context_bytes;
             let base_is_lfs_pointer = base_bytes.as_deref().is_some_and(vee_core::is_lfs_pointer);
-            let mut base_is_binary = false;
-            let mut source_is_binary = false;
-            let base_text = match base_bytes {
-                Some(bytes) if bytes.contains(&0) => {
-                    base_is_binary = true;
-                    None
-                }
+            let as_text = |bytes: Option<Vec<u8>>| match bytes {
+                Some(bytes) if bytes.contains(&0) => (None, true),
                 Some(bytes) => match String::from_utf8(bytes) {
-                    Ok(text) => Some(text),
-                    Err(_) => {
-                        base_is_binary = true;
-                        None
-                    }
+                    Ok(text) => (Some(text), false),
+                    Err(_) => (None, true),
                 },
-                None => None,
+                None => (None, false),
             };
-            let source_text = match source_bytes {
-                Some(bytes) if bytes.contains(&0) => {
-                    source_is_binary = true;
-                    None
-                }
-                Some(bytes) => match String::from_utf8(bytes) {
-                    Ok(text) => Some(text),
-                    Err(_) => {
-                        source_is_binary = true;
-                        None
-                    }
-                },
-                None => None,
-            };
-            let context = if size_exceeded
-                && (base_is_lfs_pointer
-                    || file.status == "lfs_pointer"
-                    || base_is_binary
-                    || source_is_binary)
-            {
+            let raw_size =
+                base_bytes.as_ref().map_or(0, Vec::len) + source_bytes.as_ref().map_or(0, Vec::len);
+            let (base_text, base_is_binary) = as_text(base_bytes);
+            let (source_text, source_is_binary) = as_text(source_bytes);
+            let lfs = base_is_lfs_pointer || file.status == "lfs_pointer";
+            if lfs || base_is_binary || source_is_binary {
+                // Only the textual side, if any, is sent, so only it is charged.
+                let sent = base_text.as_ref().map_or(0, String::len)
+                    + source_text.as_ref().map_or(0, String::len);
                 context_limited = true;
                 omitted_context_files += 1;
-                serde_json::json!({"path":file.path,"base_content":null,"content":null,"changed_line_ranges":changed_line_ranges,"note":"binary or Git LFS content exceeded the context budget and was omitted","truncated":true,"classification":"untrusted_repository_source"})
-            } else if base_is_lfs_pointer || file.status == "lfs_pointer" {
-                context_bytes += total_size;
-                context_limited = true;
-                omitted_context_files += 1;
-                serde_json::json!({"path":file.path,"base_content":base_text,"content":source_text,"changed_line_ranges":changed_line_ranges,"note":"Git LFS pointer captured; object contents were not fetched","truncated":false,"classification":"untrusted_repository_source"})
-            } else if base_is_binary || source_is_binary {
-                context_bytes += total_size;
-                context_limited = true;
-                omitted_context_files += 1;
-                serde_json::json!({"path":file.path,"base_content":base_text,"content":source_text,"changed_line_ranges":changed_line_ranges,"note":"binary or non-UTF-8 baseline/source omitted","truncated":false,"classification":"untrusted_repository_source"})
-            } else if source_text.is_none() && base_text.is_none() {
-                context_limited = true;
-                omitted_context_files += 1;
-                serde_json::json!({"path":file.path,"base_content":null,"content":null,"changed_line_ranges":changed_line_ranges,"note":"baseline and source bytes are unavailable","truncated":false,"classification":"untrusted_repository_source"})
-            } else if size_exceeded {
-                let diff = bounded_text_diff(
-                    base_text.as_deref().map(str::as_bytes),
-                    source_text.as_deref().map(str::as_bytes),
-                    config.review.max_context_file_bytes,
-                )?;
-                if let Some(diff) = diff.filter(|diff| {
-                    context_bytes.saturating_add(diff.len()) <= config.review.max_context_bytes
-                }) {
-                    context_bytes += diff.len();
-                    serde_json::json!({"path":file.path,"base_content":null,"content":null,"changed_line_ranges":changed_line_ranges,"diff":diff,"note":"bounded unified diff with 40 lines of surrounding context; unchanged file content omitted","truncated":false,"classification":"untrusted_repository_source"})
+                let note = if lfs {
+                    "Git LFS pointer captured; object contents were not fetched"
                 } else {
+                    "binary or non-UTF-8 baseline/source omitted"
+                };
+                let fits = raw_size <= config.review.max_context_file_bytes
+                    && context_bytes.saturating_add(sent) <= config.review.max_context_bytes;
+                let context = if fits {
+                    context_bytes += sent;
+                    serde_json::json!({"path":file.path,"base_content":base_text,"content":source_text,"changed_line_ranges":changed_line_ranges,"note":note,"truncated":false,"classification":"untrusted_repository_source"})
+                } else {
+                    serde_json::json!({"path":file.path,"base_content":null,"content":null,"changed_line_ranges":changed_line_ranges,"note":"binary or Git LFS content exceeded the context budget and was omitted","truncated":true,"classification":"untrusted_repository_source"})
+                };
+                changed.push(ChangedContext::Settled(context));
+                continue;
+            }
+            if source_text.is_none() && base_text.is_none() {
+                context_limited = true;
+                omitted_context_files += 1;
+                changed.push(ChangedContext::Settled(serde_json::json!({"path":file.path,"base_content":null,"content":null,"changed_line_ranges":changed_line_ranges,"note":"baseline and source bytes are unavailable","truncated":false,"classification":"untrusted_repository_source"})));
+                continue;
+            }
+            let total_size = base_text.as_ref().map_or(0, String::len)
+                + source_text.as_ref().map_or(0, String::len);
+            let full = (total_size <= config.review.max_context_file_bytes).then_some(total_size);
+            changed.push(ChangedContext::Text {
+                path: file.path.clone(),
+                changed_line_ranges,
+                cost: crate::context_budget::ContextCost { full, diff: None },
+                diff: None,
+            });
+        }
+        let all_full_bytes = changed
+            .iter()
+            .try_fold(context_bytes, |sum, entry| match entry {
+                ChangedContext::Text { cost, .. } => cost.full.map(|full| sum.saturating_add(full)),
+                ChangedContext::Settled(_) => Some(sum),
+            });
+        if all_full_bytes.is_none_or(|bytes| bytes > config.review.max_context_bytes) {
+            // Full contents cannot all fit: build every text file's diff so
+            // allocation can reserve them first.
+            for entry in &mut changed {
+                if let ChangedContext::Text {
+                    path, cost, diff, ..
+                } = entry
+                {
+                    let relative = Path::new(path.as_str());
+                    let base = vee_git::read_snapshot_base_file(root, &change_set, relative)?;
+                    let source = vee_git::read_snapshot_file(root, &change_set, relative)?;
+                    *diff = bounded_text_diff(
+                        base.as_deref(),
+                        source.as_deref(),
+                        config.review.max_context_file_bytes,
+                    )?;
+                    cost.diff = diff.as_ref().map(String::len);
+                }
+            }
+        }
+        let costs = changed
+            .iter()
+            .filter_map(|entry| match entry {
+                ChangedContext::Text { cost, .. } => Some(*cost),
+                ChangedContext::Settled(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let mut choices = crate::context_budget::allocate(
+            &costs,
+            config
+                .review
+                .max_context_bytes
+                .saturating_sub(context_bytes),
+        )
+        .into_iter();
+        for entry in changed {
+            let (path, changed_line_ranges, cost, diff) = match entry {
+                ChangedContext::Settled(context) => {
+                    context_files.push(context);
+                    continue;
+                }
+                ChangedContext::Text {
+                    path,
+                    changed_line_ranges,
+                    cost,
+                    diff,
+                } => (path, changed_line_ranges, cost, diff),
+            };
+            let context = match choices
+                .next()
+                .unwrap_or(crate::context_budget::ContextChoice::Omit)
+            {
+                crate::context_budget::ContextChoice::Full => {
+                    let relative = Path::new(path.as_str());
+                    let base = vee_git::read_snapshot_base_file(root, &change_set, relative)?
+                        .map(String::from_utf8)
+                        .transpose()
+                        .map_err(|_| format!("changed file {path} is no longer UTF-8"))?;
+                    let source = vee_git::read_snapshot_file(root, &change_set, relative)?
+                        .map(String::from_utf8)
+                        .transpose()
+                        .map_err(|_| format!("changed file {path} is no longer UTF-8"))?;
+                    context_bytes += cost.full.unwrap_or(0);
+                    serde_json::json!({"path":path,"base_content":base,"content":source,"changed_line_ranges":changed_line_ranges,"truncated":false,"classification":"untrusted_repository_source"})
+                }
+                crate::context_budget::ContextChoice::Diff => {
+                    context_bytes += cost.diff.unwrap_or(0);
+                    serde_json::json!({"path":path,"base_content":null,"content":null,"changed_line_ranges":changed_line_ranges,"diff":diff,"note":"bounded unified diff with 40 lines of surrounding context; unchanged file content omitted","truncated":false,"classification":"untrusted_repository_source"})
+                }
+                crate::context_budget::ContextChoice::Omit => {
                     context_limited = true;
                     omitted_context_files += 1;
-                    serde_json::json!({"path":file.path,"base_content":null,"content":null,"changed_line_ranges":changed_line_ranges,"note":"full contents and bounded diff omitted because the context size limit was reached","truncated":true,"classification":"untrusted_repository_source"})
+                    serde_json::json!({"path":path,"base_content":null,"content":null,"changed_line_ranges":changed_line_ranges,"note":"full contents and bounded diff omitted because the context size limit was reached","truncated":true,"classification":"untrusted_repository_source"})
                 }
-            } else {
-                context_bytes += total_size;
-                serde_json::json!({"path":file.path,"base_content":base_text,"content":source_text,"changed_line_ranges":changed_line_ranges,"truncated":false,"classification":"untrusted_repository_source"})
             };
             context_files.push(context);
         }
