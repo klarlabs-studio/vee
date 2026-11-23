@@ -63,7 +63,7 @@ fn typescript_impact_is_heuristic_and_ignores_comments_and_strings() {
     .unwrap();
 
     let change_set = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
-    let impact = analyze_impact_with_typescript_server(root, &change_set, None).unwrap();
+    let impact = analyze_impact_with_typescript_server(root, &change_set, None, None).unwrap();
 
     assert_eq!(impact.snapshot_id, change_set.digest);
     assert!(impact.changed_symbols.contains(&"ChangedAPI".to_owned()));
@@ -209,7 +209,7 @@ fn typescript_project_references_resolve_aliases_without_same_name_false_edges()
 
     let change_set = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
     let impact =
-        analyze_impact_with_typescript_server(root, &change_set, Some(&executable)).unwrap();
+        analyze_impact_with_typescript_server(root, &change_set, Some(&executable), None).unwrap();
 
     assert!(impact.coverage_complete);
     assert!(impact.changed_symbols.contains(&"ChangedAPI".into()));
@@ -1393,7 +1393,13 @@ fn impact_memo_reuses_results_until_the_live_checkout_changes() {
     let change_set = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
 
     let first = analyze_impact(root, &change_set).unwrap();
-    let key = impact_memo_key(root, &change_set, find_typescript_server().as_deref()).unwrap();
+    let key = impact_memo_key(
+        root,
+        &change_set,
+        find_typescript_server().as_deref(),
+        impact_review_filter(root).as_ref(),
+    )
+    .unwrap();
     assert_eq!(memoized_impact(&key), Some(first.clone()));
     assert_eq!(analyze_impact(root, &change_set).unwrap(), first);
     assert!(first
@@ -1416,4 +1422,68 @@ fn impact_memo_reuses_results_until_the_live_checkout_changes() {
         "{:?}",
         second.groups
     );
+}
+
+#[test]
+fn impact_skips_paths_outside_the_repository_review_filter() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee Test"]);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("dist")).unwrap();
+    std::fs::write(
+        root.join(".vee.yaml"),
+        "version: 1\nreview:\n  exclude: [\"dist/**\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/api.js"),
+        "export function ChangedAPI() { return 1; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/consumer.js"),
+        "export function call() { return ChangedAPI() + Ae(); }\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("dist/app.js"), "function Ae() { return 1; }\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "baseline"]);
+    std::fs::write(
+        root.join("src/api.js"),
+        "export function ChangedAPI() { return 2; }\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("dist/app.js"), "function Ae() { return 2; }\n").unwrap();
+
+    let change_set = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
+    let impact = analyze_impact(root, &change_set).unwrap();
+
+    assert!(impact.changed_paths.contains(&"dist/app.js".to_owned()));
+    assert!(impact.changed_symbols.contains(&"ChangedAPI".to_owned()));
+    assert!(
+        !impact.changed_symbols.contains(&"Ae".to_owned()),
+        "{:?}",
+        impact.changed_symbols
+    );
+    assert!(impact
+        .paths
+        .iter()
+        .all(|edge| !edge.source_path.starts_with("dist/")
+            && !edge.affected_path.starts_with("dist/")));
+    assert!(impact
+        .limitations
+        .iter()
+        .any(|limitation| limitation.contains("review filter")));
 }

@@ -115,18 +115,41 @@ pub(crate) type TypeScriptReferenceQuery = (
 /// `Cargo.toml` files and, for semantic analyzers, the workspace they read),
 /// and the tool lookup path. Results from a failed or partial semantic
 /// analyzer are not memoized, so a timeout is retried on the next request.
+///
+/// Paths outside the repository review filter (`review.include` and
+/// `review.exclude`, such as generated bundles) are neither scanned nor used
+/// as changed-symbol sources; a repository without a readable configuration
+/// is analyzed unfiltered.
 pub fn analyze_impact(root: &Path, change_set: &ChangeSet) -> Result<ImpactAssessment, String> {
     let typescript_server = find_typescript_server();
-    let key = impact_memo_key(root, change_set, typescript_server.as_deref());
+    let review_filter = impact_review_filter(root);
+    let key = impact_memo_key(
+        root,
+        change_set,
+        typescript_server.as_deref(),
+        review_filter.as_ref(),
+    );
     if let Some(hit) = key.as_ref().and_then(memoized_impact) {
         return Ok(hit);
     }
-    let assessment =
-        analyze_impact_with_typescript_server(root, change_set, typescript_server.as_deref())?;
+    let assessment = analyze_impact_with_typescript_server(
+        root,
+        change_set,
+        typescript_server.as_deref(),
+        review_filter.as_ref(),
+    )?;
     if let Some(key) = key {
         memoize_impact(key, &assessment);
     }
     Ok(assessment)
+}
+
+/// The repository review filter, or `None` when the configuration cannot be
+/// read (an unconfigured repository is analyzed unfiltered).
+fn impact_review_filter(root: &Path) -> Option<vee_core::ReviewConfig> {
+    crate::load_repository_config(root)
+        .ok()
+        .map(|config| config.review)
 }
 
 const IMPACT_MEMO_CAPACITY: usize = 8;
@@ -146,12 +169,15 @@ fn impact_memo_key(
     root: &Path,
     change_set: &ChangeSet,
     typescript_server: Option<&Path>,
+    review_filter: Option<&vee_core::ReviewConfig>,
 ) -> Option<ImpactMemoKey> {
     use sha2::{Digest, Sha256};
     let change = serde_json::to_vec(change_set).ok()?;
     let tracked = vee_git::tracked_paths(root).ok()?;
     let live = vee_git::workspace_state(root).ok()?;
     let lookup_path = std::env::var_os("PATH").unwrap_or_default();
+    let filter =
+        serde_json::to_vec(&review_filter.map(|filter| (&filter.include, &filter.exclude))).ok()?;
     let mut hasher = Sha256::new();
     let mut part = |bytes: &[u8]| {
         hasher.update((bytes.len() as u64).to_le_bytes());
@@ -162,6 +188,7 @@ fn impact_memo_key(
     part(&live);
     part(typescript_server.map_or(&[][..], |path| path.as_os_str().as_encoded_bytes()));
     part(lookup_path.as_encoded_bytes());
+    part(&filter);
     for path in &tracked {
         part(path.as_os_str().as_encoded_bytes());
     }
@@ -197,14 +224,34 @@ pub(crate) fn analyze_impact_with_typescript_server(
     root: &Path,
     change_set: &ChangeSet,
     typescript_server: Option<&Path>,
+    review_filter: Option<&vee_core::ReviewConfig>,
 ) -> Result<ImpactAssessment, String> {
     const MAX_SOURCE_FILES: usize = 10_000;
     const MAX_SOURCE_BYTES: usize = 32 * 1024 * 1024;
     const MAX_FILE_BYTES: usize = 512 * 1024;
-    let changed: std::collections::BTreeSet<String> = change_set
+    // Changed paths outside the review filter (include and exclude) seed no
+    // symbols; excluded files are not scanned for references. Files merely
+    // outside `include` still are, since their callers remain real impact.
+    let in_review_filter = |path: &str| {
+        review_filter.is_none_or(|filter| crate::review::review_path_is_included(path, filter))
+    };
+    let not_excluded = |path: &str| {
+        review_filter.is_none_or(|filter| {
+            !filter
+                .exclude
+                .iter()
+                .any(|pattern| crate::review::glob_matches(pattern, path))
+        })
+    };
+    let all_changed: std::collections::BTreeSet<String> = change_set
         .files
         .iter()
         .map(|file| file.path.clone())
+        .collect();
+    let changed: std::collections::BTreeSet<String> = all_changed
+        .iter()
+        .filter(|path| in_review_filter(path))
+        .cloned()
         .collect();
     let mut candidates = vee_git::tracked_paths(root)?;
     candidates.extend(
@@ -217,7 +264,7 @@ pub(crate) fn analyze_impact_with_typescript_server(
         matches!(
             path.extension().and_then(|extension| extension.to_str()),
             Some("rs" | "go" | "ts" | "tsx" | "js" | "jsx" | "mts" | "cts" | "py" | "java")
-        )
+        ) && not_excluded(&path.to_string_lossy().replace('\\', "/"))
     });
     candidates.sort_by_key(|path| {
         let relative = path.to_string_lossy().replace('\\', "/");
@@ -705,6 +752,10 @@ pub(crate) fn analyze_impact_with_typescript_server(
     if !coverage_complete {
         limitations.push("Some source files were omitted because they were binary, invalid UTF-8, larger than 512 KiB, or the scan reached its file or 32 MiB content limit.".into());
     }
+    let filtered_out = all_changed.len() - changed.len();
+    if filtered_out > 0 {
+        limitations.push(format!("{filtered_out} changed path(s) outside the repository review filter were not analyzed for changed symbols, and files it excludes were not scanned for references."));
+    }
     if scan_limit_reached {
         limitations.push("Impact scanning is bounded to 10,000 source files and 32 MiB of decoded source content per assessment.".into());
     }
@@ -713,7 +764,7 @@ pub(crate) fn analyze_impact_with_typescript_server(
         snapshot_id: change_set.digest.clone(),
         coverage_complete,
         analyzers,
-        changed_paths: changed.into_iter().collect(),
+        changed_paths: all_changed.into_iter().collect(),
         changed_symbols: symbols.into_iter().collect(),
         groups,
         paths,
