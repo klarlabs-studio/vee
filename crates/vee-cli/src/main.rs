@@ -1033,6 +1033,11 @@ enum HostingCommand {
         /// Hosting account that owns Vee's published threads.
         #[arg(long, value_name = "LOGIN")]
         actor_login: Option<String>,
+        /// Also publish the approval verdict (`vee gate approval`) as a separate
+        /// "Vee approval" check: success when eligible, neutral when a person is
+        /// needed. Not available for Gerrit.
+        #[arg(long)]
+        approval: bool,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
@@ -2948,6 +2953,7 @@ fn run() -> Result<u8> {
                 username,
                 webhook_secret_env,
                 actor_login,
+                approval,
                 output,
             } => {
                 let cwd = std::env::current_dir()?;
@@ -2969,6 +2975,7 @@ fn run() -> Result<u8> {
                             webhook_secret_env,
                             actor_login,
                         },
+                        approval,
                     },
                 )?;
                 match output {

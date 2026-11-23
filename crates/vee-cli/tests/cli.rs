@@ -3636,6 +3636,54 @@ fn gerrit_publish_command_emits_revision_bound_tagged_gate_summary() {
 #[cfg(unix)]
 #[test]
 fn github_publish_command_emits_snapshot_bound_check_run() {
+    let (requests, receipt, base_oid, head_oid) = github_publish_fixture(&[], 7);
+    assert_eq!(receipt["review_id"], "review-github-publish");
+    assert_eq!(receipt["revision"], format!("{base_oid}:{head_oid}"));
+    assert_eq!(receipt["provider_check_id"], "1234");
+    assert!(receipt.get("approval_check_id").is_none());
+    assert_eq!(requests.len(), 7);
+    assert!(requests[0].starts_with("GET /repos/team/repo/pulls/9 HTTP/1.1"));
+    let check_run = requests
+        .iter()
+        .find(|request| request.starts_with("POST /repos/team/repo/check-runs "))
+        .expect("GitHub check-run publication request");
+    assert!(check_run.contains(&head_oid));
+    assert!(check_run.contains("Vee passed"));
+}
+
+/// `--approval` adds a separate "Vee approval" check after the gate check.
+#[cfg(unix)]
+#[test]
+fn github_publish_with_approval_adds_a_separate_approval_check() {
+    let (requests, receipt, _, head_oid) = github_publish_fixture(&["--approval"], 11);
+    assert_eq!(receipt["provider_check_id"], "1234");
+    assert_eq!(receipt["approval_check_id"], "1234");
+    let checks: Vec<&String> = requests
+        .iter()
+        .filter(|request| request.starts_with("POST /repos/team/repo/check-runs "))
+        .collect();
+    assert_eq!(checks.len(), 2, "{requests:#?}");
+    assert!(checks[0].contains("Vee passed"));
+    let approval = checks[1];
+    assert!(approval.contains(&head_oid));
+    assert!(approval.contains("\"name\":\"Vee approval\""), "{approval}");
+    assert!(approval.contains("review-github-publish:approval"));
+    // Every stage is listed, whatever the verdict.
+    for stage in ["snapshot", "paths", "authors", "risk", "gate"] {
+        assert!(
+            approval.contains(&format!("{stage} ")),
+            "{stage}: {approval}"
+        );
+    }
+}
+
+#[cfg(unix)]
+/// Publishes a passing review to a fake GitHub server and returns the
+/// requests it received, the receipt, and the head commit.
+fn github_publish_fixture(
+    extra_args: &[&str],
+    request_count: usize,
+) -> (Vec<String>, serde_json::Value, String, String) {
     use std::{
         io::{Read, Write},
         net::TcpListener,
@@ -3743,7 +3791,7 @@ fn github_publish_command_emits_snapshot_bound_check_run() {
     let expected_head = head_oid.clone();
     let server = thread::spawn(move || {
         let mut requests = Vec::new();
-        for _ in 0..7 {
+        for _ in 0..request_count {
             let mut stream = accept_with_timeout(&listener).unwrap();
             let mut request = Vec::new();
             let mut chunk = [0u8; 1024];
@@ -3831,6 +3879,7 @@ fn github_publish_command_emits_snapshot_bound_check_run() {
             "--output",
             "json",
         ])
+        .args(extra_args)
         .env("VEE_FIXTURE_GITHUB_TOKEN", "fixture-token")
         .current_dir(root)
         .output()
@@ -3843,18 +3892,7 @@ fn github_publish_command_emits_snapshot_bound_check_run() {
         String::from_utf8_lossy(&output.stderr),
     );
     let receipt: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(receipt["review_id"], "review-github-publish");
-    assert_eq!(receipt["revision"], format!("{base_oid}:{head_oid}"));
-    assert_eq!(receipt["provider_check_id"], "1234");
-    let requests = server.join().unwrap();
-    assert_eq!(requests.len(), 7);
-    assert!(requests[0].starts_with("GET /repos/team/repo/pulls/9 HTTP/1.1"));
-    let check_run = requests
-        .iter()
-        .find(|request| request.starts_with("POST /repos/team/repo/check-runs "))
-        .expect("GitHub check-run publication request");
-    assert!(check_run.contains(&head_oid));
-    assert!(check_run.contains("Vee passed"));
+    (server.join().unwrap(), receipt, base_oid, head_oid)
 }
 
 #[cfg(unix)]
@@ -11545,4 +11583,42 @@ fn mcp_review_changes_reports_progress_notifications() {
         progress.last().unwrap()["message"],
         "2 of 2 reviewer runs finished"
     );
+}
+
+#[test]
+fn hosting_publish_refuses_an_approval_check_on_gerrit() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["init", "-q"])
+        .status()
+        .unwrap()
+        .success());
+    fs::write(root.join(".vee.yaml"), "version: 1\n").unwrap();
+    let output = vee()
+        .args([
+            "hosting",
+            "publish",
+            "--provider",
+            "gerrit",
+            "--review",
+            "rev_missing",
+            "--repository",
+            "team/repo",
+            "--number",
+            "1",
+            "--approval",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("publish without --approval"));
 }

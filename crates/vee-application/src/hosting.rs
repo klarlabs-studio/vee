@@ -409,6 +409,10 @@ pub struct ReviewPublication {
     pub provider_check_id: String,
     /// Vee finding fingerprint to provider-native thread ID.
     pub thread_ids: BTreeMap<String, String>,
+    /// The provider's ID of the separate "Vee approval" check, when the
+    /// approval verdict was published too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_check_id: Option<String>,
     /// The pull request revision after publication.
     pub revision: String,
     #[serde(skip)]
@@ -495,6 +499,8 @@ pub struct PublishRequest<'a> {
     pub repository: &'a str,
     pub number: u64,
     pub flags: PublishFlags,
+    /// Also publish the approval verdict as a separate "Vee approval" check.
+    pub approval: bool,
 }
 
 /// Settings resolved from flags, the repository's `hosting` block and defaults.
@@ -560,12 +566,27 @@ pub fn publish_review(
     );
     let actor_login = resolve_hosting_setting(flags.actor_login, hosting.actor_login, "");
 
+    anyhow::ensure!(
+        !(request.approval && provider_id == "gerrit"),
+        usage_failure(
+            "Gerrit has no separate check to carry an approval verdict; publish without --approval"
+        )
+    );
     // The same re-evaluation as `vee gate check`, so a published decision is the
     // one the gate would make now.
     let reevaluated = crate::operations::reevaluate_gate(workspace, request.review_id, None)?;
     let mut reviewed = reevaluated.review;
     reviewed.gate = reevaluated.decision;
     ensure_publishable(root, &reviewed)?;
+    // Evaluated before anything is written, so a failure publishes nothing.
+    let approval = if request.approval {
+        Some(crate::operations::approval_eligibility(
+            workspace,
+            request.review_id,
+        )?)
+    } else {
+        None
+    };
 
     let token_env = if token_env.is_empty() {
         default_publish_token_env(&provider_id).to_owned()
@@ -607,12 +628,23 @@ pub fn publish_review(
             &reviewed,
         )?
     };
+    let approval_check_id = approval
+        .map(|eligibility| {
+            let check = crate::publication::approval_check_run(
+                &eligibility,
+                &pull_request,
+                &reviewed.snapshot_id,
+            );
+            publish_approval_check(&settings, &pull_request, &revision, check)
+        })
+        .transpose()?;
     Ok(ReviewPublication {
         schema_version: REVIEW_PUBLICATION_SCHEMA_VERSION,
         review_id: reviewed.review_id,
         snapshot_id: reviewed.snapshot_id,
         provider_check_id,
         thread_ids,
+        approval_check_id,
         revision,
         destination: Some(PublicationDestination {
             provider: settings.provider_id,
@@ -743,14 +775,7 @@ fn publish_to_azure_devops(
     pull_request: &vee_hosting::PullRequestRef,
     reviewed: &crate::ReviewResult,
 ) -> Result<PublicationReceipt> {
-    let provider = vee_hosting::azure_devops::AzureDevOpsAdapter::new(
-        vee_hosting::azure_devops::AzureDevOpsConfig::new(
-            &settings.api_base,
-            settings.token.clone(),
-        )
-        .map_err(anyhow::Error::msg)?,
-    )
-    .map_err(anyhow::Error::msg)?;
+    let provider = azure_devops_adapter(settings)?;
     let remote =
         vee_hosting::PullRequestContextProvider::get_pull_request_context(&provider, pull_request)
             .map_err(anyhow::Error::msg)?;
@@ -809,6 +834,44 @@ fn publish_to_azure_devops(
     )
     .map_err(anyhow::Error::msg)?;
     Ok((check_id, thread_ids, remote.revision))
+}
+
+fn azure_devops_adapter(
+    settings: &PublishSettings,
+) -> Result<vee_hosting::azure_devops::AzureDevOpsAdapter> {
+    vee_hosting::azure_devops::AzureDevOpsAdapter::new(
+        vee_hosting::azure_devops::AzureDevOpsConfig::new(
+            &settings.api_base,
+            settings.token.clone(),
+        )
+        .map_err(anyhow::Error::msg)?,
+    )
+    .map_err(anyhow::Error::msg)
+}
+
+/// Publish the approval verdict as its own check at the revision the gate
+/// was just published to. It carries no threads; omitting threads never
+/// resolves the ones the gate publication owns.
+fn publish_approval_check(
+    settings: &PublishSettings,
+    pull_request: &vee_hosting::PullRequestRef,
+    revision: &str,
+    check: vee_hosting::CheckRun,
+) -> Result<String> {
+    if settings.provider_id == "azure-devops" {
+        return azure_devops_adapter(settings)?
+            .publish_check(pull_request, revision, &check)
+            .map_err(anyhow::Error::msg);
+    }
+    let receipt = settings_provider(settings)?
+        .publish_review(vee_hosting::ReviewPublication {
+            pull_request: pull_request.clone(),
+            expected_revision: revision.to_owned(),
+            check,
+            threads: Vec::new(),
+        })
+        .map_err(anyhow::Error::msg)?;
+    Ok(receipt.provider_check_id)
 }
 
 /// The adapter for a provider that publishes a check and its threads together.

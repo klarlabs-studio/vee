@@ -245,6 +245,13 @@ impl ToView for ReviewPublication {
                 ),
                 ("Snapshot".into(), Cell::code(&self.snapshot_id)),
                 ("Provider check".into(), Cell::id(&self.provider_check_id)),
+                (
+                    "Approval check".into(),
+                    self.approval_check_id
+                        .as_ref()
+                        .map(Cell::id)
+                        .unwrap_or_else(|| Cell::muted("not published")),
+                ),
                 ("Revision".into(), Cell::code(&self.revision)),
             ])
             .section(format!("Finding threads ({})", self.thread_ids.len()));

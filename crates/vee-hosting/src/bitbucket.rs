@@ -675,7 +675,10 @@ impl GitHostingProvider for BitbucketAdapter {
             .collect::<String>();
         let state = match (publication.check.status, publication.check.conclusion) {
             (CheckStatus::Queued | CheckStatus::InProgress, _) => "INPROGRESS",
-            (_, Some(CheckConclusion::Success | CheckConclusion::Neutral)) => "SUCCESSFUL",
+            (_, Some(CheckConclusion::Success)) => "SUCCESSFUL",
+            // Bitbucket has no neutral state; a neutral check must never read
+            // as a success, so it shows as stopped.
+            (_, Some(CheckConclusion::Neutral)) => "STOPPED",
             (_, Some(CheckConclusion::Failure | CheckConclusion::ActionRequired)) => "FAILED",
             (_, Some(CheckConclusion::Cancelled | CheckConclusion::TimedOut)) => "STOPPED",
             _ => {

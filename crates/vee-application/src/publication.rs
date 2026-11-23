@@ -236,6 +236,51 @@ pub fn gate_check_run(
     }
 }
 
+/// The check name of the approval verdict, distinct from the gate's "Vee"
+/// check so branch protection can require one without the other.
+pub const APPROVAL_CHECK_NAME: &str = "Vee approval";
+
+/// The completed check that reports whether a change may be approved without
+/// a human ([ADR 0015](../../../docs/adr/0015-layered-approval-eligibility.md)).
+/// Eligible is a success; anything else is neutral, never a failure: a change
+/// that needs a person is not a broken change. Every stage is listed, so the
+/// reason is visible on the pull request.
+pub fn approval_check_run(
+    eligibility: &crate::ApprovalEligibility,
+    pull_request: &PullRequestRef,
+    snapshot_id: &str,
+) -> CheckRun {
+    let (conclusion, title) = if eligibility.eligible {
+        (
+            CheckConclusion::Success,
+            "Eligible for approval without a human",
+        )
+    } else {
+        (CheckConclusion::Neutral, "Needs a human reviewer")
+    };
+    let summary = eligibility
+        .stages
+        .iter()
+        .map(|stage| {
+            let mark = if stage.passed { "passed" } else { "failed" };
+            format!("- {} {mark}: {}", stage.id, stage.detail)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let key = format!("{}:approval", eligibility.review_id);
+    CheckRun {
+        pull_request: pull_request.clone(),
+        external_id: key.clone(),
+        name: APPROVAL_CHECK_NAME.into(),
+        status: CheckStatus::Completed,
+        conclusion: Some(conclusion),
+        title: title.into(),
+        summary,
+        snapshot_id: snapshot_id.to_owned(),
+        idempotency_key: key,
+    }
+}
+
 /// The review a publication reports.
 pub struct PublishedReview<'a> {
     pub review_id: &'a str,
@@ -551,5 +596,37 @@ mod tests {
         let check = gate_check_run(&gate, &pull_request(), "review-4".into(), "sha256:snapshot");
         assert_eq!(check.title, "Vee passed");
         assert_eq!(check.summary, "Gate status: Pass");
+    }
+
+    #[test]
+    fn approval_check_is_separate_and_never_fails_a_change_that_needs_a_person() {
+        let stage = |id: &str, passed: bool| crate::ApprovalStage {
+            id: id.into(),
+            passed,
+            detail: format!("{id} detail"),
+        };
+        let mut eligibility = crate::ApprovalEligibility {
+            schema_version: 1,
+            review_id: "review-4".into(),
+            snapshot_id: "sha256:snapshot".into(),
+            eligible: true,
+            stages: vec![stage("snapshot", true), stage("risk", true)],
+        };
+        let check = approval_check_run(&eligibility, &pull_request(), "sha256:snapshot");
+        assert_eq!(check.name, APPROVAL_CHECK_NAME);
+        assert_eq!(check.conclusion, Some(CheckConclusion::Success));
+        assert_eq!(check.idempotency_key, "review-4:approval");
+        // The gate check's key is the bare review ID.
+        assert_ne!(check.idempotency_key, "review-4");
+
+        eligibility.eligible = false;
+        eligibility.stages[1].passed = false;
+        let check = approval_check_run(&eligibility, &pull_request(), "sha256:snapshot");
+        assert_eq!(check.conclusion, Some(CheckConclusion::Neutral));
+        assert_eq!(check.title, "Needs a human reviewer");
+        assert_eq!(
+            check.summary,
+            "- snapshot passed: snapshot detail\n- risk failed: risk detail"
+        );
     }
 }
