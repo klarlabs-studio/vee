@@ -2580,8 +2580,8 @@ fn run() -> Result<u8> {
                         Output::Json => emit_json(&session)?,
                         Output::Text => print_view(&session)?,
                     }
-                    // Like `gate check`: non-zero unless every change passed.
-                    Ok(if session.verdict == "pass" { 0 } else { 1 })
+                    // Like `gate check`: 0 pass, 1 block, 2 incomplete.
+                    Ok(session.exit_code())
                 }
                 ReviewsCommand::Show { id, output } => {
                     let workspace = operations::Workspace::new(

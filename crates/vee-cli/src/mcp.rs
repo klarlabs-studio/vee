@@ -348,7 +348,8 @@ struct StandardsInput {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ReviewSessionInput {
-    /// Saved review IDs to read together (1 to 20), in display order.
+    /// Saved review IDs to read together (1 to 20, no repeats), in display order.
+    #[schemars(length(min = 1, max = 20))]
     review_ids: Vec<String>,
 }
 

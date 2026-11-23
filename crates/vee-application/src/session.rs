@@ -43,6 +43,17 @@ pub struct ReviewSession {
     pub approval_eligible: u32,
 }
 
+impl ReviewSession {
+    /// The same exit codes as the gate: 0 pass, 1 block, 2 incomplete.
+    pub fn exit_code(&self) -> u8 {
+        match self.verdict.as_str() {
+            "pass" => 0,
+            "block" => 1,
+            _ => 2,
+        }
+    }
+}
+
 /// One change's line in a session, from its review detail and approval.
 pub fn session_review(
     review: &ReviewResult,
@@ -154,5 +165,9 @@ mod tests {
             "a change that moved after its review cannot pass the session"
         );
         assert_eq!(review_session(Vec::new()).verdict, "incomplete");
+        let exit = |lines| review_session(lines).exit_code();
+        assert_eq!(exit(vec![line("pass", true, true)]), 0);
+        assert_eq!(exit(vec![line("block", true, false)]), 1);
+        assert_eq!(exit(vec![line("pass", false, false)]), 2);
     }
 }

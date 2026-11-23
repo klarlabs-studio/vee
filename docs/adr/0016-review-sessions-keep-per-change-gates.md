@@ -39,7 +39,8 @@ stacked review was found.
 - `pass` only if every change passed on a current snapshot;
 - `incomplete` otherwise.
 
-The command exits 0 only on `pass`. The MCP text and the CLI view are the
+Like the gate, the command exits 0 on `pass`, 1 on `block`, and 2 on
+`incomplete`; a repeated review ID is a usage error. The MCP text and the CLI view are the
 same Markdown and terminal rendering, so a session can be exported as text.
 
 ## Consequences

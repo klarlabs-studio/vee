@@ -11304,7 +11304,7 @@ fn review_session_reads_several_reviews_with_one_verdict() {
     let provider = directory.path().join("fake-provider");
     fs::write(
         &provider,
-        "#!/bin/sh\nif grep -q 'value() -> u8 { 3 }'; then printf '%s' '{\"schema_version\":1,\"findings\":[{\"category\":\"correctness\",\"severity\":\"high\",\"confidence\":95,\"rationale\":\"Three is wrong.\",\"path\":\"src/lib.rs\",\"line\":1}]}'; else printf '%s' '{\"schema_version\":1,\"findings\":[]}'; fi\n",
+        "#!/bin/sh\ninput=$(cat)\nif printf '%s' \"$input\" | grep -q 'value() -> u8 { 3 }'; then printf '%s' '{\"schema_version\":1,\"findings\":[{\"category\":\"correctness\",\"severity\":\"high\",\"confidence\":95,\"rationale\":\"Three is wrong.\",\"path\":\"src/lib.rs\",\"line\":1}]}'; else printf '%s' '{\"schema_version\":1,\"findings\":[]}'; fi\n",
     )
     .unwrap();
     let mut permissions = fs::metadata(&provider).unwrap().permissions();
@@ -11353,7 +11353,23 @@ fn review_session_reads_several_reviews_with_one_verdict() {
         String::from_utf8_lossy(&first.stderr)
     );
     let both = session(&[&review_ids[0], &review_ids[1]]);
-    assert_eq!(both.status.code(), Some(1));
+    assert_eq!(
+        both.status.code(),
+        Some(1),
+        "a blocked session exits 1, like the gate"
+    );
+    let repeated = session(&[&review_ids[0], &review_ids[0]]);
+    assert_eq!(
+        repeated.status.code(),
+        Some(3),
+        "a repeated review is a usage error"
+    );
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&repeated.stdout),
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+    assert!(reported.contains("listed more than once"), "{reported}");
     let value: serde_json::Value = serde_json::from_slice(&both.stdout).unwrap();
     let schema: serde_json::Value = serde_json::from_str(include_str!(
         "../../../schemas/review-session-v1.schema.json"

@@ -1148,10 +1148,17 @@ pub fn review_session(
     review_ids: &[String],
 ) -> Result<crate::ReviewSession> {
     if review_ids.is_empty() || review_ids.len() > crate::MAX_SESSION_REVIEWS {
-        anyhow::bail!(
+        return Err(usage_failure(format!(
             "a review session combines 1 to {} reviews",
             crate::MAX_SESSION_REVIEWS
-        );
+        )));
+    }
+    let mut seen = std::collections::HashSet::new();
+    if let Some(repeated) = review_ids.iter().find(|id| !seen.insert(id.as_str())) {
+        // A repeated review would be counted twice in the session totals.
+        return Err(usage_failure(format!(
+            "review {repeated} is listed more than once"
+        )));
     }
     let config = crate::load_repository_config(workspace.root()).map_err(configuration_failure)?;
     let mut lines = Vec::with_capacity(review_ids.len());
