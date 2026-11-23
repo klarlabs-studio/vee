@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 
 const reviews = ref([])
 const analytics = ref(null)
@@ -65,6 +65,28 @@ const analyticsDimensions = computed(() => analytics.value?.review_dimensions ||
 // a review that awaited verification passes once that verification completes.
 const currentGateStatus = computed(() => new Map(analyticsDimensions.value.map(item => [item.review_id, item.status])))
 const reviewStatus = review => currentGateStatus.value.get(review.review_id) || review.status
+const scopeLabels = { base: 'branch changes', staged: 'staged changes', working_tree: 'working tree' }
+// A change-set scope in words; a single commit is `commit:<oid>`.
+const scopeName = scope => {
+  const value = String(scope || '')
+  if (value.startsWith('commit:')) return `commit ${value.slice(7, 14)}`
+  return scopeLabels[value] || value.replace(/_/g, ' ') || 'review'
+}
+// A content hash without its algorithm prefix, short enough to recognize.
+const shortHash = value => String(value || '').replace(/^sha256:/, '').slice(0, 12)
+const timeFormat = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+const formatTime = value => {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? String(value || '') : timeFormat.format(date)
+}
+// Axis labels for a bar chart scaled to `maximum`; the midpoint is shown only when it is a whole count.
+const scaleLabels = maximum => [maximum, maximum % 2 === 0 ? maximum / 2 : '', 0]
+// SARIF analyzers exit non-zero whenever they report anything; a run with no
+// findings on the changed lines is what the gate treats as passing.
+const verificationOutcome = run => run.status === 'failed' && run.analyzer_findings_on_changed_lines === 0 ? 'passed' : run.status
+const verificationLabel = run => run.status === 'failed' && Number.isInteger(run.analyzer_findings_on_changed_lines)
+  ? (run.analyzer_findings_on_changed_lines === 0 ? 'clean on changed lines' : `${run.analyzer_findings_on_changed_lines} analyzer findings on changed lines`)
+  : String(run.status).replace('_', ' ')
 const queueItems = computed(() => {
   const dimensions = new Map(analyticsDimensions.value.map(item => [item.review_id, item]))
   const query = queueQuery.value.trim().toLowerCase()
@@ -292,7 +314,8 @@ const verificationDays = computed(() => {
   for (const run of filteredVerificationRuns.value) {
     const day = run.created_at.slice(0, 10)
     const entry = grouped.get(day) || { day, passed: 0, failed: 0, timed_out: 0, total: 0 }
-    if (Object.hasOwn(entry, run.status)) entry[run.status]++
+    const outcome = verificationOutcome(run)
+    if (Object.hasOwn(entry, outcome)) entry[outcome]++
     entry.total++
     grouped.set(day, entry)
   }
@@ -585,10 +608,22 @@ async function openReview(id, showError = true, allowWhileLoading = false) {
     if (showError) error.value = e.message
   }
 }
+// Elapsed time of the running review; the previous review stays visible meanwhile.
+const reviewStartedAt = ref(0)
+const clock = ref(0)
+let reviewClock = null
+const reviewElapsed = computed(() => {
+  const seconds = Math.max(0, Math.floor((clock.value - reviewStartedAt.value) / 1000))
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+})
+const stopReviewClock = () => { clearInterval(reviewClock); reviewClock = null }
+onBeforeUnmount(stopReviewClock)
 async function startReview() {
   historyRequestId++
   detailRequestId++
-  loading.value = true; error.value = ''; selected.value = null; detailLoaded.value = false; detailError.value = false
+  loading.value = true; error.value = ''; closeFinding()
+  reviewStartedAt.value = clock.value = Date.now()
+  reviewClock = setInterval(() => { clock.value = Date.now() }, 1000)
   try {
     const request = { scope: scope.value, reviewer_ids: [] }
     if (scope.value === 'base' && base.value.trim()) request.base = base.value.trim()
@@ -604,7 +639,7 @@ async function startReview() {
     try { await refreshReviews(false) }
     catch (e) { error.value = `Review started, but history could not be refreshed: ${e.message}` }
   } catch (e) { error.value = e.message }
-  finally { loading.value = false }
+  finally { loading.value = false; stopReviewClock() }
 }
 async function loadConfig() {
   try { config.value = await api('/api/config'); configText.value = JSON.stringify(config.value.config, null, 2) }
@@ -703,8 +738,8 @@ onMounted(async () => {
       <button class="nav-item" :class="{ active: activeTab === 'settings' }" @click="activeTab = 'settings'">⚙ <span>Configuration</span></button>
       <div class="rail-label history-label">HISTORY <span>{{ reviews.length }}</span></div>
       <div class="review-history" aria-label="Saved review history">
-        <button v-for="item in reviews" :key="item.review_id" class="review-link" :class="{ chosen: selected?.review?.review_id === item.review_id }" :disabled="loading" @click="activeTab = 'overview'; openReview(item.review_id)">
-          <span class="dot" :class="statusTone(reviewStatus(item))" :title="`Gate: ${reviewStatus(item)}`"></span><span class="review-link-text"><b>{{ item.review_id.slice(0, 17) }}</b><small>{{ item.created_at }}</small></span>
+        <button v-for="item in reviews" :key="item.review_id" class="review-link" :class="{ chosen: selected?.review?.review_id === item.review_id }" :aria-label="`${item.review_id}, gate ${reviewStatus(item)}, ${item.created_at}`" :disabled="loading" @click="activeTab = 'overview'; openReview(item.review_id)">
+          <span class="dot" :class="statusTone(reviewStatus(item))" :title="`Gate: ${reviewStatus(item)}`"></span><span class="review-link-text" :title="item.review_id"><b>{{ formatTime(item.created_at) }}</b><small>{{ reviewStatus(item) }} · {{ item.review_id.replace(/^rev_/, '').slice(0, 8) }}</small></span>
         </button>
         <div v-if="!reviews.length" class="empty-history">No reviews yet</div>
       </div>
@@ -725,6 +760,7 @@ onMounted(async () => {
           <label class="queue-search">Search<input v-model="queueQuery" aria-label="Search review queue" placeholder="Review, snapshot, reviewer…"></label>
           <button class="text-button" @click="clearQueueFilters">Clear filters</button>
         </div>
+        <details class="saved-views-toggle" :open="queueSavedViews.length > 0"><summary>Saved views<span v-if="queueSavedViews.length"> · {{ queueSavedViews.length }}</span></summary>
         <div class="queue-saved-views" aria-label="Saved review queue views">
           <label>Saved view<select v-model="queueSavedViewId" aria-label="Choose saved queue view"><option value="">Choose a saved view</option><option v-for="view in queueSavedViews" :key="view.id" :value="view.id">{{ view.name }}</option></select></label>
           <button class="text-button" :disabled="!queueSavedViewId" @click="applyQueueView">Load view</button>
@@ -734,7 +770,8 @@ onMounted(async () => {
           <small v-if="queueViewMessage" role="status">{{ queueViewMessage }}</small>
           <small v-else>Saved in this browser profile for this local Vee instance.</small>
         </div>
-        <p class="queue-scope hint">Showing {{ queueItems.length }} matching reviews from the latest {{ Math.min(reviews.length, 500) }} saved records<template v-if="reviews.length > 500">; older records are omitted</template>. “Status unavailable” means Vee could not load the review's retained analytics dimensions; it does not mean ungated.</p>
+        </details>
+        <p class="queue-scope hint">Showing {{ queueItems.length }} matching reviews from the latest {{ Math.min(reviews.length, 500) }} saved records<template v-if="reviews.length > 500">; older records are omitted</template>.<template v-if="queueItems.some(item => item.gate_status === 'unknown')"> “Status unavailable” means Vee could not load the review's retained analytics dimensions; it does not mean ungated.</template></p>
         <div v-if="queueItems.length" class="queue-list">
           <article v-for="item in queueItems" :key="item.review_id" class="queue-card">
             <div class="queue-card-main"><span class="status-pill" :class="statusTone(item.gate_status)">{{ item.gate_status_stale ? 'possibly outdated' : item.gate_status === 'unknown' ? 'status unavailable' : item.gate_status === 'ungated' ? 'no gate' : item.gate_status }}</span><div><strong>{{ item.review_id }}</strong><small>{{ item.created_at }} · snapshot {{ item.snapshot_id }}</small><small v-if="item.status !== item.gate_status && !['unknown', 'ungated'].includes(item.gate_status)">Reviewed as {{ item.status }}; gate re-evaluated since</small><small v-if="item.next_action" class="next-action" :data-kind="item.next_action.kind">Next: {{ item.next_action.summary }}</small></div></div>
@@ -756,7 +793,8 @@ onMounted(async () => {
           <label>Approved rule<select v-model="analyticsRule" aria-label="Filter by approved rule"><option value="">All rules</option><option v-for="id in analyticsOptions('finding_rule_ids')" :key="id" :value="id">{{ id }}</option></select></label>
           <button class="text-button" @click="analyticsReviewer = ''; analyticsProvider = ''; analyticsCategory = ''; analyticsRule = ''">Clear filters</button>
         </div>
-        <div v-if="analytics" class="analytics-saved-views" aria-label="Saved Insights views">
+        <details v-if="analytics" class="saved-views-toggle" :open="savedAnalyticsViews.length > 0"><summary>Saved views<span v-if="savedAnalyticsViews.length"> · {{ savedAnalyticsViews.length }}</span></summary>
+        <div class="analytics-saved-views" aria-label="Saved Insights views">
           <label>Saved view<select v-model="selectedAnalyticsViewId" aria-label="Choose saved Insights view"><option value="">Choose a saved view</option><option v-for="view in savedAnalyticsViews" :key="view.id" :value="view.id">{{ view.name }}</option></select></label>
           <button class="text-button" :disabled="!selectedAnalyticsViewId" @click="applySavedAnalyticsView">Load view</button>
           <button class="text-button" :disabled="!selectedAnalyticsViewId" @click="deleteSavedAnalyticsView">Delete view</button>
@@ -765,6 +803,7 @@ onMounted(async () => {
           <small v-if="analyticsViewMessage" role="status">{{ analyticsViewMessage }}</small>
           <small v-else>Saved in this browser profile for this local Vee instance.</small>
         </div>
+        </details>
         <div v-if="analytics" class="analytics-kpis">
           <div class="summary-card"><div class="card-label">FILTERED REVIEWS</div><strong class="metric">{{ chartDays.reduce((total, day) => total + day.total, 0) }}</strong><small>in the visible window from {{ analyticsDimensions.length }} saved reviews</small></div>
           <div class="summary-card"><div class="card-label">GATE PASS</div><strong class="metric good">{{ chartDays.reduce((total, day) => total + day.pass, 0) }}</strong><small>in the visible filtered timeline</small></div>
@@ -775,23 +814,23 @@ onMounted(async () => {
             <div v-if="analyticsRange === 'custom'" class="analytics-date-range"><label>From<input v-model="analyticsDateFrom" aria-label="Start date" type="date"></label><label>To<input v-model="analyticsDateTo" aria-label="End date" type="date"></label><button class="text-button" @click="analyticsDateFrom = ''; analyticsDateTo = ''">Clear dates</button></div>
             <p v-if="invalidAnalyticsDateRange" class="hint" role="alert">Start date must be on or before end date.</p>
             <div v-if="chartDays.length" class="timeline-chart" role="img" aria-label="Stacked bar chart of daily gate outcomes">
-              <div class="chart-scale"><span>{{ Math.max(1, ...chartDays.map(day => day.total)) }}</span><span>{{ Math.ceil(Math.max(1, ...chartDays.map(day => day.total)) / 2) }}</span><span>0</span></div>
+              <div class="chart-scale"><span v-for="(label, index) in scaleLabels(Math.max(1, ...chartDays.map(day => day.total)))" :key="index">{{ label }}</span></div>
               <div class="chart-bars"> <button v-for="day in chartDays" :key="day.day" class="day-column" :class="{ chosen: selectedAnalyticsDay === day.day }" :aria-label="`Show reviews for ${day.day}: ${day.pass} pass, ${day.block} block, ${day.incomplete} incomplete, ${day.ungated} without a gate`" :aria-pressed="selectedAnalyticsDay === day.day" :title="`${day.day}: ${day.pass} pass, ${day.block} block, ${day.incomplete} incomplete, ${day.ungated} without a gate`" @click="selectedAnalyticsDay = selectedAnalyticsDay === day.day ? '' : day.day"><span class="stacked-bar"><i class="bar-pass" :style="{ height: `${day.passHeight}px` }"></i><i class="bar-block" :style="{ height: `${day.blockHeight}px` }"></i><i class="bar-incomplete" :style="{ height: `${day.incompleteHeight}px` }"></i><i class="bar-ungated" :style="{ height: `${day.ungatedHeight}px` }"></i></span><small>{{ day.day.slice(5) }}</small></button></div>
             </div>
             <div v-else class="chart-empty">Run a review to start building a local trend.</div>
             <div class="chart-legend"><span><i class="bar-pass"></i>Pass</span><span><i class="bar-block"></i>Block</span><span><i class="bar-incomplete"></i>Incomplete</span><span><i class="bar-ungated"></i>No gate</span></div>
-            <p class="hint"><template v-if="analyticsRange === 'custom'">Chart shows saved review dates in the selected custom range within available history; gate counts use the latest decision per review.</template><template v-else>Chart shows the {{ analyticsWindow }} latest dates with matching saved reviews; gate counts use the latest decision per review.</template> Reviews without a saved gate decision are shown as “No gate.” Finding severity and feedback panels summarize current repository-wide records. Filterable history is capped at the most recent 500 reviews<template v-if="!analytics.history_complete"> and older reviews are omitted</template>.<template v-if="!analytics.dimensions_complete"> Some saved review records lack readable reviewer/category dimensions and are excluded when a filter is selected.</template></p>
+            <details class="chart-about"><summary>About this chart</summary><p class="hint"><template v-if="analyticsRange === 'custom'">Chart shows saved review dates in the selected custom range within available history; gate counts use the latest decision per review.</template><template v-else>Chart shows the {{ analyticsWindow }} latest dates with matching saved reviews; gate counts use the latest decision per review.</template> Reviews without a saved gate decision are shown as “No gate.” Finding severity and feedback panels summarize current repository-wide records. Filterable history is capped at the most recent 500 reviews<template v-if="!analytics.history_complete"> and older reviews are omitted</template>.<template v-if="!analytics.dimensions_complete"> Some saved review records lack readable reviewer/category dimensions and are excluded when a filter is selected.</template></p></details>
             <div v-if="selectedAnalyticsDay" class="analytics-drilldown" aria-live="polite"><div class="drilldown-head"><strong>Reviews on {{ selectedAnalyticsDay }}</strong><button class="text-button" @click="selectedAnalyticsDay = ''">Clear</button></div><button v-for="review in analyticsDayReviews" :key="review.review_id" class="drilldown-review" :disabled="loading" @click="activeTab = 'overview'; openReview(review.review_id)"><span class="dot" :class="statusTone(review.gate_status)"></span><span><b>{{ review.review_id }}</b><small>{{ review.created_at }} · Gate: {{ review.gate_status === 'ungated' ? 'no gate' : review.gate_status === 'unknown' ? 'status unavailable' : review.gate_status }} · Review: {{ review.status || 'unknown status' }}</small></span><span aria-hidden="true">→</span></button><p v-if="!analyticsDayReviews.length" class="hint">No matching review summaries are available for this chart date.</p><small v-if="!analytics.history_complete" class="hint">The chart is based on the latest 500 reviews, so this list can contain additional reviews for the same date.</small></div>
           </section>
-          <section class="panel chart-panel"><div class="panel-head"><div><h3>Verification outcomes</h3><p>Saved verification run events, grouped by completion date.</p></div><label>Profile<select v-model="verificationProfile" aria-label="Filter verification profile"><option value="">All profiles</option><option v-for="profile in verificationProfiles" :key="profile" :value="profile">{{ profile }}</option></select></label></div>
+          <section class="panel chart-panel"><div class="panel-head"><div><h3>Verification outcomes</h3><p>Saved verification run events, grouped by completion date.</p></div><label class="chart-controls">Profile<select v-model="verificationProfile" aria-label="Filter verification profile"><option value="">All profiles</option><option v-for="profile in verificationProfiles" :key="profile" :value="profile">{{ profile }}</option></select></label></div>
             <div v-if="verificationChartDays.length" class="timeline-chart" role="img" aria-label="Stacked bar chart of daily verification outcomes">
-              <div class="chart-scale"><span>{{ Math.max(1, ...verificationChartDays.map(day => day.total)) }}</span><span>{{ Math.ceil(Math.max(1, ...verificationChartDays.map(day => day.total)) / 2) }}</span><span>0</span></div>
+              <div class="chart-scale"><span v-for="(label, index) in scaleLabels(Math.max(1, ...verificationChartDays.map(day => day.total)))" :key="index">{{ label }}</span></div>
               <div class="chart-bars"><button v-for="day in verificationChartDays" :key="day.day" class="day-column" :class="{ chosen: selectedVerificationDay === day.day }" :aria-label="`Show verification runs for ${day.day}: ${day.passed} passed, ${day.failed} failed, ${day.timed_out} timed out`" :aria-pressed="selectedVerificationDay === day.day" :title="`${day.day}: ${day.passed} passed, ${day.failed} failed, ${day.timed_out} timed out`" @click="selectedVerificationDay = selectedVerificationDay === day.day ? '' : day.day"><span class="stacked-bar"><i class="bar-pass" :style="{ height: `${day.passedHeight}px` }"></i><i class="bar-block" :style="{ height: `${day.failedHeight}px` }"></i><i class="bar-incomplete" :style="{ height: `${day.timedOutHeight}px` }"></i></span><small>{{ day.day.slice(5) }}</small></button></div>
             </div>
             <div v-else class="chart-empty">No verification runs in this range.</div>
             <div class="chart-legend"><span><i class="bar-pass"></i>Passed</span><span><i class="bar-block"></i>Failed</span><span><i class="bar-incomplete"></i>Timed out</span></div>
-            <p class="hint">Showing {{ verificationVisibleRuns.length }} retained runs matching this profile and visible dates; {{ analytics.verification_run_count }} runs exist in total. These are run counts, not pass rates. The chart uses the latest {{ analytics.verification_runs.length }} records<template v-if="!analytics.verification_history_complete">; older runs are omitted</template>.</p>
-            <div v-if="selectedVerificationDay" class="analytics-drilldown" aria-live="polite"><div class="drilldown-head"><strong>Verification runs on {{ selectedVerificationDay }} · {{ verificationDayRuns.length }}</strong><button class="text-button" @click="selectedVerificationDay = ''">Clear</button></div><article v-for="run in verificationDayRuns" :key="run.run_id" class="drilldown-finding"><div><strong>{{ run.profile_id }} · {{ run.status.replace('_', ' ') }}</strong><small>{{ run.run_id }} · {{ run.created_at }}</small><small>Snapshot {{ run.snapshot_id }}</small></div><button v-if="reviews.some(review => review.snapshot_id === run.snapshot_id)" class="text-button" @click="activeTab = 'overview'; openReview(reviews.find(review => review.snapshot_id === run.snapshot_id).review_id)">Open matching review →</button></article><p v-if="!verificationDayRuns.length" class="hint">No verification runs match this date and profile.</p><small v-if="!analytics.verification_history_complete" class="hint">This drill-down is limited to the latest 500 verification runs.</small></div>
+            <details class="chart-about"><summary>About this chart</summary><p class="hint">Showing {{ verificationVisibleRuns.length }} retained runs matching this profile and visible dates; {{ analytics.verification_run_count }} runs exist in total. These are run counts, not pass rates. Analyzer runs with no findings on the changed lines count as passed, as the gate treats them. The chart uses the latest {{ analytics.verification_runs.length }} records<template v-if="!analytics.verification_history_complete">; older runs are omitted</template>.</p></details>
+            <div v-if="selectedVerificationDay" class="analytics-drilldown" aria-live="polite"><div class="drilldown-head"><strong>Verification runs on {{ selectedVerificationDay }} · {{ verificationDayRuns.length }}</strong><button class="text-button" @click="selectedVerificationDay = ''">Clear</button></div><article v-for="run in verificationDayRuns" :key="run.run_id" class="drilldown-finding"><div><strong>{{ run.profile_id }} · {{ verificationLabel(run) }}</strong><small>{{ run.run_id }} · {{ run.created_at }}</small><small>Snapshot {{ run.snapshot_id }}</small></div><button v-if="reviews.some(review => review.snapshot_id === run.snapshot_id)" class="text-button" @click="activeTab = 'overview'; openReview(reviews.find(review => review.snapshot_id === run.snapshot_id).review_id)">Open matching review →</button></article><p v-if="!verificationDayRuns.length" class="hint">No verification runs match this date and profile.</p><small v-if="!analytics.verification_history_complete" class="hint">This drill-down is limited to the latest 500 verification runs.</small></div>
           </section>
           <section class="panel chart-panel provider-latency-panel"><div class="panel-head"><div><h3>Provider latency</h3><p>Measured adapter time across retained reviews.</p></div><span class="chart-unit">MILLISECONDS</span></div>
             <div v-if="providerLatencyBars.length" class="provider-latency-chart" role="img" aria-label="Provider adapter latency comparison showing median and 95th percentile">
@@ -803,14 +842,14 @@ onMounted(async () => {
             </div>
             <div v-else class="chart-empty">No provider timing data in retained reviews.</div>
             <div class="chart-legend"><span><i class="latency-p50-key"></i>p50</span><span><i class="latency-p95-key"></i>p95</span></div>
-            <p class="hint">{{ analytics.provider_latency_note }}<template v-if="!analytics.provider_latency_history_complete"> Older or unreadable review records were omitted.</template></p>
+            <details class="chart-about"><summary>About this chart</summary><p class="hint">{{ analytics.provider_latency_note }}<template v-if="!analytics.provider_latency_history_complete"> Older or unreadable review records were omitted.</template></p></details>
             <div class="provider-history-head"><strong>Daily p95 history</strong><span>{{ analytics.provider_latency_reviews }} reviews inspected</span></div>
             <div v-if="providerLatencyHistoryDays.length" class="provider-history-chart" role="img" aria-label="Daily provider p95 latency over retained reviews">
               <div v-for="day in providerLatencyHistoryDays" :key="day.day" class="provider-history-day"><div class="provider-history-bars"><i v-for="item in day.providers" :key="item.provider_id" :style="{ height: `${item.height}px` }" :title="`${day.day} · ${item.provider_id}: p50 ${item.median_duration_ms} ms, p95 ${item.p95_duration_ms} ms, ${item.measured_runs} measured`"></i></div><small>{{ day.day.slice(5) }}</small></div>
             </div>
             <div v-else class="chart-empty compact">No daily latency samples in this range and provider filter.</div>
             <div class="chart-legend"><span><i class="latency-history-key"></i>p95 by day</span></div>
-            <p class="hint">Daily history follows the selected date range and provider filter. Recent view shows the {{ analyticsWindow }} latest dates with measurements; custom range includes all available matching dates. History is bounded to 2,000 reviews.</p>
+            <details class="chart-about"><summary>About this chart</summary><p class="hint">Daily history follows the selected date range and provider filter. Recent view shows the {{ analyticsWindow }} latest dates with measurements; custom range includes all available matching dates. History is bounded to 2,000 reviews.</p></details>
           </section>
           <section class="panel chart-panel provider-cost-panel"><div class="panel-head"><div><h3>Estimated provider cost</h3><p>Configured token rates applied to recorded usage.</p></div></div>
             <div v-if="providerCostBars.length" class="provider-latency-chart">
@@ -822,7 +861,7 @@ onMounted(async () => {
             <div v-if="providerCostHistoryDays.length" class="provider-history-chart" role="img" aria-label="Daily estimated provider cost over retained reviews">
               <div v-for="day in providerCostHistoryDays" :key="day.day" class="provider-history-day"><div class="provider-history-bars"><i v-for="item in day.providers" :key="item.provider_id" class="cost-history-bar" :style="{ height: `${item.height}px` }" :title="`${day.day} · ${item.provider_id}: $${item.estimated_usd.toFixed(6)}, ${item.priced_runs} priced, ${item.unpriced_runs} unpriced`"></i></div><small>{{ day.day.slice(5) }}</small></div>
             </div><div v-else class="chart-empty compact">No priced usage in this range and provider filter.</div>
-            <p class="hint">Totals and daily history follow the selected date range and provider filter; recent view uses the {{ analyticsWindow }} latest dates with provider usage. {{ analytics.provider_cost_note }}<template v-if="!analytics.provider_cost_history_complete"> Older or unreadable review records were omitted.</template></p>
+            <details class="chart-about"><summary>About this chart</summary><p class="hint">Totals and daily history follow the selected date range and provider filter; recent view uses the {{ analyticsWindow }} latest dates with provider usage. {{ analytics.provider_cost_note }}<template v-if="!analytics.provider_cost_history_complete"> Older or unreadable review records were omitted.</template></p></details>
           </section>
           <section class="panel chart-panel"><div class="panel-head"><div><h3>Finding severity</h3><p>Current unique findings by severity.</p></div></div>
             <div v-if="severityBars.length" class="severity-chart"><button v-for="item in severityBars" :key="item.severity" class="severity-meter severity-select" :class="{ chosen: selectedAnalyticsSeverity === item.severity }" :aria-pressed="selectedAnalyticsSeverity === item.severity" :aria-label="`Show ${item.count} ${item.severity} findings`" @click="selectedAnalyticsSeverity = selectedAnalyticsSeverity === item.severity ? '' : item.severity"><div><span>{{ item.severity }}</span><b>{{ item.count }}</b></div><div class="meter-track"><i :class="`severity-${item.severity}`" :style="{ width: item.width }"></i></div></button></div>
@@ -841,9 +880,9 @@ onMounted(async () => {
       </section>
 
       <template v-else>
-        <section class="launch-card">
-          <div class="launch-copy"><div class="launch-icon">⌁</div><div><strong>Start a local review</strong><small>Capture changes and evaluate the repository policy.</small></div></div>
-          <div class="launch-controls"><select v-model="scope" aria-label="Change scope"><option value="base">Branch changes</option><option value="staged">Staged changes</option><option value="working_tree">Working tree</option></select><input v-if="scope === 'base'" v-model="base" aria-label="Base branch" placeholder="Base ref"/><button class="primary" :disabled="loading || initializing" @click="startReview">{{ initializing ? 'Loading…' : loading ? 'Reviewing…' : 'Run review' }} <span>→</span></button></div>
+        <section class="launch-card" :class="{ running: loading }">
+          <div class="launch-copy"><div class="launch-icon">⌁</div><div><strong>{{ loading ? `Reviewing ${scopeLabels[scope]}…` : 'Start a local review' }}</strong><small role="status">{{ loading ? (selected ? 'Reviewers run in parallel. The previous review stays visible until this one finishes.' : 'Reviewers run in parallel; this can take a few minutes.') : 'Capture changes and evaluate the repository policy.' }}</small><small v-if="loading" class="review-elapsed" aria-hidden="true">{{ reviewElapsed }} elapsed</small></div></div>
+          <div class="launch-controls"><select v-model="scope" aria-label="Change scope"><option value="base">Branch changes</option><option value="staged">Staged changes</option><option value="working_tree">Working tree</option></select><input v-if="scope === 'base'" v-model="base" aria-label="Base branch" placeholder="Base ref"/><button class="primary" :class="{ quiet: selected }" :disabled="loading || initializing" @click="startReview">{{ initializing ? 'Loading…' : loading ? 'Reviewing…' : 'Run review' }} <span>→</span></button></div>
         </section>
 
         <template v-if="selected">
@@ -851,7 +890,7 @@ onMounted(async () => {
           <div v-else-if="detailError" class="alert">Saved details could not be refreshed. Showing the last available review details; they may be out of date.</div>
           <template v-if="detailLoaded || detailError">
           <section class="summary-row">
-            <div class="summary-card gate-card"><div class="card-label">GATE DECISION</div><div class="gate-line"><span class="status-pill" :class="statusTone(selected.review.status)">{{ selected.review.status }}</span><strong>{{ selected.review.status === 'pass' ? 'Policy satisfied' : selected.review.status === 'block' ? 'Action required' : 'Analysis incomplete' }}</strong></div><small>{{ selected.review.review_id }} · {{ selected.review.snapshot_id }}</small></div>
+            <div class="summary-card gate-card"><div class="card-label">GATE DECISION</div><div class="gate-line"><span class="status-pill" :class="statusTone(selected.review.status)">{{ selected.review.status }}</span><strong>{{ selected.review.status === 'pass' ? 'Policy satisfied' : selected.review.status === 'block' ? 'Action required' : 'Analysis incomplete' }}</strong></div><small :title="`${selected.review.review_id} · ${selected.review.snapshot_id}`">{{ scopeName(selected.review.change_set?.scope) }} · snapshot {{ shortHash(selected.review.snapshot_id) }}</small></div>
             <div class="summary-card"><div class="card-label">FINDINGS</div><strong class="metric">{{ findings.length }}</strong><small>reported in this review</small></div>
             <div class="summary-card"><div class="card-label">AFFECTED FILES</div><strong class="metric">{{ impactedFiles }}</strong><small>{{ impactPaths.length }} {{ impactPaths.length === 1 ? 'reference' : 'references' }} · {{ selected.impact?.coverage_complete ? 'coverage complete' : 'coverage has limitations' }}</small></div>
           </section>

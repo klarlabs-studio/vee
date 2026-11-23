@@ -1,6 +1,12 @@
 import { test, expect } from '@playwright/test'
 import { readFile } from 'node:fs/promises'
 
+// Saved views sit behind a disclosure that starts open only when views exist.
+async function openSavedViews(page) {
+  const toggle = page.locator('details.saved-views-toggle')
+  if (!(await toggle.evaluate(element => element.open))) await toggle.locator('summary').click()
+}
+
 const latest = {
   review_id: 'rev_latest', snapshot_id: 'sha256:latest', status: 'block',
   created_at: '2026-11-14 09:00:00',
@@ -60,7 +66,11 @@ const findingTask = {
   verification_runs: [{ run_id: 'verify_2', profile_id: 'unit', status: 'failed', snapshot_id: 'sha256:latest', created_at: '2026-11-14 13:00:00' }],
 }
 
+// Lets a test adjust the mocked analytics response before the page loads it.
+let patchAnalytics = body => body
+
 test.beforeEach(async ({ page }) => {
+  patchAnalytics = body => body
   let latestSummary = latest
   let latestDetail = detail(latest)
   await page.route('**/api/**', async route => {
@@ -134,6 +144,7 @@ test.beforeEach(async ({ page }) => {
     else if (url.pathname === '/api/reviews/rev_prior') body = { ...detail(prior), superseded_by: { review_id: 'rev_latest', created_at: '2026-11-14 09:00:00', outdated_finding_ids: ['FIND-001'] } }
     else if (url.pathname === '/api/reviews/rev_started') body = latestDetail
     else body = { error: `Unexpected API path ${url.pathname}` }
+    if (url.pathname === '/api/analytics') body = patchAnalytics(body)
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
   })
 })
@@ -145,7 +156,11 @@ test('insights view renders local review trends and labels feedback counts', asy
   await expect(page.getByRole('heading', { name: 'Gate outcomes over time' })).toBeVisible()
   await expect(page.getByRole('img', { name: 'Stacked bar chart of daily gate outcomes' })).toBeVisible()
   await page.getByLabel('Recent date count').selectOption('7')
-  await expect(page.getByText(/Chart shows the 7 latest dates/)).toBeVisible()
+  // Explanations start collapsed so the charts lead.
+  const about = page.locator('.chart-about').first()
+  await expect(about.getByText(/Chart shows the 7 latest dates/)).toBeHidden()
+  await about.getByText('About this chart').click()
+  await expect(about.getByText(/Chart shows the 7 latest dates/)).toBeVisible()
   await expect(page.getByText('confirmed')).toBeVisible()
   await expect(page.getByText(/not calibrated acceptance or accuracy rates/)).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Findings by approved rule' })).toBeVisible()
@@ -185,6 +200,19 @@ test('initial saved review opens without waiting for analytics', async ({ page }
   await savedReview.click()
   await page.getByRole('button', { name: /Findings/ }).click()
   await expect(page.getByText('The changed branch skips validation.')).toBeVisible({ timeout: 3000 })
+})
+
+test('an analyzer run with no findings on changed lines charts as passed, as the gate treats it', async ({ page }) => {
+  patchAnalytics = body => ({
+    ...body,
+    verification_runs: body.verification_runs.map(run =>
+      run.run_id === 'verify_2' ? { ...run, profile_id: 'nox', analyzer_findings_on_changed_lines: 0 } : run),
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: /Insights/ }).click()
+  await page.getByLabel('Filter verification profile').selectOption('nox')
+  await page.getByRole('button', { name: /Show verification runs for 2026-11-14: 1 passed, 0 failed, 0 timed out/ }).click()
+  await expect(page.locator('.analytics-drilldown')).toContainText('nox · clean on changed lines')
 })
 
 test('verification chart filters by profile and date and drills into snapshot context', async ({ page }) => {
@@ -282,6 +310,7 @@ test('saved Insights views restore filters and date range across reloads', async
   await page.getByLabel('Chart date range').selectOption('custom')
   await page.getByLabel('Start date').fill('2026-11-14')
   await page.getByLabel('End date').fill('2026-11-14')
+  await openSavedViews(page)
   await page.getByLabel('New Insights view name').fill('Security on latest day')
   await page.getByRole('button', { name: 'Save view' }).click()
   await expect(page.getByRole('status')).toHaveText('Saved “Security on latest day”.')
@@ -487,6 +516,8 @@ test('review queue filters saved gate decisions and opens the matching review', 
   await expect(page.locator('.queue-card').first()).toContainText('security')
   await expect(page.locator('.queue-card').first()).toContainText('claude')
 
+  await openSavedViews(page)
+
   await page.getByLabel('New queue view name').fill('Blocked security')
   await page.getByRole('button', { name: 'Save view' }).click()
   await expect(page.getByRole('status')).toHaveText('Saved “Blocked security”.')
@@ -510,6 +541,7 @@ test('queue view save reports browser storage failure instead of claiming succes
   })
   await page.goto('/')
   await page.getByRole('button', { name: /Review queue/ }).click()
+  await openSavedViews(page)
   await page.getByLabel('New queue view name').fill('Do not claim saved')
   await page.getByRole('button', { name: 'Save view' }).click()
   await expect(page.getByRole('status')).toHaveText('Could not save this view in browser storage.')
@@ -526,6 +558,7 @@ test('queue view delete restores the view when browser storage fails', async ({ 
   })
   await page.goto('/')
   await page.getByRole('button', { name: /Review queue/ }).click()
+  await openSavedViews(page)
   await page.getByLabel('New queue view name').fill('Keep on failed delete')
   await page.getByRole('button', { name: 'Save view' }).click()
   await expect(page.getByRole('status')).toHaveText('Could not save this view in browser storage.')
@@ -555,6 +588,7 @@ test('Insights saved view deletion restores the view when browser storage fails'
   })
   await page.goto('/')
   await page.getByRole('button', { name: /Insights/ }).click()
+  await openSavedViews(page)
   await page.getByLabel('New Insights view name').fill('Keep insights view')
   await page.getByRole('button', { name: 'Save view' }).click()
   await page.getByLabel('Choose saved Insights view').selectOption({ label: 'Keep insights view' })
@@ -567,6 +601,7 @@ test('Insights saved view deletion restores the view when browser storage fails'
 test('saved queue view keys include the active repository identity', async ({ page }) => {
   await page.goto('/')
   await page.getByRole('button', { name: /Review queue/ }).click()
+  await openSavedViews(page)
   await page.getByLabel('New queue view name').fill('Repo one only')
   await page.getByRole('button', { name: 'Save view' }).click()
   const keys = await page.evaluate(() => Object.keys(localStorage))
@@ -665,6 +700,42 @@ test('saved-review and Insights drilldown links are disabled while a new review 
   await expect(findingReview).toBeDisabled()
   releaseReview()
   await expect(page.getByRole('button', { name: /rev_started/ })).toBeVisible()
+})
+
+test('a running review keeps the previous review visible and shows elapsed time', async ({ page }) => {
+  let releaseReview
+  let reviewRequested
+  const reviewGate = new Promise(resolve => { releaseReview = resolve })
+  const requestSeen = new Promise(resolve => { reviewRequested = resolve })
+  await page.route('**/api/reviews', async route => {
+    if (route.request().method() === 'POST') {
+      reviewRequested()
+      await reviewGate
+    }
+    await route.fallback()
+  })
+  await page.goto('/')
+  await expect(page.getByText('Action required')).toBeVisible()
+  await page.getByLabel('Change scope').selectOption('working_tree')
+  await page.getByRole('button', { name: /Run review/ }).click()
+  await requestSeen
+  await expect(page.getByText('Reviewing working tree…')).toBeVisible()
+  await expect(page.getByRole('status').filter({ hasText: 'The previous review stays visible' })).toBeVisible()
+  await expect(page.locator('.review-elapsed')).toContainText(/0:0\d elapsed/)
+  await expect(page.getByText('Action required')).toBeVisible()
+  releaseReview()
+  await expect(page.getByText('Policy satisfied')).toBeVisible()
+  await expect(page.locator('.review-elapsed')).toBeHidden()
+})
+
+test('launch controls show keyboard focus', async ({ page }) => {
+  await page.goto('/')
+  const scope = page.getByLabel('Change scope')
+  await scope.focus()
+  await expect(scope).toHaveCSS('outline-style', 'solid')
+  await page.keyboard.press('Tab')
+  await expect(page.getByLabel('Base branch')).toBeFocused()
+  await expect(page.getByLabel('Base branch')).toHaveCSS('outline-style', 'solid')
 })
 
 test('review launcher waits for initial history before starting a new review', async ({ page }) => {
