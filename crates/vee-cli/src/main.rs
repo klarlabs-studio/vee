@@ -820,6 +820,15 @@ enum ReviewsCommand {
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
+    /// Read several saved reviews together, such as one agent session's changes: each change's gate, risk, open findings, and approval eligibility, and one verdict.
+    Session {
+        /// Saved review IDs (1 to 20), in the order to show them.
+        #[arg(long = "review", value_name = "REVIEW_ID", required = true)]
+        reviews: Vec<String>,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
     /// Export a saved review as SARIF or Vee JSON.
     Export {
         /// Saved review ID.
@@ -2560,6 +2569,19 @@ fn run() -> Result<u8> {
                         Output::Text => print_view(&list)?,
                     }
                     Ok(0)
+                }
+                ReviewsCommand::Session { reviews, output } => {
+                    let workspace = operations::Workspace::new(
+                        std::path::PathBuf::from(&top),
+                        crate::local_stores(),
+                    );
+                    let session = operations::review_session(&workspace, &reviews)?;
+                    match output {
+                        Output::Json => emit_json(&session)?,
+                        Output::Text => print_view(&session)?,
+                    }
+                    // Like `gate check`: non-zero unless every change passed.
+                    Ok(if session.verdict == "pass" { 0 } else { 1 })
                 }
                 ReviewsCommand::Show { id, output } => {
                     let workspace = operations::Workspace::new(

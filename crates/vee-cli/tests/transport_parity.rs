@@ -357,6 +357,23 @@ fn cli_and_mcp_return_identical_documents_for_shared_operations() {
         &text,
     );
 
+    let output = vee()
+        .args([
+            "reviews", "session", "--review", &review_id, "--output", "json",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let cli: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let (via_mcp, text) = mcp.call_with_text("review_session", json!({"review_ids": [review_id]}));
+    assert_same(&cli, &via_mcp, "session", "review-session-v1");
+    assert_same_view::<vee_application::ReviewSession>(
+        root,
+        &["reviews", "session", "--review", &review_id],
+        &via_mcp,
+        &text,
+    );
+
     let cli = cli_json(root, &["risk", "--review", &review_id]);
     let (via_mcp, text) = mcp.call_with_text("assess_change_risk", json!({"review_id": review_id}));
     assert_same(&cli, &via_mcp, "risk", "change-risk-v1");

@@ -29,6 +29,7 @@ pub mod review_progress;
 mod risk;
 pub mod rule_candidates;
 pub mod sarif;
+mod session;
 pub mod setup;
 pub mod signing;
 mod source;
@@ -50,6 +51,7 @@ pub use providers::*;
 pub use review::*;
 pub use review_progress::{ReviewProgress, ReviewProgressSink, ReviewerProgress};
 pub use risk::*;
+pub use session::*;
 pub use source::*;
 pub use verification::*;
 

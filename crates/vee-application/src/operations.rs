@@ -1141,6 +1141,39 @@ pub fn approval_eligibility(
     ))
 }
 
+/// `review-session-v1`: several saved reviews read together, each with its
+/// own gate, risk, open findings, and approval eligibility.
+pub fn review_session(
+    workspace: &Workspace,
+    review_ids: &[String],
+) -> Result<crate::ReviewSession> {
+    if review_ids.is_empty() || review_ids.len() > crate::MAX_SESSION_REVIEWS {
+        anyhow::bail!(
+            "a review session combines 1 to {} reviews",
+            crate::MAX_SESSION_REVIEWS
+        );
+    }
+    let config = crate::load_repository_config(workspace.root()).map_err(configuration_failure)?;
+    let mut lines = Vec::with_capacity(review_ids.len());
+    for review_id in review_ids {
+        let (detail, current) = review_detail_and_currency(workspace, review_id)?;
+        let approval = crate::evaluate_approval(
+            workspace.root(),
+            &config.approval,
+            &detail.review,
+            current,
+            detail.risk.as_ref(),
+        );
+        lines.push(crate::session_review(
+            &detail.review,
+            &detail.findings,
+            detail.risk.as_ref(),
+            &approval,
+        ));
+    }
+    Ok(crate::review_session(lines))
+}
+
 /// `change-risk-v1`: the change's risk tier with every measured factor.
 pub fn change_risk(workspace: &Workspace, target: ChangeTarget) -> Result<crate::ChangeRisk> {
     let change_set = target.change_set(workspace)?;

@@ -50,6 +50,7 @@ const SCHEMAS: &[(&str, &str)] = schemas![
     "repository-context-v2",
     "review-gate-attestation-v1",
     "review-output-v2",
+    "review-session-v1",
     "reviews-list-v1",
     "rule-approval-list-v1",
     "rule-approval-v2",

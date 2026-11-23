@@ -347,6 +347,13 @@ struct StandardsInput {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct ReviewSessionInput {
+    /// Saved review IDs to read together (1 to 20), in display order.
+    review_ids: Vec<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ReviewInput {
     /// Saved review ID.
     review_id: String,
@@ -656,6 +663,11 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         "impact-assessment-v4",
         "Analyze files and tests likely affected by a saved review's snapshot, with evidence paths and uncertainty. Same document as `vee impact --review <id> --output json`.",
         |ws, input: ReviewInput| operations::impact(&ws, operations::ChangeTarget::Review(input.review_id)));
+
+    viewed_tool!(server, workspace, "review_session", "Review session", read_only_tool(),
+        "review-session-v1",
+        "Read several saved reviews together, such as the changes one coding-agent session produced: each change keeps its own gate, risk tier, open findings by severity, and approval eligibility, and the session verdict passes only when every change passed on a current snapshot. Same document as `vee reviews session --review <id>... --output json`.",
+        |ws, input: ReviewSessionInput| operations::review_session(&ws, &input.review_ids));
 
     viewed_tool!(server, workspace, "check_approval_eligibility", "Check approval eligibility", read_only_tool(),
         "approval-eligibility-v1",

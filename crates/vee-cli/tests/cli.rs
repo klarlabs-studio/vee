@@ -10206,6 +10206,7 @@ fn mcp_tools_declare_titles_safety_annotations_and_documented_inputs() {
         "analyze_impact",
         "assess_change_risk",
         "check_approval_eligibility",
+        "review_session",
         "analyze_cross_repository_impact",
         "acceptance_traceability",
         "get_repository_context",
@@ -11252,7 +11253,10 @@ fn agent_plugins_match_the_bundled_skills_version_and_mcp_command() {
     };
     let version = env!("CARGO_PKG_VERSION");
     assert_eq!(json(plugin.join("plugin.json"))["version"], version);
-    assert_eq!(json(plugin.join(".claude-plugin/plugin.json"))["version"], version);
+    assert_eq!(
+        json(plugin.join(".claude-plugin/plugin.json"))["version"],
+        version
+    );
     let portable = &json(plugin.join("mcp.json"))["mcpServers"]["vee"];
     let claude = &json(plugin.join(".mcp.json"))["mcpServers"]["vee"];
     assert_eq!(portable["type"], "stdio");
@@ -11262,7 +11266,10 @@ fn agent_plugins_match_the_bundled_skills_version_and_mcp_command() {
     let mut help_args = args.clone();
     help_args.push("--help".into());
     let help = vee().args(&help_args).output().unwrap();
-    assert!(help.status.success(), "the plugin's MCP command must be valid: {args:?}");
+    assert!(
+        help.status.success(),
+        "the plugin's MCP command must be valid: {args:?}"
+    );
     for marketplace in [
         ".claude-plugin/marketplace.json",
         ".agents/plugins/marketplace.json",
@@ -11270,4 +11277,95 @@ fn agent_plugins_match_the_bundled_skills_version_and_mcp_command() {
         let entry = &json(repo.join(marketplace))["plugins"][0];
         assert_eq!(entry["name"], "vee", "{marketplace}");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn review_session_reads_several_reviews_with_one_verdict() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();
+    fs::write(root.join("reviewer.md"), "Review changed code.\n").unwrap();
+    // The provider reports a blocking finding only for the second change.
+    let provider = directory.path().join("fake-provider");
+    fs::write(
+        &provider,
+        "#!/bin/sh\nif grep -q 'value() -> u8 { 3 }'; then printf '%s' '{\"schema_version\":1,\"findings\":[{\"category\":\"correctness\",\"severity\":\"high\",\"confidence\":95,\"rationale\":\"Three is wrong.\",\"path\":\"src/lib.rs\",\"line\":1}]}'; else printf '%s' '{\"schema_version\":1,\"findings\":[]}'; fi\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&provider).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&provider, permissions).unwrap();
+    fs::write(
+        root.join(".vee.yaml"),
+        format!(
+            "version: 1\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\npolicy:\n  required_reviewers: [correctness]\n  block_severities: [high]\n  on_incomplete: block\n",
+            provider.display()
+        ),
+    )
+    .unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "baseline"]);
+    let mut review_ids = Vec::new();
+    for value in [2, 3] {
+        fs::write(
+            root.join("src/lib.rs"),
+            format!("pub fn value() -> u8 {{ {value} }}\n"),
+        )
+        .unwrap();
+        git(&["commit", "-qam", "change"]);
+        let review = vee()
+            .args(["review", "--commit", "HEAD", "--output", "json"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        let review: serde_json::Value = serde_json::from_slice(&review.stdout).unwrap();
+        review_ids.push(review["review_id"].as_str().unwrap().to_owned());
+    }
+    let session = |ids: &[&String]| {
+        let mut command = vee();
+        command.args(["reviews", "session", "--output", "json"]);
+        for id in ids {
+            command.args(["--review", id.as_str()]);
+        }
+        command.current_dir(root).output().unwrap()
+    };
+
+    let first = session(&[&review_ids[0]]);
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let both = session(&[&review_ids[0], &review_ids[1]]);
+    assert_eq!(both.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&both.stdout).unwrap();
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/review-session-v1.schema.json"
+    ))
+    .unwrap();
+    assert!(
+        jsonschema::validator_for(&schema).unwrap().is_valid(&value),
+        "{value:#}"
+    );
+    assert_eq!(value["verdict"], "block");
+    assert_eq!(value["open_findings"], 1);
+    assert_eq!(value["reviews"][0]["gate"], "pass");
+    assert_eq!(value["reviews"][1]["gate"], "block");
+    assert_eq!(value["reviews"][1]["open_findings"]["high"], 1);
 }
