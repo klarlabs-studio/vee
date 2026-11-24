@@ -95,17 +95,21 @@ and it offers three read-only tools:
 
 ### Evidence and the review record
 
-- Every tool call is recorded in the review record: tool, arguments,
-  paths, bytes and content digests. A finding's supporting evidence is
-  therefore auditable.
-- Findings may cite explored files. Anchor validation accepts any snapshot
-  path that was read, in addition to the changed and bundled paths.
+- Every tool call is logged with its tool, arguments, outcome, the files
+  whose text it returned and its size. The reviewer context manifest
+  records the totals and the files read, so what a reviewer saw is
+  auditable.
+- Findings may cite explored files, as they may already cite any path
+  inside the repository; anchoring is unchanged.
 
 ### Providers and rollout
 
 - **Opt-in.** `review.exploration.enabled` defaults to `false`.
-- **First providers.** The Claude CLI and the Codex CLI pass the server as
-  an MCP configuration.
+- **First provider.** The Claude CLI gets the server as its only MCP
+  server, with only the three tools allowed. The Codex CLI accepts MCP
+  servers through configuration overrides, but its sandbox still lets its
+  own shell read the filesystem, so it follows once that read access can
+  be confined.
 - **Other providers.** API providers (`openai_compatible`,
   `ollama_native`) can later use the same tool service through function
   calling. Until then they review the bundle alone, and the review records
