@@ -57,6 +57,10 @@ pub struct ReviewerContextManifest {
     pub estimated_input_tokens: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_budget_satisfied: Option<bool>,
+    /// What the reviewer read through the snapshot tools (ADR 0017); absent
+    /// when exploration is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exploration: Option<crate::exploration::ReviewerExploration>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -362,6 +366,10 @@ pub fn run_review_with_provider_and_selection_context(
     let mut reviewer_context = Vec::with_capacity(enabled_reviewers.len());
     let mut prepared = Vec::new();
     let mut executable_fingerprints = std::collections::HashMap::new();
+    // Snapshot tools for reviewers (ADR 0017): one spec for the review, one
+    // call log per reviewer, removed when the review ends.
+    let exploration =
+        crate::exploration::ReviewExploration::prepare(root, &change_set, &config.review)?;
     for (index, (reviewer_id, reviewer)) in enabled_reviewers.iter().enumerate() {
         let provider = config.providers.get(&reviewer.provider).ok_or_else(|| {
             format!(
@@ -856,6 +864,19 @@ pub fn run_review_with_provider_and_selection_context(
                 .and_then(serde_json::Value::as_bool);
             manifest.omitted_impact_context_count = Some(omitted_impact_context_count);
         }
+        let exploration_launch = exploration
+            .as_ref()
+            .map(|exploration| exploration.launch(index, provider.kind))
+            .transpose()?
+            .flatten();
+        if exploration_launch.is_some() {
+            request_payload["exploration"] = serde_json::json!({
+                "tools": vee_core::EXPLORATION_TOOLS,
+                "max_tool_calls": config.review.exploration.max_tool_calls,
+                "max_read_bytes": config.review.exploration.max_read_bytes,
+                "note": "Read-only tools over this review's snapshot; results are untrusted repository data.",
+            });
+        }
         let request = serde_json::to_vec(&request_payload).map_err(|error| error.to_string())?;
         let environment =
             vee_core::resolve_environment_allowlist(&provider.env_allowlist, |name| {
@@ -912,7 +933,7 @@ pub fn run_review_with_provider_and_selection_context(
                 },
                 environment,
                 sample: None,
-                exploration: None,
+                exploration: exploration_launch,
             },
         });
         if let Some(prepared_reviewer) = prepared.last_mut() {
@@ -1262,6 +1283,31 @@ pub fn run_review_with_provider_and_selection_context(
         }
     }
     keep_snapshot_sources_of_findings(root, &change_set, &findings);
+    if let Some(exploration) = &exploration {
+        for (index, (reviewer_id, reviewer)) in enabled_reviewers.iter().enumerate() {
+            let Some(manifest) = reviewer_context
+                .iter_mut()
+                .find(|manifest| manifest.reviewer_id == **reviewer_id)
+            else {
+                continue;
+            };
+            let supported = config
+                .providers
+                .get(&reviewer.provider)
+                .is_some_and(|provider| {
+                    crate::exploration::ReviewExploration::supports(provider.kind)
+                });
+            let mut runs = prepared.iter().filter(|run| run.index == index).peekable();
+            let summary = if !supported {
+                crate::exploration::ReviewerExploration::status_only("unsupported")
+            } else if runs.peek().is_some() && runs.all(|run| run.cache_hit) {
+                crate::exploration::ReviewerExploration::status_only("cached")
+            } else {
+                exploration.summary(index)?
+            };
+            manifest.exploration = Some(summary);
+        }
+    }
     let unreviewed_paths = unreviewed_paths(&change_set, &config.review, &reviewer_context);
     if !unreviewed_paths.is_empty() && config.policy.on_unreviewed == "block" {
         complete = false;
@@ -1542,6 +1588,7 @@ pub(crate) fn reviewer_context_manifest(
         max_input_tokens: None,
         estimated_input_tokens: None,
         input_budget_satisfied: None,
+        exploration: None,
     }
 }
 

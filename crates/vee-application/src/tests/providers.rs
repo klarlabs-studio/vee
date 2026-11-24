@@ -1104,6 +1104,72 @@ fn provider_cache_keys_distinguish_samples_and_keep_unsampled_keys() {
 }
 
 #[cfg(unix)]
+#[test]
+fn exploration_keys_the_cache_by_its_contract_not_its_per_run_paths() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let executable = dir.path().join("reviewer");
+    std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let launch = |log: &str, descriptor: &str| vee_core::ExplorationLaunch {
+        program: "/usr/local/bin/vee".into(),
+        args: vec!["mcp".into(), "snapshot".into(), "--log".into(), log.into()],
+        descriptor: descriptor.into(),
+    };
+    let key = |exploration| {
+        let request = ProviderRequest {
+            kind: vee_core::ProviderKind::ClaudeCli,
+            executable: executable.to_string_lossy().into_owned(),
+            args: vec![],
+            model: None,
+            working_directory: dir.path().to_path_buf(),
+            stdin: b"{}".to_vec(),
+            timeout_seconds: 5,
+            output_limit_bytes: 4096,
+            context_window_tokens: None,
+            max_output_tokens: None,
+            environment: vec![],
+            sample: None,
+            exploration,
+        };
+        provider_cache_key(&request, "1.0", &mut Default::default())
+            .unwrap()
+            .unwrap()
+    };
+    assert_ne!(key(None), key(Some(launch("/tmp/a.jsonl", "v1"))));
+    assert_eq!(
+        key(Some(launch("/tmp/a.jsonl", "v1"))),
+        key(Some(launch("/tmp/b.jsonl", "v1")))
+    );
+    assert_ne!(
+        key(Some(launch("/tmp/a.jsonl", "v1"))),
+        key(Some(launch("/tmp/a.jsonl", "v2")))
+    );
+}
+
+#[test]
+fn claude_reviewers_get_only_the_snapshot_server_and_its_tools() {
+    let args = claude_exploration_args(&vee_core::ExplorationLaunch {
+        program: "/usr/local/bin/vee".into(),
+        args: vec!["mcp".into(), "snapshot".into()],
+        descriptor: String::new(),
+    });
+    assert_eq!(args[0], "--strict-mcp-config");
+    assert_eq!(args[1], "--mcp-config");
+    let config: serde_json::Value = serde_json::from_str(&args[2]).unwrap();
+    assert_eq!(
+        config,
+        serde_json::json!({"mcpServers": {"vee_snapshot": {
+            "command": "/usr/local/bin/vee", "args": ["mcp", "snapshot"]}}})
+    );
+    assert_eq!(args[3], "--allowedTools");
+    assert_eq!(
+        args[4],
+        "mcp__vee_snapshot__list_files,mcp__vee_snapshot__read_file,mcp__vee_snapshot__search"
+    );
+}
+
+#[cfg(unix)]
 fn failing_cli_request(
     directory: &std::path::Path,
     kind: vee_core::ProviderKind,

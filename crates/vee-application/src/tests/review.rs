@@ -1869,3 +1869,137 @@ fn a_large_early_file_does_not_crowd_later_files_out_of_the_reviewer_context() {
     assert_eq!(input["context_complete"], true);
     assert!(review.analysis_complete);
 }
+
+/// Reviewer `correctness` on provider `p`, with exploration on, over a change
+/// to `src/lib.rs` whose caller is `src/caller.rs`.
+fn exploration_review(
+    provider: &str,
+    adapter: &dyn ReviewProvider,
+) -> (tempfile::TempDir, ChangeSet, ReviewResult) {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn charge(cents: u64) {}\n").unwrap();
+    std::fs::write(
+        root.join("src/caller.rs"),
+        "fn pay() { crate::charge(1); }\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("reviewer.md"), "Review changed behavior.\n").unwrap();
+    // A stand-in reviewer CLI that only answers the version probe.
+    let cli = root.join("fake-cli");
+    std::fs::write(&cli, "#!/bin/sh\necho '2.1.0 (Claude Code)'\n").unwrap();
+    std::fs::set_permissions(&cli, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "initial"]);
+    std::fs::write(root.join("src/lib.rs"), "pub fn charge(dollars: u64) {}\n").unwrap();
+    let config_path = root.join(".vee.yaml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "version: 1\nproviders:\n  p: {{ kind: {provider}, executable: {} }}\nreviewers:\n  correctness:\n    provider: p\n    instructions_file: reviewer.md\n    include: [src/**]\nreview:\n  exploration:\n    enabled: true\n    max_tool_calls: 5\npolicy:\n  on_incomplete: block\n",
+            cli.display()
+        ),
+    )
+    .unwrap();
+    let config = RepositoryConfig::load(&config_path).unwrap();
+    let snapshot = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
+    std::fs::create_dir_all(root.join(".vee")).unwrap();
+    let mut store = ReviewStore::open(&root.join(".vee/vee.sqlite")).unwrap();
+    let result =
+        run_review_with_provider(root, snapshot.clone(), &config, &mut store, adapter, None)
+            .unwrap();
+    (directory, snapshot, result)
+}
+
+/// Records each request and, like a reviewer calling the snapshot server,
+/// appends one `read_file` call to the request's exploration log.
+struct ExploringProvider(std::sync::Arc<std::sync::Mutex<Vec<ProviderRequest>>>);
+
+impl ReviewProvider for ExploringProvider {
+    fn execute(
+        &self,
+        request: &ProviderRequest,
+        _cancellation: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<ProviderResult, String> {
+        self.0.lock().unwrap().push(request.clone());
+        if let Some(launch) = &request.exploration {
+            let log = launch
+                .args
+                .iter()
+                .skip_while(|arg| *arg != "--log")
+                .nth(1)
+                .unwrap();
+            std::fs::write(
+                log,
+                r#"{"tool":"read_file","arguments":{"path":"src/caller.rs"},"paths":["src/caller.rs"],"bytes":40,"outcome":"ok"}
+"#,
+            )
+            .unwrap();
+        }
+        Ok(ProviderResult {
+            stdout: br#"{"schema_version":1,"findings":[]}"#.to_vec(),
+            stderr: Vec::new(),
+            exit_code: Some(0),
+            usage: None,
+        })
+    }
+}
+
+#[test]
+fn exploring_reviewers_get_the_snapshot_server_and_their_reads_are_recorded() {
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (_directory, snapshot, result) =
+        exploration_review("claude_cli", &ExploringProvider(requests.clone()));
+
+    let requests = requests.lock().unwrap();
+    let launch = requests[0].exploration.clone().expect("exploration launch");
+    assert_eq!(launch.args[..3], ["mcp", "snapshot", "--spec"]);
+    assert_eq!(launch.args[4], "--log");
+    assert!(
+        launch.descriptor.contains("\"max_tool_calls\":5"),
+        "{}",
+        launch.descriptor
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&requests[0].stdin).unwrap();
+    assert_eq!(
+        payload["exploration"]["tools"],
+        serde_json::json!(vee_core::EXPLORATION_TOOLS)
+    );
+    // The spec and logs live only as long as the review.
+    assert!(!Path::new(&launch.args[3]).exists());
+
+    let exploration = result.reviewer_context[0].exploration.clone().unwrap();
+    assert_eq!(exploration.status, "used");
+    assert_eq!(exploration.tool_calls, 1);
+    assert_eq!(exploration.read_bytes, 40);
+    assert_eq!(exploration.files, ["src/caller.rs"]);
+    assert_eq!(result.change_set.digest, snapshot.digest);
+}
+
+#[test]
+fn providers_without_snapshot_tools_review_the_bundle_and_say_so() {
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (_directory, _snapshot, result) =
+        exploration_review("cli", &ExploringProvider(requests.clone()));
+
+    let requests = requests.lock().unwrap();
+    assert!(requests[0].exploration.is_none());
+    let payload: serde_json::Value = serde_json::from_slice(&requests[0].stdin).unwrap();
+    assert!(payload.get("exploration").is_none());
+    let exploration = result.reviewer_context[0].exploration.clone().unwrap();
+    assert_eq!(exploration.status, "unsupported");
+    assert!(result.analysis_complete, "{:?}", result.reasons);
+}

@@ -412,6 +412,139 @@ impl SnapshotExplorer {
     }
 }
 
+/// What one reviewer read through the snapshot tools, as recorded in the
+/// review's reviewer context manifest.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewerExploration {
+    /// `used`, `unused`, `cached` (the reviewer's result came from the
+    /// cache, so nothing was read this time) or `unsupported` (the provider
+    /// cannot use the tools).
+    pub status: String,
+    pub tool_calls: usize,
+    pub read_bytes: usize,
+    pub budget_exhausted: bool,
+    /// Files whose text reached the reviewer through the tools, sorted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
+}
+
+impl ReviewerExploration {
+    pub(crate) fn status_only(status: &str) -> Self {
+        Self {
+            status: status.into(),
+            tool_calls: 0,
+            read_bytes: 0,
+            budget_exhausted: false,
+            files: Vec::new(),
+        }
+    }
+}
+
+/// Exploration resources of one review: the spec the snapshot servers read
+/// and a call log per reviewer, in a private directory removed with it.
+pub(crate) struct ReviewExploration {
+    directory: tempfile::TempDir,
+    spec_path: PathBuf,
+    descriptor: String,
+    program: PathBuf,
+}
+
+impl ReviewExploration {
+    /// `None` when exploration is off.
+    pub(crate) fn prepare(
+        root: &Path,
+        change_set: &ChangeSet,
+        review: &ReviewConfig,
+    ) -> Result<Option<Self>, String> {
+        if !review.exploration.enabled {
+            return Ok(None);
+        }
+        let program = std::env::current_exe()
+            .map_err(|error| format!("locating the vee executable for snapshot tools: {error}"))?;
+        let directory = tempfile::Builder::new()
+            .prefix("vee-exploration-")
+            .tempdir()
+            .map_err(|error| format!("creating the exploration directory: {error}"))?;
+        let spec = ExplorationSpec::new(root, change_set, review);
+        let spec_path = directory.path().join("spec.json");
+        std::fs::write(
+            &spec_path,
+            serde_json::to_vec(&spec).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("writing the exploration spec: {error}"))?;
+        Ok(Some(Self {
+            descriptor: spec.descriptor(),
+            directory,
+            spec_path,
+            program,
+        }))
+    }
+
+    /// Providers that can start the snapshot server.
+    pub(crate) fn supports(kind: vee_core::ProviderKind) -> bool {
+        kind == vee_core::ProviderKind::ClaudeCli
+    }
+
+    /// How reviewer `index` starts the snapshot server; `None` when its
+    /// provider cannot use it.
+    pub(crate) fn launch(
+        &self,
+        index: usize,
+        kind: vee_core::ProviderKind,
+    ) -> Result<Option<vee_core::ExplorationLaunch>, String> {
+        if !Self::supports(kind) {
+            return Ok(None);
+        }
+        let path = |path: &Path| {
+            path.to_str()
+                .map(str::to_string)
+                .ok_or_else(|| format!("exploration path is not UTF-8: {}", path.display()))
+        };
+        Ok(Some(vee_core::ExplorationLaunch {
+            program: path(&self.program)?,
+            args: vec![
+                "mcp".into(),
+                "snapshot".into(),
+                "--spec".into(),
+                path(&self.spec_path)?,
+                "--log".into(),
+                path(&self.log_path(index))?,
+            ],
+            descriptor: self.descriptor.clone(),
+        }))
+    }
+
+    /// What reviewer `index` read, across all of its samples.
+    pub(crate) fn summary(&self, index: usize) -> Result<ReviewerExploration, String> {
+        let log = match std::fs::read_to_string(self.log_path(index)) {
+            Ok(log) => log,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(format!("reading the exploration log: {error}")),
+        };
+        let mut summary = ReviewerExploration::status_only("unused");
+        let mut files = std::collections::BTreeSet::new();
+        for line in log.lines().filter(|line| !line.trim().is_empty()) {
+            let call: ExplorationCall = serde_json::from_str(line)
+                .map_err(|error| format!("parsing the exploration log: {error}"))?;
+            summary.tool_calls += 1;
+            summary.read_bytes += call.bytes;
+            summary.budget_exhausted |= call.outcome == "budget_exhausted";
+            files.extend(call.paths);
+        }
+        if summary.tool_calls > 0 {
+            summary.status = "used".into();
+        }
+        summary.files = files.into_iter().collect();
+        Ok(summary)
+    }
+
+    fn log_path(&self, index: usize) -> PathBuf {
+        self.directory
+            .path()
+            .join(format!("reviewer-{index}.jsonl"))
+    }
+}
+
 /// `dir/./a/../b` → `dir/b`; `None` for absolute paths, paths that climb
 /// above the root, and the root itself.
 fn normalize_path(raw: &str) -> Option<String> {
