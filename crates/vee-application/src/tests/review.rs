@@ -22,6 +22,32 @@ fn review_prompt_requires_exact_changed_line_anchors() {
 }
 
 #[test]
+fn review_prompt_asks_for_one_concise_defect_per_finding_and_rates_severity_by_consequence() {
+    let prompt = provider_request_prompt(
+        &serde_json::json!({"context_files": []}),
+        "Review the supplied change context.",
+        "review request",
+    )
+    .unwrap();
+    assert!(prompt.contains("Each finding reports one defect"));
+    assert!(prompt.contains("The first sentence states what goes wrong"));
+    assert!(prompt.contains("at most two further sentences"));
+    assert!(prompt.contains("Set severity by the consequence"));
+    assert!(prompt.contains("is at least medium"));
+}
+
+#[test]
+fn task_prompts_do_not_receive_review_finding_rules() {
+    let prompt = provider_request_prompt(
+        &serde_json::json!({"task_instructions": "Summarize the change."}),
+        "Review the supplied change context.",
+        "task request",
+    )
+    .unwrap();
+    assert!(!prompt.contains("Each finding reports one defect"));
+}
+
+#[test]
 fn source_evidence_marks_unchanged_finding_lines_as_unknown() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

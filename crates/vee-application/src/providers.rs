@@ -181,6 +181,12 @@ pub(crate) fn validate_provider_task_output(
         .map_err(|_| "provider task output does not match its declared JSON schema".to_string())
 }
 
+/// How every reviewer writes and rates a finding. On a public review benchmark,
+/// findings cut to their first claim lost 27% of their false positives, and a
+/// third of the real defects Vee found were rated low, so the rating did not
+/// separate them from noise.
+const FINDING_WRITING_RULES: &str = "Each finding reports one defect. The first sentence states what goes wrong and when, naming the function, variable or condition responsible. Add at most two further sentences of evidence: the input or state that triggers the defect and its consequence. Do not put several defects in one finding, and do not repeat a defect at each place it occurs; report it once at its cause and name the other places. Leave out suggestions to consider, praise, and summaries of the change.\n\nSet severity by the consequence of the defect, not by your confidence or by the size of the fix: critical for a security breach or for data loss or corruption; high for a wrong result, crash or broken contract on a normal path; medium for one that needs a specific but realistic input, state or timing; low for a defect with a minor effect, such as a misleading message or a wrong log level. A defect that causes wrong behavior is at least medium.";
+
 pub(crate) fn provider_request_prompt(
     input: &serde_json::Value,
     review_prompt: &str,
@@ -198,7 +204,7 @@ pub(crate) fn provider_request_prompt(
         ))
     } else {
         Ok(format!(
-            "{review_prompt}\n\nUse files marked `snapshot_impact_reference` as local-analysis leads to inspect possible interactions with the changed code. Each `impact_edges` entry identifies a source path, relationship, symbol, certainty, and evidence line. These relationships may be heuristic or syntax-derived; they are not proof of a runtime call or defect. Confirm any finding against the supplied source text, and do not report a defect based only on an impact edge. If impact context is partial, unavailable, or omitted by the context budget, do not treat missing references as evidence that no impact exists.\n\nFor each finding, use the file's `changed_line_ranges` to anchor its location to the smallest changed line that directly causes the defect. Treat those ranges as exact one-based line numbers in the captured current source. Do not guess from nearby context or report an unchanged line as the finding location. If no changed line can be identified reliably, omit the line number.\n\nFor review findings, return exactly the keys defined by the findings schema. Do not include an `id` field or other extra keys; Vee assigns finding identities.\n\nVee review request JSON:\n{payload}"
+            "{review_prompt}\n\nUse files marked `snapshot_impact_reference` as local-analysis leads to inspect possible interactions with the changed code. Each `impact_edges` entry identifies a source path, relationship, symbol, certainty, and evidence line. These relationships may be heuristic or syntax-derived; they are not proof of a runtime call or defect. Confirm any finding against the supplied source text, and do not report a defect based only on an impact edge. If impact context is partial, unavailable, or omitted by the context budget, do not treat missing references as evidence that no impact exists.\n\nFor each finding, use the file's `changed_line_ranges` to anchor its location to the smallest changed line that directly causes the defect. Treat those ranges as exact one-based line numbers in the captured current source. Do not guess from nearby context or report an unchanged line as the finding location. If no changed line can be identified reliably, omit the line number.\n\n{FINDING_WRITING_RULES}\n\nFor review findings, return exactly the keys defined by the findings schema. Do not include an `id` field or other extra keys; Vee assigns finding identities.\n\nVee review request JSON:\n{payload}"
         ))
     }
 }
