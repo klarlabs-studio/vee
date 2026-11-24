@@ -63,6 +63,38 @@ acceptance:
 }
 
 #[test]
+fn protected_policy_adds_severity_floors_that_the_repository_cannot_drop() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join(".vee")).unwrap();
+    std::fs::write(
+        directory.path().join(".vee.yaml"),
+        "version: 1\npolicy:\n  severity_floors:\n    - categories: [security]\n      minimum: high\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join(".vee/policy.yaml"),
+        "severity_floors:\n  - paths: [\"payments/**\"]\n    minimum: critical\n",
+    )
+    .unwrap();
+    let mut config = RepositoryConfig::load(&directory.path().join(".vee.yaml")).unwrap();
+    apply_protected_policy(directory.path(), &mut config).unwrap();
+    assert_eq!(config.policy.severity_floors.len(), 2);
+    assert_eq!(
+        config.policy.severity_floors[1].minimum,
+        vee_core::Severity::Critical
+    );
+    std::fs::write(
+        directory.path().join(".vee/policy.yaml"),
+        "severity_floors:\n  - minimum: high\n",
+    )
+    .unwrap();
+    let mut config = RepositoryConfig::load(&directory.path().join(".vee.yaml")).unwrap();
+    assert!(apply_protected_policy(directory.path(), &mut config)
+        .unwrap_err()
+        .contains("protected policy.severity_floors"));
+}
+
+#[test]
 fn protected_policy_rejects_unknown_requirements() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::create_dir(directory.path().join(".vee")).unwrap();

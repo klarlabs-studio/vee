@@ -23,6 +23,100 @@ pub enum Severity {
     Info,
 }
 
+impl Severity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Critical => "critical",
+            Self::High => "high",
+            Self::Medium => "medium",
+            Self::Low => "low",
+            Self::Info => "info",
+        }
+    }
+
+    /// Higher is more severe.
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::Critical => 4,
+            Self::High => 3,
+            Self::Medium => 2,
+            Self::Low => 1,
+            Self::Info => 0,
+        }
+    }
+}
+
+/// A minimum severity for findings in selected paths or categories
+/// ([ADR 0018](../../docs/adr/0018-fixed-finding-rubric-and-severity-floors.md)).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SeverityFloor {
+    /// Path globs; when set, the finding's path must match one of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    /// Categories; when set, the finding's category must be one of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub categories: Vec<String>,
+    pub minimum: Severity,
+}
+
+impl SeverityFloor {
+    /// The floor's selectors, for gate reasons: `paths a/**, b/**; categories security`.
+    pub fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.paths.is_empty() {
+            parts.push(format!("paths {}", self.paths.join(", ")));
+        }
+        if !self.categories.is_empty() {
+            parts.push(format!("categories {}", self.categories.join(", ")));
+        }
+        parts.join("; ")
+    }
+
+    pub fn applies_to(&self, finding: &Finding) -> bool {
+        let path_matches = self.paths.is_empty()
+            || finding
+                .path
+                .as_deref()
+                .is_some_and(|path| self.paths.iter().any(|pattern| glob_matches(pattern, path)));
+        let category_matches = self.categories.is_empty()
+            || self
+                .categories
+                .iter()
+                .any(|category| category.eq_ignore_ascii_case(&finding.category));
+        path_matches && category_matches
+    }
+}
+
+const MAX_SEVERITY_FLOORS: usize = 64;
+const MAX_FLOOR_SELECTORS: usize = 256;
+
+/// Each floor selects by paths, categories or both, with bounded, non-empty patterns.
+pub fn validate_severity_floors(label: &str, floors: &[SeverityFloor]) -> Result<(), String> {
+    if floors.len() > MAX_SEVERITY_FLOORS {
+        return Err(format!(
+            "{label}.severity_floors has more than {MAX_SEVERITY_FLOORS} floors"
+        ));
+    }
+    for floor in floors {
+        if floor.paths.is_empty() && floor.categories.is_empty() {
+            return Err(format!(
+                "{label}.severity_floors entries must select paths or categories"
+            ));
+        }
+        if floor.paths.len() + floor.categories.len() > MAX_FLOOR_SELECTORS
+            || floor.paths.iter().chain(&floor.categories).any(|value| {
+                value.trim().is_empty() || value.len() > 512 || value.chars().any(char::is_control)
+            })
+        {
+            return Err(format!(
+                "{label}.severity_floors has an empty, invalid, or too long path or category"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum GateStatus {
@@ -520,6 +614,32 @@ pub struct Policy {
     /// levels that block. Omitted when empty so earlier decisions replay unchanged.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub analyzer_block_levels: std::collections::BTreeMap<String, Vec<SarifLevel>>,
+    /// Minimum severities by path or category. Omitted when empty so earlier
+    /// decisions replay unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub severity_floors: Vec<SeverityFloor>,
+}
+
+impl Policy {
+    /// The severity the gate evaluates: the reported severity, raised to the
+    /// highest matching floor. Floors never lower a severity.
+    pub fn effective_severity(&self, finding: &Finding) -> Severity {
+        self.raising_floor(finding)
+            .map_or(finding.severity, |floor| floor.minimum)
+    }
+
+    /// The first floor with the highest minimum above the reported severity.
+    pub fn raising_floor(&self, finding: &Finding) -> Option<&SeverityFloor> {
+        self.severity_floors
+            .iter()
+            .filter(|floor| {
+                floor.minimum.rank() > finding.severity.rank() && floor.applies_to(finding)
+            })
+            .fold(None, |best: Option<&SeverityFloor>, floor| match best {
+                Some(current) if current.minimum.rank() >= floor.minimum.rank() => Some(current),
+                _ => Some(floor),
+            })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -876,15 +996,16 @@ pub fn evaluate_gate_with_waivers_and_reviewer_policies(
         .map(|waiver| waiver.finding_fingerprint.as_str())
         .collect();
     let meets_blocking_policy = |f: &Finding| {
+        let severity = policy.effective_severity(f);
         !f.advisory
             && f.meets_sample_quorum()
-            && (policy.block_severities.contains(&f.severity)
+            && (policy.block_severities.contains(&severity)
                 && f.confidence.unwrap_or(0) >= policy.minimum_confidence
                 || f.reviewer_ids.iter().any(|reviewer_id| {
                     reviewer_policies
                         .get(reviewer_id)
                         .is_some_and(|reviewer_policy| {
-                            reviewer_policy.block_severities.contains(&f.severity)
+                            reviewer_policy.block_severities.contains(&severity)
                                 && f.confidence.unwrap_or(0) >= reviewer_policy.minimum_confidence
                         })
                 }))
@@ -1055,15 +1176,26 @@ pub fn evaluate_gate_with_waivers_and_reviewer_policies(
     };
     if status == GateStatus::Block {
         let mut reviewer_reasons = std::collections::BTreeSet::new();
+        let mut floor_reasons = std::collections::BTreeSet::new();
         for finding in findings
             .iter()
             .filter(|finding| blocked.contains(&finding.id))
         {
+            let severity = policy.effective_severity(finding);
+            if let Some(floor) = policy.raising_floor(finding) {
+                floor_reasons.insert(format!(
+                    "severity floor ({}) raised finding {} from {} to {}",
+                    floor.describe(),
+                    finding.id,
+                    finding.severity.as_str(),
+                    severity.as_str()
+                ));
+            }
             for reviewer_id in &finding.reviewer_ids {
                 if reviewer_policies
                     .get(reviewer_id)
                     .is_some_and(|reviewer_policy| {
-                        reviewer_policy.block_severities.contains(&finding.severity)
+                        reviewer_policy.block_severities.contains(&severity)
                             && finding.confidence.unwrap_or(0) >= reviewer_policy.minimum_confidence
                     })
                 {
@@ -1074,6 +1206,7 @@ pub fn evaluate_gate_with_waivers_and_reviewer_policies(
                 }
             }
         }
+        reasons.extend(floor_reasons);
         reasons.extend(reviewer_reasons);
     }
     for waiver in applied_waivers {
@@ -1293,6 +1426,7 @@ mod tests {
             required_review_complete: true,
             required_verifications: vec!["lint".into()],
             analyzer_block_levels: [("lint".to_owned(), vec![SarifLevel::Error])].into(),
+            severity_floors: Vec::new(),
         };
         let gate = |runs: &[VerificationRun], reports: &[AnalyzerReport]| {
             evaluate_gate(
@@ -1381,6 +1515,7 @@ mod tests {
             required_review_complete: true,
             required_verifications: vec![],
             analyzer_block_levels: Default::default(),
+            severity_floors: Vec::new(),
         };
         let mut findings = vec![
             finding("low-confidence", Severity::High, Some(79)),
@@ -1405,6 +1540,115 @@ mod tests {
         assert_eq!(decision.blocking_findings, vec!["high"]);
     }
 
+    fn floor(paths: &[&str], categories: &[&str], minimum: Severity) -> SeverityFloor {
+        SeverityFloor {
+            paths: paths.iter().map(|path| path.to_string()).collect(),
+            categories: categories.iter().map(|value| value.to_string()).collect(),
+            minimum,
+        }
+    }
+
+    #[test]
+    fn severity_floors_raise_matching_findings_until_they_block_and_say_why() {
+        let policy = Policy {
+            block_severities: vec![Severity::Critical, Severity::High],
+            minimum_confidence: 80,
+            required_review_complete: true,
+            required_verifications: vec![],
+            analyzer_block_levels: Default::default(),
+            severity_floors: vec![
+                floor(&["payments/**"], &[], Severity::High),
+                floor(&[], &["security"], Severity::Critical),
+            ],
+        };
+        let mut in_payments = finding("in-payments", Severity::Low, Some(90));
+        in_payments.path = Some("payments/charge.rs".into());
+        let elsewhere = finding("elsewhere", Severity::Medium, Some(90));
+        let mut security = finding("security", Severity::Low, Some(90));
+        security.category = "Security".into();
+        let mut findings = vec![in_payments, elsewhere, security];
+        let evidence = observed_test_evidence(&mut findings);
+        let decision = evaluate_gate(
+            "snapshot",
+            "config",
+            "policy",
+            &findings,
+            &policy,
+            true,
+            GateEvidence {
+                verification_runs: &[],
+                source_evidence: &evidence,
+                analyzer_reports: &[],
+            },
+        );
+        assert_eq!(decision.status, GateStatus::Block);
+        assert_eq!(decision.blocking_findings, vec!["in-payments", "security"]);
+        assert!(decision.reasons.contains(
+            &"severity floor (paths payments/**) raised finding in-payments from low to high"
+                .to_string()
+        ));
+        assert!(decision.reasons.contains(
+            &"severity floor (categories security) raised finding security from low to critical"
+                .to_string()
+        ));
+        assert_eq!(policy.effective_severity(&findings[1]), Severity::Medium);
+    }
+
+    #[test]
+    fn severity_floors_never_lower_a_severity_and_path_floors_skip_unlocated_findings() {
+        let policy = Policy {
+            block_severities: vec![Severity::High],
+            minimum_confidence: 0,
+            required_review_complete: true,
+            required_verifications: vec![],
+            analyzer_block_levels: Default::default(),
+            severity_floors: vec![floor(&["**"], &[], Severity::Medium)],
+        };
+        let critical = finding("critical", Severity::Critical, Some(90));
+        assert_eq!(policy.effective_severity(&critical), Severity::Critical);
+        let mut unlocated = finding("unlocated", Severity::Low, Some(90));
+        unlocated.path = None;
+        assert_eq!(policy.effective_severity(&unlocated), Severity::Low);
+    }
+
+    #[test]
+    fn empty_severity_floors_keep_recorded_policies_unchanged() {
+        let policy = Policy {
+            block_severities: vec![Severity::High],
+            minimum_confidence: 80,
+            required_review_complete: true,
+            required_verifications: vec![],
+            analyzer_block_levels: Default::default(),
+            severity_floors: vec![],
+        };
+        let recorded = serde_json::to_value(&policy).unwrap();
+        assert!(recorded.get("severity_floors").is_none());
+        let replayed: Policy = serde_json::from_value(recorded).unwrap();
+        assert_eq!(replayed, policy);
+    }
+
+    #[test]
+    fn severity_floors_need_a_selector_and_valid_patterns() {
+        assert!(
+            validate_severity_floors("policy", &[floor(&["src/**"], &[], Severity::High)]).is_ok()
+        );
+        assert!(
+            validate_severity_floors("policy", &[floor(&[], &[], Severity::High)])
+                .unwrap_err()
+                .contains("paths or categories")
+        );
+        assert!(
+            validate_severity_floors("policy", &[floor(&[" "], &[], Severity::High)])
+                .unwrap_err()
+                .contains("empty, invalid, or too long")
+        );
+        assert!(
+            validate_severity_floors("policy", &[floor(&[], &[""], Severity::High)])
+                .unwrap_err()
+                .contains("empty, invalid, or too long")
+        );
+    }
+
     #[test]
     fn gate_blocks_a_sampled_finding_only_at_its_quorum() {
         let policy = Policy {
@@ -1413,6 +1657,7 @@ mod tests {
             required_review_complete: true,
             required_verifications: vec![],
             analyzer_block_levels: Default::default(),
+            severity_floors: Vec::new(),
         };
         let agreement = |reported| {
             Some(SampleAgreement {
@@ -1463,6 +1708,7 @@ mod tests {
             required_review_complete: true,
             required_verifications: vec![],
             analyzer_block_levels: Default::default(),
+            severity_floors: Vec::new(),
         };
         let mut advisory = finding("advisory", Severity::Critical, Some(99));
         advisory.advisory = true;
@@ -1496,6 +1742,7 @@ mod tests {
             required_review_complete: true,
             required_verifications: vec![],
             analyzer_block_levels: Default::default(),
+            severity_floors: Vec::new(),
         };
         let mut unlocated = finding("unlocated", Severity::High, Some(95));
         unlocated.path = None;
@@ -1526,6 +1773,7 @@ mod tests {
             required_review_complete: true,
             required_verifications: vec![],
             analyzer_block_levels: Default::default(),
+            severity_floors: Vec::new(),
         };
         let mut finding = finding("changed-line", Severity::High, Some(95));
         finding.evidence_ids = vec!["source-evidence".into()];
@@ -1591,6 +1839,7 @@ mod tests {
             required_review_complete: true,
             required_verifications: vec![],
             analyzer_block_levels: Default::default(),
+            severity_floors: Vec::new(),
         };
         let reviewer_policies = std::collections::BTreeMap::from([(
             "security".into(),
@@ -1639,6 +1888,7 @@ mod tests {
             required_review_complete: true,
             required_verifications: vec![],
             analyzer_block_levels: Default::default(),
+            severity_floors: Vec::new(),
         };
         let duplicate = finding("same-finding", Severity::High, Some(99));
         let mut findings = [duplicate.clone(), duplicate];
@@ -1668,6 +1918,7 @@ mod tests {
             required_review_complete: true,
             required_verifications: vec![],
             analyzer_block_levels: Default::default(),
+            severity_floors: Vec::new(),
         };
         let first = evaluate_gate(
             "snapshot",
@@ -1710,6 +1961,7 @@ mod tests {
             required_review_complete: true,
             required_verifications: vec![],
             analyzer_block_levels: Default::default(),
+            severity_floors: Vec::new(),
         };
         let mut findings = [finding("finding-a", Severity::High, Some(90))];
         let evidence = observed_test_evidence(&mut findings);
@@ -1822,6 +2074,7 @@ mod tests {
             required_review_complete: true,
             required_verifications: vec![],
             analyzer_block_levels: Default::default(),
+            severity_floors: Vec::new(),
         };
         let decision = evaluate_gate(
             "snapshot",
@@ -1847,6 +2100,7 @@ mod tests {
             required_review_complete: false,
             required_verifications: vec![],
             analyzer_block_levels: Default::default(),
+            severity_floors: Vec::new(),
         };
         let mut findings = [finding("high", Severity::High, Some(90))];
         let evidence = observed_test_evidence(&mut findings);
@@ -1875,6 +2129,7 @@ mod tests {
             required_review_complete: true,
             required_verifications: vec!["unit".into()],
             analyzer_block_levels: Default::default(),
+            severity_floors: Vec::new(),
         };
         let mut targeted = passed_run_for_test();
         targeted.targets = vec!["./pkg".into()];
@@ -2056,6 +2311,27 @@ mod tests {
         assert!(RepositoryConfig::load(&file)
             .unwrap_err()
             .contains("0..=100"));
+        std::fs::write(
+            &file,
+            "version: 1\npolicy:\n  severity_floors:\n    - paths: [\"payments/**\"]\n      minimum: high\n",
+        )
+        .unwrap();
+        let floored = RepositoryConfig::load(&file).unwrap();
+        assert_eq!(floored.policy.severity_floors[0].minimum, Severity::High);
+        std::fs::write(
+            &file,
+            "version: 1\npolicy:\n  severity_floors:\n    - minimum: high\n",
+        )
+        .unwrap();
+        assert!(RepositoryConfig::load(&file)
+            .unwrap_err()
+            .contains("must select paths or categories"));
+        std::fs::write(
+            &file,
+            "version: 1\npolicy:\n  severity_floors:\n    - categories: [security]\n      minimum: urgent\n",
+        )
+        .unwrap();
+        assert!(RepositoryConfig::load(&file).is_err());
         std::fs::write(&file, "version: 1\nreview:\n  max_concurrency: 33\n").unwrap();
         assert!(RepositoryConfig::load(&file)
             .unwrap_err()
@@ -3116,6 +3392,10 @@ pub struct PolicyConfig {
     pub on_unreviewed: String,
     #[serde(default)]
     pub acceptance: AcceptancePolicyConfig,
+    /// Minimum severities by path or category (ADR 0018). Omitted when empty so
+    /// existing configuration and policy digests are unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub severity_floors: Vec<SeverityFloor>,
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -3137,6 +3417,7 @@ impl Default for PolicyConfig {
             on_incomplete: default_incomplete(),
             on_unreviewed: default_unreviewed(),
             acceptance: AcceptancePolicyConfig::default(),
+            severity_floors: Vec::new(),
         }
     }
 }
@@ -3455,6 +3736,7 @@ impl RepositoryConfig {
                 return Err(format!("unknown blocking severity {severity}"));
             }
         }
+        validate_severity_floors("policy", &config.policy.severity_floors)?;
         for (id, provider) in &config.providers {
             for (model, pricing) in &provider.pricing {
                 if model.trim().is_empty()
@@ -3797,6 +4079,10 @@ impl RepositoryConfig {
                     ));
                 }
             }
+            validate_severity_floors(
+                &format!("policy profile {profile_id}"),
+                &profile.severity_floors,
+            )?;
             for reviewer in &profile.required_reviewers {
                 if !config.reviewers.contains_key(reviewer) {
                     return Err(format!(
@@ -3902,4 +4188,67 @@ impl ProviderUsage {
         self.output_tokens = add(self.output_tokens, other.output_tokens);
         self.total_tokens = add(self.total_tokens, other.total_tokens);
     }
+}
+
+/// Matches a repository-relative path against a glob: `*` and `?` stay within
+/// one path segment, `**` crosses segments.
+pub fn glob_matches(pattern: &str, path: &str) -> bool {
+    fn matches(
+        pattern: &[u8],
+        path: &[u8],
+        pattern_index: usize,
+        path_index: usize,
+        memo: &mut std::collections::HashMap<(usize, usize), bool>,
+    ) -> bool {
+        if let Some(result) = memo.get(&(pattern_index, path_index)) {
+            return *result;
+        }
+        let result = if pattern_index == pattern.len() {
+            path_index == path.len()
+        } else if pattern[pattern_index..].starts_with(b"**/") {
+            matches(pattern, path, pattern_index + 3, path_index, memo)
+                || path[path_index..]
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, byte)| **byte == b'/')
+                    .any(|(offset, _)| {
+                        matches(
+                            pattern,
+                            path,
+                            pattern_index + 3,
+                            path_index + offset + 1,
+                            memo,
+                        )
+                    })
+        } else if pattern[pattern_index..].starts_with(b"**") {
+            matches(pattern, path, pattern_index + 2, path_index, memo)
+                || (path_index < path.len()
+                    && matches(pattern, path, pattern_index, path_index + 1, memo))
+        } else if pattern[pattern_index] == b'*' {
+            matches(pattern, path, pattern_index + 1, path_index, memo)
+                || (path_index < path.len()
+                    && path[path_index] != b'/'
+                    && matches(pattern, path, pattern_index, path_index + 1, memo))
+        } else if pattern[pattern_index] == b'?' {
+            path_index < path.len()
+                && path[path_index] != b'/'
+                && matches(pattern, path, pattern_index + 1, path_index + 1, memo)
+        } else {
+            path_index < path.len()
+                && pattern[pattern_index] == path[path_index]
+                && matches(pattern, path, pattern_index + 1, path_index + 1, memo)
+        };
+        memo.insert((pattern_index, path_index), result);
+        result
+    }
+
+    let pattern = pattern.replace('\\', "/");
+    let path = path.replace('\\', "/");
+    matches(
+        pattern.as_bytes(),
+        path.as_bytes(),
+        0,
+        0,
+        &mut std::collections::HashMap::new(),
+    )
 }

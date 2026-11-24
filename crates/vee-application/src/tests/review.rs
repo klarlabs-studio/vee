@@ -138,6 +138,7 @@ fn source_evidence_marks_unchanged_finding_lines_as_unknown() {
         required_review_complete: true,
         required_verifications: vec![],
         analyzer_block_levels: Default::default(),
+        severity_floors: Vec::new(),
     };
     let decision = vee_core::evaluate_gate(
         "snapshot",
@@ -218,6 +219,7 @@ fn legacy_review_without_policy_findings_falls_back_to_display_findings() {
         required_review_complete: true,
         required_verifications: vec![],
         analyzer_block_levels: Default::default(),
+        severity_floors: Vec::new(),
     };
     let finding = vee_core::Finding {
         id: "legacy-blocker".into(),

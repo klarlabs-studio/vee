@@ -124,6 +124,7 @@ pub fn apply_protected_policy(root: &Path, config: &mut RepositoryConfig) -> Res
             ));
         }
     }
+    vee_core::validate_severity_floors("protected policy", &protected.severity_floors)?;
     if protected.on_incomplete != "block" && protected.on_incomplete != "allow" {
         return Err("protected policy on_incomplete must be 'block' or 'allow'".into());
     }
@@ -169,6 +170,11 @@ pub fn apply_protected_policy(root: &Path, config: &mut RepositoryConfig) -> Res
         .extend(protected.block_severities);
     config.policy.block_severities.sort();
     config.policy.block_severities.dedup();
+    for floor in protected.severity_floors {
+        if !config.policy.severity_floors.contains(&floor) {
+            config.policy.severity_floors.push(floor);
+        }
+    }
     config.policy.minimum_confidence = config
         .policy
         .minimum_confidence

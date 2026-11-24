@@ -340,6 +340,7 @@ pub fn run_review_with_provider_and_selection_context(
         required_review_complete: config.policy.on_incomplete == "block",
         required_verifications: config.policy.required_verifications.clone(),
         analyzer_block_levels: sarif::analyzer_block_levels(config),
+        severity_floors: config.policy.severity_floors.clone(),
     };
     let required_reviewers_available = config.policy.required_reviewers.iter().all(|required| {
         selected_reviewers
@@ -1592,66 +1593,7 @@ pub(crate) fn reviewer_context_manifest(
     }
 }
 
-pub(crate) fn glob_matches(pattern: &str, path: &str) -> bool {
-    fn matches(
-        pattern: &[u8],
-        path: &[u8],
-        pattern_index: usize,
-        path_index: usize,
-        memo: &mut std::collections::HashMap<(usize, usize), bool>,
-    ) -> bool {
-        if let Some(result) = memo.get(&(pattern_index, path_index)) {
-            return *result;
-        }
-        let result = if pattern_index == pattern.len() {
-            path_index == path.len()
-        } else if pattern[pattern_index..].starts_with(b"**/") {
-            matches(pattern, path, pattern_index + 3, path_index, memo)
-                || path[path_index..]
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, byte)| **byte == b'/')
-                    .any(|(offset, _)| {
-                        matches(
-                            pattern,
-                            path,
-                            pattern_index + 3,
-                            path_index + offset + 1,
-                            memo,
-                        )
-                    })
-        } else if pattern[pattern_index..].starts_with(b"**") {
-            matches(pattern, path, pattern_index + 2, path_index, memo)
-                || (path_index < path.len()
-                    && matches(pattern, path, pattern_index, path_index + 1, memo))
-        } else if pattern[pattern_index] == b'*' {
-            matches(pattern, path, pattern_index + 1, path_index, memo)
-                || (path_index < path.len()
-                    && path[path_index] != b'/'
-                    && matches(pattern, path, pattern_index, path_index + 1, memo))
-        } else if pattern[pattern_index] == b'?' {
-            path_index < path.len()
-                && path[path_index] != b'/'
-                && matches(pattern, path, pattern_index + 1, path_index + 1, memo)
-        } else {
-            path_index < path.len()
-                && pattern[pattern_index] == path[path_index]
-                && matches(pattern, path, pattern_index + 1, path_index + 1, memo)
-        };
-        memo.insert((pattern_index, path_index), result);
-        result
-    }
-
-    let pattern = pattern.replace('\\', "/");
-    let path = path.replace('\\', "/");
-    matches(
-        pattern.as_bytes(),
-        path.as_bytes(),
-        0,
-        0,
-        &mut std::collections::HashMap::new(),
-    )
-}
+pub(crate) use vee_core::glob_matches;
 
 pub(crate) struct AttachedSourceEvidence {
     pub(crate) evidence: Vec<Evidence>,

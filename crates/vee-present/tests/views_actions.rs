@@ -157,6 +157,7 @@ fn passing_review() -> ReviewResult {
         required_review_complete: true,
         required_verifications: vec![],
         analyzer_block_levels: Default::default(),
+        severity_floors: Vec::new(),
     };
     let gate = vee_core::evaluate_gate(
         "sha256:snap",

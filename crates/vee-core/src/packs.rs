@@ -361,7 +361,8 @@ fn load_pinned(root: &Path, reference: &PackReference) -> Result<LoadedPack, Str
 }
 
 /// The stricter of two policies: union of required reviewers, verifications,
-/// acceptance profiles, and blocking severities; the lower confidence threshold;
+/// acceptance profiles, blocking severities and severity floors; the lower
+/// confidence threshold;
 /// `block` on incomplete if either blocks.
 pub fn strictest(repository: &PolicyConfig, pack: &PolicyConfig) -> PolicyConfig {
     let union = |left: &[String], right: &[String]| {
@@ -380,6 +381,11 @@ pub fn strictest(repository: &PolicyConfig, pack: &PolicyConfig) -> PolicyConfig
         &pack.required_verifications,
     );
     merged.block_severities = union(&repository.block_severities, &pack.block_severities);
+    for floor in &pack.severity_floors {
+        if !merged.severity_floors.contains(floor) {
+            merged.severity_floors.push(floor.clone());
+        }
+    }
     merged.minimum_confidence = repository.minimum_confidence.min(pack.minimum_confidence);
     if pack.on_incomplete == "block" {
         merged.on_incomplete = "block".into();
@@ -417,6 +423,18 @@ mod tests {
         assert_eq!(merged.block_severities, ["high", "critical"]);
         assert_eq!(merged.minimum_confidence, 70);
         assert_eq!(merged.on_incomplete, "block");
+    }
+
+    #[test]
+    fn pack_severity_floors_are_added_to_the_repository_floors() {
+        let pack = policy("severity_floors:\n  - paths: [\"payments/**\"]\n    minimum: high\n");
+        let repository = policy(
+            "severity_floors:\n  - categories: [security]\n    minimum: critical\n  - paths: [\"payments/**\"]\n    minimum: high\n",
+        );
+        let merged = strictest(&repository, &pack);
+        assert_eq!(merged.severity_floors.len(), 2);
+        let from_pack_only = strictest(&policy("{}"), &pack);
+        assert_eq!(from_pack_only.severity_floors, pack.severity_floors);
     }
 
     #[test]
