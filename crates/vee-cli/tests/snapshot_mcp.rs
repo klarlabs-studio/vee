@@ -122,7 +122,6 @@ fn snapshot_server_serves_confined_reads_and_logs_every_call() {
         json!({"name":"read_file","arguments":{"path":".env"}}),
     ));
     assert!(!secret.contains("tracked-secret"), "{secret}");
-    drop(request);
     let _ = child.kill();
     let _ = child.wait();
 
