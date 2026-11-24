@@ -1,5 +1,33 @@
 use super::*;
 
+/// Reads one HTTP request, headers and body, so a test server does not close
+/// the connection while the client is still sending.
+fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+    use std::io::Read;
+    let mut request = Vec::new();
+    let mut buffer = [0; 4096];
+    loop {
+        let count = stream.read(&mut buffer).unwrap();
+        request.extend_from_slice(&buffer[..count]);
+        if let Some(split) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+            let length = String::from_utf8_lossy(&request[..split])
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length: ")
+                        .and_then(|value| value.parse::<usize>().ok())
+                })
+                .unwrap_or(0);
+            if request.len() >= split + 4 + length {
+                return request;
+            }
+        }
+        if count == 0 {
+            return request;
+        }
+    }
+}
+
 struct FixedTaskProvider(Vec<u8>);
 
 impl ReviewProvider for FixedTaskProvider {
@@ -685,15 +713,14 @@ fn ollama_native_adapter_sets_context_window_schema_and_extracts_usage() {
 
 #[test]
 fn openai_compatible_adapter_rejects_http_errors_and_oversized_response() {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::net::TcpListener;
     fn serve(status: &'static str, body: &'static [u8]) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut bytes = [0; 2048];
-            let _ = stream.read(&mut bytes);
+            read_http_request(&mut stream);
             write!(
                 stream,
                 "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
