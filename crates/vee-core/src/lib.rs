@@ -2478,6 +2478,28 @@ mod tests {
     }
 
     #[test]
+    fn a_machine_effort_applies_only_to_reviewers_that_set_no_effort_or_samples() {
+        let dir = tempfile::tempdir().unwrap();
+        let repository = dir.path().join(".vee.yaml");
+        let user = dir.path().join("user.yaml");
+        std::fs::write(
+            &repository,
+            "version: 1\nproviders:\n  p: { kind: cli, executable: provider }\nreviewers:\n  open:\n    provider: p\n    instructions_file: a.md\n  pinned:\n    provider: p\n    instructions_file: b.md\n    effort: low\n  sampled:\n    provider: p\n    instructions_file: c.md\n    samples: 2\n",
+        )
+        .unwrap();
+        std::fs::write(&user, "version: 1\nreview:\n  effort: medium\n").unwrap();
+        let config =
+            RepositoryConfig::load_with_provider_defaults(&repository, Some(&user)).unwrap();
+        assert_eq!(config.reviewers["open"].effort, Some(ReviewEffort::Medium));
+        assert_eq!(config.reviewers["pinned"].effort, Some(ReviewEffort::Low));
+        assert_eq!(config.reviewers["sampled"].effort, None);
+        assert_eq!(config.reviewers["sampled"].samples, Some(2));
+
+        std::fs::write(&user, "version: 1\nreview:\n  effort: extreme\n").unwrap();
+        assert!(RepositoryConfig::load_with_provider_defaults(&repository, Some(&user)).is_err());
+    }
+
+    #[test]
     fn named_policy_profiles_select_deterministic_policy_and_reject_unknown_names() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join(".vee.yaml");
@@ -3428,6 +3450,19 @@ pub struct UserProviderConfig {
     pub version: u32,
     #[serde(default)]
     pub providers: std::collections::BTreeMap<String, ProviderConfig>,
+    #[serde(default)]
+    pub review: UserReviewDefaults,
+}
+
+/// Review defaults for this machine. Repository configuration wins.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UserReviewDefaults {
+    /// Effort for reviewers whose repository configuration sets neither
+    /// `effort` nor `samples`. Effort trades review time and tokens for
+    /// quality, so it is a choice for whoever runs the review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReviewEffort>,
 }
 /// API key environment variables an HTTP provider may forward, with the vendor
 /// host each key is bound to. `OPENAI_API_KEY` is also the conventional key for
@@ -3548,6 +3583,7 @@ impl RepositoryConfig {
         let raw = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut config: Self =
             serde_yaml::from_str(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut user_effort = None;
         if let Some(user_path) = user_config_path {
             let user_raw = std::fs::read_to_string(user_path)
                 .map_err(|error| format!("{}: {error}", user_path.display()))?;
@@ -3563,11 +3599,19 @@ impl RepositoryConfig {
             for (id, provider) in user.providers {
                 config.providers.entry(id).or_insert(provider);
             }
+            user_effort = user.review.effort;
         }
         if config.version != 1 {
             return Err(format!("unsupported config version {}", config.version));
         }
         packs::apply_packs(&mut config, root)?;
+        if let Some(effort) = user_effort {
+            for reviewer in config.reviewers.values_mut() {
+                if reviewer.effort.is_none() && reviewer.samples.is_none() {
+                    reviewer.effort = Some(effort);
+                }
+            }
+        }
         config.offline |= force_offline;
         if !(1..=32).contains(&config.review.max_concurrency) {
             return Err("review.max_concurrency must be in 1..=32".into());

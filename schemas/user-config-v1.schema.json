@@ -10,6 +10,16 @@
     "providers": {
       "type": "object",
       "additionalProperties": { "$ref": "#/$defs/provider" }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "effort": {
+          "enum": ["low", "medium", "high"],
+          "description": "Effort for reviewers whose repository configuration sets neither effort nor samples: low runs once, medium three times, high five times, keeping findings the runs agree on."
+        }
+      }
     }
   },
   "$defs": {
