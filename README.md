@@ -122,6 +122,20 @@ Reviewers may be limited with `include` and `exclude` globs. A changed file that
 
 Named policy profiles can be defined under `policy_profiles`; each profile uses the same fields as `policy` and is selected with `vee review --policy-profile strict`. The chosen profile is stored in the review and restored by `gate check`. MCP `review_changes` and `start_review` accept the optional `policy_profile` field. The trusted local `.vee/policy.yaml` is applied after profile selection, so a profile cannot weaken protected requirements. Reviewer definitions may also add reviewer-specific `policy.block_severities` and `policy.minimum_confidence` rules. These rules add to the global gate: a finding blocks if it meets the repository policy or a policy for any reviewer listed in its `reviewer_ids`; a reviewer rule cannot override or weaken global policy. Example: `security: { policy: { block_severities: [critical], minimum_confidence: 30 } }`. The effective policy digest binds these rules and reviewer attribution.
 
+Every reviewer writes findings to the same rubric, whichever provider runs it. A finding reports one defect, led by what goes wrong. Severity follows the defect's consequence: `critical` for a security breach or data loss, `high` for a wrong result or crash on a normal path, `medium` for one that needs a specific but realistic input or state, and `low` for a minor effect. The rubric is part of Vee, not configuration, so `block_severities`, packs and gate attestations mean the same thing in every repository. To raise the bar where it matters, add `policy.severity_floors`:
+
+```yaml
+policy:
+  block_severities: [critical, high]
+  severity_floors:
+    - paths: ["payments/**", "billing/**"]
+      minimum: high
+    - categories: [security]
+      minimum: high
+```
+
+A floor applies to findings that match one of its path globs, one of its categories (compared case-insensitively), or both when both are set. The gate evaluates the higher of the reported severity and every matching floor, for the repository policy and for reviewer policies. The review record keeps the reported severity, and a gate that blocks because of a floor names the finding, both severities and the floor. Floors from packs and from `.vee/policy.yaml` are added to the repository's floors and cannot be removed. See [ADR 0018](docs/adr/0018-fixed-finding-rubric-and-severity-floors.md).
+
 For repositories where policy must not be weakened by checked-in configuration, maintainers can provide a trusted local `.vee/policy.yaml`. It can add required reviewers and verification profiles, add blocking severities, require a higher confidence threshold, and require incomplete analyses to block. Repository config may strengthen these settings, but cannot weaken them. Requirements must name reviewers and verification profiles already declared in `.vee.yaml`; malformed protected policy fails configuration. The merged effective configuration is fingerprinted, so edits invalidate prior gate approvals. Keep this file in the local checkout's `.vee` directory and provision it through the repository owner's trusted setup process.
 
 Shell completions: `vee completions <bash|zsh|fish|elvish|powershell>` prints a completion script to stdout, for example `vee completions zsh > ~/.zfunc/_vee`.
