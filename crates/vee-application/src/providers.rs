@@ -142,6 +142,7 @@ pub fn run_provider_task(
         max_output_tokens: provider.max_output_tokens,
         environment,
         sample: None,
+        exploration: None,
     };
     let result = provider_adapter.execute(&request, None)?;
     if result.exit_code != Some(0) {
@@ -1034,6 +1035,7 @@ pub(crate) fn execute_claude_cli(
         max_output_tokens: request.max_output_tokens,
         environment: with_cli_login_environment(&request.environment),
         sample: None,
+        exploration: None,
     };
     let mut result = vee_process::execute_provider_cancellable(&claude_request, cancellation)?;
     if result.exit_code != Some(0) {
@@ -1147,6 +1149,7 @@ pub(crate) fn execute_antigravity_cli(
         max_output_tokens: request.max_output_tokens,
         environment: with_cli_login_environment(&request.environment),
         sample: None,
+        exploration: None,
     };
     let mut result = vee_process::execute_provider_reporting_exit(&agy_request, cancellation)?;
     let envelope = serde_json::from_slice::<serde_json::Value>(&result.stdout).ok();
@@ -1269,6 +1272,7 @@ pub(crate) fn execute_gemini_cli(
             .chain([("NO_BROWSER".to_string(), "true".to_string())])
             .collect(),
         sample: None,
+        exploration: None,
     };
     let mut result = vee_process::execute_provider_reporting_exit(&gemini_request, cancellation)?;
     if result.exit_code != Some(0) {
@@ -1431,6 +1435,7 @@ pub(crate) fn execute_codex_cli(
         max_output_tokens: request.max_output_tokens,
         environment: request.environment.clone(),
         sample: None,
+        exploration: None,
     };
     let mut result = vee_process::execute_provider_reporting_exit(&codex_request, cancellation)?;
     if result.exit_code != Some(0) {
@@ -1570,6 +1575,7 @@ pub(crate) fn probe_provider_version(
             max_output_tokens: None,
             environment: environment.to_vec(),
             sample: None,
+            exploration: None,
         },
         cancellation,
     )?;

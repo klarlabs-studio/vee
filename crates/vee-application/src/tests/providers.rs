@@ -217,6 +217,7 @@ printf '%s\n' '{{"type":"item.completed","item":{{"type":"agent_message","text":
         max_output_tokens: None,
         environment: Vec::new(),
         sample: None,
+        exploration: None,
     };
     let result = CliReviewProvider.execute(&request, None).unwrap();
     assert_eq!(
@@ -359,6 +360,7 @@ fn gemini_cli_adapter_uses_headless_json_and_extracts_only_response() {
         max_output_tokens: None,
         environment: vec![],
         sample: None,
+        exploration: None,
     };
     let result = CliReviewProvider.execute(&request, None).unwrap();
     let extracted: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
@@ -442,6 +444,7 @@ fn claude_cli_adapter_uses_restricted_schema_validated_json_contract() {
         max_output_tokens: None,
         environment: vec![],
         sample: None,
+        exploration: None,
     };
     let result = CliReviewProvider.execute(&request, None).unwrap();
     let extracted: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
@@ -586,6 +589,7 @@ fn openai_compatible_adapter_sends_schema_and_extracts_content() {
             max_output_tokens: None,
                 environment: vec![("OPENAI_API_KEY".into(), "local-secret".into())],
                 sample: None,
+                exploration: None,
             },
             None,
         )
@@ -666,6 +670,7 @@ fn ollama_native_adapter_sets_context_window_schema_and_extracts_usage() {
                 max_output_tokens: Some(4096),
                 environment: vec![],
                 sample: None,
+                exploration: None,
             },
             None,
         )
@@ -712,6 +717,7 @@ fn openai_compatible_adapter_rejects_http_errors_and_oversized_response() {
         max_output_tokens: None,
         environment: vec![],
         sample: None,
+        exploration: None,
     };
     let error = execute_openai_compatible(&request(serve("401 Unauthorized", b"nope"), 4096), None)
         .unwrap_err();
@@ -795,6 +801,7 @@ fn openai_compatible_adapter_does_not_forward_credentials_or_context_across_redi
             max_output_tokens: None,
             environment: vec![("OPENAI_API_KEY".into(), "do-not-forward".into())],
             sample: None,
+            exploration: None,
         },
         None,
     )
@@ -876,6 +883,7 @@ fn openai_compatible_adapter_honors_cancellation_while_waiting_for_response() {
         max_output_tokens: None,
         environment: vec![],
         sample: None,
+        exploration: None,
     };
     let error = execute_openai_compatible(&request, Some(&cancellation)).unwrap_err();
     thread.join().unwrap();
@@ -1000,6 +1008,7 @@ fn ollama_native_focused_strategy_reasons_then_structures_each_changed_file() {
             max_output_tokens: Some(4096),
             environment: vec![],
             sample: None,
+            exploration: None,
         },
         None,
     )
@@ -1075,6 +1084,7 @@ fn provider_cache_keys_distinguish_samples_and_keep_unsampled_keys() {
         max_output_tokens: None,
         environment: vec![],
         sample,
+        exploration: None,
     };
     let key = |sample| {
         provider_cache_key(&request(sample), "1.0", &mut Default::default())
@@ -1124,6 +1134,7 @@ fn failing_cli_request(
         max_output_tokens: None,
         environment: vec![],
         sample: None,
+        exploration: None,
     }
 }
 

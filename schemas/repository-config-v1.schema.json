@@ -49,6 +49,21 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 16777216
+        },
+        "exploration": {
+          "type": "object",
+          "description": "Read-only reviewer access to the review snapshot through Vee-served tools (ADR 0017).",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "max_tool_calls": { "type": "integer", "minimum": 1, "maximum": 200 },
+            "max_read_bytes": { "type": "integer", "minimum": 1024, "maximum": 4194304 },
+            "deny": {
+              "type": "array",
+              "description": "Path globs reviewers may never read, in addition to the built-in list of environment files, keys and credential stores.",
+              "items": { "type": "string", "minLength": 1 }
+            }
+          }
         }
       }
     },

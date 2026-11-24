@@ -7,6 +7,7 @@ mod config;
 mod context_budget;
 pub mod coverage;
 pub mod evidence_bundle;
+pub mod exploration;
 pub mod failure;
 pub mod finding_task;
 mod focused_review;

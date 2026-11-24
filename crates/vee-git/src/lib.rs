@@ -334,6 +334,117 @@ pub fn read_snapshot_tree_file(
     read_tree_file(root, treeish, relative)
 }
 
+/// Paths of the snapshot tree: the captured head tree's tracked files with
+/// the change applied, so added files are present and deleted ones absent.
+/// Sorted; paths that are not UTF-8 are skipped. Never reads the working tree.
+pub fn snapshot_paths(root: &Path, change_set: &ChangeSet) -> Result<Vec<String>, String> {
+    let mut paths = std::collections::BTreeSet::new();
+    if let Some(head) = change_set.head_oid.as_deref() {
+        validate_revision(head)?;
+        let output = git(
+            root,
+            &["ls-tree", "-r", "-z", "--name-only", "--full-tree", head],
+        )?;
+        for raw in output
+            .split(|byte| *byte == 0)
+            .filter(|raw| !raw.is_empty())
+        {
+            if let Ok(path) = String::from_utf8(raw.to_vec()) {
+                paths.insert(path);
+            }
+        }
+    }
+    for file in &change_set.files {
+        if file.status == "deleted" {
+            paths.remove(&file.path);
+        } else {
+            paths.insert(file.path.clone());
+        }
+    }
+    Ok(paths.into_iter().collect())
+}
+
+/// One line of a tree search.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TreeMatch {
+    pub path: String,
+    pub line: u64,
+    pub text: String,
+}
+
+/// Lines of text files in commit `treeish` that contain `needle` as a fixed
+/// string, at most `per_file` per file, sorted by path and line. Binary files
+/// are skipped. Reads Git objects only, never the working tree.
+pub fn grep_tree(
+    root: &Path,
+    treeish: &str,
+    needle: &str,
+    ignore_case: bool,
+    per_file: usize,
+) -> Result<Vec<TreeMatch>, String> {
+    validate_revision(treeish)?;
+    if needle.is_empty() || needle.contains('\n') || needle.contains('\0') {
+        return Err("search pattern must be one non-empty line".into());
+    }
+    let per_file = per_file.max(1).to_string();
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(root)
+        .args([
+            "grep",
+            "--null",
+            "-n",
+            "-I",
+            "-F",
+            "--no-color",
+            "--max-count",
+        ])
+        .arg(&per_file);
+    if ignore_case {
+        command.arg("-i");
+    }
+    let output = command
+        .args(["-e", needle, treeish])
+        .output()
+        .map_err(git_spawn_error)?;
+    match output.status.code() {
+        Some(0) => {}
+        // `git grep` exits 1 when nothing matches.
+        Some(1) => return Ok(Vec::new()),
+        _ => return Err("git grep failed".into()),
+    }
+    let prefix = format!("{treeish}:");
+    let mut matches = Vec::new();
+    for record in output.stdout.split(|byte| *byte == b'\n') {
+        // `<treeish>:<path>\0<line>\0<text>`
+        let mut fields = record.splitn(3, |byte| *byte == 0);
+        let (Some(location), Some(line), Some(text)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let Ok(location) = std::str::from_utf8(location) else {
+            continue;
+        };
+        let Some(path) = location.strip_prefix(prefix.as_str()) else {
+            continue;
+        };
+        let Some(line) = std::str::from_utf8(line)
+            .ok()
+            .and_then(|line| line.parse().ok())
+        else {
+            continue;
+        };
+        matches.push(TreeMatch {
+            path: path.to_string(),
+            line,
+            text: String::from_utf8_lossy(text).into_owned(),
+        });
+    }
+    Ok(matches)
+}
+
 /// Read a file as represented by a captured ChangeSet. Changed files are verified
 /// against their manifest digest; unchanged files are read from the captured HEAD OID.
 pub fn read_snapshot_file(

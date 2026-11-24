@@ -2830,7 +2830,73 @@ pub struct ReviewConfig {
     pub max_context_file_bytes: usize,
     #[serde(default = "default_context_bytes")]
     pub max_context_bytes: usize,
+    /// Read-only reviewer access to the review snapshot (ADR 0017).
+    #[serde(default)]
+    pub exploration: ReviewExplorationConfig,
 }
+
+/// Lets reviewers read more of the review snapshot through Vee-served tools
+/// (ADR 0017). Off by default.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewExplorationConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Tool calls one reviewer request may make.
+    #[serde(default = "default_exploration_tool_calls")]
+    pub max_tool_calls: usize,
+    /// Bytes of source text one reviewer request may read through tools.
+    #[serde(default = "default_exploration_read_bytes")]
+    pub max_read_bytes: usize,
+    /// Extra path globs reviewers may never read, added to
+    /// [`EXPLORATION_DENIED_PATHS`].
+    #[serde(default)]
+    pub deny: Vec<String>,
+}
+
+impl Default for ReviewExplorationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_tool_calls: default_exploration_tool_calls(),
+            max_read_bytes: default_exploration_read_bytes(),
+            deny: Vec::new(),
+        }
+    }
+}
+
+fn default_exploration_tool_calls() -> usize {
+    24
+}
+
+fn default_exploration_read_bytes() -> usize {
+    256 * 1024
+}
+
+/// Paths a reviewer may never read through exploration tools, whatever the
+/// configuration: environment files, private keys and credential stores.
+pub const EXPLORATION_DENIED_PATHS: &[&str] = &[
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "*.keystore",
+    "*.jks",
+    "id_rsa*",
+    "id_dsa*",
+    "id_ecdsa*",
+    "id_ed25519*",
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    ".git-credentials",
+    ".dockercfg",
+    "credentials",
+    "credentials.json",
+    "secrets.*",
+];
 
 impl Default for ReviewConfig {
     fn default() -> Self {
@@ -2841,6 +2907,7 @@ impl Default for ReviewConfig {
             max_context_files: default_context_files(),
             max_context_file_bytes: default_context_file_bytes(),
             max_context_bytes: default_context_bytes(),
+            exploration: ReviewExplorationConfig::default(),
         }
     }
 }
@@ -3232,6 +3299,21 @@ impl RepositoryConfig {
         }
         if !(1..=16 * 1024 * 1024).contains(&config.review.max_context_bytes) {
             return Err("review.max_context_bytes must be in 1..=16777216".into());
+        }
+        if !(1..=200).contains(&config.review.exploration.max_tool_calls) {
+            return Err("review.exploration.max_tool_calls must be in 1..=200".into());
+        }
+        if !(1024..=4 * 1024 * 1024).contains(&config.review.exploration.max_read_bytes) {
+            return Err("review.exploration.max_read_bytes must be in 1024..=4194304".into());
+        }
+        if config
+            .review
+            .exploration
+            .deny
+            .iter()
+            .any(|pattern| pattern.trim().is_empty())
+        {
+            return Err("review.exploration.deny entries must not be empty".into());
         }
         for (id, provider) in &config.providers {
             if let Some(context_window) = provider.context_window_tokens {
@@ -3784,7 +3866,24 @@ pub struct ProviderRequest {
     pub environment: Vec<(String, String)>,
     /// Which run of a sampled reviewer this request is; absent for an unsampled reviewer.
     pub sample: Option<ProviderSample>,
+    /// The snapshot tool server a CLI reviewer may start (ADR 0017); absent
+    /// when exploration is off or the provider cannot use it.
+    pub exploration: Option<ExplorationLaunch>,
 }
+
+/// How a reviewer CLI starts Vee's snapshot tool server.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExplorationLaunch {
+    pub program: String,
+    pub args: Vec<String>,
+    /// Identifies the tool contract and budgets, without per-run paths, so
+    /// the review cache can key on it.
+    pub descriptor: String,
+}
+/// Names of the snapshot tools, as the MCP server registers them.
+pub const EXPLORATION_TOOLS: &[&str] = &["list_files", "read_file", "search"];
+/// MCP server name reviewers see the snapshot tools under.
+pub const EXPLORATION_SERVER_NAME: &str = "vee_snapshot";
 /// One run of a reviewer that sends the same request several times.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct ProviderSample {

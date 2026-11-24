@@ -912,6 +912,7 @@ pub fn run_review_with_provider_and_selection_context(
                 },
                 environment,
                 sample: None,
+                exploration: None,
             },
         });
         if let Some(prepared_reviewer) = prepared.last_mut() {
