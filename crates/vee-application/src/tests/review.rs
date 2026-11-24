@@ -37,6 +37,19 @@ fn review_prompt_asks_for_one_concise_defect_per_finding_and_rates_severity_by_c
 }
 
 #[test]
+fn provider_findings_schema_carries_the_writing_and_severity_rules() {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../schemas/provider-findings-v1.schema.json"
+    ))
+    .unwrap();
+    let finding = &schema["properties"]["findings"]["items"]["properties"];
+    let severity = finding["severity"]["description"].as_str().unwrap();
+    assert!(severity.contains("is at least medium"));
+    let rationale = finding["rationale"]["description"].as_str().unwrap();
+    assert!(rationale.starts_with("One defect."));
+}
+
+#[test]
 fn task_prompts_do_not_receive_review_finding_rules() {
     let prompt = provider_request_prompt(
         &serde_json::json!({"task_instructions": "Summarize the change."}),
