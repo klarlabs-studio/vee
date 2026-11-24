@@ -19,6 +19,7 @@ use vee_application::proposals::{
 };
 use vee_application::work_items::{effective_work_item_host, work_item_api_base};
 mod mcp;
+mod snapshot_mcp;
 use vee_application::operations;
 use vee_application::packs;
 use vee_application::patch_sandbox;
@@ -388,6 +389,16 @@ enum McpCommand {
         /// MCP transport (stdio is the only supported transport).
         #[arg(long, default_value = "stdio", value_parser = ["stdio"])]
         transport: String,
+    },
+    /// Internal: serve read-only snapshot tools to a reviewer during a review.
+    #[command(hide = true)]
+    Snapshot {
+        /// Exploration spec written by the review.
+        #[arg(long)]
+        spec: std::path::PathBuf,
+        /// File each tool call is appended to, one JSON line per call.
+        #[arg(long)]
+        log: std::path::PathBuf,
     },
 }
 #[derive(Subcommand)]
@@ -2049,6 +2060,10 @@ fn run() -> Result<u8> {
         Command::Mcp { command } => match command {
             McpCommand::Serve { transport: _ } => {
                 mcp::serve_stdio()?;
+                Ok(0)
+            }
+            McpCommand::Snapshot { spec, log } => {
+                snapshot_mcp::serve(&spec, &log)?;
                 Ok(0)
             }
         },
