@@ -1783,10 +1783,16 @@ pub fn doctor(workspace: &Workspace) -> Result<crate::setup::DoctorReport> {
 
 /// Create a reviewer setup from the detected backends, or configure this machine
 /// for a repository that already has one.
+/// This machine's configured provider and review effort, for guided setup.
+pub fn machine_setup() -> Result<crate::setup::MachineSetup> {
+    crate::setup::machine_setup(&user_config_location()?).map_err(configuration_failure)
+}
+
 pub fn init(
     workspace: &Workspace,
     candidate_id: Option<&str>,
     model: Option<&str>,
+    effort: Option<vee_core::ReviewEffort>,
 ) -> Result<crate::setup::InitReport> {
     let user_config = user_config_location()?;
     crate::setup::init(
@@ -1796,6 +1802,7 @@ pub fn init(
         crate::setup::InitRequest {
             candidate_id,
             model,
+            effort,
         },
     )
     .map_err(|error| match error {

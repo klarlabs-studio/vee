@@ -11,7 +11,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use vee_core::{ProviderConfig, ProviderEgress, ProviderKind};
+use vee_core::{ProviderConfig, ProviderEgress, ProviderKind, ReviewEffort};
 
 /// Provider ID that `init` writes to the user config and reviewers reference.
 pub const DEFAULT_PROVIDER_ID: &str = "default";
@@ -101,6 +101,80 @@ pub struct DetectionReport {
     pub candidates: Vec<Candidate>,
     /// First available candidate that `init` can configure without further input.
     pub recommended: Option<String>,
+    /// Models worth choosing, by available candidate, best first. Candidates
+    /// without suggestions use the model configured in their own CLI.
+    #[serde(default)]
+    pub model_suggestions: std::collections::BTreeMap<String, Vec<ModelSuggestion>>,
+    /// How hard reviewers work, with what each level costs and gives.
+    #[serde(default)]
+    pub effort_options: Vec<EffortOption>,
+}
+
+/// A model for a backend, with the reason to choose it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelSuggestion {
+    pub model: String,
+    pub note: String,
+    pub recommended: bool,
+}
+
+/// A review effort level, with what it costs and gives.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EffortOption {
+    pub effort: ReviewEffort,
+    /// Review runs per reviewer.
+    pub runs: u32,
+    pub note: String,
+    pub recommended: bool,
+}
+
+/// Models worth choosing for a candidate, best first. The notes summarize
+/// Vee's own review benchmark (docs/guides/best-results.md).
+pub fn model_suggestions(candidate_id: &str) -> Vec<ModelSuggestion> {
+    let suggestion = |model: &str, note: &str, recommended| ModelSuggestion {
+        model: model.to_owned(),
+        note: note.to_owned(),
+        recommended,
+    };
+    match candidate_id {
+        "claude" | "anthropic-api" => vec![
+            suggestion(
+                "claude-opus-5-5",
+                "Finds the most defects in Vee's review benchmark. Slower, and uses more of your plan or credits.",
+                true,
+            ),
+            suggestion(
+                "claude-sonnet-5-5",
+                "Faster and cheaper. Found about a fifth fewer defects than Opus in Vee's review benchmark.",
+                false,
+            ),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// The review effort levels, with the recommended one marked.
+pub fn effort_options() -> Vec<EffortOption> {
+    vec![
+        EffortOption {
+            effort: ReviewEffort::Low,
+            runs: ReviewEffort::Low.samples(),
+            note: "One run. Fastest and cheapest; good while you iterate on a change.".to_owned(),
+            recommended: false,
+        },
+        EffortOption {
+            effort: ReviewEffort::Medium,
+            runs: ReviewEffort::Medium.samples(),
+            note: "Three runs. Only findings that at least two runs report can block, so one-off false alarms do not. About three times the time and tokens of low.".to_owned(),
+            recommended: true,
+        },
+        EffortOption {
+            effort: ReviewEffort::High,
+            runs: ReviewEffort::High.samples(),
+            note: "Five runs. Surfaces the most defects, at about five times the time and tokens of low. Only findings that at least three runs report can block.".to_owned(),
+            recommended: false,
+        },
+    ]
 }
 
 struct AgentCli {
@@ -307,10 +381,20 @@ pub fn detect(probe: &dyn SystemProbe) -> DetectionReport {
         .iter()
         .find(|candidate| candidate.available && !candidate.requires_model)
         .map(|candidate| candidate.candidate_id.clone());
+    let model_suggestions = candidates
+        .iter()
+        .filter(|candidate| candidate.available)
+        .filter_map(|candidate| {
+            let suggestions = model_suggestions(&candidate.candidate_id);
+            (!suggestions.is_empty()).then(|| (candidate.candidate_id.clone(), suggestions))
+        })
+        .collect();
     DetectionReport {
         schema_version: 1,
         candidates,
         recommended,
+        model_suggestions,
+        effort_options: effort_options(),
     }
 }
 
@@ -408,11 +492,11 @@ pub fn provider_for(
             Ok(provider)
         }
         BackendFamily::AgentCli => {
-            if model.is_some() {
-                return Err(format!(
-                    "{} uses the model configured in its own CLI; omit --model",
-                    candidate.candidate_id
-                ));
+            // Without a model the CLI uses the one configured in it.
+            if model
+                .is_some_and(|model| model.trim().is_empty() || model.chars().any(char::is_control))
+            {
+                return Err("--model must be a non-empty model name".into());
             }
             let cli = AGENT_CLIS
                 .iter()
@@ -426,6 +510,7 @@ pub fn provider_for(
                 .iter()
                 .map(|name| (*name).to_owned())
                 .collect();
+            provider.model = model.map(str::to_owned);
             Ok(provider)
         }
         BackendFamily::ApiKey => {
@@ -460,6 +545,8 @@ pub fn provider_for(
 pub struct InitRequest<'a> {
     pub candidate_id: Option<&'a str>,
     pub model: Option<&'a str>,
+    /// This machine's review effort, written to the user config.
+    pub effort: Option<ReviewEffort>,
 }
 
 /// `init-report-v1`
@@ -478,6 +565,9 @@ pub struct InitReport {
     pub provider_id: String,
     pub candidate_id: Option<String>,
     pub egress: String,
+    /// This machine's review effort after init, if one is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReviewEffort>,
     pub detection: DetectionReport,
 }
 
@@ -525,6 +615,39 @@ fn write_atomically(path: &Path, contents: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// What this machine already has configured for review.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MachineSetup {
+    /// The `default` provider's kind and model, such as `claude_cli claude-opus-5-5`.
+    pub default_provider: Option<String>,
+    pub effort: Option<ReviewEffort>,
+}
+
+/// Read this machine's review setup from the user config.
+pub fn machine_setup(user_config: &Path) -> Result<MachineSetup, String> {
+    let user = read_user_providers(user_config)?;
+    let default_provider = user
+        .get("providers")
+        .and_then(|providers| providers.get(DEFAULT_PROVIDER_ID))
+        .map(|provider| {
+            let field = |name: &str| provider.get(name).and_then(serde_yaml::Value::as_str);
+            [field("kind"), field("model")]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" ")
+        });
+    let effort = user
+        .get("review")
+        .and_then(|review| review.get("effort"))
+        .cloned()
+        .and_then(|value| serde_yaml::from_value(value).ok());
+    Ok(MachineSetup {
+        default_provider,
+        effort,
+    })
+}
+
 /// Create `.vee.yaml`, the default reviewer instructions, and (if absent) the
 /// `default` provider in the user config. Nothing is written unless every step
 /// can succeed.
@@ -546,7 +669,7 @@ pub fn init(
         .cloned();
 
     let (provider_status, candidate_id, egress) = match (&existing_default, request.candidate_id) {
-        (Some(_), _) if repository_exists => {
+        (Some(_), None) if repository_exists && request.effort.is_none() => {
             return Err(InitError::Usage(format!(
                 "this repository and machine are already set up ({} defines provider `{DEFAULT_PROVIDER_ID}`); run `vee doctor` to check them",
                 user_config.display()
@@ -599,10 +722,33 @@ pub fn init(
         }
     };
 
+    let review_key = serde_yaml::Value::from("review");
+    if let Some(effort) = request.effort {
+        let effort = serde_yaml::to_value(effort)
+            .map_err(|error| InitError::Configuration(error.to_string()))?;
+        user.entry(serde_yaml::Value::from("version"))
+            .or_insert(serde_yaml::Value::from(1));
+        user.entry(review_key.clone())
+            .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()))
+            .as_mapping_mut()
+            .ok_or_else(|| {
+                InitError::Configuration(format!(
+                    "{}: review must be a mapping",
+                    user_config.display()
+                ))
+            })?
+            .insert("effort".into(), effort);
+    }
+    let effort = user
+        .get(&review_key)
+        .and_then(|review| review.get("effort"))
+        .cloned()
+        .and_then(|value| serde_yaml::from_value::<ReviewEffort>(value).ok());
+
     let instructions = root.join(REVIEWER_INSTRUCTIONS_PATH);
     // An existing repository keeps its own reviewers; only this machine is configured.
     let instructions_created = !repository_exists && !instructions.exists();
-    if provider_status == "written" {
+    if provider_status == "written" || request.effort.is_some() {
         let yaml = serde_yaml::to_string(&serde_yaml::Value::Mapping(user))
             .map_err(|error| InitError::Configuration(error.to_string()))?;
         write_atomically(user_config, &yaml).map_err(InitError::Configuration)?;
@@ -639,6 +785,7 @@ pub fn init(
         provider_id: DEFAULT_PROVIDER_ID.to_string(),
         candidate_id,
         egress,
+        effort,
         detection,
     })
 }
@@ -1144,6 +1291,7 @@ mod tests {
             InitRequest {
                 candidate_id: None,
                 model: None,
+                effort: None,
             },
         )
         .unwrap();
@@ -1184,13 +1332,14 @@ mod tests {
             InitRequest {
                 candidate_id: None,
                 model: None,
+                effort: None,
             },
         )
         .unwrap();
         assert_eq!(report.provider_status, "existing");
         assert_eq!(report.repository_config_status, "written");
         assert!(matches!(
-            init(&system, second.path(), &user_config, InitRequest { candidate_id: None, model: None }),
+            init(&system, second.path(), &user_config, InitRequest { candidate_id: None, model: None, effort: None }),
             Err(InitError::Usage(message)) if message.contains("already set up")
         ));
     }
@@ -1222,6 +1371,7 @@ mod tests {
             InitRequest {
                 candidate_id: None,
                 model: None,
+                effort: None,
             },
         )
         .unwrap();
@@ -1247,6 +1397,7 @@ mod tests {
             InitRequest {
                 candidate_id: None,
                 model: None,
+                effort: None,
             },
         )
         .unwrap_err();
@@ -1255,5 +1406,98 @@ mod tests {
         );
         assert!(!repository.path().join(".vee.yaml").exists());
         assert!(!user_config.exists());
+    }
+
+    #[test]
+    fn init_records_the_chosen_effort_for_this_machine_and_can_change_it_later() {
+        let system = FakeSystem {
+            executables: [("claude", "2.1.0")].into(),
+            ..Default::default()
+        };
+        let repository = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let user_config = home.path().join("config.yaml");
+        let report = init(
+            &system,
+            repository.path(),
+            &user_config,
+            InitRequest {
+                candidate_id: Some("claude"),
+                model: Some("claude-opus-5-5"),
+                effort: Some(vee_core::ReviewEffort::Medium),
+            },
+        )
+        .unwrap();
+        assert_eq!(report.effort, Some(vee_core::ReviewEffort::Medium));
+        let load = || {
+            vee_core::RepositoryConfig::load_with_provider_defaults_and_offline(
+                &repository.path().join(".vee.yaml"),
+                Some(&user_config),
+                false,
+            )
+            .unwrap()
+        };
+        let config = load();
+        assert_eq!(
+            config.providers[DEFAULT_PROVIDER_ID].model.as_deref(),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(
+            config.reviewers["correctness"].effort,
+            Some(vee_core::ReviewEffort::Medium)
+        );
+
+        // Once set up, init can still change this machine's effort.
+        let report = init(
+            &system,
+            repository.path(),
+            &user_config,
+            InitRequest {
+                candidate_id: None,
+                model: None,
+                effort: Some(vee_core::ReviewEffort::High),
+            },
+        )
+        .unwrap();
+        assert_eq!(report.provider_status, "existing");
+        assert_eq!(
+            load().reviewers["correctness"].effort,
+            Some(vee_core::ReviewEffort::High)
+        );
+    }
+
+    #[test]
+    fn detection_suggests_models_and_efforts_with_reasons() {
+        let system = FakeSystem {
+            executables: [("claude", "2.1.0"), ("codex", "codex-cli 0.40.0")].into(),
+            ..Default::default()
+        };
+        let report = detect(&system);
+        let claude = &report.model_suggestions["claude"];
+        assert_eq!(claude[0].model, "claude-opus-5-5");
+        assert!(claude[0].recommended);
+        assert!(claude.iter().all(|suggestion| !suggestion.note.is_empty()));
+        assert!(!report.model_suggestions.contains_key("codex"));
+        let efforts: Vec<_> = report
+            .effort_options
+            .iter()
+            .map(|option| (option.effort, option.runs))
+            .collect();
+        assert_eq!(
+            efforts,
+            [
+                (vee_core::ReviewEffort::Low, 1),
+                (vee_core::ReviewEffort::Medium, 3),
+                (vee_core::ReviewEffort::High, 5)
+            ]
+        );
+        assert_eq!(
+            report
+                .effort_options
+                .iter()
+                .filter(|option| option.recommended)
+                .count(),
+            1
+        );
     }
 }

@@ -8,6 +8,7 @@ use vee_store_sqlite::ReviewStore;
 
 use vee_application::attestation;
 mod contracts;
+mod init_wizard;
 use vee_application::evidence_bundle;
 use vee_application::failure::{
     configuration_failure, usage_failure, ConfigurationFailure, UsageFailure,
@@ -119,9 +120,16 @@ enum Command {
         /// Backend to use instead of the recommended one (see `vee providers detect`).
         #[arg(long, value_name = "CANDIDATE")]
         provider: Option<String>,
-        /// Model for the chosen backend; required for API keys, optional for Ollama.
+        /// Model for the chosen backend; required for API keys, optional otherwise.
         #[arg(long)]
         model: Option<String>,
+        /// Review effort on this machine: low runs each reviewer once, medium three
+        /// times and high five times, keeping findings the runs agree on.
+        #[arg(long, value_enum)]
+        effort: Option<EffortArg>,
+        /// Do not ask questions in a terminal; use the recommended choices.
+        #[arg(long)]
+        no_input: bool,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
@@ -1846,10 +1854,34 @@ fn run() -> Result<u8> {
         Command::Init {
             provider,
             model,
+            effort,
+            no_input,
             output,
         } => {
             let workspace = operations::Workspace::discover(crate::local_stores())?;
-            let report = operations::init(&workspace, provider.as_deref(), model.as_deref())?;
+            let mut provider = provider;
+            let mut model = model;
+            let mut effort = effort.map(vee_core::ReviewEffort::from);
+            let guided = !no_input
+                && output == Output::Text
+                && provider.is_none()
+                && model.is_none()
+                && effort.is_none()
+                && std::io::IsTerminal::is_terminal(&std::io::stdin())
+                && std::io::IsTerminal::is_terminal(&std::io::stdout());
+            if guided {
+                let choices = init_wizard::ask(
+                    &operations::detect_providers(),
+                    &operations::machine_setup()?,
+                    &mut std::io::stdin().lock(),
+                    &mut std::io::stdout().lock(),
+                )?;
+                provider = choices.provider;
+                model = choices.model;
+                effort = choices.effort;
+            }
+            let report =
+                operations::init(&workspace, provider.as_deref(), model.as_deref(), effort)?;
             match output {
                 Output::Json => emit_json(&report)?,
                 Output::Text => print_view(&report)?,
