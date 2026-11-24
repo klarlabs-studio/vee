@@ -24,17 +24,21 @@ On the 45 pull requests not used to tune instructions:
 
 | | Vee | Leading hosted reviewers |
 |---|---|---|
-| Precision | 36% | 32% to 51% |
-| Recall | 39% | 60% to 62% |
+| Precision | 42% | 32% to 52% |
+| Recall | 44% | 45% to 62% |
 
 - **Precision is already in range; recall is the gap.** On precision,
-  Vee is level with or ahead of the best-recall hosted reviewer.
+  Vee is ahead of the best-recall hosted reviewers.
 - **The reviewers that close the gap can look beyond the diff.** In the
   published results, a general-purpose coding agent with repository
   access outscores the same family of models reviewing a bundle.
 - **Instructions alone do not close it.** Broader instructions raised
-  Vee's recall to 51%, but precision fell to 26% and F1 dropped. That
-  points to missing evidence, not missing instructions.
+  Vee's recall by about 13 points, but precision fell by about 7 and F1
+  did not improve. That points to missing evidence, not missing
+  instructions.
+
+A first measurement of this decision did not raise F1 (see Rollout), so
+the default stays off.
 
 **The CLIs' own file tools cannot be confined.** Reviewer CLIs such as the
 Claude CLI and the Codex CLI ship file tools. Their reads are not confined
@@ -115,7 +119,10 @@ and it offers three read-only tools:
   calling. Until then they review the bundle alone, and the review records
   `exploration: unsupported` rather than failing.
 - **Default.** It changes to `true` only after the held-out benchmark set
-  shows higher F1 with exploration than without.
+  shows higher F1 with exploration than without. On the first
+  measurement (36 correctly built held-out pull requests), exploring
+  reviewers scored lower: 40 F1 against 45 without exploration. They
+  used the tools on about half of the requests.
 
 ## Consequences
 
