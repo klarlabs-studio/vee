@@ -49,7 +49,9 @@
               "files",
               "lines",
               "blast_radius",
-              "untested_source"
+              "untested_source",
+              "prior_changes",
+              "authors"
             ]
           },
           "label": {
