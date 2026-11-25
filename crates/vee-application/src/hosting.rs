@@ -532,6 +532,9 @@ pub struct PublishRequest<'a> {
     pub flags: PublishFlags,
     /// Also publish the approval verdict as a separate "Vee approval" check.
     pub approval: bool,
+    /// Vee's threads read back from the pull request; those whose finding is
+    /// no longer reported are resolved (see `PublishedReview`).
+    pub pull_request_threads: Vec<crate::publication::PullRequestThread>,
 }
 
 /// Settings resolved from flags, the repository's `hosting` block and defaults.
@@ -543,6 +546,7 @@ struct PublishSettings {
     username: String,
     webhook_secret_env: String,
     actor_login: String,
+    pull_request_threads: Vec<crate::publication::PullRequestThread>,
 }
 
 const DEFAULT_WEBHOOK_SECRET_ENV: &str = "VEE_GITHUB_WEBHOOK_SECRET";
@@ -645,6 +649,7 @@ pub fn publish_review(
         username,
         webhook_secret_env,
         actor_login,
+        pull_request_threads: request.pull_request_threads,
     };
     let pull_request = vee_hosting::PullRequestRef {
         repository: vee_hosting::RepositoryRef {
@@ -882,7 +887,7 @@ fn publish_to_azure_devops(
         store,
         &settings.provider_id,
         pull_request,
-        &published_review(reviewed),
+        &published_review(reviewed, settings),
         threads,
         |threads| {
             let thread_ids = if threads.is_empty() {
@@ -1062,7 +1067,7 @@ fn publish_to_provider(
         store,
         &settings.provider_id,
         pull_request,
-        &published_review(reviewed),
+        &published_review(reviewed, settings),
         threads,
         |threads| {
             provider
@@ -1083,11 +1088,15 @@ fn publish_to_provider(
     ))
 }
 
-fn published_review(reviewed: &crate::ReviewResult) -> crate::publication::PublishedReview<'_> {
+fn published_review<'a>(
+    reviewed: &'a crate::ReviewResult,
+    settings: &'a PublishSettings,
+) -> crate::publication::PublishedReview<'a> {
     crate::publication::PublishedReview {
         review_id: &reviewed.review_id,
         snapshot_id: &reviewed.snapshot_id,
         findings: &reviewed.findings,
+        pull_request_threads: &settings.pull_request_threads,
     }
 }
 
