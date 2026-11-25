@@ -66,7 +66,7 @@ pub(crate) fn co_change_edges(
         }
     }
     let mut edges = Vec::new();
-    for source in changed {
+    for source in changed.iter().filter(|path| !is_documentation_path(path)) {
         let mut source_commits = 0u32;
         let mut together = std::collections::BTreeMap::<&str, u32>::new();
         for paths in &commits {
@@ -75,7 +75,11 @@ pub(crate) fn co_change_edges(
             }
             source_commits += 1;
             for path in paths.iter() {
-                if path != source && !changed.contains(path) && eligible(path) {
+                if path != source
+                    && !changed.contains(path)
+                    && !is_documentation_path(path)
+                    && eligible(path)
+                {
                     *together.entry(path.as_str()).or_default() += 1;
                 }
             }
@@ -1787,6 +1791,12 @@ pub(crate) fn query_typescript_references(
             let Some(text) = source.get(changed_path.as_str()) else {
                 continue;
             };
+            // Outside a tsconfig or jsconfig project the server sees only the
+            // open file and what it imports, so it would miss references from
+            // other files; those files keep the labelled heuristic edges.
+            if !in_typescript_project(&root, changed_path) {
+                continue;
+            }
             let absolute = root.join(changed_path);
             if !absolute.starts_with(&root) {
                 failures = true;
@@ -1892,6 +1902,10 @@ pub(crate) fn query_typescript_references(
                         saw_declaration = true;
                         continue;
                     }
+                    // A changed file is not impact of itself.
+                    if relative == **changed_path {
+                        continue;
+                    }
                     edges.push(ImpactEdge {
                         source_path: (*changed_path).clone(),
                         affected_path: relative.clone(),
@@ -1932,6 +1946,20 @@ pub(crate) fn query_typescript_references(
     })();
     terminate_typescript_server(&mut child);
     outcome
+}
+
+/// Whether `relative` lies under a `tsconfig.json` or `jsconfig.json` within
+/// `root`, so the TypeScript server loads the whole project around it.
+fn in_typescript_project(root: &Path, relative: &str) -> bool {
+    let mut directory = Path::new(relative).parent();
+    while let Some(current) = directory {
+        let absolute = root.join(current);
+        if absolute.join("tsconfig.json").is_file() || absolute.join("jsconfig.json").is_file() {
+            return true;
+        }
+        directory = current.parent();
+    }
+    false
 }
 
 #[cfg(unix)]
@@ -2279,6 +2307,10 @@ pub(crate) fn query_gopls_references(
                     };
                     if relative == **changed_path && evidence_line == line {
                         saw_declaration = true;
+                        continue;
+                    }
+                    // A changed file is not impact of itself.
+                    if relative == **changed_path {
                         continue;
                     }
                     edges.push(ImpactEdge {
@@ -3337,6 +3369,20 @@ pub(crate) fn is_test_context_attribute(attributes: &[syn::Attribute]) -> bool {
                     .parse_args::<syn::Ident>()
                     .is_ok_and(|ident| ident == "test")
         })
+}
+
+/// Prose documentation: Markdown, reStructuredText, and AsciiDoc files, and
+/// anything under a `docs/` directory. Plain `.txt` is not included, since it
+/// also names build and dependency manifests (`CMakeLists.txt`,
+/// `requirements.txt`) that do couple to code. Documentation is updated alongside features, so it says
+/// nothing about code coupling or code diffusion.
+pub(crate) fn is_documentation_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.starts_with("docs/")
+        || lower.contains("/docs/")
+        || [".md", ".mdx", ".markdown", ".rst", ".adoc"]
+            .iter()
+            .any(|extension| lower.ends_with(extension))
 }
 
 pub(crate) fn is_vue_path(path: &str) -> bool {

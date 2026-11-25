@@ -54,3 +54,4 @@
 .diff-hunk .source-line.added{background:rgba(122,212,165,.12)}.diff-hunk .source-line.removed{background:rgba(240,120,120,.12)}
 .diff-marker{display:inline-block;width:1.2em;color:#9b9da6}
 .visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.risk-card>small{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.45}

@@ -675,7 +675,10 @@ impl GitHostingProvider for BitbucketAdapter {
             .collect::<String>();
         let state = match (publication.check.status, publication.check.conclusion) {
             (CheckStatus::Queued | CheckStatus::InProgress, _) => "INPROGRESS",
-            (_, Some(CheckConclusion::Success | CheckConclusion::Neutral)) => "SUCCESSFUL",
+            (_, Some(CheckConclusion::Success)) => "SUCCESSFUL",
+            // Bitbucket has no neutral state; a neutral check must never read
+            // as a success, so it shows as stopped.
+            (_, Some(CheckConclusion::Neutral)) => "STOPPED",
             (_, Some(CheckConclusion::Failure | CheckConclusion::ActionRequired)) => "FAILED",
             (_, Some(CheckConclusion::Cancelled | CheckConclusion::TimedOut)) => "STOPPED",
             _ => {
@@ -827,11 +830,11 @@ impl GitHostingProvider for BitbucketAdapter {
             _ => None,
         };
         let base_oid = pull
-            .and_then(|value| value.pointer("destination.commit.hash"))
+            .and_then(|value| value.pointer("/destination/commit/hash"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
         let head_oid = pull
-            .and_then(|value| value.pointer("source.commit.hash"))
+            .and_then(|value| value.pointer("/source/commit/hash"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
         let action = match event_key {
@@ -1275,6 +1278,8 @@ mod tests {
         assert_eq!(event.event_id, "delivery-1");
         assert_eq!(event.delivery_attempt, 2);
         assert_eq!(event.action.as_deref(), Some("synchronize"));
+        assert_eq!(event.base_oid.as_deref(), Some("a".repeat(40).as_str()));
+        assert_eq!(event.head_oid.as_deref(), Some("b".repeat(40).as_str()));
         assert_eq!(
             event.pull_request.unwrap().repository.full_name,
             "team/repo"
