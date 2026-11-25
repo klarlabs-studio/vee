@@ -265,6 +265,22 @@ fn resolve_path(path: String, rules: &[Rule], has_codeowners: bool) -> Ownership
     }
 }
 
+/// The owners `CODEOWNERS` text assigns to `path` (the last matching rule
+/// wins), for authorization. Fails when any line cannot be read, because a
+/// skipped rule could be the one that matches.
+pub fn owners_in(contents: &str, path: &str) -> Result<Vec<String>, String> {
+    if contents.len() as u64 > MAX_CODEOWNERS_BYTES {
+        return Err(format!(
+            "CODEOWNERS exceeds the {MAX_CODEOWNERS_BYTES} byte limit"
+        ));
+    }
+    let (rules, limitations) = parse_rules(contents);
+    if let Some(limitation) = limitations.first() {
+        return Err(limitation.clone());
+    }
+    Ok(resolve_path(path.to_owned(), &rules, true).owners)
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

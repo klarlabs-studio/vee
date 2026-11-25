@@ -1,0 +1,466 @@
+//! `vee ci command` end to end, against a fake GitHub that remembers the
+//! comments Vee posts (ADR 0020).
+#![cfg(unix)]
+
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+fn vee() -> std::process::Command {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_vee"));
+    command.env("NO_COLOR", "1").env_remove("VEE_HOSTING_HOSTS");
+    command
+}
+
+fn git(root: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "Vee test")
+        .env("GIT_AUTHOR_EMAIL", "vee@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Vee test")
+        .env("GIT_COMMITTER_EMAIL", "vee@example.invalid")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// RFC 3339 for a Unix time, as GitHub writes it.
+fn rfc3339(unix: i64) -> String {
+    let days = unix.div_euclid(86_400);
+    let seconds = unix.rem_euclid(86_400);
+    // Civil date from days (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        seconds / 3600,
+        seconds / 60 % 60,
+        seconds % 60
+    )
+}
+
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+const BOT: &str = "github-actions[bot]";
+
+/// What the fake GitHub remembers.
+#[derive(Default)]
+struct State {
+    /// Inline review comments.
+    review: Vec<serde_json::Value>,
+    /// Comments in the pull request's conversation.
+    conversation: Vec<serde_json::Value>,
+    /// Conclusions of the check runs Vee created, in order.
+    checks: Vec<String>,
+    next_id: u64,
+}
+
+impl State {
+    fn add(&mut self, review: bool, author: &str, mut comment: serde_json::Value) -> u64 {
+        self.next_id += 1;
+        let id = 700 + self.next_id;
+        comment["id"] = id.into();
+        comment["user"] = serde_json::json!({
+            "login": author,
+            "type": if author.ends_with("[bot]") { "Bot" } else { "User" },
+        });
+        comment["created_at"] = rfc3339(now()).into();
+        comment["updated_at"] = comment["created_at"].clone();
+        comment["html_url"] = format!("https://example.invalid/c/{id}").into();
+        if review {
+            &mut self.review
+        } else {
+            &mut self.conversation
+        }
+        .push(comment);
+        id
+    }
+}
+
+fn read_request(stream: &mut std::net::TcpStream) -> (String, String) {
+    let mut request = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let header_end = loop {
+        let count = stream.read(&mut chunk).unwrap();
+        request.extend_from_slice(&chunk[..count]);
+        if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+            break end + 4;
+        }
+    };
+    let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+    let length = headers
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length: "))
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    while request.len() < header_end + length {
+        let count = stream.read(&mut chunk).unwrap();
+        request.extend_from_slice(&chunk[..count]);
+    }
+    let line = String::from_utf8_lossy(&request[..header_end])
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_owned();
+    (
+        line,
+        String::from_utf8_lossy(&request[header_end..]).to_string(),
+    )
+}
+
+fn respond(state: &Mutex<State>, line: &str, body: &str, base: &str, head: &str) -> (u16, String) {
+    let mut state = state.lock().unwrap();
+    let json = |value: serde_json::Value| (200, value.to_string());
+    let request: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    let (method, target) = line.split_once(' ').unwrap();
+    let path = target.split(' ').next().unwrap();
+    let route = path.split('?').next().unwrap();
+    match (method, route) {
+        ("GET", "/repos/team/repo/pulls/9") => json(serde_json::json!({
+            "number": 9, "title": "Change", "body": null, "state": "open", "merged": false,
+            "base": {"sha": base, "repo": {"full_name": "team/repo"}},
+            "head": {"sha": head, "repo": {"full_name": "team/repo"}},
+        })),
+        ("GET", "/repos/team/repo/pulls/9/files") => json(serde_json::json!([{
+            "filename": "src/lib.rs", "status": "modified", "previous_filename": null,
+            "patch": "@@ -1 +1 @@\n-pub fn initial() {}\n+pub fn changed() {}",
+            "additions": 1, "deletions": 1,
+        }])),
+        ("GET", "/repos/team/repo/pulls/9/comments") => {
+            let page_one = path.contains("page=1") || !path.contains("page=");
+            json(if page_one {
+                state.review.clone().into()
+            } else {
+                serde_json::json!([])
+            })
+        }
+        ("GET", "/repos/team/repo/issues/9/comments") => {
+            let page_one = path.contains("page=1") || !path.contains("page=");
+            json(if page_one {
+                state.conversation.clone().into()
+            } else {
+                serde_json::json!([])
+            })
+        }
+        ("POST", "/repos/team/repo/pulls/9/comments") => {
+            let id = state.add(
+                true,
+                BOT,
+                serde_json::json!({
+                    "body": request["body"], "path": request["path"],
+                    "line": request["line"], "side": "RIGHT",
+                }),
+            );
+            (201, serde_json::json!({"id": id}).to_string())
+        }
+        ("POST", route) if route.starts_with("/repos/team/repo/pulls/9/comments/") => {
+            let parent: u64 = route.split('/').nth(7).unwrap().parse().unwrap();
+            let id = state.add(
+                true,
+                BOT,
+                serde_json::json!({
+                    "body": request["body"], "in_reply_to_id": parent,
+                    "path": "src/lib.rs", "line": 1,
+                }),
+            );
+            (201, serde_json::json!({"id": id}).to_string())
+        }
+        ("POST", "/repos/team/repo/issues/9/comments") => {
+            let id = state.add(false, BOT, serde_json::json!({"body": request["body"]}));
+            (201, serde_json::json!({"id": id}).to_string())
+        }
+        ("PATCH", route) if route.starts_with("/repos/team/repo/pulls/comments/") => {
+            let id: u64 = route.rsplit('/').next().unwrap().parse().unwrap();
+            if let Some(comment) = state.review.iter_mut().find(|c| c["id"] == id) {
+                comment["body"] = request["body"].clone();
+            }
+            json(serde_json::json!({"id": id}))
+        }
+        ("GET", "/repos/team/repo/collaborators/alice/permission") => {
+            json(serde_json::json!({"permission": "write", "role_name": "write"}))
+        }
+        ("GET", route) if route.starts_with("/repos/team/repo/collaborators/") => {
+            json(serde_json::json!({"permission": "read", "role_name": "read"}))
+        }
+        ("GET", "/repos/team/repo/commits/head/check-runs") | ("GET", _)
+            if route.ends_with("/check-runs") =>
+        {
+            json(serde_json::json!({"check_runs": []}))
+        }
+        ("POST", "/repos/team/repo/check-runs") => {
+            state
+                .checks
+                .push(request["conclusion"].as_str().unwrap_or("").to_owned());
+            json(serde_json::json!({"id": 1234}))
+        }
+        ("POST", "/graphql") | ("POST", "/api/graphql") => {
+            if body.contains("resolveReviewThread") || body.contains("unresolveReviewThread") {
+                json(
+                    serde_json::json!({"data": {"resolveReviewThread": {"thread": {"id": "T", "isResolved": true}}, "unresolveReviewThread": {"thread": {"id": "T", "isResolved": false}}}}),
+                )
+            } else {
+                let nodes: Vec<_> = state
+                    .review
+                    .iter()
+                    .filter(|comment| comment.get("in_reply_to_id").is_none())
+                    .map(|comment| serde_json::json!({
+                        "id": format!("T{}", comment["id"]), "isResolved": false,
+                        "comments": {"nodes": [{"databaseId": comment["id"], "body": "x", "author": {"login": BOT}}]},
+                    }))
+                    .collect();
+                json(
+                    serde_json::json!({"data": {"repository": {"pullRequest": {"reviewThreads": {
+                    "nodes": nodes, "pageInfo": {"hasNextPage": false, "endCursor": "c"}}}}}}),
+                )
+            }
+        }
+        _ => panic!("unexpected GitHub request: {line}"),
+    }
+}
+
+fn serve(
+    listener: TcpListener,
+    stop: Arc<AtomicBool>,
+    state: Arc<Mutex<State>>,
+    base: String,
+    head: String,
+) -> std::thread::JoinHandle<()> {
+    listener.set_nonblocking(true).unwrap();
+    std::thread::spawn(move || {
+        while !stop.load(Ordering::SeqCst) {
+            let Ok((mut stream, _)) = listener.accept() else {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                continue;
+            };
+            stream.set_nonblocking(false).unwrap();
+            let (line, body) = read_request(&mut stream);
+            let (status, reply) = respond(&state, &line, &body, &base, &head);
+            write!(
+                stream,
+                "HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            )
+            .unwrap();
+        }
+    })
+}
+
+#[test]
+fn a_waiver_given_in_a_finding_thread_passes_the_gate_on_that_head() {
+    use std::os::unix::fs::PermissionsExt;
+    let outside = tempfile::tempdir().unwrap();
+    let provider = outside.path().join("provider");
+    std::fs::write(
+        &provider,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s' '{\"schema_version\":1,\"findings\":[{\"category\":\"correctness\",\"severity\":\"high\",\"confidence\":90,\"rationale\":\"changed() drops the result callers rely on.\",\"path\":\"src/lib.rs\",\"line\":1}]}'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // origin has main and the pull request's head; the job checks out main.
+    let origin = outside.path().join("origin.git");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "--bare", "-b", "main"]);
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn initial() {}\n").unwrap();
+    std::fs::write(root.join("reviewer.md"), "Review the change.\n").unwrap();
+    std::fs::write(
+        root.join(".vee.yaml"),
+        format!(
+            "version: 1\noffline: false\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\n",
+            provider.display()
+        ),
+    )
+    .unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "base"]);
+    let base = git(root, &["rev-parse", "HEAD"]);
+    git(root, &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(root.join("src/lib.rs"), "pub fn changed() {}\n").unwrap();
+    git(root, &["commit", "-qam", "change"]);
+    let head = git(root, &["rev-parse", "HEAD"]);
+    git(root, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(
+        root,
+        &["push", "-q", "origin", "main", "feature:refs/pull/9/head"],
+    );
+
+    let state = Arc::new(Mutex::new(State::default()));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let server = serve(
+        listener,
+        stop.clone(),
+        state.clone(),
+        base.clone(),
+        head.clone(),
+    );
+    let github =
+        |command: &mut std::process::Command, event_name: &str, event: &serde_json::Value| {
+            let path = outside.path().join(format!("{event_name}.json"));
+            std::fs::write(&path, event.to_string()).unwrap();
+            command
+                .env("GITHUB_ACTIONS", "true")
+                .env("GITHUB_EVENT_NAME", event_name)
+                .env("GITHUB_EVENT_PATH", &path)
+                .env("GITHUB_REPOSITORY", "team/repo")
+                .env("GITHUB_SERVER_URL", "http://127.0.0.1")
+                .env("GITHUB_API_URL", format!("http://{address}"))
+                .env("GH_TOKEN", "fixture-token")
+                .current_dir(root);
+        };
+    let run_ci = || {
+        let mut command = vee();
+        command.args(["ci", "run", "--output", "json"]);
+        github(
+            &mut command,
+            "pull_request",
+            &serde_json::json!({"pull_request": {"number": 9, "base": {"sha": base}, "head": {"sha": head}}}),
+        );
+        command.output().unwrap()
+    };
+
+    // 1. The review blocks and opens the finding's thread.
+    let first = run_ci();
+    assert_eq!(
+        first.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let thread = state.lock().unwrap().review[0].clone();
+    let thread_id = thread["id"].as_u64().unwrap();
+    assert!(
+        thread["body"].as_str().unwrap().contains("vee:fingerprint"),
+        "{thread}"
+    );
+
+    // 2. Alice waives it in the thread, from a job that checked out main.
+    git(root, &["checkout", "-q", "main"]);
+    let command_id = state.lock().unwrap().add(
+        true,
+        "alice",
+        serde_json::json!({"body": "@vee waive 7d accepted for the hotfix", "in_reply_to_id": thread_id, "path": "src/lib.rs", "line": 1}),
+    );
+    let event = {
+        let state = state.lock().unwrap();
+        let comment = state
+            .review
+            .iter()
+            .find(|c| c["id"] == command_id)
+            .unwrap()
+            .clone();
+        serde_json::json!({"action": "created", "comment": comment, "pull_request": {"number": 9}})
+    };
+    let mut command = vee();
+    command.args(["ci", "command", "--output", "json"]);
+    github(&mut command, "pull_request_review_comment", &event);
+    let handled = command.output().unwrap();
+    assert!(
+        handled.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&handled.stdout),
+        String::from_utf8_lossy(&handled.stderr)
+    );
+    let outcome: serde_json::Value = serde_json::from_slice(&handled.stdout).unwrap();
+    let mut schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../../schemas/ci-command-v1.schema.json")).unwrap();
+    let mut run_schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../../schemas/ci-run-v1.schema.json")).unwrap();
+    // The run is the published ci-run schema; inline it for the validator.
+    run_schema.as_object_mut().unwrap().remove("$id");
+    schema["properties"]["run"] = run_schema;
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let errors: Vec<String> = validator
+        .iter_errors(&outcome)
+        .map(|e| e.to_string())
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}\n{outcome:#}");
+    assert_eq!(outcome["outcome"], "done", "{outcome:#}");
+    assert_eq!(outcome["run"]["gate"], "pass", "{outcome:#}");
+    assert_eq!(
+        git(root, &["rev-parse", "HEAD"]),
+        head,
+        "Vee checked out the head"
+    );
+    {
+        let state = state.lock().unwrap();
+        let acknowledgement = state
+            .review
+            .iter()
+            .find(|c| c["body"].as_str().is_some_and(|b| b.contains("vee:ack:")))
+            .expect("Vee acknowledged the waiver in the thread");
+        assert_eq!(acknowledgement["in_reply_to_id"], thread_id);
+        assert_eq!(state.checks, ["failure", "success"]);
+    }
+
+    // 3. A later run on the same head still applies the waiver.
+    let again = run_ci();
+    assert_eq!(
+        again.status.code(),
+        Some(0),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&again.stdout),
+        String::from_utf8_lossy(&again.stderr)
+    );
+
+    // 4. Someone without write access is refused, and nothing is reviewed.
+    let refused_id =
+        state
+            .lock()
+            .unwrap()
+            .add(false, "mallory", serde_json::json!({"body": "@vee review"}));
+    let event = {
+        let state = state.lock().unwrap();
+        let comment = state
+            .conversation
+            .iter()
+            .find(|c| c["id"] == refused_id)
+            .unwrap()
+            .clone();
+        serde_json::json!({"action": "created", "comment": comment, "issue": {"number": 9, "pull_request": {}}})
+    };
+    let mut command = vee();
+    command.args(["ci", "command", "--output", "json"]);
+    github(&mut command, "issue_comment", &event);
+    let refused: serde_json::Value =
+        serde_json::from_slice(&command.output().unwrap().stdout).unwrap();
+    assert_eq!(refused["outcome"], "refused", "{refused:#}");
+    stop.store(true, Ordering::SeqCst);
+    server.join().unwrap();
+    assert_eq!(
+        state.lock().unwrap().checks.len(),
+        3,
+        "the refused command reviewed nothing"
+    );
+}

@@ -107,6 +107,30 @@ pub fn pull_request_context_provider(
     })
 }
 
+/// The conversation on a pull request, for comment commands (ADR 0020).
+/// Only GitHub is supported so far.
+pub fn conversation_provider(
+    provider_id: &str,
+    api_base: &str,
+    token_env: &str,
+    actor_login: &str,
+) -> Result<Box<dyn vee_hosting::PullRequestConversationProvider>> {
+    anyhow::ensure!(
+        provider_id == "github",
+        usage_failure(format!(
+            "comment commands are supported on GitHub, not `{provider_id}`"
+        ))
+    );
+    Ok(Box::new(
+        vee_hosting::github::GitHubAdapter::new(
+            vee_hosting::github::GitHubConfig::new(api_base, read_token(token_env)?, String::new())
+                .map_err(configuration_failure)?
+                .with_actor_login(actor_login),
+        )
+        .map_err(configuration_failure)?,
+    ))
+}
+
 fn review_issues_provider(
     provider_id: &str,
     api_base: &str,
@@ -439,6 +463,9 @@ pub struct ReviewPublication {
     pub approval_check_id: Option<String>,
     /// The pull request revision after publication.
     pub revision: String,
+    /// The gate status as published, after waivers recorded since the review.
+    #[serde(skip)]
+    pub gate: Option<vee_core::GateStatus>,
     #[serde(skip)]
     pub destination: Option<PublicationDestination>,
 }
@@ -535,6 +562,9 @@ pub struct PublishRequest<'a> {
     /// Vee's threads read back from the pull request; those whose finding is
     /// no longer reported are resolved (see `PublishedReview`).
     pub pull_request_threads: Vec<crate::publication::PullRequestThread>,
+    /// Findings people dismissed on the pull request. Those that do not block
+    /// are left out, so their threads are resolved; blocking ones stay.
+    pub dismissed_fingerprints: std::collections::BTreeSet<String>,
 }
 
 /// Settings resolved from flags, the repository's `hosting` block and defaults.
@@ -615,6 +645,13 @@ pub fn publish_review(
     reviewed.gate = reevaluated.decision;
     reviewed.findings =
         crate::publication::findings_for_publication(&reviewed.findings, &reviewed.gate);
+    let blocking = &reviewed.gate.blocking_findings;
+    reviewed.findings.retain(|finding| {
+        !request
+            .dismissed_fingerprints
+            .contains(&finding.fingerprint)
+            || blocking.contains(&finding.id)
+    });
     ensure_publishable(root, &reviewed)?;
     // Evaluated before anything is written, so a failure publishes nothing.
     let approval = if request.approval {
@@ -692,6 +729,7 @@ pub fn publish_review(
         thread_ids,
         approval_check_id,
         revision,
+        gate: Some(reviewed.gate.status),
         destination: Some(PublicationDestination {
             provider: settings.provider_id,
             pull_request,

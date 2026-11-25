@@ -978,6 +978,26 @@ enum CiCommand {
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
+    /// Handle the pull request comment that started a GitHub Actions job:
+    /// `@vee review`, `status`, `explain`, `dismiss`, `waive` or `help`.
+    /// Exits 0 when the comment was handled or held no command.
+    Command {
+        /// Also publish the approval verdict when the command reviews.
+        #[arg(long)]
+        approval: bool,
+        /// Review effort when the command reviews.
+        #[arg(long, value_enum)]
+        effort: Option<EffortArg>,
+        /// Named policy profile from .vee.yaml to apply.
+        #[arg(long, value_name = "NAME")]
+        policy_profile: Option<String>,
+        /// Account Vee posts as.
+        #[arg(long)]
+        actor_login: Option<String>,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3041,6 +3061,52 @@ fn run() -> Result<u8> {
                 GateStatus::Incomplete => 2,
             })
         }
+        Command::Ci {
+            command:
+                CiCommand::Command {
+                    approval,
+                    effort,
+                    policy_profile,
+                    actor_login,
+                    output,
+                },
+        } => {
+            let Some(event) =
+                vee_application::pr_commands::detect_comment(&|name| std::env::var(name).ok())?
+            else {
+                return Ok(0);
+            };
+            let actor = actor_login
+                .clone()
+                .unwrap_or_else(|| event.actor_login.clone());
+            let host = vee_application::hosting::conversation_provider(
+                "github",
+                &event.api_base,
+                &event.token_env,
+                &actor,
+            )?;
+            let cwd = std::env::current_dir()?;
+            let top = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
+            let handled = vee_application::pr_commands::handle(
+                &operations::Workspace::new(top, crate::local_stores()),
+                &*host,
+                event,
+                vee_application::pr_commands::CommandOptions {
+                    run: vee_application::ci::CiRunOptions {
+                        approval,
+                        effort: effort.map(Into::into),
+                        policy_profile,
+                        actor_login: None,
+                    },
+                    actor_login,
+                },
+            )?;
+            match output {
+                Output::Json => emit_json(&serde_json::to_value(&handled)?)?,
+                Output::Text => print_view(&handled)?,
+            }
+            Ok(0)
+        }
         Command::Hosting { command } => match command {
             HostingCommand::PrIssues {
                 repository,
@@ -3145,6 +3211,7 @@ fn run() -> Result<u8> {
                 let publication = vee_application::hosting::publish_review(
                     &operations::Workspace::new(top, crate::local_stores()),
                     vee_application::hosting::PublishRequest {
+                        dismissed_fingerprints: Default::default(),
                         review_id: &review_id,
                         repository: &repository,
                         number,

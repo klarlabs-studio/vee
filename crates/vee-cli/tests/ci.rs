@@ -98,6 +98,11 @@ fn fake_github(
                     "html_url": "https://example.invalid/c/501",
                     "created_at": "2026-11-20T00:00:00Z", "updated_at": "2026-11-20T00:00:00Z"}])
                 .to_string()
+            } else if line.starts_with("GET ") && line.contains("/issues/9/comments?") {
+                // The conversation, where comment commands would be.
+                "[]".to_owned()
+            } else if line.starts_with("GET ") && line.contains("/collaborators/") {
+                r#"{"permission":"read","role_name":"read"}"#.to_owned()
             } else if line.starts_with("PATCH ") && line.contains("/pulls/comments/501 ") {
                 r#"{"id":501}"#.to_owned()
             } else if line.starts_with("POST ") && line.contains("/pulls/9/comments ") {
