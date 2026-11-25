@@ -68,7 +68,9 @@ build provenance.
   file changes.
 - Optional hosting adapters for GitHub, GitLab, Bitbucket, Azure DevOps and
   Gerrit (context and publication). They are tested against mock servers;
-  live installation acceptance is still open.
+  live installation acceptance is still open. A hosting credential goes only to
+  the provider's public service or to a host named with `--host`,
+  `--api-base` or `VEE_HOSTING_HOSTS`, never to one set only in `.vee.yaml`.
 
 ### CLI and MCP output
 
