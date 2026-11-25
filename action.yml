@@ -1,0 +1,105 @@
+name: Vee review
+description: >-
+  Review a pull request with Vee on this runner, with your own model key, and
+  publish a check and finding threads. The job's result is the gate.
+author: Klarlabs
+branding:
+  icon: check-circle
+  color: green
+
+inputs:
+  provider:
+    description: "Model provider: anthropic-api, openai-api or gemini-api."
+    required: true
+  model:
+    description: The model to review with.
+    required: true
+  api-key:
+    description: The provider's API key. Pass it from a secret.
+    required: true
+  effort:
+    description: "Review effort: low runs each reviewer once, medium three times, high five times."
+    default: medium
+  approval:
+    description: Also publish whether the change may be approved without a person.
+    default: "false"
+  github-token:
+    description: Token Vee publishes with; it needs checks and pull request write access.
+    default: ${{ github.token }}
+  version:
+    description: >-
+      Vee release to install, such as v0.1.0. Defaults to the release this
+      action is pinned to, or the latest release when it is pinned to a branch.
+    default: ""
+
+outputs:
+  gate:
+    description: "The gate: pass, block or incomplete."
+    value: ${{ steps.review.outputs.gate }}
+  review-id:
+    description: The saved review's ID.
+    value: ${{ steps.review.outputs.review-id }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install Vee
+      shell: bash
+      env:
+        VEE_REQUESTED_VERSION: ${{ inputs.version }}
+        VEE_ACTION_REF: ${{ github.action_ref }}
+      run: |
+        set -euo pipefail
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          echo "::error::The Vee action runs on Linux and macOS runners." >&2
+          exit 2
+        fi
+        version="$VEE_REQUESTED_VERSION"
+        if [ -z "$version" ] && [[ "$VEE_ACTION_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]]; then
+          version="$VEE_ACTION_REF"
+        fi
+        if [ -z "$version" ]; then
+          url="https://github.com/klarlabs-studio/vee/releases/latest/download/vee-installer.sh"
+        elif [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]]; then
+          url="https://github.com/klarlabs-studio/vee/releases/download/$version/vee-installer.sh"
+        else
+          echo "::error::version must look like v0.1.0, not '$version'." >&2
+          exit 2
+        fi
+        # The installer checks the archive against the checksum built into it.
+        curl --proto '=https' --tlsv1.2 -LsSf "$url" | VEE_NO_MODIFY_PATH=1 sh
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+    - name: Review the pull request
+      id: review
+      shell: bash
+      env:
+        VEE_PROVIDER: ${{ inputs.provider }}
+        VEE_MODEL: ${{ inputs.model }}
+        VEE_EFFORT: ${{ inputs.effort }}
+        VEE_APPROVAL: ${{ inputs.approval }}
+        VEE_API_KEY: ${{ inputs.api-key }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -uo pipefail
+        case "$VEE_PROVIDER" in
+          anthropic-api) export ANTHROPIC_API_KEY="$VEE_API_KEY" ;;
+          openai-api) export OPENAI_API_KEY="$VEE_API_KEY" ;;
+          gemini-api) export GEMINI_API_KEY="$VEE_API_KEY" ;;
+          *) echo "::error::provider must be anthropic-api, openai-api or gemini-api." >&2; exit 2 ;;
+        esac
+        unset VEE_API_KEY
+        vee init --provider "$VEE_PROVIDER" --model "$VEE_MODEL" --effort "$VEE_EFFORT" --no-input || exit 2
+        args=(ci run --output json)
+        if [ "$VEE_APPROVAL" = "true" ]; then
+          args+=(--approval)
+        fi
+        result="$RUNNER_TEMP/vee-ci-run.json"
+        vee "${args[@]}" > "$result"
+        status=$?
+        if [ -s "$result" ]; then
+          echo "gate=$(jq -r '.gate // empty' "$result")" >> "$GITHUB_OUTPUT"
+          echo "review-id=$(jq -r '.review_id // empty' "$result")" >> "$GITHUB_OUTPUT"
+          jq -r '"Vee gate: \(.gate // "error")\(if .error then " — " + .error.message else "" end)"' "$result" || true
+        fi
+        exit "$status"

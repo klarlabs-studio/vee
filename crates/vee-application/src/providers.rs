@@ -181,6 +181,12 @@ pub(crate) fn validate_provider_task_output(
         .map_err(|_| "provider task output does not match its declared JSON schema".to_string())
 }
 
+/// How every reviewer writes and rates a finding. On a public review benchmark,
+/// findings cut to their first claim lost 27% of their false positives, and a
+/// third of the real defects Vee found were rated low, so the rating did not
+/// separate them from noise.
+const FINDING_WRITING_RULES: &str = "Each finding reports one defect. The first sentence states what goes wrong and when, naming the function, variable or condition responsible. Add at most two further sentences of evidence: the input or state that triggers the defect and its consequence. Do not put several defects in one finding, and do not repeat a defect at each place it occurs; report it once at its cause and name the other places. Leave out suggestions to consider, praise, and summaries of the change.\n\nSet severity by the consequence of the defect, not by your confidence or by the size of the fix: critical for a security breach or for data loss or corruption; high for a wrong result, crash or broken contract on a normal path; medium for one that needs a specific but realistic input, state or timing; low for a defect with a minor effect, such as a misleading message or a wrong log level. A defect that causes wrong behavior is at least medium.";
+
 pub(crate) fn provider_request_prompt(
     input: &serde_json::Value,
     review_prompt: &str,
@@ -191,6 +197,24 @@ pub(crate) fn provider_request_prompt(
         .as_object_mut()
         .and_then(|object| object.remove("task_instructions"))
         .and_then(|value| value.as_str().map(str::to_owned));
+    // The reviewer's configured instructions come from the repository's own
+    // configuration, not from the change under review, so they are part of
+    // the trusted prompt rather than the payload the model must not follow.
+    let reviewer_instructions = if task_instructions.is_none() {
+        payload
+            .as_object_mut()
+            .and_then(|object| object.remove("instructions"))
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .filter(|text| !text.trim().is_empty())
+    } else {
+        None
+    };
+    let review_prompt = match reviewer_instructions {
+        Some(instructions) => format!(
+            "Reviewer instructions from the repository's Vee configuration; follow them:\n{instructions}\n\n{review_prompt}"
+        ),
+        None => review_prompt.to_owned(),
+    };
     let payload = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
     if let Some(task) = task_instructions {
         Ok(format!(
@@ -198,7 +222,7 @@ pub(crate) fn provider_request_prompt(
         ))
     } else {
         Ok(format!(
-            "{review_prompt}\n\nUse files marked `snapshot_impact_reference` as local-analysis leads to inspect possible interactions with the changed code. Each `impact_edges` entry identifies a source path, relationship, symbol, certainty, and evidence line. These relationships may be heuristic or syntax-derived; they are not proof of a runtime call or defect. Confirm any finding against the supplied source text, and do not report a defect based only on an impact edge. If impact context is partial, unavailable, or omitted by the context budget, do not treat missing references as evidence that no impact exists.\n\nFor each finding, use the file's `changed_line_ranges` to anchor its location to the smallest changed line that directly causes the defect. Treat those ranges as exact one-based line numbers in the captured current source. Do not guess from nearby context or report an unchanged line as the finding location. If no changed line can be identified reliably, omit the line number.\n\nFor review findings, return exactly the keys defined by the findings schema. Do not include an `id` field or other extra keys; Vee assigns finding identities.\n\nVee review request JSON:\n{payload}"
+            "{review_prompt}\n\nUse files marked `snapshot_impact_reference` as local-analysis leads to inspect possible interactions with the changed code. Each `impact_edges` entry identifies a source path, relationship, symbol, certainty, and evidence line. These relationships may be heuristic or syntax-derived; they are not proof of a runtime call or defect. Confirm any finding against the supplied source text, and do not report a defect based only on an impact edge. If impact context is partial, unavailable, or omitted by the context budget, do not treat missing references as evidence that no impact exists.\n\nFor each finding, use the file's `changed_line_ranges` to anchor its location to the smallest changed line that directly causes the defect. Treat those ranges as exact one-based line numbers in the captured current source. Do not guess from nearby context or report an unchanged line as the finding location. If no changed line can be identified reliably, omit the line number.\n\n{FINDING_WRITING_RULES}\n\nFor review findings, return exactly the keys defined by the findings schema. Do not include an `id` field or other extra keys; Vee assigns finding identities.\n\nVee review request JSON:\n{payload}"
         ))
     }
 }
@@ -523,6 +547,30 @@ pub(crate) fn reports_usage_limit(result: &Result<ProviderResult, String>) -> bo
     }
 }
 
+/// The error for a provider run that exited non-zero. The exit error keeps
+/// only a redacted summary of stderr, so a usage limit the provider printed is
+/// named explicitly, keeping it visible to `reports_usage_limit`.
+fn exit_failure(result: ProviderResult, environment: &[(String, String)]) -> String {
+    let error = vee_process::provider_exit_error(&result, environment);
+    if reports_usage_limit(&Ok(result)) {
+        format!("{error}; the provider reported a usage limit")
+    } else {
+        error
+    }
+}
+
+/// Run a provider and turn a non-zero exit into an error, see `exit_failure`.
+fn execute_checked(
+    request: &ProviderRequest,
+    cancellation: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<ProviderResult, String> {
+    let result = vee_process::execute_provider_reporting_exit(request, cancellation)?;
+    if result.exit_code != Some(0) {
+        return Err(exit_failure(result, &request.environment));
+    }
+    Ok(result)
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CliReviewProvider;
 
@@ -542,9 +590,9 @@ impl ReviewProvider for CliReviewProvider {
                         ("VEE_SAMPLE_INDEX".to_string(), sample.index.to_string()),
                         ("VEE_SAMPLE_COUNT".to_string(), sample.count.to_string()),
                     ]);
-                    vee_process::execute_provider_cancellable(&sampled, cancellation)
+                    execute_checked(&sampled, cancellation)
                 }
-                None => vee_process::execute_provider_cancellable(request, cancellation),
+                None => execute_checked(request, cancellation),
             },
             vee_core::ProviderKind::CodexCli => execute_codex_cli(request, cancellation),
             vee_core::ProviderKind::GeminiCli => execute_gemini_cli(request, cancellation),
@@ -1045,10 +1093,7 @@ pub(crate) fn execute_claude_cli(
         sample: None,
         exploration: None,
     };
-    let mut result = vee_process::execute_provider_cancellable(&claude_request, cancellation)?;
-    if result.exit_code != Some(0) {
-        return Ok(result);
-    }
+    let mut result = execute_checked(&claude_request, cancellation)?;
     let envelope: serde_json::Value = serde_json::from_slice(&result.stdout)
         .map_err(|error| format!("parsing Claude JSON output: {error}"))?;
     if envelope

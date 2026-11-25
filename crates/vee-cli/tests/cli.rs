@@ -4,6 +4,8 @@ use vee_core::{ActorName, Reason};
 
 mod support;
 use support::vee;
+#[cfg(unix)]
+use support::vee_applying_without_terminal;
 
 fn accept_with_timeout(listener: &std::net::TcpListener) -> std::io::Result<std::net::TcpStream> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
@@ -268,7 +270,7 @@ fn test_generation_saves_snapshot_bound_sandbox_checked_patch_without_applying()
     assert!(!root.join("tests/changed_test.rs").exists());
 
     let proposal_id = report["proposal_id"].as_str().unwrap();
-    let wrong_approval = vee()
+    let wrong_approval = vee_applying_without_terminal()
         .args([
             "tests",
             "apply",
@@ -287,7 +289,7 @@ fn test_generation_saves_snapshot_bound_sandbox_checked_patch_without_applying()
         "pub fn changed() -> bool { true }\n",
     )
     .unwrap();
-    let stale_apply = vee()
+    let stale_apply = vee_applying_without_terminal()
         .args(["tests", "apply", proposal_id, "--approve", proposal_id])
         .current_dir(root)
         .output()
@@ -301,7 +303,7 @@ fn test_generation_saves_snapshot_bound_sandbox_checked_patch_without_applying()
     )
     .unwrap();
 
-    let apply = vee()
+    let apply = vee_applying_without_terminal()
         .args([
             "tests",
             "apply",
@@ -390,7 +392,7 @@ fn test_generation_saves_snapshot_bound_sandbox_checked_patch_without_applying()
     assert_eq!(refined["refinement"]["attempt"], 1);
 
     let refined_id = refined["proposal_id"].as_str().unwrap();
-    let refined_apply = vee()
+    let refined_apply = vee_applying_without_terminal()
         .args([
             "tests",
             "apply",
@@ -1160,6 +1162,7 @@ fn change_package_explicitly_refreshes_and_binds_linked_provider_state() {
             "json",
         ])
         .env("VEE_TEST_GH_TOKEN", "test-token")
+        .env("VEE_HOSTING_HOSTS", "127.0.0.1")
         .output()
         .unwrap();
     server.join().unwrap();
@@ -1317,6 +1320,7 @@ fn change_package_refresh_routes_through_all_other_hosting_adapters() {
                 "json",
             ])
             .env("VEE_TEST_HOSTING_TOKEN", "test-token")
+            .env("VEE_HOSTING_HOSTS", "127.0.0.1")
             .output()
             .unwrap();
         server.join().unwrap();
@@ -4725,6 +4729,7 @@ fn gitlab_issue_context_is_available_through_the_cli() {
             "12",
         ])
         .env("VEE_TEST_GITLAB_TOKEN", "fixture-token")
+        .env("VEE_HOSTING_HOSTS", "127.0.0.1")
         .args(["--output", "json"])
         .current_dir(directory.path())
         .output()
@@ -4924,6 +4929,7 @@ fn gate_check_rejects_review_after_remote_work_item_changes() {
             "org/repo#5",
         ])
         .env("VEE_TEST_GITLAB_TOKEN", "test-token")
+        .env("VEE_HOSTING_HOSTS", "127.0.0.1")
         .current_dir(root)
         .output()
         .unwrap();
@@ -8772,9 +8778,26 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
     .unwrap();
     assert_eq!(preserved_proposal["review_id"], review_id);
 
+    // An agent's shell has no terminal: without the machine's opt-in, a
+    // correctly approved patch is still not applied.
+    let unconfirmed = vee()
+        .args(["findings", "apply-patch", digest, "--approve", digest])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!unconfirmed.status.success());
+    assert!(
+        String::from_utf8_lossy(&unconfirmed.stdout).contains("confirm it at a terminal"),
+        "{unconfirmed:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("src.rs")).unwrap(),
+        "pub fn value() -> i32 { 1 }\n"
+    );
+
     let apply_lock = root.join(".vee/proposals/apply.lock");
     fs::write(&apply_lock, "pid=another-process\n").unwrap();
-    let concurrent_apply = vee()
+    let concurrent_apply = vee_applying_without_terminal()
         .args(["findings", "apply-patch", digest, "--approve", digest])
         .current_dir(root)
         .output()
@@ -8789,7 +8812,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
     let instruction_path = root.join("reviewer.md");
     let original_instructions = fs::read_to_string(&instruction_path).unwrap();
     fs::write(&instruction_path, "The review instructions have changed.\n").unwrap();
-    let stale_config = vee()
+    let stale_config = vee_applying_without_terminal()
         .args(["findings", "apply-patch", digest, "--approve", digest])
         .current_dir(root)
         .output()
@@ -8801,7 +8824,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
     );
     fs::write(&instruction_path, original_instructions).unwrap();
 
-    let rejected = vee()
+    let rejected = vee_applying_without_terminal()
         .args([
             "findings",
             "apply-patch",
@@ -8818,7 +8841,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
         "pub fn value() -> i32 { 1 }\n"
     );
 
-    let applied = vee()
+    let applied = vee_applying_without_terminal()
         .args([
             "findings",
             "apply-patch",
@@ -8857,7 +8880,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
         proposal_record["follow_up_review_id"],
         applied["review"]["review_id"]
     );
-    let replay = vee()
+    let replay = vee_applying_without_terminal()
         .args(["findings", "apply-patch", digest, "--approve", digest])
         .current_dir(root)
         .output()
@@ -8946,7 +8969,7 @@ fn an_incomplete_follow_up_review_says_why_in_text_output() {
     let proposed: serde_json::Value = serde_json::from_slice(&proposed.stdout).unwrap();
     let digest = proposed["patch_digest"].as_str().unwrap();
 
-    let applied = vee()
+    let applied = vee_applying_without_terminal()
         .args(["findings", "apply-patch", digest, "--approve", digest])
         .current_dir(root)
         .output()
@@ -10722,6 +10745,22 @@ fn review_effort_flag_sets_the_runs_per_reviewer_and_is_recorded_in_the_config_d
         "the effort used is part of the recorded configuration"
     );
     assert_eq!(medium["reviewer_outcomes"][0]["status"], "completed");
+    assert_eq!(medium["review_effort"], "medium");
+
+    // A later gate check reproduces the review's configuration, effort included,
+    // so the review is not reported stale.
+    let review_id = medium["review_id"].as_str().unwrap();
+    let checked = vee()
+        .args(["gate", "check", review_id, "--output", "json"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let decision: serde_json::Value = serde_json::from_slice(&checked.stdout)
+        .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&checked.stderr)));
+    assert!(
+        !decision.to_string().contains("stale"),
+        "gate check after --effort: {decision}"
+    );
 
     let rejected = vee()
         .args(["review", "--working-tree", "--effort", "max"])

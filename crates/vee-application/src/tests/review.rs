@@ -22,6 +22,45 @@ fn review_prompt_requires_exact_changed_line_anchors() {
 }
 
 #[test]
+fn review_prompt_asks_for_one_concise_defect_per_finding_and_rates_severity_by_consequence() {
+    let prompt = provider_request_prompt(
+        &serde_json::json!({"context_files": []}),
+        "Review the supplied change context.",
+        "review request",
+    )
+    .unwrap();
+    assert!(prompt.contains("Each finding reports one defect"));
+    assert!(prompt.contains("The first sentence states what goes wrong"));
+    assert!(prompt.contains("at most two further sentences"));
+    assert!(prompt.contains("Set severity by the consequence"));
+    assert!(prompt.contains("is at least medium"));
+}
+
+#[test]
+fn provider_findings_schema_carries_the_writing_and_severity_rules() {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../schemas/provider-findings-v1.schema.json"
+    ))
+    .unwrap();
+    let finding = &schema["properties"]["findings"]["items"]["properties"];
+    let severity = finding["severity"]["description"].as_str().unwrap();
+    assert!(severity.contains("is at least medium"));
+    let rationale = finding["rationale"]["description"].as_str().unwrap();
+    assert!(rationale.starts_with("One defect."));
+}
+
+#[test]
+fn task_prompts_do_not_receive_review_finding_rules() {
+    let prompt = provider_request_prompt(
+        &serde_json::json!({"task_instructions": "Summarize the change."}),
+        "Review the supplied change context.",
+        "task request",
+    )
+    .unwrap();
+    assert!(!prompt.contains("Each finding reports one defect"));
+}
+
+#[test]
 fn source_evidence_marks_unchanged_finding_lines_as_unknown() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
@@ -99,6 +138,7 @@ fn source_evidence_marks_unchanged_finding_lines_as_unknown() {
         required_review_complete: true,
         required_verifications: vec![],
         analyzer_block_levels: Default::default(),
+        severity_floors: Vec::new(),
     };
     let decision = vee_core::evaluate_gate(
         "snapshot",
@@ -179,6 +219,7 @@ fn legacy_review_without_policy_findings_falls_back_to_display_findings() {
         required_review_complete: true,
         required_verifications: vec![],
         analyzer_block_levels: Default::default(),
+        severity_floors: Vec::new(),
     };
     let finding = vee_core::Finding {
         id: "legacy-blocker".into(),
@@ -240,6 +281,7 @@ fn legacy_review_without_policy_findings_falls_back_to_display_findings() {
         reviewer_context: vec![],
         unreviewed_paths: Vec::new(),
         policy_profile: None,
+        review_effort: None,
         work_item: None,
         work_item_token_env: None,
     };
@@ -1870,6 +1912,7 @@ fn a_large_early_file_does_not_crowd_later_files_out_of_the_reviewer_context() {
     assert!(review.analysis_complete);
 }
 
+#[cfg(unix)]
 /// Reviewer `correctness` on provider `p`, with exploration on, over a change
 /// to `src/lib.rs` whose caller is `src/caller.rs`.
 fn exploration_review(
@@ -1924,10 +1967,12 @@ fn exploration_review(
     (directory, snapshot, result)
 }
 
+#[cfg(unix)]
 /// Records each request and, like a reviewer calling the snapshot server,
 /// appends one `read_file` call to the request's exploration log.
 struct ExploringProvider(std::sync::Arc<std::sync::Mutex<Vec<ProviderRequest>>>);
 
+#[cfg(unix)]
 impl ReviewProvider for ExploringProvider {
     fn execute(
         &self,
@@ -1958,6 +2003,7 @@ impl ReviewProvider for ExploringProvider {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn exploring_reviewers_get_the_snapshot_server_and_their_reads_are_recorded() {
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1989,6 +2035,7 @@ fn exploring_reviewers_get_the_snapshot_server_and_their_reads_are_recorded() {
     assert_eq!(result.change_set.digest, snapshot.digest);
 }
 
+#[cfg(unix)]
 #[test]
 fn providers_without_snapshot_tools_review_the_bundle_and_say_so() {
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
