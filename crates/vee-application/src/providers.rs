@@ -197,6 +197,24 @@ pub(crate) fn provider_request_prompt(
         .as_object_mut()
         .and_then(|object| object.remove("task_instructions"))
         .and_then(|value| value.as_str().map(str::to_owned));
+    // The reviewer's configured instructions come from the repository's own
+    // configuration, not from the change under review, so they are part of
+    // the trusted prompt rather than the payload the model must not follow.
+    let reviewer_instructions = if task_instructions.is_none() {
+        payload
+            .as_object_mut()
+            .and_then(|object| object.remove("instructions"))
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .filter(|text| !text.trim().is_empty())
+    } else {
+        None
+    };
+    let review_prompt = match reviewer_instructions {
+        Some(instructions) => format!(
+            "Reviewer instructions from the repository's Vee configuration; follow them:\n{instructions}\n\n{review_prompt}"
+        ),
+        None => review_prompt.to_owned(),
+    };
     let payload = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
     if let Some(task) = task_instructions {
         Ok(format!(
@@ -529,6 +547,30 @@ pub(crate) fn reports_usage_limit(result: &Result<ProviderResult, String>) -> bo
     }
 }
 
+/// The error for a provider run that exited non-zero. The exit error keeps
+/// only a redacted summary of stderr, so a usage limit the provider printed is
+/// named explicitly, keeping it visible to `reports_usage_limit`.
+fn exit_failure(result: ProviderResult, environment: &[(String, String)]) -> String {
+    let error = vee_process::provider_exit_error(&result, environment);
+    if reports_usage_limit(&Ok(result)) {
+        format!("{error}; the provider reported a usage limit")
+    } else {
+        error
+    }
+}
+
+/// Run a provider and turn a non-zero exit into an error, see `exit_failure`.
+fn execute_checked(
+    request: &ProviderRequest,
+    cancellation: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<ProviderResult, String> {
+    let result = vee_process::execute_provider_reporting_exit(request, cancellation)?;
+    if result.exit_code != Some(0) {
+        return Err(exit_failure(result, &request.environment));
+    }
+    Ok(result)
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CliReviewProvider;
 
@@ -548,9 +590,9 @@ impl ReviewProvider for CliReviewProvider {
                         ("VEE_SAMPLE_INDEX".to_string(), sample.index.to_string()),
                         ("VEE_SAMPLE_COUNT".to_string(), sample.count.to_string()),
                     ]);
-                    vee_process::execute_provider_cancellable(&sampled, cancellation)
+                    execute_checked(&sampled, cancellation)
                 }
-                None => vee_process::execute_provider_cancellable(request, cancellation),
+                None => execute_checked(request, cancellation),
             },
             vee_core::ProviderKind::CodexCli => execute_codex_cli(request, cancellation),
             vee_core::ProviderKind::GeminiCli => execute_gemini_cli(request, cancellation),
@@ -1051,10 +1093,7 @@ pub(crate) fn execute_claude_cli(
         sample: None,
         exploration: None,
     };
-    let mut result = vee_process::execute_provider_cancellable(&claude_request, cancellation)?;
-    if result.exit_code != Some(0) {
-        return Ok(result);
-    }
+    let mut result = execute_checked(&claude_request, cancellation)?;
     let envelope: serde_json::Value = serde_json::from_slice(&result.stdout)
         .map_err(|error| format!("parsing Claude JSON output: {error}"))?;
     if envelope

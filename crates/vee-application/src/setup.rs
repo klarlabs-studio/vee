@@ -243,6 +243,133 @@ const API_VENDORS: &[ApiVendor] = &[
     },
 ];
 
+/// A CI system `vee init --ci` writes a pipeline for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CiTarget {
+    Github,
+    Gitlab,
+}
+
+/// The pipeline file `vee init --ci` writes: its path in the repository and
+/// its content.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CiWorkflow {
+    pub path: String,
+    pub content: String,
+    /// CI secrets or variables the team must define before it runs.
+    pub secrets: Vec<String>,
+}
+
+/// A pipeline that installs this version of Vee, sets up an API-key provider
+/// (agent CLIs need an interactive login, which CI does not have) and runs
+/// `vee ci run`. The review runs on the team's own runner and model key.
+pub fn ci_workflow(
+    target: CiTarget,
+    candidate_id: &str,
+    model: &str,
+    effort: ReviewEffort,
+) -> Result<CiWorkflow, String> {
+    let vendor = API_VENDORS
+        .iter()
+        .find(|vendor| vendor.candidate_id == candidate_id)
+        .ok_or_else(|| {
+            let known: Vec<_> = API_VENDORS
+                .iter()
+                .map(|vendor| vendor.candidate_id)
+                .collect();
+            format!(
+                "CI reviews use an API key; choose --provider {}",
+                known.join(", ")
+            )
+        })?;
+    if model.trim().is_empty() || model.contains(['"', '\'', '\n', '$', '`', '\\']) {
+        return Err("--model must be a plain model name".into());
+    }
+    let version = env!("CARGO_PKG_VERSION");
+    let effort = match effort {
+        ReviewEffort::Low => "low",
+        ReviewEffort::Medium => "medium",
+        ReviewEffort::High => "high",
+    };
+    let key = vendor.key;
+    Ok(match target {
+        CiTarget::Github => CiWorkflow {
+            path: ".github/workflows/vee.yml".into(),
+            secrets: vec![key.into()],
+            content: format!(
+                r#"# Vee reviews each pull request on this repository's runner, with this
+# repository's model key, and publishes a check and finding threads.
+# Written by `vee init --ci github`; see https://github.com/klarlabs-studio/vee
+name: Vee review
+on:
+  pull_request:
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+jobs:
+  vee:
+    runs-on: ubuntu-latest
+    # Pull requests from forks get no secrets; Vee needs the model key.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Vee reviews the pull request's head, not GitHub's merge commit,
+          # and needs the history back to the base.
+          ref: ${{{{ github.event.pull_request.head.sha }}}}
+          fetch-depth: 0
+      - uses: klarlabs-studio/vee@v{version}
+        with:
+          provider: {candidate_id}
+          model: "{model}"
+          effort: {effort}
+          api-key: ${{{{ secrets.{key} }}}}
+"#
+            ),
+        },
+        CiTarget::Gitlab => CiWorkflow {
+            path: ".gitlab/vee.gitlab-ci.yml".into(),
+            secrets: vec![key.into(), "GL_TOKEN".into(), "VEE_ACTOR_LOGIN".into()],
+            content: format!(
+                r#"# Vee reviews each merge request on this project's runner, with this
+# project's model key, and publishes a commit status and discussions.
+# Written by `vee init --ci gitlab`. Include it from .gitlab-ci.yml:
+#   include:
+#     - local: .gitlab/vee.gitlab-ci.yml
+# Define these masked CI/CD variables: {key}; GL_TOKEN, a project access
+# token with the api scope; VEE_ACTOR_LOGIN, that token's bot username.
+include:
+  - remote: https://raw.githubusercontent.com/klarlabs-studio/vee/v{version}/integrations/gitlab/vee.gitlab-ci.yml
+variables:
+  VEE_VERSION: v{version}
+  VEE_PROVIDER: {candidate_id}
+  VEE_MODEL: "{model}"
+  VEE_EFFORT: {effort}
+"#
+            ),
+        },
+    })
+}
+
+/// Write `workflow` into the repository at `root`, never over an existing file.
+pub fn write_ci_workflow(root: &Path, workflow: &CiWorkflow) -> Result<(), String> {
+    if !root.join(".vee.yaml").exists() {
+        return Err("this repository has no .vee.yaml; run `vee init` first".into());
+    }
+    let path = root.join(&workflow.path);
+    if path.exists() {
+        return Err(format!(
+            "{} already exists; edit it or remove it first",
+            workflow.path
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::write(&path, &workflow.content).map_err(|error| format!("{}: {error}", workflow.path))
+}
+
 /// Ollama's base URL from `OLLAMA_HOST`, accepted only when it is a loopback HTTP
 /// address, because the local provider must not send source off the machine.
 fn ollama_base_url(probe: &dyn SystemProbe) -> Result<String, String> {
@@ -669,6 +796,12 @@ pub fn init(
         .cloned();
 
     let (provider_status, candidate_id, egress) = match (&existing_default, request.candidate_id) {
+        (Some(_), None) if request.model.is_some() => {
+            return Err(InitError::Usage(format!(
+                "{} already defines provider `{DEFAULT_PROVIDER_ID}`; pass --provider with --model to replace it",
+                user_config.display()
+            )))
+        }
         (Some(_), None) if repository_exists && request.effort.is_none() => {
             return Err(InitError::Usage(format!(
                 "this repository and machine are already set up ({} defines provider `{DEFAULT_PROVIDER_ID}`); run `vee doctor` to check them",
@@ -683,13 +816,9 @@ pub fn init(
                 .to_owned();
             ("existing", None, egress)
         }
-        (Some(_), Some(_)) => {
-            return Err(InitError::Usage(format!(
-                "{} already defines provider `{DEFAULT_PROVIDER_ID}`; edit it there or run without --provider",
-                user_config.display()
-            )))
-        }
-        (None, requested) => {
+        // No provider yet, or an explicit --provider, which replaces this
+        // machine's provider.
+        (_, requested) => {
             let candidate_id = match requested.or(detection.recommended.as_deref()) {
                 Some(id) => id,
                 None => {
@@ -1241,6 +1370,91 @@ mod tests {
     }
 
     #[test]
+    fn the_github_action_and_gitlab_template_take_what_init_writes() {
+        let read = |path: &str| -> serde_yaml::Value {
+            let path = format!("{}/../../{path}", env!("CARGO_MANIFEST_DIR"));
+            serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+        };
+        let action = read("action.yml");
+        for input in ["provider", "model", "effort", "api-key"] {
+            assert!(!action["inputs"][input].is_null(), "action input {input}");
+        }
+        assert_eq!(action["runs"]["using"], "composite");
+        let template = read("integrations/gitlab/vee.gitlab-ci.yml");
+        for variable in ["VEE_VERSION", "VEE_PROVIDER", "VEE_MODEL", "VEE_EFFORT"] {
+            assert!(
+                !template["variables"][variable].is_null(),
+                "template variable {variable}"
+            );
+        }
+        assert_eq!(
+            template["vee-review"]["image"]["name"],
+            "ghcr.io/klarlabs-studio/vee:${VEE_VERSION}"
+        );
+    }
+
+    #[test]
+    fn ci_workflows_pin_this_version_and_use_an_api_key() {
+        let github = ci_workflow(
+            CiTarget::Github,
+            "anthropic-api",
+            "claude-sonnet-5-5",
+            ReviewEffort::Medium,
+        )
+        .unwrap();
+        assert_eq!(github.path, ".github/workflows/vee.yml");
+        assert_eq!(github.secrets, ["ANTHROPIC_API_KEY"]);
+        let version = env!("CARGO_PKG_VERSION");
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&github.content).unwrap();
+        let steps = &parsed["jobs"]["vee"]["steps"];
+        assert_eq!(
+            steps[0]["with"]["ref"],
+            "${{ github.event.pull_request.head.sha }}"
+        );
+        assert_eq!(steps[0]["with"]["fetch-depth"], 0);
+        assert_eq!(
+            steps[1]["uses"],
+            format!("klarlabs-studio/vee@v{version}").as_str()
+        );
+        assert_eq!(steps[1]["with"]["model"], "claude-sonnet-5-5");
+        assert_eq!(
+            steps[1]["with"]["api-key"],
+            "${{ secrets.ANTHROPIC_API_KEY }}"
+        );
+        assert_eq!(parsed["permissions"]["checks"], "write");
+
+        let gitlab = ci_workflow(
+            CiTarget::Gitlab,
+            "openai-api",
+            "gpt-model",
+            ReviewEffort::Low,
+        )
+        .unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&gitlab.content).unwrap();
+        assert_eq!(
+            parsed["variables"]["VEE_VERSION"],
+            format!("v{version}").as_str()
+        );
+        assert!(parsed["include"][0]["remote"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!(
+                "/v{version}/integrations/gitlab/vee.gitlab-ci.yml"
+            )));
+        assert!(gitlab.secrets.contains(&"GL_TOKEN".to_string()));
+
+        let cli = ci_workflow(CiTarget::Github, "claude", "m", ReviewEffort::Low).unwrap_err();
+        assert!(cli.contains("anthropic-api"), "{cli}");
+        assert!(ci_workflow(
+            CiTarget::Github,
+            "openai-api",
+            "x\"; curl evil",
+            ReviewEffort::Low
+        )
+        .is_err());
+    }
+
+    #[test]
     fn generated_providers_pass_repository_validation() {
         let system = FakeSystem {
             executables: [
@@ -1273,6 +1487,114 @@ mod tests {
             vee_core::RepositoryConfig::load(&path)
                 .unwrap_or_else(|error| panic!("{}: {error}", candidate.candidate_id));
         }
+    }
+
+    #[test]
+    fn the_user_config_init_writes_matches_its_published_schema() {
+        let schema_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../schemas/user-config-v1.schema.json"
+        );
+        let schema: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(schema_path).unwrap()).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let system = FakeSystem {
+            executables: [
+                ("codex", "1"),
+                ("agy", "1"),
+                ("gemini", "1"),
+                ("claude", "1"),
+            ]
+            .into(),
+            env: [
+                ("OPENAI_API_KEY", "k"),
+                ("ANTHROPIC_API_KEY", "k"),
+                ("GEMINI_API_KEY", "k"),
+            ]
+            .into(),
+            ollama: Some(vec!["qwen3:8b"]),
+            context_length: Some(40_960),
+        };
+        for candidate in &detect(&system).candidates {
+            let repository = tempfile::tempdir().unwrap();
+            let home = tempfile::tempdir().unwrap();
+            let user_config = home.path().join("vee/config.yaml");
+            init(
+                &system,
+                repository.path(),
+                &user_config,
+                InitRequest {
+                    candidate_id: Some(candidate.candidate_id.as_str()),
+                    model: candidate.requires_model.then_some("model-id"),
+                    effort: Some(vee_core::ReviewEffort::Medium),
+                },
+            )
+            .unwrap_or_else(|error| panic!("{}: {error:?}", candidate.candidate_id));
+            let written: serde_json::Value =
+                serde_yaml::from_slice(&std::fs::read(&user_config).unwrap()).unwrap();
+            let errors: Vec<String> = validator
+                .iter_errors(&written)
+                .map(|e| e.to_string())
+                .collect();
+            assert!(
+                errors.is_empty(),
+                "{}: {errors:?}\n{written}",
+                candidate.candidate_id
+            );
+        }
+    }
+
+    #[test]
+    fn user_and_repository_schemas_define_providers_alike() {
+        let load = |name: &str| -> serde_json::Value {
+            let path = format!("{}/../../schemas/{name}", env!("CARGO_MANIFEST_DIR"));
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+        };
+        assert_eq!(
+            load("user-config-v1.schema.json")["$defs"]["provider"],
+            load("repository-config-v1.schema.json")["$defs"]["provider"]
+        );
+    }
+
+    #[test]
+    fn init_with_a_provider_replaces_this_machines_provider_and_a_lone_model_is_refused() {
+        let system = FakeSystem {
+            executables: [("codex", "1"), ("claude", "1")].into(),
+            ..Default::default()
+        };
+        let repository = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let user_config = home.path().join("vee/config.yaml");
+        let run = |candidate_id, model| {
+            init(
+                &system,
+                repository.path(),
+                &user_config,
+                InitRequest {
+                    candidate_id,
+                    model,
+                    effort: None,
+                },
+            )
+        };
+        run(Some("codex"), None).unwrap();
+        assert!(std::fs::read_to_string(&user_config)
+            .unwrap()
+            .contains("codex_cli"));
+
+        // A model alone would be ignored, so it is refused.
+        assert!(matches!(
+            run(None, Some("other-model")),
+            Err(InitError::Usage(message)) if message.contains("--provider")
+        ));
+
+        let report = run(Some("claude"), None).unwrap();
+        assert_eq!(report.provider_status, "written");
+        let written = std::fs::read_to_string(&user_config).unwrap();
+        assert!(
+            written.contains("claude_cli") && !written.contains("codex_cli"),
+            "{written}"
+        );
     }
 
     #[test]

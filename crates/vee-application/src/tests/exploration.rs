@@ -196,3 +196,26 @@ fn configured_deny_globs_add_to_the_built_in_list() {
         .contains("may not be read"));
     assert!(!explorer.list_files(None, None).contains("billing"));
 }
+
+#[test]
+fn a_reviewer_explores_only_the_paths_its_own_filters_allow() {
+    let (directory, change_set) = repository();
+    let root = directory.path();
+    let reviewer: vee_core::ReviewerConfig = serde_yaml::from_str(
+        "provider: p\ninstructions_file: r.md\nexclude: [\"src/billing.rs\"]\n",
+    )
+    .unwrap();
+    let spec = ExplorationSpec::new(root, &change_set, &vee_core::ReviewConfig::default())
+        .for_reviewer(&reviewer);
+    assert!(spec.descriptor().contains("src/billing.rs"));
+    let mut explorer = SnapshotExplorer::new(spec);
+    let listing = explorer.list_files(None, None);
+    assert!(
+        !listing.contains("billing.rs") && listing.contains("src/caller.rs"),
+        "{listing}"
+    );
+    let read = explorer.read_file("src/billing.rs", None, None);
+    assert!(!read.contains("charge in cents"), "{read}");
+    let found = explorer.search("charge in cents", None, false, None);
+    assert!(!found.contains("billing.rs"), "{found}");
+}

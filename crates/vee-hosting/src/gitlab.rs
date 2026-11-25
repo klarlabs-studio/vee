@@ -388,54 +388,96 @@ impl GitLabAdapter {
                         position.get("new_line").and_then(serde_json::Value::as_u64),
                     ),
                 };
-                if position_path != Some(thread.path.as_str()) || position_line != Some(thread.line)
-                {
-                    return Err(HostingError::InvalidResponse(
-                                "GitLab cannot move an existing review discussion; finding location changed and needs manual thread reconciliation".into(),
-                            ));
+                let moved = position_path != Some(thread.path.as_str())
+                    || position_line != Some(thread.line);
+                if !moved {
+                    self.put_note(&thread.pull_request, discussion_id, note_id, &body)?;
+                } else if thread.resolution == ThreadResolution::Open {
+                    // GitLab cannot move a discussion. The old one says where
+                    // the finding went and loses its fingerprint marker, so
+                    // later publications no longer match it. It is resolved,
+                    // and a new discussion opens at the new line.
+                    let moved_body = format!(
+                        "Vee now reports this finding at `{}` line {}; see the discussion there.\n<!-- vee:moved:{} -->",
+                        thread.path, thread.line, thread.fingerprint
+                    );
+                    self.put_note(&thread.pull_request, discussion_id, note_id, &moved_body)?;
+                    if !resolved {
+                        self.set_discussion_resolved(&thread.pull_request, discussion_id, true)?;
+                    }
+                    return self.create_discussion(snapshot, thread, file, &body);
                 }
-                let note_url = self.project_path(
-                    &thread.pull_request,
-                    &format!("/discussions/{discussion_id}/notes/{note_id}"),
-                )?;
-                let response = self
-                    .request_method(Method::PUT, note_url)?
-                    .json(&serde_json::json!({"body":body}))
-                    .send()
-                    .map_err(|error| {
-                        HostingError::Transport(format!("updating GitLab review note: {error}"))
-                    })?;
-                let _: serde_json::Value =
-                    Self::bounded_json(Self::checked(response)?, MAX_API_RESPONSE_BYTES)?;
             }
-            if (thread.resolution == ThreadResolution::Resolved) != resolved {
-                let mut url = self.project_path(
-                    &thread.pull_request,
-                    &format!("/discussions/{discussion_id}"),
-                )?;
-                url.query_pairs_mut().append_pair(
-                    "resolved",
-                    if thread.resolution == ThreadResolution::Resolved {
-                        "true"
-                    } else {
-                        "false"
-                    },
-                );
-                let response = self
-                    .request_method(Method::PUT, url)?
-                    .send()
-                    .map_err(|error| {
-                        HostingError::Transport(format!("resolving GitLab discussion: {error}"))
-                    })?;
-                let _: serde_json::Value =
-                    Self::bounded_json(Self::checked(response)?, MAX_API_RESPONSE_BYTES)?;
+            let should_resolve = thread.resolution == ThreadResolution::Resolved;
+            if should_resolve != resolved {
+                self.set_discussion_resolved(&thread.pull_request, discussion_id, should_resolve)?;
             }
             return Ok(Some(discussion_id.into()));
         }
         if thread.resolution == ThreadResolution::Resolved {
             return Ok(None);
         }
-        let Some(file) = file.filter(|_| location_is_current) else {
+        self.create_discussion(
+            snapshot,
+            thread,
+            file.filter(|_| location_is_current),
+            &body,
+        )
+    }
+
+    fn put_note(
+        &self,
+        pull_request: &PullRequestRef,
+        discussion_id: &str,
+        note_id: u64,
+        body: &str,
+    ) -> Result<(), HostingError> {
+        let note_url = self.project_path(
+            pull_request,
+            &format!("/discussions/{discussion_id}/notes/{note_id}"),
+        )?;
+        let response = self
+            .request_method(Method::PUT, note_url)?
+            .json(&serde_json::json!({"body":body}))
+            .send()
+            .map_err(|error| {
+                HostingError::Transport(format!("updating GitLab review note: {error}"))
+            })?;
+        let _: serde_json::Value =
+            Self::bounded_json(Self::checked(response)?, MAX_API_RESPONSE_BYTES)?;
+        Ok(())
+    }
+
+    fn set_discussion_resolved(
+        &self,
+        pull_request: &PullRequestRef,
+        discussion_id: &str,
+        resolve: bool,
+    ) -> Result<(), HostingError> {
+        let mut url = self.project_path(pull_request, &format!("/discussions/{discussion_id}"))?;
+        url.query_pairs_mut()
+            .append_pair("resolved", if resolve { "true" } else { "false" });
+        let response = self
+            .request_method(Method::PUT, url)?
+            .send()
+            .map_err(|error| {
+                HostingError::Transport(format!("resolving GitLab discussion: {error}"))
+            })?;
+        let _: serde_json::Value =
+            Self::bounded_json(Self::checked(response)?, MAX_API_RESPONSE_BYTES)?;
+        Ok(())
+    }
+
+    /// Open a discussion for `thread` on `file`, or nothing when the line is
+    /// not in the merge request's diff.
+    fn create_discussion(
+        &self,
+        snapshot: &PullRequestSnapshot,
+        thread: &ReviewThread,
+        file: Option<&PullRequestFile>,
+        body: &str,
+    ) -> Result<Option<String>, HostingError> {
+        let Some(file) = file else {
             return Ok(None);
         };
         let url = self.project_path(&thread.pull_request, "/discussions")?;
@@ -1604,6 +1646,69 @@ mod tests {
         assert!(!requests.iter().any(|request| request.contains(
             "POST /api/v4/projects/group%2Fsubgroup%2Fproject/merge_requests/17/discussions HTTP"
         )));
+    }
+
+    #[test]
+    fn gitlab_replaces_the_discussion_of_an_open_finding_whose_line_moved() {
+        let diff = r#"[{"old_path":"src/lib.rs","new_path":"src/lib.rs","diff":"@@ -1,2 +1,2 @@\n before\n-old\n+new\n","new_file":false,"renamed_file":false,"deleted_file":false}]"#.to_string();
+        let existing = r#"[{"id":"discussion-1","resolved":false,"position":{"new_path":"src/lib.rs","new_line":1},"notes":[{"id":77,"body":"old <!-- vee:fingerprint:finding-1 -->","author":{"username":"vee-bot"}}]}]"#;
+        let (base, worker) = fixture_sequence(vec![
+            merge_request_json(),
+            "[]".into(),
+            r#"{"id":91}"#.into(),
+            merge_request_json(),
+            diff,
+            existing.into(),
+            r#"{}"#.into(),
+            r#"{}"#.into(),
+            r#"{"id":"discussion-2"}"#.into(),
+        ]);
+        let adapter = GitLabAdapter::new(
+            GitLabConfig::new(&base, "secret".into())
+                .unwrap()
+                .with_actor_login("vee-bot".into()),
+        )
+        .unwrap();
+        let reference = pull_request_ref("127.0.0.1");
+        let revision = format!("{}:{}:{}", "a".repeat(40), "b".repeat(40), "c".repeat(40));
+        let publication = ReviewPublication {
+            pull_request: reference.clone(),
+            expected_revision: revision,
+            check: CheckRun {
+                pull_request: reference.clone(),
+                external_id: "review-2".into(),
+                name: "Vee".into(),
+                status: CheckStatus::Completed,
+                conclusion: Some(CheckConclusion::Failure),
+                title: "Vee blocked".into(),
+                summary: "Finding moved".into(),
+                snapshot_id: "snapshot-2".into(),
+                idempotency_key: "review-2".into(),
+            },
+            threads: vec![ReviewThread {
+                pull_request: reference,
+                fingerprint: "finding-1".into(),
+                path: "src/lib.rs".into(),
+                line: 2,
+                side: DiffSide::New,
+                body: "Still wrong".into(),
+                resolution: ThreadResolution::Open,
+                snapshot_id: "snapshot-2".into(),
+                idempotency_key: "review-2:finding-1".into(),
+            }],
+        };
+        let receipt = adapter.publish_review(publication).unwrap();
+        assert_eq!(receipt.thread_ids.get("finding-1").unwrap(), "discussion-2");
+        let requests = worker.join().unwrap();
+        assert!(requests[6].starts_with("PUT /api/v4/projects/group%2Fsubgroup%2Fproject/merge_requests/17/discussions/discussion-1/notes/77"));
+        assert!(
+            requests[6].contains("vee:moved:finding-1") && !requests[6].contains("vee:fingerprint")
+        );
+        assert!(requests[7].contains("discussions/discussion-1?resolved=true"));
+        assert!(requests[8].starts_with(
+            "POST /api/v4/projects/group%2Fsubgroup%2Fproject/merge_requests/17/discussions HTTP"
+        ));
+        assert!(requests[8].contains("Still wrong"));
     }
 
     #[test]
