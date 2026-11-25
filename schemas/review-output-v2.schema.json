@@ -435,6 +435,10 @@
         "null"
       ]
     },
+    "review_effort": {
+      "enum": ["low", "medium", "high"],
+      "description": "The effort `vee review --effort` applied to every reviewer; a gate check reapplies it."
+    },
     "work_item": {
       "$ref": "work-item-v1.schema.json"
     },
