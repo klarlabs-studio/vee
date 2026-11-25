@@ -25,3 +25,9 @@ post-announce-jobs = ["./container"]
 # permissions, so the generated workflow is patched: after `dist generate`, run
 # scripts/patch-release-workflow.py.
 allow-dirty = ["ci"]
+
+# The Linux binaries are built on Ubuntu 22.04 and need glibc 2.35; dist would
+# otherwise accept 2.31, where they fail to start.
+[dist.min-glibc-version]
+x86_64-unknown-linux-gnu = "2.35"
+aarch64-unknown-linux-gnu = "2.35"
