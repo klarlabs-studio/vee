@@ -32,6 +32,7 @@ fn review(findings: Vec<Finding>, blocking: Vec<String>, complete: bool) -> Revi
         required_review_complete: true,
         required_verifications: vec![],
         analyzer_block_levels: Default::default(),
+        severity_floors: Vec::new(),
     };
     let mut gate = vee_core::evaluate_gate(
         "sha256:snap",
@@ -88,6 +89,7 @@ fn review(findings: Vec<Finding>, blocking: Vec<String>, complete: bool) -> Revi
         reviewer_context: vec![],
         unreviewed_paths: vec!["core/lib.rs".into()],
         policy_profile: None,
+        review_effort: None,
         work_item: None,
         work_item_token_env: None,
     }
