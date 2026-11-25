@@ -8,9 +8,14 @@ cargo-dist-version = "0.34.0"
 # CI backends to support
 ci = "github"
 # The installers to generate for each app
-installers = ["shell", "powershell"]
+installers = ["shell", "powershell", "homebrew"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# The Homebrew formula goes to the organization's shared tap, which the org
+# secret HOMEBREW_TAP_TOKEN can write to: brew install klarlabs-studio/tap/vee
+tap = "klarlabs-studio/homebrew-tap"
+# Publish the formula before the release is announced.
+publish-jobs = ["homebrew"]
 # Path that installers should place binaries in
 install-path = "~/.local/bin"
 # Where to host releases
