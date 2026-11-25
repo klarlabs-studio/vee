@@ -51,6 +51,31 @@ pub fn diff_contains_added_line(patch: Option<&str>, wanted: u32) -> bool {
     false
 }
 
+/// The findings as the gate evaluated them: each at its effective severity, so
+/// a finding a severity floor raised is posted (even from `info`) and labelled
+/// with the severity that blocked it. A raised finding says so in its text.
+pub fn findings_for_publication(findings: &[Finding], gate: &GateDecision) -> Vec<Finding> {
+    let Some(inputs) = gate.replay_inputs.as_ref() else {
+        return findings.to_vec();
+    };
+    findings
+        .iter()
+        .map(|finding| {
+            let mut published = finding.clone();
+            if let Some(floor) = inputs.policy.raising_floor(finding) {
+                published.severity = inputs.policy.effective_severity(finding);
+                published.rationale = format!(
+                    "Raised from {} by a severity floor ({}).\n\n{}",
+                    finding.severity.as_str(),
+                    floor.describe(),
+                    finding.rationale
+                );
+            }
+            published
+        })
+        .collect()
+}
+
 /// The finding's path and line when it can be a pull request thread at all:
 /// informational findings and findings without a location are never posted.
 pub fn thread_location(finding: &Finding) -> Option<(&str, u32)> {
@@ -286,6 +311,83 @@ pub struct PublishedReview<'a> {
     pub review_id: &'a str,
     pub snapshot_id: &'a str,
     pub findings: &'a [Finding],
+    /// Vee's threads read back from the pull request. When there is no local
+    /// ledger, as in CI, these are the record of what Vee published before.
+    pub pull_request_threads: &'a [PullRequestThread],
+}
+
+/// One of Vee's own threads, as the pull request shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullRequestThread {
+    pub fingerprint: String,
+    pub path: String,
+    pub line: u64,
+}
+
+/// Vee's threads among a pull request's review comments: comments by
+/// `actor_login` that carry a fingerprint marker.
+pub fn vee_threads_on_pull_request(
+    issues: &[vee_hosting::PullRequestReviewIssue],
+    actor_login: &str,
+) -> Vec<PullRequestThread> {
+    const MARKER: &str = "<!-- vee:fingerprint:";
+    let mut threads: Vec<PullRequestThread> = issues
+        .iter()
+        .filter(|issue| {
+            !actor_login.is_empty()
+                && issue
+                    .author
+                    .as_deref()
+                    .is_some_and(|author| author.eq_ignore_ascii_case(actor_login))
+        })
+        .filter_map(|issue| {
+            let start = issue.body.find(MARKER)? + MARKER.len();
+            let end = issue.body[start..].find(" -->")?;
+            let fingerprint = issue.body[start..start + end].trim();
+            (!fingerprint.is_empty()).then(|| PullRequestThread {
+                fingerprint: fingerprint.to_owned(),
+                path: issue.path.clone().unwrap_or_default(),
+                line: issue.line.unwrap_or(0),
+            })
+        })
+        .collect();
+    threads.sort_by(|a, b| a.fingerprint.cmp(&b.fingerprint));
+    threads.dedup_by(|a, b| a.fingerprint == b.fingerprint);
+    threads
+}
+
+/// Resolutions for Vee's threads on the pull request whose findings this
+/// review no longer reports and that are not otherwise being published.
+fn resolve_unreported_pull_request_threads(
+    review: &PublishedReview<'_>,
+    pull_request: &PullRequestRef,
+    threads: &[ReviewThread],
+) -> Vec<ReviewThread> {
+    let reported: BTreeSet<&str> = review
+        .findings
+        .iter()
+        .map(|finding| finding.fingerprint.as_str())
+        .chain(threads.iter().map(|thread| thread.fingerprint.as_str()))
+        .collect();
+    review
+        .pull_request_threads
+        .iter()
+        .filter(|thread| !reported.contains(thread.fingerprint.as_str()))
+        .map(|thread| ReviewThread {
+            pull_request: pull_request.clone(),
+            fingerprint: thread.fingerprint.clone(),
+            path: thread.path.clone(),
+            line: thread.line,
+            side: DiffSide::New,
+            body: format!(
+                "**Resolved finding**\n\nVee no longer reports this finding at the reviewed head.\n\nSnapshot `{}`",
+                review.snapshot_id
+            ),
+            resolution: ThreadResolution::Resolved,
+            snapshot_id: review.snapshot_id.to_owned(),
+            idempotency_key: format!("{}:{}:resolved", review.review_id, thread.fingerprint),
+        })
+        .collect()
 }
 
 /// Publish `threads`, plus resolutions for previously published findings that
@@ -319,6 +421,8 @@ where
         review.review_id,
         review.snapshot_id,
     ));
+    let from_pull_request = resolve_unreported_pull_request_threads(review, pull_request, &threads);
+    threads.extend(from_pull_request);
     let published = updated_hosted_finding_fingerprints(&previously_published, &threads);
     let intent = hosting_thread_intent_fingerprints(&previously_published, &threads);
     store.replace_hosted_finding_threads(&target, &intent)?;
@@ -329,6 +433,137 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn threads_vee_published_are_read_back_and_resolved_when_no_longer_reported() {
+        let issue = |author: &str, body: &str| vee_hosting::PullRequestReviewIssue {
+            external_id: "1".into(),
+            author: Some(author.into()),
+            body: body.into(),
+            path: Some("src/lib.rs".into()),
+            line: Some(3),
+            side: None,
+            source_url: None,
+            created_at: None,
+            updated_at: None,
+            classification: "review_comment".into(),
+        };
+        let threads = vee_threads_on_pull_request(
+            &[
+                issue(
+                    "vee-bot",
+                    "Fixed now\n\n<!-- vee:fingerprint:sha256:gone -->\n<!-- vee:idempotency:k -->",
+                ),
+                issue(
+                    "vee-bot",
+                    "Still there <!-- vee:fingerprint:sha256:kept -->",
+                ),
+                issue("someone", "Copied <!-- vee:fingerprint:sha256:forged -->"),
+                issue("vee-bot", "Moved <!-- vee:moved:sha256:old -->"),
+            ],
+            "Vee-Bot",
+        );
+        assert_eq!(
+            threads
+                .iter()
+                .map(|t| t.fingerprint.as_str())
+                .collect::<Vec<_>>(),
+            ["sha256:gone", "sha256:kept"]
+        );
+        let kept = Finding {
+            id: "f".into(),
+            fingerprint: "sha256:kept".into(),
+            category: "correctness".into(),
+            severity: Severity::High,
+            confidence: Some(90),
+            rationale: "r".into(),
+            path: Some("src/lib.rs".into()),
+            line: Some(3),
+            provenance: "model_inference".into(),
+            reviewer_ids: vec![],
+            evidence_ids: vec![],
+            rule_attributions: vec![],
+            sample_agreement: None,
+            advisory: false,
+        };
+        let pull_request = PullRequestRef {
+            repository: vee_hosting::RepositoryRef {
+                host: "github.com".into(),
+                full_name: "o/r".into(),
+            },
+            number: 1,
+        };
+        let review = PublishedReview {
+            review_id: "review",
+            snapshot_id: "snapshot",
+            findings: std::slice::from_ref(&kept),
+            pull_request_threads: &threads,
+        };
+        let resolved = resolve_unreported_pull_request_threads(&review, &pull_request, &[]);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].fingerprint, "sha256:gone");
+        assert_eq!(resolved[0].resolution, ThreadResolution::Resolved);
+    }
+
+    #[test]
+    fn published_findings_carry_the_severity_a_floor_raised_them_to() {
+        let floor = vee_core::SeverityFloor {
+            paths: vec!["payments/**".into()],
+            categories: vec![],
+            minimum: Severity::High,
+        };
+        let policy = vee_core::Policy {
+            block_severities: vec![Severity::High],
+            minimum_confidence: 0,
+            required_review_complete: true,
+            required_verifications: vec![],
+            analyzer_block_levels: Default::default(),
+            severity_floors: vec![floor],
+        };
+        let gate: GateDecision = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "decision_id": "d", "snapshot_id": "s",
+            "effective_config_digest": "c", "policy_digest": "p", "status": "block",
+            "blocking_findings": [], "verification_run_ids": [], "evidence_digest": "e",
+            "reasons": [],
+            "replay_inputs": {
+                "schema_version": 1, "policy": policy, "reviewer_policies": {},
+                "complete": true, "verification_runs": [], "waivers": [],
+                "evaluation_time_unix": 0
+            }
+        }))
+        .unwrap();
+        let finding = |id: &str, path: &str| Finding {
+            id: id.into(),
+            fingerprint: id.into(),
+            category: "correctness".into(),
+            severity: Severity::Info,
+            confidence: Some(90),
+            rationale: "The total is wrong.".into(),
+            path: Some(path.into()),
+            line: Some(3),
+            provenance: "model_inference".into(),
+            reviewer_ids: vec![],
+            evidence_ids: vec![],
+            rule_attributions: vec![],
+            sample_agreement: None,
+            advisory: false,
+        };
+        let published = findings_for_publication(
+            &[
+                finding("raised", "payments/charge.rs"),
+                finding("kept", "docs/x.md"),
+            ],
+            &gate,
+        );
+        assert_eq!(published[0].severity, Severity::High);
+        assert!(published[0]
+            .rationale
+            .starts_with("Raised from info by a severity floor (paths payments/**)."));
+        assert!(thread_location(&published[0]).is_some());
+        assert_eq!(published[1].severity, Severity::Info);
+        assert_eq!(published[1].rationale, "The total is wrong.");
+        assert!(thread_location(&published[1]).is_none());
+    }
     use super::*;
     use vee_hosting::{FileChange, RepositoryRef};
 
@@ -527,6 +762,7 @@ mod tests {
             review_id: "review-3",
             snapshot_id: "sha256:snapshot",
             findings: &findings,
+            pull_request_threads: &[],
         };
 
         let failed: Result<(), String> = publish_with_thread_ledger(

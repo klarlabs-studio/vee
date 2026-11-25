@@ -628,6 +628,19 @@ impl Policy {
             .map_or(finding.severity, |floor| floor.minimum)
     }
 
+    /// Whether `severities` blocks this finding: some severity from the reported
+    /// one up to the effective one is in the list. Raising a severity therefore
+    /// never moves a finding out of a list with gaps, such as `[high]` alone.
+    pub fn blocks_at(&self, severities: &[Severity], finding: &Finding) -> bool {
+        let (low, high) = (
+            finding.severity.rank(),
+            self.effective_severity(finding).rank(),
+        );
+        severities
+            .iter()
+            .any(|severity| (low..=high).contains(&severity.rank()))
+    }
+
     /// The first floor with the highest minimum above the reported severity.
     pub fn raising_floor(&self, finding: &Finding) -> Option<&SeverityFloor> {
         self.severity_floors
@@ -996,16 +1009,15 @@ pub fn evaluate_gate_with_waivers_and_reviewer_policies(
         .map(|waiver| waiver.finding_fingerprint.as_str())
         .collect();
     let meets_blocking_policy = |f: &Finding| {
-        let severity = policy.effective_severity(f);
         !f.advisory
             && f.meets_sample_quorum()
-            && (policy.block_severities.contains(&severity)
+            && (policy.blocks_at(&policy.block_severities, f)
                 && f.confidence.unwrap_or(0) >= policy.minimum_confidence
                 || f.reviewer_ids.iter().any(|reviewer_id| {
                     reviewer_policies
                         .get(reviewer_id)
                         .is_some_and(|reviewer_policy| {
-                            reviewer_policy.block_severities.contains(&severity)
+                            policy.blocks_at(&reviewer_policy.block_severities, f)
                                 && f.confidence.unwrap_or(0) >= reviewer_policy.minimum_confidence
                         })
                 }))
@@ -1195,7 +1207,7 @@ pub fn evaluate_gate_with_waivers_and_reviewer_policies(
                 if reviewer_policies
                     .get(reviewer_id)
                     .is_some_and(|reviewer_policy| {
-                        reviewer_policy.block_severities.contains(&severity)
+                        policy.blocks_at(&reviewer_policy.block_severities, finding)
                             && finding.confidence.unwrap_or(0) >= reviewer_policy.minimum_confidence
                     })
                 {
@@ -1609,6 +1621,45 @@ mod tests {
         let mut unlocated = finding("unlocated", Severity::Low, Some(90));
         unlocated.path = None;
         assert_eq!(policy.effective_severity(&unlocated), Severity::Low);
+    }
+
+    #[test]
+    fn a_floor_never_stops_a_finding_that_would_block_from_blocking() {
+        // `[high]` alone: a floor that raises a high finding to critical must
+        // not move it out of the blocking set.
+        let policy = Policy {
+            block_severities: vec![Severity::High],
+            minimum_confidence: 0,
+            required_review_complete: true,
+            required_verifications: vec![],
+            analyzer_block_levels: Default::default(),
+            severity_floors: vec![floor(&[], &["security"], Severity::Critical)],
+        };
+        let mut high = finding("high-security", Severity::High, Some(90));
+        high.category = "security".into();
+        let mut low = finding("low-security", Severity::Low, Some(90));
+        low.category = "security".into();
+        let mut findings = vec![high, low];
+        let evidence = observed_test_evidence(&mut findings);
+        let decision = evaluate_gate(
+            "snapshot",
+            "config",
+            "policy",
+            &findings,
+            &policy,
+            true,
+            GateEvidence {
+                verification_runs: &[],
+                source_evidence: &evidence,
+                analyzer_reports: &[],
+            },
+        );
+        // Both pass through `high` on the way to `critical`, so both block.
+        assert_eq!(decision.status, GateStatus::Block);
+        assert_eq!(
+            decision.blocking_findings,
+            vec!["high-security", "low-security"]
+        );
     }
 
     #[test]
@@ -2478,6 +2529,45 @@ mod tests {
     }
 
     #[test]
+    fn a_machine_effort_applies_only_to_reviewers_that_set_no_effort_or_samples() {
+        let dir = tempfile::tempdir().unwrap();
+        let repository = dir.path().join(".vee.yaml");
+        let user = dir.path().join("user.yaml");
+        std::fs::write(
+            &repository,
+            "version: 1\nproviders:\n  p: { kind: cli, executable: provider }\nreviewers:\n  open:\n    provider: p\n    instructions_file: a.md\n  pinned:\n    provider: p\n    instructions_file: b.md\n    effort: low\n  sampled:\n    provider: p\n    instructions_file: c.md\n    samples: 2\n",
+        )
+        .unwrap();
+        std::fs::write(&user, "version: 1\nreview:\n  effort: medium\n").unwrap();
+        let config =
+            RepositoryConfig::load_with_provider_defaults(&repository, Some(&user)).unwrap();
+        assert_eq!(config.reviewers["open"].effort, Some(ReviewEffort::Medium));
+        assert_eq!(config.reviewers["pinned"].effort, Some(ReviewEffort::Low));
+        assert_eq!(config.reviewers["sampled"].effort, None);
+        assert_eq!(config.reviewers["sampled"].samples, Some(2));
+
+        std::fs::write(&user, "version: 1\nreview:\n  effort: extreme\n").unwrap();
+        assert!(RepositoryConfig::load_with_provider_defaults(&repository, Some(&user)).is_err());
+    }
+
+    #[test]
+    fn a_selected_policy_profile_keeps_the_pack_policy_and_its_floors() {
+        let mut config: RepositoryConfig = serde_yaml::from_str(
+            "version: 1\npolicy_profiles:\n  fast:\n    block_severities: []\n    minimum_confidence: 90\n",
+        )
+        .unwrap();
+        let pack: PolicyConfig = serde_yaml::from_str(
+            "block_severities: [critical]\nminimum_confidence: 50\nseverity_floors:\n  - paths: [\"payments/**\"]\n    minimum: high\n",
+        )
+        .unwrap();
+        config.add_pack_policy(&pack);
+        config.select_policy_profile(Some("fast")).unwrap();
+        assert_eq!(config.policy.block_severities, ["critical"]);
+        assert_eq!(config.policy.minimum_confidence, 50);
+        assert_eq!(config.policy.severity_floors, pack.severity_floors);
+    }
+
+    #[test]
     fn named_policy_profiles_select_deterministic_policy_and_reject_unknown_names() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join(".vee.yaml");
@@ -2527,6 +2617,41 @@ policy_profiles:
             assert!(
                 RepositoryConfig::load(&file).is_err(),
                 "accepted invalid config: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn repository_hosting_config_names_only_hosting_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".vee.yaml");
+        for allowed in [
+            "GH_TOKEN",
+            "GITLAB_TOKEN",
+            "AZURE_DEVOPS_EXT_PAT",
+            "VEE_REVIEW_TOKEN",
+        ] {
+            std::fs::write(
+                &file,
+                format!("version: 1\nhosting: {{ token_env: {allowed} }}\n"),
+            )
+            .unwrap();
+            assert!(RepositoryConfig::load(&file).is_ok(), "{allowed}");
+        }
+        for (field, name) in [
+            ("token_env", "AWS_SECRET_ACCESS_KEY"),
+            ("token_env", "OPENAI_API_KEY"),
+            ("webhook_secret_env", "USER"),
+        ] {
+            std::fs::write(
+                &file,
+                format!("version: 1\nhosting: {{ {field}: {name} }}\n"),
+            )
+            .unwrap();
+            let error = RepositoryConfig::load(&file).unwrap_err();
+            assert!(
+                error.contains("hosting credential"),
+                "{field} {name}: {error}"
             );
         }
     }
@@ -3017,6 +3142,13 @@ pub struct RepositoryConfig {
     pub approval: ApprovalConfig,
     #[serde(skip)]
     pub active_policy_profile: Option<String>,
+    /// The effort a single review applied to every reviewer, if any.
+    #[serde(skip)]
+    pub active_review_effort: Option<ReviewEffort>,
+    /// Policies from pinned packs. They are merged into `policy` and into any
+    /// selected policy profile, so a profile cannot drop a pack's baseline.
+    #[serde(skip)]
+    pub pack_policies: Vec<PolicyConfig>,
     /// Digest-pinned policy packs merged into this configuration at load time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub packs: Vec<PackReference>,
@@ -3428,7 +3560,58 @@ pub struct UserProviderConfig {
     pub version: u32,
     #[serde(default)]
     pub providers: std::collections::BTreeMap<String, ProviderConfig>,
+    #[serde(default)]
+    pub review: UserReviewDefaults,
+    #[serde(default, skip_serializing_if = "UserPatchSettings::is_default")]
+    pub patches: UserPatchSettings,
 }
+
+/// How this machine applies proposed patches.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UserPatchSettings {
+    /// Apply an approved patch without a person confirming it at a terminal,
+    /// for example in automation this machine's owner set up. Off by default,
+    /// so an agent that may only propose patches cannot apply them itself.
+    #[serde(default)]
+    pub allow_noninteractive_apply: bool,
+}
+
+impl UserPatchSettings {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+/// Review defaults for this machine. Repository configuration wins.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UserReviewDefaults {
+    /// Effort for reviewers whose repository configuration sets neither
+    /// `effort` nor `samples`. Effort trades review time and tokens for
+    /// quality, so it is a choice for whoever runs the review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReviewEffort>,
+}
+/// Credential variables a repository's `hosting` configuration may name, besides
+/// any `VEE_`-prefixed variable. Other variables must come from a command-line flag.
+pub const HOSTING_CREDENTIAL_NAMES: &[&str] = &[
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GL_TOKEN",
+    "GITLAB_TOKEN",
+    "CI_JOB_TOKEN",
+    "BB_TOKEN",
+    "BITBUCKET_TOKEN",
+    "AZURE_DEVOPS_EXT_PAT",
+    "SYSTEM_ACCESSTOKEN",
+    "GERRIT_TOKEN",
+];
+
+pub fn is_hosting_credential_name(name: &str) -> bool {
+    HOSTING_CREDENTIAL_NAMES.contains(&name) || name.starts_with("VEE_")
+}
+
 /// API key environment variables an HTTP provider may forward, with the vendor
 /// host each key is bound to. `OPENAI_API_KEY` is also the conventional key for
 /// self-hosted OpenAI-compatible servers, so it is not host-bound.
@@ -3491,6 +3674,7 @@ impl RepositoryConfig {
     /// Apply one effort level to every reviewer for a single review, replacing
     /// configured `effort`, `samples` and `sample_quorum` (quorum returns to a majority).
     pub fn override_review_effort(&mut self, effort: ReviewEffort) {
+        self.active_review_effort = Some(effort);
         for reviewer in self.reviewers.values_mut() {
             reviewer.effort = Some(effort);
             reviewer.samples = None;
@@ -3498,14 +3682,25 @@ impl RepositoryConfig {
         }
     }
 
+    /// Merge a pack's policy into the repository policy, and remember it for
+    /// any policy profile selected later.
+    pub fn add_pack_policy(&mut self, pack: &PolicyConfig) {
+        self.policy = packs::strictest(&self.policy, pack);
+        self.pack_policies.push(pack.clone());
+    }
+
     pub fn select_policy_profile(&mut self, profile: Option<&str>) -> Result<(), String> {
         self.active_policy_profile = None;
         if let Some(profile_id) = profile {
-            self.policy = self
+            let selected = self
                 .policy_profiles
                 .get(profile_id)
                 .cloned()
                 .ok_or_else(|| format!("unknown policy profile {profile_id}"))?;
+            self.policy = self
+                .pack_policies
+                .iter()
+                .fold(selected, |policy, pack| packs::strictest(&policy, pack));
             self.active_policy_profile = Some(profile_id.to_string());
         }
         Ok(())
@@ -3548,6 +3743,7 @@ impl RepositoryConfig {
         let raw = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut config: Self =
             serde_yaml::from_str(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut user_effort = None;
         if let Some(user_path) = user_config_path {
             let user_raw = std::fs::read_to_string(user_path)
                 .map_err(|error| format!("{}: {error}", user_path.display()))?;
@@ -3563,11 +3759,19 @@ impl RepositoryConfig {
             for (id, provider) in user.providers {
                 config.providers.entry(id).or_insert(provider);
             }
+            user_effort = user.review.effort;
         }
         if config.version != 1 {
             return Err(format!("unsupported config version {}", config.version));
         }
         packs::apply_packs(&mut config, root)?;
+        if let Some(effort) = user_effort {
+            for reviewer in config.reviewers.values_mut() {
+                if reviewer.effort.is_none() && reviewer.samples.is_none() {
+                    reviewer.effort = Some(effort);
+                }
+            }
+        }
         config.offline |= force_offline;
         if !(1..=32).contains(&config.review.max_concurrency) {
             return Err("review.max_concurrency must be in 1..=32".into());
@@ -3665,6 +3869,15 @@ impl RepositoryConfig {
                     .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
                 if !valid_first || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
                     return Err(format!("{field} must be an environment variable name"));
+                }
+                // The repository configuration is shared and may come from any
+                // branch, so it may only name hosting credentials. Any other
+                // variable is passed with --token-env or --webhook-secret-env.
+                if !is_hosting_credential_name(value) {
+                    return Err(format!(
+                        "{field} must name a hosting credential ({} or a VEE_ variable); pass another variable with the command-line flag",
+                        HOSTING_CREDENTIAL_NAMES.join(", ")
+                    ));
                 }
             }
         }

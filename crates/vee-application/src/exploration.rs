@@ -32,6 +32,12 @@ pub struct ExplorationSpec {
     pub include: Vec<String>,
     pub exclude: Vec<String>,
     pub deny: Vec<String>,
+    /// The reviewer's own `include` and `exclude`, applied on top of the
+    /// repository filter, so exploration reads no more than the reviewer may.
+    #[serde(default)]
+    pub reviewer_include: Vec<String>,
+    #[serde(default)]
+    pub reviewer_exclude: Vec<String>,
     pub max_tool_calls: usize,
     pub max_read_bytes: usize,
     pub max_file_bytes: usize,
@@ -50,10 +56,19 @@ impl ExplorationSpec {
             include: review.include.clone(),
             exclude: review.exclude.clone(),
             deny,
+            reviewer_include: Vec::new(),
+            reviewer_exclude: Vec::new(),
             max_tool_calls: review.exploration.max_tool_calls,
             max_read_bytes: review.exploration.max_read_bytes,
             max_file_bytes: review.max_context_file_bytes,
         }
+    }
+
+    /// This spec narrowed to what `reviewer` may read.
+    pub fn for_reviewer(mut self, reviewer: &vee_core::ReviewerConfig) -> Self {
+        self.reviewer_include = reviewer.include.clone();
+        self.reviewer_exclude = reviewer.exclude.clone();
+        self
     }
 
     /// The contract and limits, without per-run paths or the snapshot (the
@@ -64,6 +79,8 @@ impl ExplorationSpec {
             "include": self.include,
             "exclude": self.exclude,
             "deny": self.deny,
+            "reviewer_include": self.reviewer_include,
+            "reviewer_exclude": self.reviewer_exclude,
             "max_tool_calls": self.max_tool_calls,
             "max_read_bytes": self.max_read_bytes,
             "max_file_bytes": self.max_file_bytes,
@@ -77,7 +94,16 @@ impl ExplorationSpec {
             exclude: self.exclude.clone(),
             ..ReviewConfig::default()
         };
-        review_path_is_included(path, &review) && !self.is_denied(path)
+        let reviewer_allows = !self
+            .reviewer_exclude
+            .iter()
+            .any(|pattern| glob_matches(pattern, path))
+            && (self.reviewer_include.is_empty()
+                || self
+                    .reviewer_include
+                    .iter()
+                    .any(|pattern| glob_matches(pattern, path)));
+        review_path_is_included(path, &review) && reviewer_allows && !self.is_denied(path)
     }
 
     fn is_denied(&self, path: &str) -> bool {
@@ -444,8 +470,7 @@ impl ReviewerExploration {
 /// and a call log per reviewer, in a private directory removed with it.
 pub(crate) struct ReviewExploration {
     directory: tempfile::TempDir,
-    spec_path: PathBuf,
-    descriptor: String,
+    spec: ExplorationSpec,
     program: PathBuf,
 }
 
@@ -465,17 +490,9 @@ impl ReviewExploration {
             .prefix("vee-exploration-")
             .tempdir()
             .map_err(|error| format!("creating the exploration directory: {error}"))?;
-        let spec = ExplorationSpec::new(root, change_set, review);
-        let spec_path = directory.path().join("spec.json");
-        std::fs::write(
-            &spec_path,
-            serde_json::to_vec(&spec).map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| format!("writing the exploration spec: {error}"))?;
         Ok(Some(Self {
-            descriptor: spec.descriptor(),
+            spec: ExplorationSpec::new(root, change_set, review),
             directory,
-            spec_path,
             program,
         }))
     }
@@ -491,10 +508,19 @@ impl ReviewExploration {
         &self,
         index: usize,
         kind: vee_core::ProviderKind,
+        reviewer: &vee_core::ReviewerConfig,
     ) -> Result<Option<vee_core::ExplorationLaunch>, String> {
         if !Self::supports(kind) {
             return Ok(None);
         }
+        // One spec per reviewer, carrying the reviewer's own path filters.
+        let spec = self.spec.clone().for_reviewer(reviewer);
+        let spec_path = self.directory.path().join(format!("spec-{index}.json"));
+        std::fs::write(
+            &spec_path,
+            serde_json::to_vec(&spec).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("writing the exploration spec: {error}"))?;
         let path = |path: &Path| {
             path.to_str()
                 .map(str::to_string)
@@ -506,11 +532,11 @@ impl ReviewExploration {
                 "mcp".into(),
                 "snapshot".into(),
                 "--spec".into(),
-                path(&self.spec_path)?,
+                path(&spec_path)?,
                 "--log".into(),
                 path(&self.log_path(index))?,
             ],
-            descriptor: self.descriptor.clone(),
+            descriptor: spec.descriptor(),
         }))
     }
 
