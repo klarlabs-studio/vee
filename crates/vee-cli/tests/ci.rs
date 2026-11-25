@@ -4,11 +4,15 @@
 mod support;
 use support::vee;
 
+#[cfg(unix)]
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::net::TcpListener;
 use std::path::Path;
 use std::process::Command;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
 use std::sync::Arc;
 
 fn git(root: &Path, args: &[&str]) -> String {
@@ -34,6 +38,7 @@ fn git(root: &Path, args: &[&str]) -> String {
 
 /// Serves GitHub API requests until `stop` is set, answering a pull request
 /// whose base is `base_tip` and head is `head`. Returns the request lines.
+#[cfg(unix)]
 fn fake_github(
     listener: TcpListener,
     stop: Arc<AtomicBool>,
