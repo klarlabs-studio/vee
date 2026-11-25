@@ -270,7 +270,7 @@ impl AzureDevOpsAdapter {
                             .split('/')
                             .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))))
                 || thread.fingerprint.trim().is_empty()
-                || thread.body.len() > 32_768
+                || thread.body_with_suggestion(SuggestionStyle::Diff).len() > 32_768
                 || thread.idempotency_key.is_empty()
                 || !thread
                     .idempotency_key
@@ -452,7 +452,12 @@ impl AzureDevOpsAdapter {
                 let comment_id = comment.get("id").and_then(Value::as_u64).ok_or_else(|| {
                     HostingError::InvalidResponse("Azure DevOps Vee comment omitted its ID".into())
                 })?;
-                let content = format!("{}\n\n{}\n{}", thread.body, finding_marker, marker);
+                let content = format!(
+                    "{}\n\n{}\n{}",
+                    thread.body_with_suggestion(SuggestionStyle::Diff),
+                    finding_marker,
+                    marker
+                );
                 if comment.get("content").and_then(Value::as_str) != Some(content.as_str()) {
                     self.patch_json(
                         self.pull_request_url(
@@ -507,7 +512,12 @@ impl AzureDevOpsAdapter {
                 let body = serde_json::json!({
                     "comments": [{
                         "parentCommentId": 0,
-                        "content": format!("{}\n\n{}\n{}", thread.body, finding_marker, marker),
+                        "content": format!(
+                    "{}\n\n{}\n{}",
+                    thread.body_with_suggestion(SuggestionStyle::Diff),
+                    finding_marker,
+                    marker
+                ),
                         "commentType": 1
                     }],
                     "status": 1,
@@ -1908,6 +1918,7 @@ mod tests {
         .unwrap();
         let reference = pr_reference(&host);
         let thread = ReviewThread {
+            suggestion: None,
             pull_request: reference.clone(),
             fingerprint: "fingerprint-1".into(),
             path: "src/lib.rs".into(),
@@ -1939,6 +1950,7 @@ mod tests {
                     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                 ),
                 &[ReviewThread {
+                    suggestion: None,
                     pull_request: reference.clone(),
                     fingerprint: "fingerprint-1".into(),
                     path: "src/lib.rs".into(),
@@ -1961,6 +1973,7 @@ mod tests {
                     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                 ),
                 &[ReviewThread {
+                    suggestion: None,
                     pull_request: reference.clone(),
                     fingerprint: "fingerprint-1".into(),
                     path: "src/lib.rs".into(),
@@ -1986,6 +1999,7 @@ mod tests {
                     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                 ),
                 &[ReviewThread {
+                    suggestion: None,
                     pull_request: reference.clone(),
                     fingerprint: "fingerprint-1".into(),
                     path: "src/lib.rs".into(),
@@ -2011,6 +2025,7 @@ mod tests {
                     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                 ),
                 &[ReviewThread {
+                    suggestion: None,
                     pull_request: reference.clone(),
                     fingerprint: "fingerprint-1".into(),
                     path: "src/lib.rs".into(),

@@ -670,6 +670,7 @@ mod tests {
             [("r1", "s1", "f1"), ("r2", "s1", "f2"), ("r3", "s2", "f3")]
         {
             let finding = vee_core::Finding {
+                suggestion: None,
                 id: finding_id.into(),
                 fingerprint: format!("fingerprint-{finding_id}"),
                 category: "correctness".into(),

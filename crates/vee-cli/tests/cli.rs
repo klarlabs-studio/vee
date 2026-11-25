@@ -5785,6 +5785,7 @@ fn rule_candidate_report_uses_versioned_schema_and_does_not_mutate_policy() {
         let finding_id = format!("finding-{index}");
         let snapshot_id = format!("snapshot-{index}");
         let finding = Finding {
+            suggestion: None,
             id: finding_id.clone(),
             fingerprint: format!("fingerprint-{index}"),
             category: "Correctness".into(),
@@ -7142,6 +7143,7 @@ fn mcp_stdio_exposes_findings_tool_over_the_pinned_protocol() {
         "block",
         "{}",
         &[vee_core::Finding {
+            suggestion: None,
             id: "finding-for-status-test".into(),
             fingerprint: "fingerprint-for-status-test".into(),
             category: "correctness".into(),
@@ -7161,6 +7163,7 @@ fn mcp_stdio_exposes_findings_tool_over_the_pinned_protocol() {
     .unwrap();
     for (index, finding_id) in ["rule-finding-a", "rule-finding-b"].into_iter().enumerate() {
         let finding = vee_core::Finding {
+            suggestion: None,
             id: finding_id.into(),
             fingerprint: format!("rule-fingerprint-{index}"),
             category: "correctness".into(),

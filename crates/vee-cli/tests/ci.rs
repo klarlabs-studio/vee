@@ -100,11 +100,13 @@ fn fake_github(
                 .to_string()
             } else if line.starts_with("PATCH ") && line.contains("/pulls/comments/501 ") {
                 r#"{"id":501}"#.to_owned()
+            } else if line.starts_with("POST ") && line.contains("/pulls/9/comments ") {
+                r#"{"id":777}"#.to_owned()
             } else if line.starts_with("POST ") && line.contains("graphql") {
                 if request.contains("resolveReviewThread") {
                     r#"{"data":{"resolveReviewThread":{"thread":{"id":"PRRT_1","isResolved":true}}}}"#.to_owned()
                 } else {
-                    r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"PRRT_1","isResolved":false,"comments":{"nodes":[{"databaseId":501,"body":"x","author":{"login":"github-actions[bot]"}}]}}],"pageInfo":{"hasNextPage":false,"endCursor":"c"}}}}}}"#.to_owned()
+                    r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"PRRT_1","isResolved":false,"comments":{"nodes":[{"databaseId":501,"body":"x","author":{"login":"github-actions[bot]"}}]}},{"id":"PRRT_2","isResolved":false,"comments":{"nodes":[{"databaseId":777,"body":"x","author":{"login":"github-actions[bot]"}}]}}],"pageInfo":{"hasNextPage":false,"endCursor":"c"}}}}}}"#.to_owned()
                 }
             } else if line.starts_with("GET ") && line.contains("check-runs?") {
                 r#"{"check_runs":[]}"#.to_owned()
@@ -119,19 +121,30 @@ fn fake_github(
                 body.len()
             )
             .unwrap();
-            requests.push(if line.contains("graphql") {
-                request.clone()
-            } else {
-                line
-            });
+            requests.push(
+                if line.contains("graphql") || line.contains("/pulls/9/comments ") {
+                    request.clone()
+                } else {
+                    line
+                },
+            );
         }
         requests
     })
 }
 
+/// A repository on a pull request branch whose head changes `src/lib.rs`
+/// line 1, reviewed by a provider that prints `findings`, a JSON array.
 #[cfg(unix)]
-#[test]
-fn ci_run_reviews_a_github_pull_request_and_publishes_its_gate() {
+struct PullRequestRepository {
+    directory: tempfile::TempDir,
+    outside: tempfile::TempDir,
+    head: String,
+    base_tip: String,
+}
+
+#[cfg(unix)]
+fn pull_request_repository(findings: &str) -> PullRequestRepository {
     use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
@@ -139,7 +152,7 @@ fn ci_run_reviews_a_github_pull_request_and_publishes_its_gate() {
     let provider = outside.path().join("provider");
     std::fs::write(
         &provider,
-        "#!/bin/sh\ncat >/dev/null\nprintf '%s' '{\"schema_version\":1,\"findings\":[]}'\n",
+        format!("#!/bin/sh\ncat >/dev/null\nprintf '%s' '{{\"schema_version\":1,\"findings\":{findings}}}'\n"),
     )
     .unwrap();
     std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -169,6 +182,20 @@ fn ci_run_reviews_a_github_pull_request_and_publishes_its_gate() {
     git(root, &["commit", "-qm", "main moved"]);
     let base_tip = git(root, &["rev-parse", "HEAD"]);
     git(root, &["checkout", "-q", &head]);
+    PullRequestRepository {
+        directory,
+        outside,
+        head,
+        base_tip,
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn ci_run_reviews_a_github_pull_request_and_publishes_its_gate() {
+    let repository = pull_request_repository("[]");
+    let (root, outside) = (repository.directory.path(), &repository.outside);
+    let (head, base_tip) = (repository.head.clone(), repository.base_tip.clone());
 
     let event = outside.path().join("event.json");
     std::fs::write(
@@ -286,4 +313,63 @@ fn init_ci_writes_a_pipeline_once_and_names_its_secrets() {
         .output()
         .unwrap();
     assert!(!without_model.status.success());
+}
+
+#[cfg(unix)]
+#[test]
+fn ci_run_posts_a_reviewers_fix_as_a_committable_suggestion() {
+    let repository = pull_request_repository(
+        r#"[{"category":"correctness","severity":"high","confidence":90,"rationale":"changed() drops the result callers rely on.","path":"src/lib.rs","line":1,"suggestion":{"replacement":"pub fn changed() -> u32 { 0 }"}}]"#,
+    );
+    let (root, outside) = (repository.directory.path(), &repository.outside);
+    let event = outside.path().join("event.json");
+    std::fs::write(
+        &event,
+        serde_json::json!({"pull_request": {"number": 9, "base": {"sha": repository.base_tip}, "head": {"sha": repository.head}}})
+            .to_string(),
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let server = fake_github(
+        listener,
+        stop.clone(),
+        repository.base_tip.clone(),
+        repository.head.clone(),
+    );
+    let output = vee()
+        .args(["ci", "run", "--output", "json"])
+        .env("GITHUB_ACTIONS", "true")
+        .env("GITHUB_EVENT_NAME", "pull_request")
+        .env("GITHUB_EVENT_PATH", &event)
+        .env("GITHUB_REPOSITORY", "team/repo")
+        .env("GITHUB_SERVER_URL", "http://127.0.0.1")
+        .env("GITHUB_API_URL", format!("http://{address}"))
+        .env("GH_TOKEN", "fixture-token")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    stop.store(true, Ordering::SeqCst);
+    let requests = server.join().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "the high finding blocks\nstdout={}\nstderr={}\nrequests={requests:#?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let comment = requests
+        .iter()
+        .find(|request| request.starts_with("POST /repos/team/repo/pulls/9/comments"))
+        .unwrap_or_else(|| panic!("an inline comment is posted: {requests:#?}"));
+    assert!(
+        comment.contains(r#"```suggestion\npub fn changed() -> u32 { 0 }\n```"#),
+        "{comment}"
+    );
+    assert!(comment.contains(r#""line":1"#), "{comment}");
+    assert!(
+        !comment.contains("start_line"),
+        "one line needs no range: {comment}"
+    );
 }

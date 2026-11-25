@@ -89,6 +89,24 @@
               "additionalProperties": false
             }
           },
+          "suggestion": {
+            "type": "object",
+            "description": "A reviewer's replacement for lines line..=end_line of the finding's file, published as a committable suggestion where the host supports one. Absent when the reviewer gave none or it could not be used.",
+            "required": [
+              "end_line",
+              "replacement"
+            ],
+            "properties": {
+              "end_line": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "replacement": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
           "advisory": {
             "type": "boolean",
             "description": "Reported only by advisory reviewers; shown, but never blocks the gate. Absent when false."

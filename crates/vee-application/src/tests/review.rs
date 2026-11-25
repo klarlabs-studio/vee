@@ -88,6 +88,7 @@ fn source_evidence_marks_unchanged_finding_lines_as_unknown() {
     let snapshot = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
     let mut findings = vec![
         vee_core::Finding {
+            suggestion: None,
             id: "changed".into(),
             fingerprint: "changed".into(),
             category: "correctness".into(),
@@ -104,6 +105,7 @@ fn source_evidence_marks_unchanged_finding_lines_as_unknown() {
             advisory: false,
         },
         vee_core::Finding {
+            suggestion: None,
             id: "unchanged".into(),
             fingerprint: "unchanged".into(),
             category: "correctness".into(),
@@ -179,6 +181,7 @@ fn invalid_finding_line_preserves_other_source_evidence_and_is_reported() {
     std::fs::write(root.join("source.rs"), "fn after() {}\n").unwrap();
     let snapshot = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
     let make_finding = |id: &str, line| vee_core::Finding {
+        suggestion: None,
         id: id.into(),
         fingerprint: id.into(),
         category: "correctness".into(),
@@ -222,6 +225,7 @@ fn legacy_review_without_policy_findings_falls_back_to_display_findings() {
         severity_floors: Vec::new(),
     };
     let finding = vee_core::Finding {
+        suggestion: None,
         id: "legacy-blocker".into(),
         fingerprint: "legacy-fingerprint".into(),
         category: "correctness".into(),

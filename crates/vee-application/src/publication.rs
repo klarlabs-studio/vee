@@ -11,7 +11,7 @@ use vee_core::ports::{FindingRepository, HostedDeliveryRepository};
 use vee_core::{Finding, FindingRecord, FindingStatus, GateDecision, GateStatus, Severity};
 use vee_hosting::{
     CheckConclusion, CheckRun, CheckStatus, DiffSide, PullRequestFile, PullRequestRef,
-    ReviewThread, ThreadResolution,
+    ReviewThread, ThreadResolution, ThreadSuggestion,
 };
 
 /// Whether `wanted` is an added line on the new side of a unified diff.
@@ -49,6 +49,68 @@ pub fn diff_contains_added_line(patch: Option<&str>, wanted: u32) -> bool {
         }
     }
     false
+}
+
+/// The text of new-side lines `first..=last` when they all lie in one hunk
+/// of a unified diff, added or unchanged. Hosts accept a suggestion only for
+/// lines the diff shows, and only within one hunk.
+pub fn new_side_lines_in_one_hunk(patch: &str, first: u32, last: u32) -> Option<Vec<String>> {
+    let mut lines = Vec::new();
+    let mut new_line = 0u32;
+    let mut in_hunk = false;
+    for row in patch.lines() {
+        if row.starts_with("@@") {
+            if !lines.is_empty() {
+                // The range ran past the end of the hunk it started in.
+                return None;
+            }
+            new_line = row
+                .split_whitespace()
+                .find(|part| part.starts_with('+'))
+                .and_then(|range| {
+                    range
+                        .trim_start_matches('+')
+                        .split(',')
+                        .next()?
+                        .parse()
+                        .ok()
+                })
+                .unwrap_or(0);
+            in_hunk = new_line > 0;
+            continue;
+        }
+        if !in_hunk {
+            continue;
+        }
+        let text = match row.as_bytes().first() {
+            Some(b'+') | Some(b' ') => &row[1..],
+            _ => continue,
+        };
+        if (first..=last).contains(&new_line) {
+            lines.push(text.to_owned());
+            if new_line == last {
+                return Some(lines);
+            }
+        }
+        new_line = new_line.saturating_add(1);
+    }
+    None
+}
+
+/// The finding's suggestion as a thread suggestion, when the diff shows every
+/// line it replaces in one hunk and it changes them.
+fn thread_suggestion(
+    finding: &Finding,
+    line: u32,
+    patch: Option<&str>,
+) -> Option<ThreadSuggestion> {
+    let suggestion = finding.suggestion.as_ref()?;
+    let original = new_side_lines_in_one_hunk(patch?, line, suggestion.end_line)?;
+    (original.join("\n") != suggestion.replacement).then(|| ThreadSuggestion {
+        end_line: u64::from(suggestion.end_line),
+        original,
+        replacement: suggestion.replacement.clone(),
+    })
 }
 
 /// The findings as the gate evaluated them: each at its effective severity, so
@@ -96,6 +158,7 @@ pub fn finding_thread(
     key_prefix: &str,
 ) -> ReviewThread {
     ReviewThread {
+        suggestion: None,
         pull_request: pull_request.clone(),
         fingerprint: finding.fingerprint.clone(),
         path: path.to_owned(),
@@ -128,12 +191,13 @@ pub fn build_hosting_threads(
         .iter()
         .filter_map(|finding| {
             let (path, line) = thread_location(finding)?;
-            changed_files
-                .iter()
-                .any(|file| {
-                    file.path == path && diff_contains_added_line(file.patch.as_deref(), line)
-                })
-                .then(|| finding_thread(finding, path, line, pull_request, snapshot_id, key_prefix))
+            let file = changed_files.iter().find(|file| {
+                file.path == path && diff_contains_added_line(file.patch.as_deref(), line)
+            })?;
+            let mut thread =
+                finding_thread(finding, path, line, pull_request, snapshot_id, key_prefix);
+            thread.suggestion = thread_suggestion(finding, line, file.patch.as_deref());
+            Some(thread)
         })
         .collect()
 }
@@ -160,6 +224,7 @@ pub fn build_resolved_hosting_threads(
             }
             let (path, line) = thread_location(finding)?;
             Some(ReviewThread {
+                suggestion: None,
                 pull_request: pull_request.clone(),
                 fingerprint: finding.fingerprint.clone(),
                 path: path.to_owned(),
@@ -374,6 +439,7 @@ fn resolve_unreported_pull_request_threads(
         .iter()
         .filter(|thread| !reported.contains(thread.fingerprint.as_str()))
         .map(|thread| ReviewThread {
+            suggestion: None,
             pull_request: pull_request.clone(),
             fingerprint: thread.fingerprint.clone(),
             path: thread.path.clone(),
@@ -471,6 +537,7 @@ mod tests {
             ["sha256:gone", "sha256:kept"]
         );
         let kept = Finding {
+            suggestion: None,
             id: "f".into(),
             fingerprint: "sha256:kept".into(),
             category: "correctness".into(),
@@ -533,6 +600,7 @@ mod tests {
         }))
         .unwrap();
         let finding = |id: &str, path: &str| Finding {
+            suggestion: None,
             id: id.into(),
             fingerprint: id.into(),
             category: "correctness".into(),
@@ -579,6 +647,7 @@ mod tests {
 
     fn finding(id: &str, line: u32, severity: Severity) -> Finding {
         Finding {
+            suggestion: None,
             id: id.into(),
             fingerprint: format!("sha256:{id}"),
             category: "correctness".into(),
@@ -611,6 +680,7 @@ mod tests {
 
     fn thread(fingerprint: &str, resolution: ThreadResolution) -> ReviewThread {
         ReviewThread {
+            suggestion: None,
             pull_request: pull_request(),
             fingerprint: fingerprint.into(),
             path: "src/lib.rs".into(),
@@ -632,6 +702,90 @@ mod tests {
         assert!(!diff_contains_added_line(Some(patch), 4));
         assert!(!diff_contains_added_line(Some(patch), 2));
         assert!(!diff_contains_added_line(None, 3));
+    }
+
+    #[test]
+    fn suggestion_ranges_must_lie_in_one_hunk_on_the_new_side() {
+        // New-side lines: hunk one is 2 (context), 3 (added), 4 (context);
+        // the removed line takes no number. Hunk two starts at 20.
+        let patch = "@@ -2,3 +2,3 @@\n context\n-removed\n+added\n more context\n@@ -20,1 +20,2 @@\n later\n+tail\n";
+        assert_eq!(
+            new_side_lines_in_one_hunk(patch, 2, 4),
+            Some(vec![
+                "context".into(),
+                "added".into(),
+                "more context".into()
+            ])
+        );
+        assert_eq!(
+            new_side_lines_in_one_hunk(patch, 3, 3),
+            Some(vec!["added".into()])
+        );
+        assert_eq!(
+            new_side_lines_in_one_hunk(patch, 21, 21),
+            Some(vec!["tail".into()])
+        );
+        assert_eq!(
+            new_side_lines_in_one_hunk(patch, 4, 20),
+            None,
+            "spans two hunks"
+        );
+        assert_eq!(
+            new_side_lines_in_one_hunk(patch, 3, 5),
+            None,
+            "runs past the hunk"
+        );
+        assert_eq!(
+            new_side_lines_in_one_hunk(patch, 21, 22),
+            None,
+            "runs past the diff"
+        );
+    }
+
+    #[test]
+    fn a_thread_carries_a_suggestion_only_when_the_diff_shows_what_it_replaces() {
+        let with = |end_line: u32, replacement: &str| {
+            let mut finding = finding("f", 3, Severity::High);
+            finding.suggestion = Some(vee_core::FindingSuggestion {
+                end_line,
+                replacement: replacement.into(),
+            });
+            finding
+        };
+        let changed_files = vec![PullRequestFile {
+            path: "src/lib.rs".into(),
+            change: FileChange::Modified,
+            previous_path: None,
+            patch: Some("@@ -2,2 +2,3 @@\n context\n+added\n more context\n".into()),
+            additions: 1,
+            deletions: 0,
+        }];
+        let thread = |finding: Finding| {
+            let threads = build_hosting_threads(
+                &[finding],
+                &pull_request(),
+                &changed_files,
+                "sha256:snapshot",
+                "review",
+            );
+            assert_eq!(threads.len(), 1, "the finding is still posted");
+            threads.into_iter().next().unwrap()
+        };
+        assert_eq!(
+            thread(with(4, "fixed\nmore context")).suggestion,
+            Some(ThreadSuggestion {
+                end_line: 4,
+                original: vec!["added".into(), "more context".into()],
+                replacement: "fixed\nmore context".into(),
+            })
+        );
+        assert_eq!(
+            thread(with(5, "fixed")).suggestion,
+            None,
+            "line 5 is not in the diff"
+        );
+        assert_eq!(thread(with(3, "added")).suggestion, None, "changes nothing");
+        assert_eq!(thread(finding("f", 3, Severity::High)).suggestion, None);
     }
 
     #[test]

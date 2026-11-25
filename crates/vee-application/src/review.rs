@@ -1701,9 +1701,15 @@ pub(crate) fn deduplicate_findings(findings: Vec<vee_core::Finding>) -> Vec<vee_
                 severity_rank(existing.severity),
                 existing.confidence.unwrap_or(0),
             );
+            // The suggestion of the most severe, most confident report wins.
             if finding_rank > existing_rank {
                 existing.severity = finding.severity;
                 existing.confidence = finding.confidence;
+                if finding.suggestion.is_some() {
+                    existing.suggestion = finding.suggestion;
+                }
+            } else if existing.suggestion.is_none() {
+                existing.suggestion = finding.suggestion;
             }
             let mut rationales = existing
                 .rationale
@@ -1778,6 +1784,7 @@ mod rule_attribution_contract_tests {
 
     fn finding() -> vee_core::Finding {
         vee_core::Finding {
+            suggestion: None,
             id: "FIND-1".into(),
             fingerprint: "fp-1".into(),
             category: "correctness".into(),
@@ -2007,6 +2014,7 @@ mod finding_deduplication_tests {
 
     fn finding(severity: vee_core::Severity, confidence: Option<u8>) -> vee_core::Finding {
         vee_core::Finding {
+            suggestion: None,
             id: format!("{severity:?}-{confidence:?}"),
             fingerprint: "same-fingerprint".into(),
             category: "correctness".into(),

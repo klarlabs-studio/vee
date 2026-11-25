@@ -88,3 +88,21 @@ full history, and publishes a commit status and discussions.
 
 Add `--approval` to also publish whether the change may be approved without
 a person ([ADR 0015](../adr/0015-layered-approval-eligibility.md)).
+
+## Suggested fixes
+
+When a reviewer is sure of a small fix to the lines a finding points at, it
+returns the replacement text with the finding, and the thread shows it as a
+suggestion:
+
+- On GitHub and GitLab it is a suggestion block that a person with write
+  access can commit from the pull request page. Vee never commits it.
+- On Azure DevOps, Bitbucket and Gerrit it is a diff in the comment, to copy
+  by hand.
+
+Vee checks a suggestion before posting it, and posts the finding without it
+when the check fails. The replaced lines must all be on the new side of one
+hunk of the pull request's diff, so they are lines the reviewer saw. The
+replacement must change them and stay within 30 lines and 4 KiB. A
+suggestion is not part of a finding's identity: a later run that suggests
+something else, or nothing, updates the same thread.

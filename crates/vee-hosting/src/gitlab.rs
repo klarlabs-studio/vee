@@ -3,8 +3,8 @@
 use crate::{
     work_item_digest, CheckConclusion, CheckRun, CheckStatus, DiffSide, FileChange,
     GitHostingProvider, HostingError, PublicationReceipt, PullRequestFile, PullRequestRef,
-    PullRequestSnapshot, PullRequestState, ReviewPublication, ReviewThread, ThreadResolution,
-    WebhookEnvelope, WorkItemProvider, WorkItemRef, WorkItemSnapshot,
+    PullRequestSnapshot, PullRequestState, ReviewPublication, ReviewThread, SuggestionStyle,
+    ThreadResolution, WebhookEnvelope, WorkItemProvider, WorkItemRef, WorkItemSnapshot,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use hmac::{Hmac, Mac};
@@ -345,7 +345,7 @@ impl GitLabAdapter {
         let body = format!(
             "{}\n\n{}\n<!-- vee:idempotency:{} -->",
             thread
-                .body
+                .body_with_suggestion(SuggestionStyle::GitLab)
                 .replace("<!-- vee:fingerprint:", "&lt;!-- vee:fingerprint:"),
             marker,
             thread.idempotency_key
@@ -1544,6 +1544,7 @@ mod tests {
                 idempotency_key: "review-1".into(),
             },
             threads: vec![ReviewThread {
+                suggestion: None,
                 pull_request: reference,
                 fingerprint: "finding-1".into(),
                 path: "src/lib.rs".into(),
@@ -1609,6 +1610,7 @@ mod tests {
             },
             threads: vec![
                 ReviewThread {
+                    suggestion: None,
                     pull_request: reference.clone(),
                     fingerprint: "finding-1".into(),
                     path: "src/removed.rs".into(),
@@ -1620,6 +1622,7 @@ mod tests {
                     idempotency_key: "review-2:finding-1".into(),
                 },
                 ReviewThread {
+                    suggestion: None,
                     pull_request: reference,
                     fingerprint: "finding-2".into(),
                     path: "src/lib.rs".into(),
@@ -1686,6 +1689,7 @@ mod tests {
                 idempotency_key: "review-2".into(),
             },
             threads: vec![ReviewThread {
+                suggestion: None,
                 pull_request: reference,
                 fingerprint: "finding-1".into(),
                 path: "src/lib.rs".into(),
@@ -1744,6 +1748,7 @@ mod tests {
             deletions: 1,
         }];
         let thread = ReviewThread {
+            suggestion: None,
             pull_request: reference,
             fingerprint: "finding-page-two".into(),
             path: "src/lib.rs".into(),

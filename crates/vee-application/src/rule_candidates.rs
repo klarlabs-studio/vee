@@ -546,6 +546,7 @@ mod tests {
         FindingRecord {
             assessments: Vec::new(),
             finding: Finding {
+                suggestion: None,
                 id: id.into(),
                 fingerprint: format!("fingerprint-{id}"),
                 category: category.into(),

@@ -272,6 +272,103 @@ pub struct ReviewThread {
     pub resolution: ThreadResolution,
     pub snapshot_id: String,
     pub idempotency_key: String,
+    /// A replacement for lines `line..=end_line` on the new side, checked
+    /// against the pull request's diff, which the adapter renders in its
+    /// host's suggestion syntax.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<ThreadSuggestion>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ThreadSuggestion {
+    /// Last replaced line; the thread's `line` is the first.
+    pub end_line: u64,
+    /// The replaced lines as the pull request's head has them.
+    pub original: Vec<String>,
+    /// Their replacement, without a trailing newline; empty deletes them.
+    pub replacement: String,
+}
+
+/// How a host shows a suggested change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SuggestionStyle {
+    /// A ```` ```suggestion ```` block on a comment spanning the replaced lines.
+    GitHub,
+    /// A ```` ```suggestion:-0+N ```` block on a comment at the first line.
+    GitLab,
+    /// A plain diff for hosts without committable suggestions.
+    Diff,
+}
+
+impl ThreadSuggestion {
+    /// A code fence longer than any backtick run in the suggestion, so
+    /// suggested code holding a fence cannot end the block early.
+    fn fence(&self) -> String {
+        let longest = std::iter::once(self.replacement.as_str())
+            .chain(self.original.iter().map(String::as_str))
+            .flat_map(|text| text.split(|c| c != '`'))
+            .map(str::len)
+            .max()
+            .unwrap_or(0);
+        "`".repeat(longest.max(2) + 1)
+    }
+
+    fn lines_with_prefix(text: &[String], prefix: char) -> String {
+        text.iter()
+            .map(|line| format!("{prefix}{line}\n"))
+            .collect()
+    }
+
+    /// The suggestion as `style` writes it, for a thread starting at `line`.
+    pub fn markdown(&self, line: u64, style: SuggestionStyle) -> String {
+        let fence = self.fence();
+        let replacement = if self.replacement.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", self.replacement)
+        };
+        match style {
+            SuggestionStyle::GitHub => format!("{fence}suggestion\n{replacement}{fence}"),
+            SuggestionStyle::GitLab => format!(
+                "{fence}suggestion:-0+{}\n{replacement}{fence}",
+                self.end_line.saturating_sub(line)
+            ),
+            SuggestionStyle::Diff => {
+                let added = self
+                    .replacement
+                    .lines()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                format!(
+                    "{fence}diff\n{}{}{fence}",
+                    Self::lines_with_prefix(&self.original, '-'),
+                    Self::lines_with_prefix(&added, '+')
+                )
+            }
+        }
+    }
+}
+
+impl ReviewThread {
+    /// The thread's text followed by its suggestion, if it has one.
+    pub fn body_with_suggestion(&self, style: SuggestionStyle) -> String {
+        match &self.suggestion {
+            Some(suggestion) => format!(
+                "{}\n\nSuggested change:\n\n{}",
+                self.body,
+                suggestion.markdown(self.line, style)
+            ),
+            None => self.body.clone(),
+        }
+    }
+
+    /// The last line the thread's comment covers.
+    pub fn end_line(&self) -> u64 {
+        self.suggestion
+            .as_ref()
+            .map_or(self.line, |suggestion| suggestion.end_line.max(self.line))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -601,6 +698,49 @@ impl std::error::Error for HostingError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn suggested(original: &[&str], replacement: &str) -> ThreadSuggestion {
+        ThreadSuggestion {
+            end_line: 11 + original.len() as u64 - 1,
+            original: original.iter().map(|line| (*line).to_owned()).collect(),
+            replacement: replacement.into(),
+        }
+    }
+
+    #[test]
+    fn suggestions_render_in_each_hosts_syntax() {
+        let two_lines = suggested(&["    let x = a;", "    let y = b;"], "    let x = b;");
+        assert_eq!(
+            two_lines.markdown(11, SuggestionStyle::GitHub),
+            "```suggestion\n    let x = b;\n```"
+        );
+        assert_eq!(
+            two_lines.markdown(11, SuggestionStyle::GitLab),
+            "```suggestion:-0+1\n    let x = b;\n```"
+        );
+        assert_eq!(
+            two_lines.markdown(11, SuggestionStyle::Diff),
+            "```diff\n-    let x = a;\n-    let y = b;\n+    let x = b;\n```"
+        );
+        let deletion = suggested(&["dbg!(x);"], "");
+        assert_eq!(
+            deletion.markdown(11, SuggestionStyle::GitHub),
+            "```suggestion\n```"
+        );
+        assert_eq!(
+            deletion.markdown(11, SuggestionStyle::GitLab),
+            "```suggestion:-0+0\n```"
+        );
+    }
+
+    #[test]
+    fn suggested_code_holding_a_fence_cannot_close_the_block() {
+        let fenced = suggested(&["/// ```"], "/// ````text");
+        assert_eq!(
+            fenced.markdown(11, SuggestionStyle::GitHub),
+            "`````suggestion\n/// ````text\n`````"
+        );
+    }
 
     fn pr() -> PullRequestRef {
         PullRequestRef {

@@ -502,6 +502,11 @@ fn consolidated_findings(findings: &[Finding]) -> Vec<Finding> {
                     saved.severity = finding.severity;
                     saved.confidence = finding.confidence;
                     saved.rationale = finding.rationale.clone();
+                    if finding.suggestion.is_some() {
+                        saved.suggestion = finding.suggestion.clone();
+                    }
+                } else if saved.suggestion.is_none() {
+                    saved.suggestion = finding.suggestion.clone();
                 }
                 saved
                     .reviewer_ids
@@ -1818,6 +1823,7 @@ mod tests {
 
     fn finding(id: &str, severity: Severity, confidence: Option<u8>) -> Finding {
         Finding {
+            suggestion: None,
             id: id.into(),
             fingerprint: id.into(),
             category: "correctness".into(),

@@ -18,6 +18,16 @@
           "rationale": {"type": "string", "minLength": 1, "description": "One defect. The first sentence states what goes wrong and when, naming the responsible code; at most two further sentences give the triggering input or state and the consequence."},
           "path": {"type": ["string", "null"]},
           "line": {"type": ["integer", "null"], "minimum": 1},
+          "suggestion": {
+            "type": ["object", "null"],
+            "description": "Optional sure, small fix: replaces lines line..end_line (default line, at most 29 more) with replacement, given with indentation; empty deletes them.",
+            "required": ["replacement"],
+            "properties": {
+              "end_line": {"type": ["integer", "null"], "minimum": 1},
+              "replacement": {"type": "string", "maxLength": 4096}
+            },
+            "additionalProperties": false
+          },
           "rule_attributions": {
             "type": "array",
             "description": "Optional reviewer-reported links to approved guidance shown in this review request.",
