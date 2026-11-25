@@ -190,6 +190,7 @@ pub fn evaluate_gate(
                 || !required_reviewers_complete,
             required_verifications: config.policy.required_verifications.clone(),
             analyzer_block_levels: sarif::analyzer_block_levels(config),
+            severity_floors: config.policy.severity_floors.clone(),
         };
         let gate_verification_runs = gate_eligible_verification_runs(
             repository_root,

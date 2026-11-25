@@ -91,6 +91,18 @@ pub fn merge_base(path: &Path, base_ref: &str) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
+/// The merge base of two commits, or `None` when either is not available
+/// locally or they share no history.
+pub fn merge_base_of(path: &Path, left: &str, right: &str) -> Option<String> {
+    validate_revision(left).ok()?;
+    validate_revision(right).ok()?;
+    let output = git(path, &["merge-base", left, right]).ok()?;
+    String::from_utf8(output)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// One commit in first-parent history: its author's email and the paths it changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HistoryCommit {

@@ -21,6 +21,9 @@ pub struct HostingSettings {
     pub host: String,
     pub api_base: String,
     pub token_env: String,
+    /// Whether the host or API base came from the caller rather than the
+    /// repository configuration; see `ensure_credential_destination`.
+    pub named_by_user: bool,
 }
 
 pub fn resolve_hosting(
@@ -34,7 +37,9 @@ pub fn resolve_hosting(
     };
     let provider = pick(overrides.provider, &configured.provider, "github");
     let token_env = pick(overrides.token_env, &configured.token_env, "GH_TOKEN");
+    let named_by_user = overrides.host.is_some() || overrides.api_base.is_some();
     HostingSettings {
+        named_by_user,
         host: pick(overrides.host, &configured.host, "github.com"),
         api_base: pick(overrides.api_base, &configured.api_base, ""),
         token_env: effective_work_item_token_env(&provider, &token_env).to_owned(),
@@ -75,6 +80,70 @@ pub fn work_item_api_base(provider: &str, host: &str, configured: &str) -> anyho
     }
 }
 
+/// Environment variable listing hosting hosts the user trusts with credentials,
+/// comma-separated, for self-hosted servers named in a repository's `.vee.yaml`.
+pub const TRUSTED_HOSTS_ENV: &str = "VEE_HOSTING_HOSTS";
+
+/// Hosts each provider's public service uses for its web and API endpoints.
+fn public_hosts(provider: &str) -> &'static [&'static str] {
+    match provider {
+        "github" => &["github.com", "api.github.com"],
+        "gitlab" => &["gitlab.com"],
+        "azure-devops" => &["dev.azure.com"],
+        "bitbucket" => &["bitbucket.org", "api.bitbucket.org"],
+        _ => &[],
+    }
+}
+
+pub fn parse_trusted_hosts(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(|host| host.trim().to_ascii_lowercase())
+        .filter(|host| !host.is_empty())
+        .collect()
+}
+
+pub fn trusted_hosts_from_env() -> Vec<String> {
+    std::env::var(TRUSTED_HOSTS_ENV)
+        .map(|value| parse_trusted_hosts(&value))
+        .unwrap_or_default()
+}
+
+/// Credentials go to the provider's public service, or to a host the person
+/// running Vee named: on the command line (`named_by_user`) or in
+/// `VEE_HOSTING_HOSTS`. A host chosen only by the shared repository
+/// configuration is refused, so a branch cannot redirect a token.
+pub fn ensure_credential_destination(
+    provider: &str,
+    host: &str,
+    api_base: &str,
+    named_by_user: bool,
+    trusted: &[String],
+) -> anyhow::Result<()> {
+    if named_by_user {
+        return Ok(());
+    }
+    let api_host = url::Url::parse(api_base)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .ok_or_else(|| configuration_failure(format!("hosting API base {api_base} has no host")))?;
+    // `host` may carry a port (Azure DevOps Server); compare host names only.
+    let host = url::Url::parse(&format!("https://{host}/"))
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .ok_or_else(|| configuration_failure(format!("hosting host {host} is not a host name")))?;
+    for destination in [host, api_host] {
+        let allowed = public_hosts(provider).contains(&destination.as_str())
+            || trusted.contains(&destination);
+        if !allowed {
+            return Err(configuration_failure(format!(
+                "the repository configuration would send hosting credentials to {destination}; confirm that host with --host or --api-base, or add it to {TRUSTED_HOSTS_ENV}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Fetches `OWNER/REPO#NUMBER` from the hosting provider, reading the
 /// credential from the settings' token environment variable.
 pub fn fetch_work_item(
@@ -103,6 +172,13 @@ pub fn fetch_work_item(
     };
     reference.validate().map_err(configuration_failure)?;
     let api_base = work_item_api_base(&settings.provider, &host, &settings.api_base)?;
+    ensure_credential_destination(
+        &settings.provider,
+        &host,
+        &api_base,
+        settings.named_by_user,
+        &trusted_hosts_from_env(),
+    )?;
     get_work_item(&settings.provider, &api_base, token, &reference)
 }
 
@@ -156,5 +232,113 @@ pub fn get_work_item(
         _ => Err(configuration_failure(format!(
             "unsupported work item provider `{provider_id}`"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod credential_destination_tests {
+    use super::*;
+
+    #[test]
+    fn credentials_go_to_public_apis_or_hosts_the_user_named() {
+        assert!(ensure_credential_destination(
+            "github",
+            "github.com",
+            "https://api.github.com/",
+            false,
+            &[]
+        )
+        .is_ok());
+        assert!(ensure_credential_destination(
+            "gitlab",
+            "gitlab.com",
+            "https://gitlab.com/api/v4/",
+            false,
+            &[]
+        )
+        .is_ok());
+        assert!(ensure_credential_destination(
+            "bitbucket",
+            "bitbucket.org",
+            "https://api.bitbucket.org/2.0/",
+            false,
+            &[]
+        )
+        .is_ok());
+
+        // A host chosen only by the repository configuration is refused...
+        let error = ensure_credential_destination(
+            "github",
+            "evil.example",
+            "https://evil.example/api/v3/",
+            false,
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("evil.example") && error.contains("VEE_HOSTING_HOSTS"),
+            "{error}"
+        );
+        // ...including an API base that points away from a public host.
+        assert!(ensure_credential_destination(
+            "github",
+            "github.com",
+            "https://evil.example/",
+            false,
+            &[]
+        )
+        .is_err());
+
+        // A host the user named on the command line or in VEE_HOSTING_HOSTS is used.
+        assert!(ensure_credential_destination(
+            "gitlab",
+            "git.corp.example",
+            "https://git.corp.example/api/v4/",
+            true,
+            &[]
+        )
+        .is_ok());
+        let trusted = ["git.corp.example".to_string()];
+        assert!(ensure_credential_destination(
+            "gitlab",
+            "git.corp.example",
+            "https://git.corp.example/api/v4/",
+            false,
+            &trusted
+        )
+        .is_ok());
+        assert!(ensure_credential_destination(
+            "gitlab",
+            "git.corp.example",
+            "https://other.example/api/v4/",
+            false,
+            &trusted
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_port_on_the_host_does_not_change_which_host_is_trusted() {
+        let local = ["127.0.0.1".to_string()];
+        assert!(ensure_credential_destination(
+            "azure-devops",
+            "127.0.0.1:8443",
+            "http://127.0.0.1:8443/",
+            false,
+            &local
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn trusted_hosting_hosts_are_read_from_a_comma_separated_list() {
+        assert_eq!(
+            parse_trusted_hosts(" git.corp.example , Gerrit.Corp.Example,,"),
+            vec![
+                "git.corp.example".to_string(),
+                "gerrit.corp.example".to_string()
+            ]
+        );
     }
 }

@@ -173,10 +173,10 @@
         },
         "executable": {
           "type": "string",
-          "minLength": 1
+          "description": "Program to run for CLI providers; empty for HTTP providers."
         },
         "endpoint": {
-          "type": "string",
+          "type": ["string", "null"],
           "format": "uri",
           "minLength": 1
         },
@@ -491,7 +491,24 @@
         },
         "acceptance": {
           "$ref": "#/$defs/acceptance_policy"
+        },
+        "severity_floors": {
+          "type": "array",
+          "maxItems": 64,
+          "description": "Minimum severities the gate applies to matching findings (ADR 0018). Floors only raise severity; the finding record keeps the reported severity.",
+          "items": { "$ref": "#/$defs/severity_floor" }
         }
+      }
+    },
+    "severity_floor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minimum"],
+      "anyOf": [{ "required": ["paths"] }, { "required": ["categories"] }],
+      "properties": {
+        "paths": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1, "maxLength": 512 }, "description": "Path globs; the finding's path must match one of them." },
+        "categories": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1, "maxLength": 512 }, "description": "Finding categories, compared case-insensitively." },
+        "minimum": { "enum": ["critical", "high", "medium", "low", "info"] }
       }
     },
     "acceptance_policy": {
