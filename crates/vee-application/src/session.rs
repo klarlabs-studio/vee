@@ -15,6 +15,10 @@ pub const MAX_SESSION_REVIEWS: usize = 20;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionReview {
+    /// The checkout the review was read from, as named in the request;
+    /// absent for this repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
     pub review_id: String,
     pub scope: String,
     pub snapshot_id: String,
@@ -41,6 +45,17 @@ pub struct ReviewSession {
     pub open_findings: u32,
     /// Changes eligible for approval without a human.
     pub approval_eligible: u32,
+}
+
+impl ReviewSession {
+    /// The same exit codes as the gate: 0 pass, 1 block, 2 incomplete.
+    pub fn exit_code(&self) -> u8 {
+        match self.verdict.as_str() {
+            "pass" => 0,
+            "block" => 1,
+            _ => 2,
+        }
+    }
 }
 
 /// One change's line in a session, from its review detail and approval.
@@ -75,6 +90,7 @@ pub fn session_review(
         reasons.extend(review.gate.reasons.iter().cloned());
     }
     SessionReview {
+        repository: None,
         review_id: review.review_id.clone(),
         scope: review.change_set.scope.clone(),
         snapshot_id: review.snapshot_id.clone(),
@@ -126,6 +142,7 @@ mod tests {
 
     fn line(gate: &str, current: bool, eligible: bool) -> SessionReview {
         SessionReview {
+            repository: None,
             review_id: format!("rev_{gate}"),
             scope: "commit".into(),
             snapshot_id: "sha256:snap".into(),
@@ -154,5 +171,9 @@ mod tests {
             "a change that moved after its review cannot pass the session"
         );
         assert_eq!(review_session(Vec::new()).verdict, "incomplete");
+        let exit = |lines| review_session(lines).exit_code();
+        assert_eq!(exit(vec![line("pass", true, true)]), 0);
+        assert_eq!(exit(vec![line("block", true, false)]), 1);
+        assert_eq!(exit(vec![line("pass", false, false)]), 2);
     }
 }

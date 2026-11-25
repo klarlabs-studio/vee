@@ -67,6 +67,101 @@ const FILES_THRESHOLD: u64 = 20;
 const LINES_THRESHOLD: u64 = 400;
 /// Production files outside the change that reference changed code.
 const BLAST_RADIUS_THRESHOLD: u64 = 10;
+/// Commits of first-parent history before the base that history factors read.
+const HISTORY_COMMITS: usize = 1_000;
+/// Fewer usable commits than this are too little history to rank a change.
+const MIN_HISTORY_COMMITS: usize = 20;
+/// Commits touching more files than this are bulk changes, skipped as in co-change.
+const HISTORY_MAX_COMMIT_FILES: usize = 30;
+/// History factors flag a change above this percentile of the repository's
+/// own recent changes, which calibrates them per repository without labels.
+const HISTORY_PERCENTILE: usize = 90;
+
+/// History measures for a change, each with the repository's own threshold.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct HistoryMeasures {
+    /// Earlier commits that changed the touched code files (Kamei's NUC).
+    pub(crate) prior_changes: u64,
+    pub(crate) prior_changes_threshold: u64,
+    /// Distinct authors who changed the touched code files (Kamei's NDEV).
+    pub(crate) authors: u64,
+    pub(crate) authors_threshold: u64,
+    pub(crate) commits: usize,
+}
+
+/// The value at `percentile` of `values`, by nearest rank.
+fn percentile(mut values: Vec<u64>, percentile: usize) -> u64 {
+    values.sort_unstable();
+    let rank = (values.len() * percentile).div_ceil(100).max(1);
+    values[rank - 1]
+}
+
+/// Measure a change touching `changed` code files against `history` (newest
+/// first). Every recent commit is measured the same way at the time it was
+/// made, and a change is flagged above the 90th percentile of those values.
+/// `None` when there is too little history.
+pub(crate) fn history_measures(
+    history: &[vee_git::HistoryCommit],
+    changed: &[&str],
+) -> Option<HistoryMeasures> {
+    let usable: Vec<&vee_git::HistoryCommit> = history
+        .iter()
+        .rev()
+        .filter(|commit| !commit.paths.is_empty() && commit.paths.len() <= HISTORY_MAX_COMMIT_FILES)
+        .collect();
+    if usable.len() < MIN_HISTORY_COMMITS {
+        return None;
+    }
+    let mut changes = std::collections::HashMap::<&str, u64>::new();
+    let mut authors = std::collections::HashMap::<&str, std::collections::HashSet<&str>>::new();
+    let measure =
+        |files: &[&str],
+         changes: &std::collections::HashMap<&str, u64>,
+         authors: &std::collections::HashMap<&str, std::collections::HashSet<&str>>| {
+            let prior: u64 = files.iter().filter_map(|file| changes.get(file)).sum();
+            let people: std::collections::HashSet<&str> = files
+                .iter()
+                .filter_map(|file| authors.get(file))
+                .flatten()
+                .copied()
+                .collect();
+            (prior, people.len() as u64)
+        };
+    let (mut prior_values, mut author_values) = (Vec::new(), Vec::new());
+    for commit in &usable {
+        let code: Vec<&str> = commit
+            .paths
+            .iter()
+            .map(String::as_str)
+            .filter(|path| !crate::impact::is_documentation_path(path))
+            .collect();
+        if code.is_empty() {
+            continue;
+        }
+        let (prior, people) = measure(&code, &changes, &authors);
+        prior_values.push(prior);
+        author_values.push(people);
+        for file in code {
+            *changes.entry(file).or_default() += 1;
+            authors
+                .entry(file)
+                .or_default()
+                .insert(commit.author_email.as_str());
+        }
+    }
+    if prior_values.len() < MIN_HISTORY_COMMITS {
+        return None;
+    }
+    let (prior_changes, people) = measure(changed, &changes, &authors);
+    Some(HistoryMeasures {
+        prior_changes,
+        prior_changes_threshold: percentile(prior_values, HISTORY_PERCENTILE) + 1,
+        authors: people,
+        authors_threshold: percentile(author_values, HISTORY_PERCENTILE) + 1,
+        commits: usable.len(),
+    })
+}
+
 /// Directories that hold one subsystem per child, such as `crates/vee-git`.
 const CONTAINER_DIRECTORIES: &[&str] = &[
     "apps", "cmd", "crates", "internal", "libs", "modules", "packages", "pkg", "plugins",
@@ -133,8 +228,13 @@ pub fn assess_change_risk(
         ));
     }
 
-    let subsystems: std::collections::BTreeSet<String> =
-        paths.iter().map(|path| subsystem(path)).collect();
+    // Diffusion is measured over code: documentation changes alongside
+    // features without spreading the change's behavior.
+    let subsystems: std::collections::BTreeSet<String> = paths
+        .iter()
+        .filter(|path| !crate::impact::is_documentation_path(path))
+        .map(|path| subsystem(path))
+        .collect();
 
     let path_bufs: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
     let current = vee_git::read_snapshot_files(root, change_set, &path_bufs)?;
@@ -225,10 +325,10 @@ pub fn assess_change_risk(
         }
         text
     };
-    let factors = vec![
+    let mut factors = vec![
         factor(
             "subsystems",
-            "Subsystems touched",
+            "Code subsystems touched",
             subsystems.len() as u64,
             SUBSYSTEMS_THRESHOLD,
             list(&mut subsystems.iter().map(String::as_str)),
@@ -267,13 +367,58 @@ pub fn assess_change_risk(
             "McIntosh & Kamei 2018; agent-change failure studies (missing tests and CI)",
         ),
     ];
+    let code_paths: Vec<&str> = paths
+        .iter()
+        .map(String::as_str)
+        .filter(|path| !crate::impact::is_documentation_path(path))
+        .collect();
+    let history = change_set
+        .base_oid
+        .as_deref()
+        .or(change_set.head_oid.as_deref())
+        .and_then(|revision| vee_git::commit_history(root, revision, HISTORY_COMMITS).ok())
+        .and_then(|history| history_measures(&history, &code_paths));
+    match history {
+        Some(history) => {
+            let window = format!(
+                "{} recent commit(s); top {}% starts at {}",
+                history.commits,
+                100 - HISTORY_PERCENTILE,
+                history.prior_changes_threshold
+            );
+            factors.push(factor(
+                "prior_changes",
+                "Earlier changes to the touched code",
+                history.prior_changes,
+                history.prior_changes_threshold,
+                window,
+                "Kamei et al. 2013 (history: NUC); threshold from this repository's own history",
+            ));
+            factors.push(factor(
+                "authors",
+                "People who changed the touched code",
+                history.authors,
+                history.authors_threshold,
+                format!(
+                    "{} recent commit(s); top {}% starts at {}",
+                    history.commits,
+                    100 - HISTORY_PERCENTILE,
+                    history.authors_threshold
+                ),
+                "Kamei et al. 2013 (history: NDEV); threshold from this repository's own history",
+            ));
+        }
+        None => limitations.push(format!(
+            "History factors need at least {MIN_HISTORY_COMMITS} recent commits before the base; this repository has fewer, or its history could not be read."
+        )),
+    }
     let flagged = factors.iter().filter(|factor| factor.flagged).count();
     let tier = match flagged {
         0 => RiskTier::Low,
         count if count >= HIGH_RISK_FLAGS => RiskTier::High,
         _ => RiskTier::Elevated,
     };
-    limitations.push("The tier is a rule over the flagged factors, not a calibrated defect probability; history factors (author experience, prior changes) are not yet included.".into());
+    limitations.push("The tier is a rule over the flagged factors, not a calibrated defect probability; author experience and change purpose are not included.".into());
     Ok(ChangeRisk {
         schema_version: CHANGE_RISK_SCHEMA_VERSION,
         snapshot_id: change_set.digest.clone(),
@@ -293,6 +438,49 @@ mod tests {
         assert_eq!(subsystem("web/src/App.vue"), "web");
         assert_eq!(subsystem("crates/vee-git/src/lib.rs"), "crates/vee-git");
         assert_eq!(subsystem("crates/README.md"), "crates");
+    }
+
+    fn commit(author: &str, paths: &[&str]) -> vee_git::HistoryCommit {
+        vee_git::HistoryCommit {
+            author_email: author.into(),
+            paths: paths.iter().map(|path| path.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn history_factors_rank_a_change_against_the_repositorys_own_commits() {
+        // Oldest first: 20 commits each adding a new file, then 5 people
+        // editing hot.rs, plus a bulk commit and a docs-only commit that are
+        // not measured.
+        let mut oldest_first: Vec<_> = (0..20)
+            .map(|index| commit("a@example.invalid", &[&format!("src/n{index}.rs")]))
+            .collect();
+        for author in ["b", "c", "d", "e", "f"] {
+            oldest_first.push(commit(
+                &format!("{author}@example.invalid"),
+                &["src/hot.rs"],
+            ));
+        }
+        let bulk: Vec<String> = (0..31).map(|index| format!("src/bulk{index}.rs")).collect();
+        let bulk: Vec<&str> = bulk.iter().map(String::as_str).collect();
+        oldest_first.push(commit("g@example.invalid", &bulk));
+        oldest_first.push(commit("h@example.invalid", &["README.md"]));
+        let newest_first: Vec<_> = oldest_first.into_iter().rev().collect();
+
+        // Values over the 25 measured commits: 21 zeros, then 1, 2, 3, 4.
+        // The 90th percentile (rank 23) is 2, so 3 and above is flagged.
+        let hot = history_measures(&newest_first, &["src/hot.rs"]).unwrap();
+        assert_eq!(hot.prior_changes, 5);
+        assert_eq!(hot.prior_changes_threshold, 3);
+        assert_eq!(hot.authors, 5);
+        assert_eq!(hot.authors_threshold, 3);
+        let quiet = history_measures(&newest_first, &["src/n0.rs"]).unwrap();
+        assert_eq!((quiet.prior_changes, quiet.authors), (1, 1));
+        assert_eq!(
+            history_measures(&newest_first[..10], &["src/hot.rs"]),
+            None,
+            "too little history"
+        );
     }
 
     #[test]
@@ -354,9 +542,13 @@ mod tests {
 
         let factor = |id: &str| risk.factors.iter().find(|factor| factor.id == id).unwrap();
         assert_eq!(risk.tier, RiskTier::Elevated, "{risk:#?}");
-        assert_eq!(factor("subsystems").value, 3);
-        assert!(factor("subsystems").flagged);
-        assert_eq!(factor("subsystems").detail, "api, docs, store");
+        assert_eq!(
+            factor("subsystems").value,
+            2,
+            "documentation is not a subsystem"
+        );
+        assert!(!factor("subsystems").flagged);
+        assert_eq!(factor("subsystems").detail, "api, store");
         assert_eq!(factor("files").value, 3);
         assert!(!factor("files").flagged);
         assert_eq!(factor("lines").value, 7, "{risk:#?}");

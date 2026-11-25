@@ -1,0 +1,42 @@
+# Vee reviews each merge request on your runner, with your model key, and
+# publishes a commit status and discussions. The job's result is the gate.
+#
+# Include it from .gitlab-ci.yml, pinned to a release:
+#
+#   include:
+#     - remote: https://raw.githubusercontent.com/klarlabs-studio/vee/v0.1.0/integrations/gitlab/vee.gitlab-ci.yml
+#   variables:
+#     VEE_VERSION: v0.1.0
+#     VEE_PROVIDER: anthropic-api      # or openai-api, gemini-api
+#     VEE_MODEL: <model>
+#
+# Define masked CI/CD variables: the provider's key (ANTHROPIC_API_KEY,
+# OPENAI_API_KEY or GEMINI_API_KEY); GL_TOKEN, a project access token with the
+# api scope; and VEE_ACTOR_LOGIN, that token's bot username.
+
+variables:
+  VEE_VERSION: latest
+  VEE_PROVIDER: anthropic-api
+  VEE_MODEL: ""
+  VEE_EFFORT: medium
+  VEE_APPROVAL: "false"
+
+vee-review:
+  image:
+    name: ghcr.io/klarlabs-studio/vee:${VEE_VERSION}
+    entrypoint: [""]
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  variables:
+    # Vee needs the history back to the merge request's base.
+    GIT_DEPTH: "0"
+  script:
+    - |
+      set -eu
+      if [ -z "$VEE_MODEL" ]; then echo "Set VEE_MODEL to the model Vee reviews with." >&2; exit 2; fi
+      vee init --provider "$VEE_PROVIDER" --model "$VEE_MODEL" --effort "$VEE_EFFORT" --no-input
+      if [ "$VEE_APPROVAL" = "true" ]; then
+        vee ci run --approval --actor-login "$VEE_ACTOR_LOGIN"
+      else
+        vee ci run --actor-login "$VEE_ACTOR_LOGIN"
+      fi
