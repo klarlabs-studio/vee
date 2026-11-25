@@ -669,6 +669,12 @@ pub fn init(
         .cloned();
 
     let (provider_status, candidate_id, egress) = match (&existing_default, request.candidate_id) {
+        (Some(_), None) if request.model.is_some() => {
+            return Err(InitError::Usage(format!(
+                "{} already defines provider `{DEFAULT_PROVIDER_ID}`; pass --provider with --model to replace it",
+                user_config.display()
+            )))
+        }
         (Some(_), None) if repository_exists && request.effort.is_none() => {
             return Err(InitError::Usage(format!(
                 "this repository and machine are already set up ({} defines provider `{DEFAULT_PROVIDER_ID}`); run `vee doctor` to check them",
@@ -683,13 +689,9 @@ pub fn init(
                 .to_owned();
             ("existing", None, egress)
         }
-        (Some(_), Some(_)) => {
-            return Err(InitError::Usage(format!(
-                "{} already defines provider `{DEFAULT_PROVIDER_ID}`; edit it there or run without --provider",
-                user_config.display()
-            )))
-        }
-        (None, requested) => {
+        // No provider yet, or an explicit --provider, which replaces this
+        // machine's provider.
+        (_, requested) => {
             let candidate_id = match requested.or(detection.recommended.as_deref()) {
                 Some(id) => id,
                 None => {
@@ -1339,6 +1341,47 @@ mod tests {
         assert_eq!(
             load("user-config-v1.schema.json")["$defs"]["provider"],
             load("repository-config-v1.schema.json")["$defs"]["provider"]
+        );
+    }
+
+    #[test]
+    fn init_with_a_provider_replaces_this_machines_provider_and_a_lone_model_is_refused() {
+        let system = FakeSystem {
+            executables: [("codex", "1"), ("claude", "1")].into(),
+            ..Default::default()
+        };
+        let repository = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let user_config = home.path().join("vee/config.yaml");
+        let run = |candidate_id, model| {
+            init(
+                &system,
+                repository.path(),
+                &user_config,
+                InitRequest {
+                    candidate_id,
+                    model,
+                    effort: None,
+                },
+            )
+        };
+        run(Some("codex"), None).unwrap();
+        assert!(std::fs::read_to_string(&user_config)
+            .unwrap()
+            .contains("codex_cli"));
+
+        // A model alone would be ignored, so it is refused.
+        assert!(matches!(
+            run(None, Some("other-model")),
+            Err(InitError::Usage(message)) if message.contains("--provider")
+        ));
+
+        let report = run(Some("claude"), None).unwrap();
+        assert_eq!(report.provider_status, "written");
+        let written = std::fs::read_to_string(&user_config).unwrap();
+        assert!(
+            written.contains("claude_cli") && !written.contains("codex_cli"),
+            "{written}"
         );
     }
 
