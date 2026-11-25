@@ -51,6 +51,19 @@ pub(crate) fn user_config_path() -> Option<PathBuf> {
     user_config_location().filter(|path| path.exists())
 }
 
+/// Whether this machine's user configuration allows applying an approved
+/// patch without a person confirming it at a terminal.
+pub fn noninteractive_patch_apply_allowed() -> Result<bool, String> {
+    let Some(path) = user_config_path() else {
+        return Ok(false);
+    };
+    let raw =
+        std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let user: vee_core::UserProviderConfig =
+        serde_yaml::from_str(&raw).map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(user.patches.allow_noninteractive_apply)
+}
+
 /// Validate a proposed repository YAML configuration with the same schema,
 /// provider defaults, and protected-policy checks used for normal commands.
 pub fn validate_repository_config_yaml(

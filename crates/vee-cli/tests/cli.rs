@@ -3,7 +3,7 @@ use vee_core::ports::*;
 use vee_core::{ActorName, Reason};
 
 mod support;
-use support::vee;
+use support::{vee, vee_applying_without_terminal};
 
 fn accept_with_timeout(listener: &std::net::TcpListener) -> std::io::Result<std::net::TcpStream> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
@@ -268,7 +268,7 @@ fn test_generation_saves_snapshot_bound_sandbox_checked_patch_without_applying()
     assert!(!root.join("tests/changed_test.rs").exists());
 
     let proposal_id = report["proposal_id"].as_str().unwrap();
-    let wrong_approval = vee()
+    let wrong_approval = vee_applying_without_terminal()
         .args([
             "tests",
             "apply",
@@ -287,7 +287,7 @@ fn test_generation_saves_snapshot_bound_sandbox_checked_patch_without_applying()
         "pub fn changed() -> bool { true }\n",
     )
     .unwrap();
-    let stale_apply = vee()
+    let stale_apply = vee_applying_without_terminal()
         .args(["tests", "apply", proposal_id, "--approve", proposal_id])
         .current_dir(root)
         .output()
@@ -301,7 +301,7 @@ fn test_generation_saves_snapshot_bound_sandbox_checked_patch_without_applying()
     )
     .unwrap();
 
-    let apply = vee()
+    let apply = vee_applying_without_terminal()
         .args([
             "tests",
             "apply",
@@ -390,7 +390,7 @@ fn test_generation_saves_snapshot_bound_sandbox_checked_patch_without_applying()
     assert_eq!(refined["refinement"]["attempt"], 1);
 
     let refined_id = refined["proposal_id"].as_str().unwrap();
-    let refined_apply = vee()
+    let refined_apply = vee_applying_without_terminal()
         .args([
             "tests",
             "apply",
@@ -8776,9 +8776,26 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
     .unwrap();
     assert_eq!(preserved_proposal["review_id"], review_id);
 
+    // An agent's shell has no terminal: without the machine's opt-in, a
+    // correctly approved patch is still not applied.
+    let unconfirmed = vee()
+        .args(["findings", "apply-patch", digest, "--approve", digest])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!unconfirmed.status.success());
+    assert!(
+        String::from_utf8_lossy(&unconfirmed.stdout).contains("confirm it at a terminal"),
+        "{unconfirmed:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("src.rs")).unwrap(),
+        "pub fn value() -> i32 { 1 }\n"
+    );
+
     let apply_lock = root.join(".vee/proposals/apply.lock");
     fs::write(&apply_lock, "pid=another-process\n").unwrap();
-    let concurrent_apply = vee()
+    let concurrent_apply = vee_applying_without_terminal()
         .args(["findings", "apply-patch", digest, "--approve", digest])
         .current_dir(root)
         .output()
@@ -8793,7 +8810,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
     let instruction_path = root.join("reviewer.md");
     let original_instructions = fs::read_to_string(&instruction_path).unwrap();
     fs::write(&instruction_path, "The review instructions have changed.\n").unwrap();
-    let stale_config = vee()
+    let stale_config = vee_applying_without_terminal()
         .args(["findings", "apply-patch", digest, "--approve", digest])
         .current_dir(root)
         .output()
@@ -8805,7 +8822,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
     );
     fs::write(&instruction_path, original_instructions).unwrap();
 
-    let rejected = vee()
+    let rejected = vee_applying_without_terminal()
         .args([
             "findings",
             "apply-patch",
@@ -8822,7 +8839,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
         "pub fn value() -> i32 { 1 }\n"
     );
 
-    let applied = vee()
+    let applied = vee_applying_without_terminal()
         .args([
             "findings",
             "apply-patch",
@@ -8861,7 +8878,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
         proposal_record["follow_up_review_id"],
         applied["review"]["review_id"]
     );
-    let replay = vee()
+    let replay = vee_applying_without_terminal()
         .args(["findings", "apply-patch", digest, "--approve", digest])
         .current_dir(root)
         .output()
@@ -8950,7 +8967,7 @@ fn an_incomplete_follow_up_review_says_why_in_text_output() {
     let proposed: serde_json::Value = serde_json::from_slice(&proposed.stdout).unwrap();
     let digest = proposed["patch_digest"].as_str().unwrap();
 
-    let applied = vee()
+    let applied = vee_applying_without_terminal()
         .args(["findings", "apply-patch", digest, "--approve", digest])
         .current_dir(root)
         .output()

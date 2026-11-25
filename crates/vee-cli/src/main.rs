@@ -2376,8 +2376,16 @@ fn run() -> Result<u8> {
                 approve,
                 output,
             } => {
-                let application =
-                    test_proposals::apply(&proposal_workspace()?, &proposal_id, &approve)?;
+                let workspace = proposal_workspace()?;
+                confirm_patch_application(
+                    "test proposal",
+                    &proposal_id,
+                    &workspace.root().join(".vee/proposals").join(format!(
+                        "test-{}.patch",
+                        proposal_id.strip_prefix("sha256:").unwrap_or(&proposal_id)
+                    )),
+                )?;
+                let application = test_proposals::apply(&workspace, &proposal_id, &approve)?;
                 match output {
                     // Through a Value, as before: keys stay sorted.
                     Output::Json => emit_json(&serde_json::to_value(&application)?)?,
@@ -3371,6 +3379,11 @@ fn run() -> Result<u8> {
                         ));
                     }
                     let proposal_dir = proposal_directory(std::path::Path::new(&top))?;
+                    confirm_patch_application(
+                        "patch",
+                        &digest,
+                        &proposal_dir.join(format!("{}.patch", &digest[7..])),
+                    )?;
                     let apply_lock = acquire_proposal_apply_lock(&proposal_dir)?;
                     let record_path = proposal_dir.join(format!("{}.json", &digest[7..]));
                     let patch_path = proposal_dir.join(format!("{}.patch", &digest[7..]));
@@ -4118,4 +4131,37 @@ mod tests {
         );
         assert!(skill_dir.join("SKILL.md").is_file());
     }
+}
+
+/// A person confirms each patch application at a terminal. Without one, as in
+/// an agent's shell, applying needs `patches.allow_noninteractive_apply` in
+/// this machine's user configuration, which lives outside the repository.
+fn confirm_patch_application(
+    kind: &str,
+    id: &str,
+    location: &std::path::Path,
+) -> anyhow::Result<()> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    if !interactive {
+        if vee_application::noninteractive_patch_apply_allowed().map_err(configuration_failure)? {
+            return Ok(());
+        }
+        return Err(usage_failure(
+            "applying a patch needs a person to confirm it at a terminal; to allow it without one on this machine, set `patches: { allow_noninteractive_apply: true }` in your Vee user config",
+        ));
+    }
+    let mut stderr = std::io::stderr();
+    write!(
+        stderr,
+        "Apply {kind} {id}?\nReview it first: {}\nType `apply` to continue: ",
+        location.display()
+    )?;
+    stderr.flush()?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    if answer.trim() != "apply" {
+        return Err(usage_failure(format!("{kind} {id} was not applied")));
+    }
+    Ok(())
 }
