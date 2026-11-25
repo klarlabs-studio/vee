@@ -128,8 +128,21 @@ pub fn evaluate_and_persist_gate(
     store: &mut dyn Repositories,
     input: GateEvaluation<'_>,
 ) -> Result<GateDecision, String> {
+    let review_id = input.review_id;
+    let decision = evaluate_gate(&*store, input)?;
+    store.save_gate_decision(review_id, &decision)?;
+    Ok(decision)
+}
+
+/// The gate decision for a saved review as of now, without recording it.
+/// Read-only consumers (approval eligibility, review sessions) use it so a
+/// verification that ran after the last `gate check` still counts.
+pub fn evaluate_gate(
+    store: &dyn Repositories,
+    input: GateEvaluation<'_>,
+) -> Result<GateDecision, String> {
     let GateEvaluation {
-        review_id,
+        review_id: _,
         reviewed_snapshot_id,
         current,
         repository_root,
@@ -177,6 +190,7 @@ pub fn evaluate_and_persist_gate(
                 || !required_reviewers_complete,
             required_verifications: config.policy.required_verifications.clone(),
             analyzer_block_levels: sarif::analyzer_block_levels(config),
+            severity_floors: config.policy.severity_floors.clone(),
         };
         let gate_verification_runs = gate_eligible_verification_runs(
             repository_root,
@@ -234,7 +248,6 @@ pub fn evaluate_and_persist_gate(
         decision.blocking_findings =
             visible_blocking_findings(&decision.blocking_findings, policy_findings, findings);
     }
-    store.save_gate_decision(review_id, &decision)?;
     Ok(decision)
 }
 
@@ -325,6 +338,11 @@ pub fn effective_config_digest(
                 provider.remove("pricing");
             }
         }
+    }
+    // Approval guards decide what happens after the gate, not what the
+    // review or gate saw, so changing them must not make reviews stale.
+    if let Some(config) = execution_config.as_object_mut() {
+        config.remove("approval");
     }
     let bytes = serde_json::to_vec(&serde_json::json!({"config":execution_config,"policy":config.policy,"policy_profile":config.active_policy_profile,"instruction_digests":instruction_digests,"context_file_digests":context_file_digests,"active_rule_approvals":active_rule_approvals}))
         .map_err(|error| error.to_string())?;

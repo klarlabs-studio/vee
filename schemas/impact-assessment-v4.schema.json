@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vee.klarlabs.de/schemas/impact-assessment-v4.schema.json",
+  "title": "Vee Impact Assessment v4",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "snapshot_id",
+    "coverage_complete",
+    "analyzers",
+    "changed_paths",
+    "changed_symbols",
+    "groups",
+    "paths",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 4
+    },
+    "snapshot_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "coverage_complete": {
+      "type": "boolean"
+    },
+    "analyzers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "version",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "enum": [
+              "syn-rust",
+              "gopls",
+              "local-go-imports",
+              "lexical-typescript",
+              "typescript-language-service",
+              "python-ast",
+              "lexical-java",
+              "git-co-change"
+            ]
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "enum": [
+              "used",
+              "partial",
+              "failed",
+              "skipped",
+              "unavailable",
+              "not_applicable"
+            ]
+          }
+        }
+      }
+    },
+    "changed_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "changed_symbols": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "groups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "package_id",
+          "changed_paths",
+          "member_paths",
+          "certainty"
+        ],
+        "properties": {
+          "package_id": {
+            "type": "string"
+          },
+          "changed_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "member_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "certainty": {
+            "const": "heuristic_package_membership"
+          }
+        }
+      }
+    },
+    "paths": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_path",
+          "affected_path",
+          "relationship",
+          "symbol",
+          "certainty",
+          "evidence_line"
+        ],
+        "properties": {
+          "source_path": {
+            "type": "string"
+          },
+          "affected_path": {
+            "type": "string"
+          },
+          "relationship": {
+            "enum": [
+              "resolved_symbol_reference",
+              "syntactic_symbol_reference",
+              "textual_symbol_reference",
+              "likely_test_reference",
+              "shared_local_dependency",
+              "co_change"
+            ]
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "certainty": {
+            "enum": [
+              "resolved_semantic",
+              "inferred_syntax",
+              "inferred_heuristic",
+              "inferred_import",
+              "historical"
+            ]
+          },
+          "evidence_line": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Line of the reference in affected_path; 0 for a co_change edge, which has no line."
+          },
+          "co_change": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "together",
+              "source_commits"
+            ],
+            "description": "For a co_change edge: of source_commits commits that changed source_path, together also changed affected_path.",
+            "properties": {
+              "together": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "source_commits": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

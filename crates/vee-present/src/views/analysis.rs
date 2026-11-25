@@ -7,7 +7,7 @@ use vee_application::test_recommendations::{
     ExecutionCoverageFile, ExecutionCoverageSummary, TestRecommendationReport,
 };
 use vee_application::verification_diagnosis::VerificationDiagnosis;
-use vee_application::ImpactAssessment;
+use vee_application::{ChangeRisk, ImpactAssessment, RiskTier};
 use vee_core::{AnalyzerReport, SarifLevel};
 
 fn coverage(complete: bool) -> Cell {
@@ -91,10 +91,28 @@ impl ToView for ImpactAssessment {
                 self.paths
                     .iter()
                     .map(|edge| {
+                        // A co-change edge has no line or symbol; its
+                        // evidence is how often the files changed together.
+                        let (location, via) = match edge.co_change {
+                            Some(history) => (
+                                Cell::code(&edge.affected_path),
+                                Cell::muted(format!(
+                                    "changed together in {} of {} commits",
+                                    history.together, history.source_commits
+                                )),
+                            ),
+                            None => (
+                                Cell::code(format!(
+                                    "{}:{}",
+                                    edge.affected_path, edge.evidence_line
+                                )),
+                                Cell::code(&edge.symbol),
+                            ),
+                        };
                         vec![
-                            Cell::code(format!("{}:{}", edge.affected_path, edge.evidence_line)),
+                            location,
                             Cell::code(&edge.source_path),
-                            Cell::code(&edge.symbol),
+                            via,
                             Cell::plain(&edge.relationship),
                             Cell::plain(&edge.certainty),
                         ]
@@ -355,6 +373,61 @@ pub(crate) fn short_version(version: &str) -> String {
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| crate::view::summary(version, 32))
+}
+
+fn risk_tier(tier: RiskTier) -> Cell {
+    match tier {
+        RiskTier::Low => Cell::badge(Tone::Success, "low"),
+        RiskTier::Elevated => Cell::badge(Tone::Warning, "elevated"),
+        RiskTier::High => Cell::badge(Tone::Danger, "high"),
+    }
+}
+
+impl ToView for ChangeRisk {
+    fn to_view(&self) -> View {
+        let flagged = self.factors.iter().filter(|factor| factor.flagged).count();
+        let view = View::new()
+            .title("Change risk", Some(risk_tier(self.tier)))
+            .fields(vec![
+                ("Snapshot".into(), Cell::code(&self.snapshot_id)),
+                (
+                    "Flagged factors".into(),
+                    Cell::plain(format!("{flagged} of {}", self.factors.len())),
+                ),
+            ])
+            .section("Factors")
+            .table(
+                &["Factor", "Value", "Flag at", "Detail"],
+                self.factors
+                    .iter()
+                    .map(|factor| {
+                        let label = if factor.flagged {
+                            Cell::badge(Tone::Warning, &factor.label)
+                        } else {
+                            Cell::plain(&factor.label)
+                        };
+                        vec![
+                            label,
+                            Cell::plain(factor.value.to_string()),
+                            Cell::muted(format!("≥ {}", factor.threshold)),
+                            if factor.detail.is_empty() {
+                                Cell::muted("none")
+                            } else {
+                                Cell::plain(&factor.detail)
+                            },
+                        ]
+                    })
+                    .collect(),
+            )
+            .section("Basis")
+            .list(
+                self.factors
+                    .iter()
+                    .map(|factor| Cell::plain(format!("{}: {}", factor.label, factor.basis)))
+                    .collect(),
+            );
+        view.extend(limitations_view(&self.limitations))
+    }
 }
 
 #[cfg(test)]

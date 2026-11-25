@@ -1618,6 +1618,7 @@ mod tests {
             reviewer_context: Vec::new(),
             unreviewed_paths: Vec::new(),
             policy_profile: None,
+            review_effort: None,
             work_item: None,
             work_item_token_env: None,
         };
@@ -1968,6 +1969,7 @@ mod tests {
             reviewer_context: Vec::new(),
             unreviewed_paths: Vec::new(),
             policy_profile: None,
+            review_effort: None,
             work_item: None,
             work_item_token_env: None,
         };
@@ -2143,6 +2145,7 @@ mod tests {
             reviewer_context: Vec::new(),
             unreviewed_paths: Vec::new(),
             policy_profile: None,
+            review_effort: None,
             work_item: None,
             work_item_token_env: None,
         };
@@ -2241,6 +2244,7 @@ mod tests {
             reviewer_context: Vec::new(),
             unreviewed_paths: Vec::new(),
             policy_profile: None,
+            review_effort: None,
             work_item: None,
             work_item_token_env: None,
         };
@@ -2277,6 +2281,12 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["review"]["review_id"], "rev_saved");
         assert_eq!(value["impact"]["coverage_complete"], false);
+        assert_eq!(value["snapshot_current"], false);
+        assert!(value.get("risk").is_none());
+        assert_eq!(
+            value["impact"]["schema_version"],
+            vee_application::IMPACT_SCHEMA_VERSION
+        );
         assert!(value["impact"]["limitations"][0]
             .as_str()
             .unwrap()
