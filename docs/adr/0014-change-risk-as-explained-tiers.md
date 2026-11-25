@@ -28,7 +28,8 @@ four points:
 ## Decision
 
 `vee risk` (MCP: `assess_change_risk`, schema `change-risk-v1`) reports a
-`low`, `elevated` or `high` tier over five measured factors. Each factor
+`low`, `elevated` or `high` tier over five measured factors, plus two
+history factors when the repository has enough history. Each factor
 carries its value, its threshold, what was counted, and its research basis.
 
 | Factor | Flag at | Basis |

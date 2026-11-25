@@ -153,6 +153,10 @@ impl ToView for DoctorReport {
     }
 }
 
+/// Where to read how to get the best reviews from Vee.
+pub const BEST_RESULTS_GUIDE: &str =
+    "https://github.com/klarlabs-studio/vee/blob/main/docs/guides/best-results.md";
+
 impl ToView for InitReport {
     fn to_view(&self) -> View {
         let created = |written: bool, path: &str| {
@@ -189,8 +193,18 @@ impl ToView for InitReport {
                 ),
                 ("Provider".into(), provider),
                 ("Egress".into(), Cell::plain(&self.egress)),
+                (
+                    "Review effort".into(),
+                    match self.effort {
+                        Some(effort) => Cell::plain(effort_label(effort)),
+                        None => Cell::muted("set by each reviewer (one run unless configured)"),
+                    },
+                ),
                 ("User config".into(), Cell::code(&self.user_config)),
             ])
+            .paragraph(Cell::muted(format!(
+                "How to get the best results: {BEST_RESULTS_GUIDE}"
+            )))
             .next_action("vee doctor", "check_setup", serde_json::json!({}))
             .next_action(
                 "vee review",
@@ -198,4 +212,13 @@ impl ToView for InitReport {
                 serde_json::json!({"scope": "working_tree"}),
             )
     }
+}
+
+fn effort_label(effort: vee_core::ReviewEffort) -> String {
+    let (name, runs) = match effort {
+        vee_core::ReviewEffort::Low => ("low", "one run"),
+        vee_core::ReviewEffort::Medium => ("medium", "three runs"),
+        vee_core::ReviewEffort::High => ("high", "five runs"),
+    };
+    format!("{name} ({runs} per reviewer)")
 }

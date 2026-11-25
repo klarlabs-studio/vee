@@ -131,6 +131,19 @@
                   ]
                 }
               }
+            },
+            "severity_floors": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["minimum"],
+                "properties": {
+                  "paths": { "type": "array", "items": { "type": "string" } },
+                  "categories": { "type": "array", "items": { "type": "string" } },
+                  "minimum": { "enum": ["critical", "high", "medium", "low", "info"] }
+                }
+              }
             }
           },
           "additionalProperties": false
