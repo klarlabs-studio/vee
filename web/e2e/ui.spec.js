@@ -1061,7 +1061,85 @@ test('change risk card names the tier and the flagged factors', async ({ page })
   await page.reload()
   const card = page.getByLabel('Change risk')
   await expect(card).toContainText('elevated')
-  await expect(card).toContainText('subsystems touched: 3')
+  await expect(card).toContainText('1 of 2 flagged: subsystems touched 3')
   await expect(card).not.toContainText('files changed')
   await expect(card.locator('small')).toHaveAttribute('title', /Basis: Mockus & Weiss 2000/)
+})
+
+test('finding drawer shows the changed hunk and the finding kind', async ({ page }) => {
+  await page.route('**/api/findings/FIND-001/task', route => route.fulfill({ json: {
+    ...findingTask,
+    task: { ...findingTask.task, diff_hunk: {
+      path: 'src/lib.rs', header: '@@ -41,3 +41,3 @@', truncated: false,
+      lines: [
+        { kind: 'context', line: 41, base_line: 41, text: '    if input.is_empty() {' },
+        { kind: 'removed', line: null, base_line: 42, text: '        return Err(Empty);' },
+        { kind: 'added', line: 42, base_line: null, text: '        return process(input);' },
+      ],
+    } },
+  } }))
+  await page.goto('/')
+  await page.getByRole('button', { name: /Findings/ }).click()
+  await page.getByRole('button', { name: 'Open details for FIND-001' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Finding details' })
+  await expect(drawer.locator('.finding-kind')).toHaveText('defect')
+  const change = drawer.getByRole('region', { name: 'Change' })
+  await expect(change).toContainText('@@ -41,3 +41,3 @@')
+  await expect(change.locator('.source-line.removed')).toContainText('return Err(Empty);')
+  await expect(change.locator('.source-line.added.flagged')).toContainText('return process(input);')
+})
+
+test('finding drawer omits the change section when the flagged line is unchanged', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: /Findings/ }).click()
+  await page.getByRole('button', { name: 'Open details for FIND-001' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Finding details' })
+  await expect(drawer.getByText('Code reference')).toBeVisible()
+  await expect(drawer.getByRole('region', { name: 'Change' })).toHaveCount(0)
+})
+
+test('impact lists code references before history-only co-change leads', async ({ page }) => {
+  await page.route('**/api/reviews/rev_latest', route => route.fulfill({ json: {
+    ...detail(latest),
+    impact: { ...detail(latest).impact, paths: [
+      { affected_path: 'schemas/api.json', source_path: 'src/lib.rs', symbol: '', relationship: 'co_change', certainty: 'historical', evidence_line: 0, co_change: { together: 4, source_commits: 6 } },
+      { affected_path: 'src/handler.rs', source_path: 'src/lib.rs', symbol: 'validate', relationship: 'syntactic_symbol_reference', certainty: 'inferred_syntax', evidence_line: 18 },
+    ] },
+  } }))
+  await page.goto('/')
+  await page.getByRole('button', { name: /Impact/ }).click()
+  await expect(page.locator('.impact-row').first()).toContainText('src/handler.rs')
+  await expect(page.locator('.impact-row').nth(1)).toContainText('changed together in 4 of 6 commits')
+})
+
+test('overview findings use the finding title, not only its category', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.locator('.content-grid .finding-row strong').first()).toHaveText('The changed branch skips validation.')
+})
+
+test('a review whose checkout has moved says why impact and risk are missing', async ({ page }) => {
+  await page.route('**/api/reviews/rev_latest', route => route.fulfill({ json: { ...detail(latest), snapshot_current: false } }))
+  await page.goto('/')
+  await expect(page.getByRole('note').filter({ hasText: 'The checkout has changed since this review' })).toBeVisible()
+  await expect(page.getByLabel('Change risk')).toHaveCount(0)
+})
+
+test('a current review shows no moved-checkout notice', async ({ page }) => {
+  await page.route('**/api/reviews/rev_latest', route => route.fulfill({ json: { ...detail(latest), snapshot_current: true } }))
+  await page.goto('/')
+  await expect(page.getByRole('button', { name: 'Overview' })).toBeVisible()
+  await expect(page.getByText('The checkout has changed since this review')).toHaveCount(0)
+})
+
+test('task-alignment findings are labeled as task findings', async ({ page }) => {
+  const taskFinding = { ...findingRecord, finding: { ...findingRecord.finding, category: 'task-alignment', advisory: false } }
+  await page.route('**/api/findings/FIND-001/task', route => route.fulfill({ json: {
+    ...findingTask, task: { ...findingTask.task, finding: taskFinding },
+  } }))
+  await page.route('**/api/reviews/rev_latest/findings**', route => route.fulfill({ json: [taskFinding] }))
+  await page.route('**/api/reviews/rev_latest', route => route.fulfill({ json: { ...detail(latest), findings: [taskFinding] } }))
+  await page.goto('/')
+  await page.getByRole('button', { name: /Findings/ }).click()
+  await page.getByRole('button', { name: 'Open details for FIND-001' }).click()
+  await expect(page.getByRole('dialog', { name: 'Finding details' }).locator('.finding-kind')).toHaveText('task')
 })

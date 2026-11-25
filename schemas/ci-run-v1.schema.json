@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vee.klarlabs.de/schemas/ci-run-v1.schema.json",
+  "title": "Vee CI run",
+  "description": "The result of `vee ci run`: the pull request detected from the CI environment, the review, its gate, and what was published.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "pull_request", "review_id", "gate", "publication"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "pull_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["system", "provider", "host", "api_base", "repository", "number", "base_oid", "head_oid", "token_env", "actor_login"],
+      "properties": {
+        "system": { "enum": ["github_actions", "gitlab_ci"] },
+        "provider": { "enum": ["github", "gitlab"] },
+        "host": { "type": "string", "minLength": 1 },
+        "api_base": { "type": "string", "format": "uri" },
+        "repository": { "type": "string", "minLength": 1 },
+        "number": { "type": "integer", "minimum": 1 },
+        "base_oid": { "type": "string", "minLength": 1 },
+        "head_oid": { "type": "string", "minLength": 1 },
+        "token_env": { "type": "string", "description": "Environment variable that held the hosting token; never the token itself." },
+        "actor_login": { "type": ["string", "null"] }
+      }
+    },
+    "review_id": { "type": "string", "minLength": 1 },
+    "gate": { "enum": ["pass", "block", "incomplete"] },
+    "publication": {
+      "type": "object",
+      "required": ["schema_version", "review_id", "snapshot_id", "provider_check_id", "thread_ids", "revision"],
+      "properties": {
+        "schema_version": { "type": "integer" },
+        "review_id": { "type": "string" },
+        "snapshot_id": { "type": "string" },
+        "provider_check_id": { "type": "string" },
+        "thread_ids": { "type": "object", "additionalProperties": { "type": "string" } },
+        "approval_check_id": { "type": "string" },
+        "revision": { "type": "string" }
+      }
+    }
+  }
+}
