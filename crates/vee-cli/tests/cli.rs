@@ -1160,6 +1160,7 @@ fn change_package_explicitly_refreshes_and_binds_linked_provider_state() {
             "json",
         ])
         .env("VEE_TEST_GH_TOKEN", "test-token")
+        .env("VEE_HOSTING_HOSTS", "127.0.0.1")
         .output()
         .unwrap();
     server.join().unwrap();
@@ -1317,6 +1318,7 @@ fn change_package_refresh_routes_through_all_other_hosting_adapters() {
                 "json",
             ])
             .env("VEE_TEST_HOSTING_TOKEN", "test-token")
+            .env("VEE_HOSTING_HOSTS", "127.0.0.1")
             .output()
             .unwrap();
         server.join().unwrap();
@@ -4725,6 +4727,7 @@ fn gitlab_issue_context_is_available_through_the_cli() {
             "12",
         ])
         .env("VEE_TEST_GITLAB_TOKEN", "fixture-token")
+        .env("VEE_HOSTING_HOSTS", "127.0.0.1")
         .args(["--output", "json"])
         .current_dir(directory.path())
         .output()
@@ -4924,6 +4927,7 @@ fn gate_check_rejects_review_after_remote_work_item_changes() {
             "org/repo#5",
         ])
         .env("VEE_TEST_GITLAB_TOKEN", "test-token")
+        .env("VEE_HOSTING_HOSTS", "127.0.0.1")
         .current_dir(root)
         .output()
         .unwrap();

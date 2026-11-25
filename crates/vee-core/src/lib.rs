@@ -2554,6 +2554,41 @@ policy_profiles:
     }
 
     #[test]
+    fn repository_hosting_config_names_only_hosting_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".vee.yaml");
+        for allowed in [
+            "GH_TOKEN",
+            "GITLAB_TOKEN",
+            "AZURE_DEVOPS_EXT_PAT",
+            "VEE_REVIEW_TOKEN",
+        ] {
+            std::fs::write(
+                &file,
+                format!("version: 1\nhosting: {{ token_env: {allowed} }}\n"),
+            )
+            .unwrap();
+            assert!(RepositoryConfig::load(&file).is_ok(), "{allowed}");
+        }
+        for (field, name) in [
+            ("token_env", "AWS_SECRET_ACCESS_KEY"),
+            ("token_env", "OPENAI_API_KEY"),
+            ("webhook_secret_env", "USER"),
+        ] {
+            std::fs::write(
+                &file,
+                format!("version: 1\nhosting: {{ {field}: {name} }}\n"),
+            )
+            .unwrap();
+            let error = RepositoryConfig::load(&file).unwrap_err();
+            assert!(
+                error.contains("hosting credential"),
+                "{field} {name}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn hosting_defaults_validate_provider_endpoints_and_environment_names() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join(".vee.yaml");
@@ -3464,6 +3499,25 @@ pub struct UserReviewDefaults {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReviewEffort>,
 }
+/// Credential variables a repository's `hosting` configuration may name, besides
+/// any `VEE_`-prefixed variable. Other variables must come from a command-line flag.
+pub const HOSTING_CREDENTIAL_NAMES: &[&str] = &[
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GL_TOKEN",
+    "GITLAB_TOKEN",
+    "CI_JOB_TOKEN",
+    "BB_TOKEN",
+    "BITBUCKET_TOKEN",
+    "AZURE_DEVOPS_EXT_PAT",
+    "SYSTEM_ACCESSTOKEN",
+    "GERRIT_TOKEN",
+];
+
+pub fn is_hosting_credential_name(name: &str) -> bool {
+    HOSTING_CREDENTIAL_NAMES.contains(&name) || name.starts_with("VEE_")
+}
+
 /// API key environment variables an HTTP provider may forward, with the vendor
 /// host each key is bound to. `OPENAI_API_KEY` is also the conventional key for
 /// self-hosted OpenAI-compatible servers, so it is not host-bound.
@@ -3709,6 +3763,15 @@ impl RepositoryConfig {
                     .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
                 if !valid_first || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
                     return Err(format!("{field} must be an environment variable name"));
+                }
+                // The repository configuration is shared and may come from any
+                // branch, so it may only name hosting credentials. Any other
+                // variable is passed with --token-env or --webhook-secret-env.
+                if !is_hosting_credential_name(value) {
+                    return Err(format!(
+                        "{field} must name a hosting credential ({} or a VEE_ variable); pass another variable with the command-line flag",
+                        HOSTING_CREDENTIAL_NAMES.join(", ")
+                    ));
                 }
             }
         }

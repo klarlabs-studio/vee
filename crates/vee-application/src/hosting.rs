@@ -201,6 +201,7 @@ pub fn pull_request_issues(
             "unsupported hosting provider `{provider_id}`"
         )));
     }
+    let named_by_user = flags.host.is_some() || flags.api_base.is_some();
     let host = resolve_hosting_setting(flags.host, hosting.host, "github.com");
     let api_base = resolve_hosting_setting(flags.api_base, hosting.api_base, "");
     let token_env = resolve_hosting_setting(flags.token_env, hosting.token_env, "GH_TOKEN");
@@ -209,6 +210,13 @@ pub fn pull_request_issues(
     let token = read_token(token_env)?;
     let host = crate::work_items::effective_work_item_host(&provider_id, &host)?;
     let api_base = crate::work_items::work_item_api_base(&provider_id, &host, &api_base)?;
+    crate::work_items::ensure_credential_destination(
+        &provider_id,
+        &host,
+        &api_base,
+        named_by_user,
+        &crate::work_items::trusted_hosts_from_env(),
+    )?;
     let reference = vee_hosting::PullRequestRef {
         repository: vee_hosting::RepositoryRef {
             host,
@@ -258,6 +266,7 @@ pub fn pull_request_context(
         ));
     }
     let provider_id = resolve_hosting_setting(flags.provider, hosting.provider, "azure-devops");
+    let named_by_user = flags.host.is_some() || flags.api_base.is_some();
     let host = resolve_hosting_setting(flags.host, hosting.host, "github.com");
     let api_base = resolve_hosting_setting(flags.api_base, hosting.api_base, "");
     let token_env =
@@ -273,6 +282,13 @@ pub fn pull_request_context(
     let token = read_token(token_env)?;
     let host = crate::work_items::effective_work_item_host(&provider_id, &host)?;
     let api_base = crate::work_items::work_item_api_base(&provider_id, &host, &api_base)?;
+    crate::work_items::ensure_credential_destination(
+        &provider_id,
+        &host,
+        &api_base,
+        named_by_user,
+        &crate::work_items::trusted_hosts_from_env(),
+    )?;
     let reference = vee_hosting::PullRequestRef {
         repository: vee_hosting::RepositoryRef {
             host,
@@ -322,6 +338,7 @@ pub fn issue_context(
         ));
     }
     let provider = resolve_hosting_setting(flags.provider, hosting.provider, "github");
+    let named_by_user = flags.host.is_some() || flags.api_base.is_some();
     let host = resolve_hosting_setting(flags.host, hosting.host, "github.com");
     let api_base = resolve_hosting_setting(flags.api_base, hosting.api_base, "");
     let token_env = resolve_hosting_setting(flags.token_env, hosting.token_env, "");
@@ -338,6 +355,13 @@ pub fn issue_context(
     let token = read_token(token_env)?;
     let host = crate::work_items::effective_work_item_host(&provider, &host)?;
     let api_base = crate::work_items::work_item_api_base(&provider, &host, &api_base)?;
+    crate::work_items::ensure_credential_destination(
+        &provider,
+        &host,
+        &api_base,
+        named_by_user,
+        &crate::work_items::trusted_hosts_from_env(),
+    )?;
     let reference = vee_hosting::WorkItemRef {
         repository: vee_hosting::RepositoryRef {
             host,
@@ -456,6 +480,13 @@ pub fn refresh_linked_pull_requests(
         let token = read_token(&token_env)?;
         let host = crate::work_items::effective_work_item_host(&provider_id, &host)?;
         let api_base = crate::work_items::work_item_api_base(&provider_id, &host, &api_base)?;
+        crate::work_items::ensure_credential_destination(
+            &provider_id,
+            &host,
+            &api_base,
+            false,
+            &crate::work_items::trusted_hosts_from_env(),
+        )?;
         let username = hosting.username.unwrap_or_default();
         let adapter = pull_request_context_provider(
             &provider_id,
@@ -555,6 +586,7 @@ pub fn publish_review(
     );
     let flags = request.flags;
     let provider_id = resolve_hosting_setting(flags.hosting.provider, hosting.provider, "github");
+    let named_by_user = flags.hosting.host.is_some() || flags.hosting.api_base.is_some();
     let host = resolve_hosting_setting(flags.hosting.host, hosting.host, "github.com");
     let api_base = resolve_hosting_setting(flags.hosting.api_base, hosting.api_base, "");
     let token_env = resolve_hosting_setting(flags.hosting.token_env, hosting.token_env, "");
@@ -596,6 +628,13 @@ pub fn publish_review(
     let token = read_token(&token_env)?;
     let host = crate::work_items::effective_work_item_host(&provider_id, &host)?;
     let api_base = crate::work_items::work_item_api_base(&provider_id, &host, &api_base)?;
+    crate::work_items::ensure_credential_destination(
+        &provider_id,
+        &host,
+        &api_base,
+        named_by_user,
+        &crate::work_items::trusted_hosts_from_env(),
+    )?;
     let settings = PublishSettings {
         provider_id,
         host,
