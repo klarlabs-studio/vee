@@ -348,7 +348,9 @@ struct StandardsInput {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ReviewSessionInput {
-    /// Saved review IDs to read together (1 to 20, no repeats), in display order.
+    /// Saved reviews to read together (1 to 20, no repeats), in display order:
+    /// a review ID, or `REPO:REVIEW_ID` for a review saved in a checkout
+    /// beneath this server's repository root.
     #[schemars(length(min = 1, max = 20), extend("uniqueItems" = true))]
     review_ids: Vec<String>,
 }
@@ -708,8 +710,8 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
 
     viewed_tool!(server, workspace, "review_session", "Review session", read_only_tool(),
         "review-session-v1",
-        "Read several saved reviews together, such as the changes one coding-agent session produced: each change keeps its own gate, risk tier, open findings by severity, and approval eligibility, and the session verdict passes only when every change passed on a current snapshot. Same document as `vee reviews session --review <id>... --output json`.",
-        |ws, input: ReviewSessionInput| operations::review_session(&ws, &input.review_ids));
+        "Read several saved reviews together, such as the changes one coding-agent session produced: each change keeps its own gate, risk tier, open findings by severity, and approval eligibility, and the session verdict passes only when every change passed on a current snapshot. A review saved in another checkout beneath this server's repository root is named `REPO:REVIEW_ID`. Same document as `vee reviews session --review <id>... --output json`.",
+        |ws, input: ReviewSessionInput| operations::review_session(&ws, &input.review_ids, operations::RepositoryPaths::Confined));
 
     viewed_tool!(server, workspace, "check_approval_eligibility", "Check approval eligibility", read_only_tool(),
         "approval-eligibility-v1",

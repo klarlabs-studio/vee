@@ -830,11 +830,11 @@ impl GitHostingProvider for BitbucketAdapter {
             _ => None,
         };
         let base_oid = pull
-            .and_then(|value| value.pointer("destination.commit.hash"))
+            .and_then(|value| value.pointer("/destination/commit/hash"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
         let head_oid = pull
-            .and_then(|value| value.pointer("source.commit.hash"))
+            .and_then(|value| value.pointer("/source/commit/hash"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
         let action = match event_key {
@@ -1278,6 +1278,8 @@ mod tests {
         assert_eq!(event.event_id, "delivery-1");
         assert_eq!(event.delivery_attempt, 2);
         assert_eq!(event.action.as_deref(), Some("synchronize"));
+        assert_eq!(event.base_oid.as_deref(), Some("a".repeat(40).as_str()));
+        assert_eq!(event.head_oid.as_deref(), Some("b".repeat(40).as_str()));
         assert_eq!(
             event.pull_request.unwrap().repository.full_name,
             "team/repo"
