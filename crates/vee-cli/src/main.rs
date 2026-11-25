@@ -8,6 +8,7 @@ use vee_store_sqlite::ReviewStore;
 
 use vee_application::attestation;
 mod contracts;
+mod init_wizard;
 use vee_application::evidence_bundle;
 use vee_application::failure::{
     configuration_failure, usage_failure, ConfigurationFailure, UsageFailure,
@@ -19,6 +20,7 @@ use vee_application::proposals::{
 };
 use vee_application::work_items::{effective_work_item_host, work_item_api_base};
 mod mcp;
+mod snapshot_mcp;
 use vee_application::operations;
 use vee_application::packs;
 use vee_application::patch_sandbox;
@@ -118,9 +120,21 @@ enum Command {
         /// Backend to use instead of the recommended one (see `vee providers detect`).
         #[arg(long, value_name = "CANDIDATE")]
         provider: Option<String>,
-        /// Model for the chosen backend; required for API keys, optional for Ollama.
+        /// Model for the chosen backend; required for API keys, optional otherwise.
         #[arg(long)]
         model: Option<String>,
+        /// Review effort on this machine: low runs each reviewer once, medium three
+        /// times and high five times, keeping findings the runs agree on.
+        #[arg(long, value_enum)]
+        effort: Option<EffortArg>,
+        /// Do not ask questions in a terminal; use the recommended choices.
+        #[arg(long)]
+        no_input: bool,
+        /// Instead of configuring this machine, write a CI pipeline that reviews
+        /// each pull request with an API-key provider (`--provider` and
+        /// `--model` required).
+        #[arg(long, value_enum)]
+        ci: Option<CiTargetArg>,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
@@ -358,6 +372,11 @@ enum Command {
         #[command(subcommand)]
         command: ReposCommand,
     },
+    /// Review the pull request a CI job runs for and publish the result to it.
+    Ci {
+        #[command(subcommand)]
+        command: CiCommand,
+    },
     /// Publish a saved local review to a Git hosting pull request.
     Hosting {
         #[command(subcommand)]
@@ -388,6 +407,16 @@ enum McpCommand {
         /// MCP transport (stdio is the only supported transport).
         #[arg(long, default_value = "stdio", value_parser = ["stdio"])]
         transport: String,
+    },
+    /// Internal: serve read-only snapshot tools to a reviewer during a review.
+    #[command(hide = true)]
+    Snapshot {
+        /// Exploration spec written by the review.
+        #[arg(long)]
+        spec: std::path::PathBuf,
+        /// File each tool call is appended to, one JSON line per call.
+        #[arg(long)]
+        log: std::path::PathBuf,
     },
 }
 #[derive(Subcommand)]
@@ -822,8 +851,11 @@ enum ReviewsCommand {
     },
     /// Read several saved reviews together, such as one agent session's changes: each change's gate, risk, open findings, and approval eligibility, and one verdict.
     Session {
-        /// Saved review IDs (1 to 20), in the order to show them.
-        #[arg(long = "review", value_name = "REVIEW_ID", required = true)]
+        /// Saved reviews (1 to 20), in the order to show them: a review ID in
+        /// this repository, or `REPO:REVIEW_ID` for a review saved in another
+        /// checkout, with REPO relative to this repository's root (such as
+        /// `../api`).
+        #[arg(long = "review", value_name = "[REPO:]REVIEW_ID", required = true)]
         reviews: Vec<String>,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
@@ -918,6 +950,36 @@ enum ReviewsCommand {
         command: ImportedCommand,
     },
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum CiTargetArg {
+    Github,
+    Gitlab,
+}
+
+#[derive(Subcommand)]
+enum CiCommand {
+    /// Detect the pull request from GitHub Actions or GitLab CI, review it from
+    /// its base, publish the check and finding threads, and exit with the gate:
+    /// 0 pass, 1 block, 2 incomplete.
+    Run {
+        /// Also publish the approval verdict as a separate check.
+        #[arg(long)]
+        approval: bool,
+        /// Review effort for this run, replacing configured sampling.
+        #[arg(long, value_enum)]
+        effort: Option<EffortArg>,
+        /// Named policy profile from .vee.yaml to apply.
+        #[arg(long, value_name = "NAME")]
+        policy_profile: Option<String>,
+        /// Account Vee publishes as, when the CI system does not determine it.
+        #[arg(long)]
+        actor_login: Option<String>,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
+}
+
 #[derive(Subcommand)]
 enum HostingCommand {
     /// Retrieve live PR review comments as untrusted remediation context.
@@ -1033,6 +1095,11 @@ enum HostingCommand {
         /// Hosting account that owns Vee's published threads.
         #[arg(long, value_name = "LOGIN")]
         actor_login: Option<String>,
+        /// Also publish the approval verdict (`vee gate approval`) as a separate
+        /// "Vee approval" check: success when eligible, neutral when a person is
+        /// needed. Not available for Gerrit.
+        #[arg(long)]
+        approval: bool,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
@@ -1559,8 +1626,10 @@ impl vee_http::WebhookEventHandler for HostingWebhookReviewer {
             .list_changed_files(pull_request, &remote.revision)
             .map_err(|error| error.to_string())?;
         let delivery_key = vee_core::digest(event.event_id.as_bytes());
+        let findings =
+            vee_application::publication::findings_for_publication(&review.findings, &review.gate);
         let threads = vee_application::publication::build_hosting_threads(
-            &review.findings,
+            &findings,
             pull_request,
             &changed,
             &review.snapshot_id,
@@ -1580,6 +1649,7 @@ impl vee_http::WebhookEventHandler for HostingWebhookReviewer {
                 review_id: &review.review_id,
                 snapshot_id: &review.snapshot_id,
                 findings: &review.findings,
+                pull_request_threads: &[],
             },
             threads,
             |threads| {
@@ -1827,10 +1897,79 @@ fn run() -> Result<u8> {
         Command::Init {
             provider,
             model,
+            effort,
+            no_input,
+            ci: Some(target),
+            output,
+        } => {
+            let _ = no_input;
+            let (Some(provider), Some(model)) = (provider, model) else {
+                return Err(usage_failure(
+                    "`vee init --ci` needs --provider and --model, for example --provider anthropic-api --model <model>",
+                ));
+            };
+            let workflow = vee_application::setup::ci_workflow(
+                match target {
+                    CiTargetArg::Github => vee_application::setup::CiTarget::Github,
+                    CiTargetArg::Gitlab => vee_application::setup::CiTarget::Gitlab,
+                },
+                &provider,
+                &model,
+                effort.map_or(vee_core::ReviewEffort::Medium, Into::into),
+            )
+            .map_err(usage_failure)?;
+            let workspace = operations::Workspace::discover(crate::local_stores())?;
+            vee_application::setup::write_ci_workflow(workspace.root(), &workflow)
+                .map_err(configuration_failure)?;
+            match output {
+                Output::Json => emit_json(&serde_json::json!({
+                    "schema_version": 1,
+                    "path": workflow.path,
+                    "secrets": workflow.secrets,
+                }))?,
+                Output::Text => {
+                    println!("Wrote {}.", workflow.path);
+                    println!(
+                        "Define these CI secrets before it runs: {}.",
+                        workflow.secrets.join(", ")
+                    );
+                    println!("Commit the file; the next pull request is reviewed in CI.");
+                }
+            }
+            Ok(0)
+        }
+        Command::Init {
+            provider,
+            model,
+            effort,
+            no_input,
+            ci: None,
             output,
         } => {
             let workspace = operations::Workspace::discover(crate::local_stores())?;
-            let report = operations::init(&workspace, provider.as_deref(), model.as_deref())?;
+            let mut provider = provider;
+            let mut model = model;
+            let mut effort = effort.map(vee_core::ReviewEffort::from);
+            let guided = !no_input
+                && output == Output::Text
+                && provider.is_none()
+                && model.is_none()
+                && effort.is_none()
+                && std::io::IsTerminal::is_terminal(&std::io::stdin())
+                && std::io::IsTerminal::is_terminal(&std::io::stdout());
+            if guided {
+                let choices = init_wizard::ask(
+                    &operations::detect_providers(),
+                    &operations::machine_setup()?,
+                    &mut std::io::stdin().lock(),
+                    &mut std::io::stdout().lock(),
+                )?;
+                provider = choices.provider;
+                model = choices.model;
+                effort = choices.effort;
+            }
+            let report =
+                operations::init(&workspace, provider.as_deref(), model.as_deref(), effort)?;
             match output {
                 Output::Json => emit_json(&report)?,
                 Output::Text => print_view(&report)?,
@@ -2041,6 +2180,10 @@ fn run() -> Result<u8> {
         Command::Mcp { command } => match command {
             McpCommand::Serve { transport: _ } => {
                 mcp::serve_stdio()?;
+                Ok(0)
+            }
+            McpCommand::Snapshot { spec, log } => {
+                snapshot_mcp::serve(&spec, &log)?;
                 Ok(0)
             }
         },
@@ -2319,8 +2462,16 @@ fn run() -> Result<u8> {
                 approve,
                 output,
             } => {
-                let application =
-                    test_proposals::apply(&proposal_workspace()?, &proposal_id, &approve)?;
+                let workspace = proposal_workspace()?;
+                confirm_patch_application(
+                    "test proposal",
+                    &proposal_id,
+                    &workspace.root().join(".vee/proposals").join(format!(
+                        "test-{}.patch",
+                        proposal_id.strip_prefix("sha256:").unwrap_or(&proposal_id)
+                    )),
+                )?;
+                let application = test_proposals::apply(&workspace, &proposal_id, &approve)?;
                 match output {
                     // Through a Value, as before: keys stay sorted.
                     Output::Json => emit_json(&serde_json::to_value(&application)?)?,
@@ -2586,7 +2737,11 @@ fn run() -> Result<u8> {
                         std::path::PathBuf::from(&top),
                         crate::local_stores(),
                     );
-                    let session = operations::review_session(&workspace, &reviews)?;
+                    let session = operations::review_session(
+                        &workspace,
+                        &reviews,
+                        operations::RepositoryPaths::Relative,
+                    )?;
                     match output {
                         Output::Json => emit_json(&session)?,
                         Output::Text => print_view(&session)?,
@@ -2852,6 +3007,39 @@ fn run() -> Result<u8> {
                 Ok(0)
             }
         },
+        Command::Ci {
+            command:
+                CiCommand::Run {
+                    approval,
+                    effort,
+                    policy_profile,
+                    actor_login,
+                    output,
+                },
+        } => {
+            let pull_request = vee_application::ci::detect(&|name| std::env::var(name).ok())?;
+            let cwd = std::env::current_dir()?;
+            let top = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
+            let run = vee_application::ci::run(
+                &operations::Workspace::new(top, crate::local_stores()),
+                pull_request,
+                vee_application::ci::CiRunOptions {
+                    approval,
+                    effort: effort.map(Into::into),
+                    policy_profile,
+                    actor_login,
+                },
+            )?;
+            match output {
+                Output::Json => emit_json(&serde_json::to_value(&run)?)?,
+                Output::Text => print_view(&run)?,
+            }
+            Ok(match run.gate {
+                GateStatus::Pass => 0,
+                GateStatus::Block => 1,
+                GateStatus::Incomplete => 2,
+            })
+        }
         Command::Hosting { command } => match command {
             HostingCommand::PrIssues {
                 repository,
@@ -2948,6 +3136,7 @@ fn run() -> Result<u8> {
                 username,
                 webhook_secret_env,
                 actor_login,
+                approval,
                 output,
             } => {
                 let cwd = std::env::current_dir()?;
@@ -2969,6 +3158,8 @@ fn run() -> Result<u8> {
                             webhook_secret_env,
                             actor_login,
                         },
+                        approval,
+                        pull_request_threads: Vec::new(),
                     },
                 )?;
                 match output {
@@ -3308,6 +3499,11 @@ fn run() -> Result<u8> {
                         ));
                     }
                     let proposal_dir = proposal_directory(std::path::Path::new(&top))?;
+                    confirm_patch_application(
+                        "patch",
+                        &digest,
+                        &proposal_dir.join(format!("{}.patch", &digest[7..])),
+                    )?;
                     let apply_lock = acquire_proposal_apply_lock(&proposal_dir)?;
                     let record_path = proposal_dir.join(format!("{}.json", &digest[7..]));
                     let patch_path = proposal_dir.join(format!("{}.patch", &digest[7..]));
@@ -3714,6 +3910,39 @@ impl vee_application::ReviewProgressSink for TerminalProgress {
         let _ = write!(stderr, "\r\x1b[2KReviewing: {line}");
         let _ = stderr.flush();
     }
+}
+
+/// A person confirms each patch application at a terminal. Without one, as in
+/// an agent's shell, applying needs `patches.allow_noninteractive_apply` in
+/// this machine's user configuration, which lives outside the repository.
+fn confirm_patch_application(
+    kind: &str,
+    id: &str,
+    location: &std::path::Path,
+) -> anyhow::Result<()> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    if !interactive {
+        if vee_application::noninteractive_patch_apply_allowed().map_err(configuration_failure)? {
+            return Ok(());
+        }
+        return Err(usage_failure(
+            "applying a patch needs a person to confirm it at a terminal; to allow it without one on this machine, set `patches: { allow_noninteractive_apply: true }` in your Vee user config",
+        ));
+    }
+    let mut stderr = std::io::stderr();
+    write!(
+        stderr,
+        "Apply {kind} {id}?\nReview it first: {}\nType `apply` to continue: ",
+        location.display()
+    )?;
+    stderr.flush()?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    if answer.trim() != "apply" {
+        return Err(usage_failure(format!("{kind} {id} was not applied")));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

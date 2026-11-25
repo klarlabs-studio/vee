@@ -218,7 +218,12 @@ impl ToView for vee_application::ReviewSession {
                             )
                         };
                         vec![
-                            Cell::id(&review.review_id),
+                            match &review.repository {
+                                Some(repository) => {
+                                    Cell::id(format!("{repository}:{}", review.review_id))
+                                }
+                                None => Cell::id(&review.review_id),
+                            },
                             gate(&review.gate),
                             Cell::plain(if review.snapshot_current {
                                 "yes"
