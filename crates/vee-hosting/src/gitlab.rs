@@ -1701,9 +1701,13 @@ mod tests {
         assert_eq!(receipt.thread_ids.get("finding-1").unwrap(), "discussion-2");
         let requests = worker.join().unwrap();
         assert!(requests[6].starts_with("PUT /api/v4/projects/group%2Fsubgroup%2Fproject/merge_requests/17/discussions/discussion-1/notes/77"));
-        assert!(requests[6].contains("vee:moved:finding-1") && !requests[6].contains("vee:fingerprint"));
+        assert!(
+            requests[6].contains("vee:moved:finding-1") && !requests[6].contains("vee:fingerprint")
+        );
         assert!(requests[7].contains("discussions/discussion-1?resolved=true"));
-        assert!(requests[8].starts_with("POST /api/v4/projects/group%2Fsubgroup%2Fproject/merge_requests/17/discussions HTTP"));
+        assert!(requests[8].starts_with(
+            "POST /api/v4/projects/group%2Fsubgroup%2Fproject/merge_requests/17/discussions HTTP"
+        ));
         assert!(requests[8].contains("Still wrong"));
     }
 

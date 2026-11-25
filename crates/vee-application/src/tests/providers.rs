@@ -1432,3 +1432,50 @@ fn argument_prompt_adapters_reject_requests_over_the_argument_limit() {
         assert!(error.contains("argument size limit"), "{kind:?}: {error}");
     }
 }
+
+#[test]
+fn a_cli_provider_that_exits_on_a_usage_limit_is_reported_as_rate_limited() {
+    use std::os::unix::fs::PermissionsExt;
+    for kind in [
+        vee_core::ProviderKind::ClaudeCli,
+        vee_core::ProviderKind::Cli,
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("fake-provider");
+        // The message Claude Code prints, on stdout, when the plan's limit is reached.
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' 'Claude AI usage limit reached|1795440000'\nexit 1\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        let request = ProviderRequest {
+            kind,
+            executable: executable.to_string_lossy().into_owned(),
+            args: Vec::new(),
+            model: None,
+            working_directory: directory.path().to_path_buf(),
+            stdin: serde_json::to_vec(&serde_json::json!({
+                "output_schema": {"title": "provider findings"},
+                "snapshot_id": "snapshot-test"
+            }))
+            .unwrap(),
+            timeout_seconds: 5,
+            output_limit_bytes: 4096,
+            context_window_tokens: None,
+            max_output_tokens: None,
+            environment: vec![],
+            sample: None,
+            exploration: None,
+        };
+        let result = CliReviewProvider.execute(&request, None);
+        assert!(result.is_err(), "{kind:?}");
+        assert!(
+            crate::providers::reports_usage_limit(&result),
+            "{kind:?}: {:?}",
+            result.err()
+        );
+    }
+}
