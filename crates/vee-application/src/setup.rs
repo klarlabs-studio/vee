@@ -243,6 +243,133 @@ const API_VENDORS: &[ApiVendor] = &[
     },
 ];
 
+/// A CI system `vee init --ci` writes a pipeline for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CiTarget {
+    Github,
+    Gitlab,
+}
+
+/// The pipeline file `vee init --ci` writes: its path in the repository and
+/// its content.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CiWorkflow {
+    pub path: String,
+    pub content: String,
+    /// CI secrets or variables the team must define before it runs.
+    pub secrets: Vec<String>,
+}
+
+/// A pipeline that installs this version of Vee, sets up an API-key provider
+/// (agent CLIs need an interactive login, which CI does not have) and runs
+/// `vee ci run`. The review runs on the team's own runner and model key.
+pub fn ci_workflow(
+    target: CiTarget,
+    candidate_id: &str,
+    model: &str,
+    effort: ReviewEffort,
+) -> Result<CiWorkflow, String> {
+    let vendor = API_VENDORS
+        .iter()
+        .find(|vendor| vendor.candidate_id == candidate_id)
+        .ok_or_else(|| {
+            let known: Vec<_> = API_VENDORS
+                .iter()
+                .map(|vendor| vendor.candidate_id)
+                .collect();
+            format!(
+                "CI reviews use an API key; choose --provider {}",
+                known.join(", ")
+            )
+        })?;
+    if model.trim().is_empty() || model.contains(['"', '\'', '\n', '$', '`', '\\']) {
+        return Err("--model must be a plain model name".into());
+    }
+    let version = env!("CARGO_PKG_VERSION");
+    let effort = match effort {
+        ReviewEffort::Low => "low",
+        ReviewEffort::Medium => "medium",
+        ReviewEffort::High => "high",
+    };
+    let key = vendor.key;
+    Ok(match target {
+        CiTarget::Github => CiWorkflow {
+            path: ".github/workflows/vee.yml".into(),
+            secrets: vec![key.into()],
+            content: format!(
+                r#"# Vee reviews each pull request on this repository's runner, with this
+# repository's model key, and publishes a check and finding threads.
+# Written by `vee init --ci github`; see https://github.com/klarlabs-studio/vee
+name: Vee review
+on:
+  pull_request:
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+jobs:
+  vee:
+    runs-on: ubuntu-latest
+    # Pull requests from forks get no secrets; Vee needs the model key.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Vee reviews the pull request's head, not GitHub's merge commit,
+          # and needs the history back to the base.
+          ref: ${{{{ github.event.pull_request.head.sha }}}}
+          fetch-depth: 0
+      - uses: klarlabs-studio/vee@v{version}
+        with:
+          provider: {candidate_id}
+          model: "{model}"
+          effort: {effort}
+          api-key: ${{{{ secrets.{key} }}}}
+"#
+            ),
+        },
+        CiTarget::Gitlab => CiWorkflow {
+            path: ".gitlab/vee.gitlab-ci.yml".into(),
+            secrets: vec![key.into(), "GL_TOKEN".into(), "VEE_ACTOR_LOGIN".into()],
+            content: format!(
+                r#"# Vee reviews each merge request on this project's runner, with this
+# project's model key, and publishes a commit status and discussions.
+# Written by `vee init --ci gitlab`. Include it from .gitlab-ci.yml:
+#   include:
+#     - local: .gitlab/vee.gitlab-ci.yml
+# Define these masked CI/CD variables: {key}; GL_TOKEN, a project access
+# token with the api scope; VEE_ACTOR_LOGIN, that token's bot username.
+include:
+  - remote: https://raw.githubusercontent.com/klarlabs-studio/vee/v{version}/integrations/gitlab/vee.gitlab-ci.yml
+variables:
+  VEE_VERSION: v{version}
+  VEE_PROVIDER: {candidate_id}
+  VEE_MODEL: "{model}"
+  VEE_EFFORT: {effort}
+"#
+            ),
+        },
+    })
+}
+
+/// Write `workflow` into the repository at `root`, never over an existing file.
+pub fn write_ci_workflow(root: &Path, workflow: &CiWorkflow) -> Result<(), String> {
+    if !root.join(".vee.yaml").exists() {
+        return Err("this repository has no .vee.yaml; run `vee init` first".into());
+    }
+    let path = root.join(&workflow.path);
+    if path.exists() {
+        return Err(format!(
+            "{} already exists; edit it or remove it first",
+            workflow.path
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::write(&path, &workflow.content).map_err(|error| format!("{}: {error}", workflow.path))
+}
+
 /// Ollama's base URL from `OLLAMA_HOST`, accepted only when it is a loopback HTTP
 /// address, because the local provider must not send source off the machine.
 fn ollama_base_url(probe: &dyn SystemProbe) -> Result<String, String> {
@@ -1240,6 +1367,91 @@ mod tests {
         );
         assert_eq!(provider.egress, ProviderEgress::Local);
         assert!(provider_for(&system, &report.candidates[0], Some("missing")).is_err());
+    }
+
+    #[test]
+    fn the_github_action_and_gitlab_template_take_what_init_writes() {
+        let read = |path: &str| -> serde_yaml::Value {
+            let path = format!("{}/../../{path}", env!("CARGO_MANIFEST_DIR"));
+            serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+        };
+        let action = read("action.yml");
+        for input in ["provider", "model", "effort", "api-key"] {
+            assert!(!action["inputs"][input].is_null(), "action input {input}");
+        }
+        assert_eq!(action["runs"]["using"], "composite");
+        let template = read("integrations/gitlab/vee.gitlab-ci.yml");
+        for variable in ["VEE_VERSION", "VEE_PROVIDER", "VEE_MODEL", "VEE_EFFORT"] {
+            assert!(
+                !template["variables"][variable].is_null(),
+                "template variable {variable}"
+            );
+        }
+        assert_eq!(
+            template["vee-review"]["image"]["name"],
+            "ghcr.io/klarlabs-studio/vee:${VEE_VERSION}"
+        );
+    }
+
+    #[test]
+    fn ci_workflows_pin_this_version_and_use_an_api_key() {
+        let github = ci_workflow(
+            CiTarget::Github,
+            "anthropic-api",
+            "claude-sonnet-5-5",
+            ReviewEffort::Medium,
+        )
+        .unwrap();
+        assert_eq!(github.path, ".github/workflows/vee.yml");
+        assert_eq!(github.secrets, ["ANTHROPIC_API_KEY"]);
+        let version = env!("CARGO_PKG_VERSION");
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&github.content).unwrap();
+        let steps = &parsed["jobs"]["vee"]["steps"];
+        assert_eq!(
+            steps[0]["with"]["ref"],
+            "${{ github.event.pull_request.head.sha }}"
+        );
+        assert_eq!(steps[0]["with"]["fetch-depth"], 0);
+        assert_eq!(
+            steps[1]["uses"],
+            format!("klarlabs-studio/vee@v{version}").as_str()
+        );
+        assert_eq!(steps[1]["with"]["model"], "claude-sonnet-5-5");
+        assert_eq!(
+            steps[1]["with"]["api-key"],
+            "${{ secrets.ANTHROPIC_API_KEY }}"
+        );
+        assert_eq!(parsed["permissions"]["checks"], "write");
+
+        let gitlab = ci_workflow(
+            CiTarget::Gitlab,
+            "openai-api",
+            "gpt-model",
+            ReviewEffort::Low,
+        )
+        .unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&gitlab.content).unwrap();
+        assert_eq!(
+            parsed["variables"]["VEE_VERSION"],
+            format!("v{version}").as_str()
+        );
+        assert!(parsed["include"][0]["remote"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!(
+                "/v{version}/integrations/gitlab/vee.gitlab-ci.yml"
+            )));
+        assert!(gitlab.secrets.contains(&"GL_TOKEN".to_string()));
+
+        let cli = ci_workflow(CiTarget::Github, "claude", "m", ReviewEffort::Low).unwrap_err();
+        assert!(cli.contains("anthropic-api"), "{cli}");
+        assert!(ci_workflow(
+            CiTarget::Github,
+            "openai-api",
+            "x\"; curl evil",
+            ReviewEffort::Low
+        )
+        .is_err());
     }
 
     #[test]

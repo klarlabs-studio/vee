@@ -130,6 +130,11 @@ enum Command {
         /// Do not ask questions in a terminal; use the recommended choices.
         #[arg(long)]
         no_input: bool,
+        /// Instead of configuring this machine, write a CI pipeline that reviews
+        /// each pull request with an API-key provider (`--provider` and
+        /// `--model` required).
+        #[arg(long, value_enum)]
+        ci: Option<CiTargetArg>,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
@@ -366,6 +371,11 @@ enum Command {
     Repos {
         #[command(subcommand)]
         command: ReposCommand,
+    },
+    /// Review the pull request a CI job runs for and publish the result to it.
+    Ci {
+        #[command(subcommand)]
+        command: CiCommand,
     },
     /// Publish a saved local review to a Git hosting pull request.
     Hosting {
@@ -940,6 +950,36 @@ enum ReviewsCommand {
         command: ImportedCommand,
     },
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum CiTargetArg {
+    Github,
+    Gitlab,
+}
+
+#[derive(Subcommand)]
+enum CiCommand {
+    /// Detect the pull request from GitHub Actions or GitLab CI, review it from
+    /// its base, publish the check and finding threads, and exit with the gate:
+    /// 0 pass, 1 block, 2 incomplete.
+    Run {
+        /// Also publish the approval verdict as a separate check.
+        #[arg(long)]
+        approval: bool,
+        /// Review effort for this run, replacing configured sampling.
+        #[arg(long, value_enum)]
+        effort: Option<EffortArg>,
+        /// Named policy profile from .vee.yaml to apply.
+        #[arg(long, value_name = "NAME")]
+        policy_profile: Option<String>,
+        /// Account Vee publishes as, when the CI system does not determine it.
+        #[arg(long)]
+        actor_login: Option<String>,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
+}
+
 #[derive(Subcommand)]
 enum HostingCommand {
     /// Retrieve live PR review comments as untrusted remediation context.
@@ -1609,6 +1649,7 @@ impl vee_http::WebhookEventHandler for HostingWebhookReviewer {
                 review_id: &review.review_id,
                 snapshot_id: &review.snapshot_id,
                 findings: &review.findings,
+                pull_request_threads: &[],
             },
             threads,
             |threads| {
@@ -1858,6 +1899,51 @@ fn run() -> Result<u8> {
             model,
             effort,
             no_input,
+            ci: Some(target),
+            output,
+        } => {
+            let _ = no_input;
+            let (Some(provider), Some(model)) = (provider, model) else {
+                return Err(usage_failure(
+                    "`vee init --ci` needs --provider and --model, for example --provider anthropic-api --model <model>",
+                ));
+            };
+            let workflow = vee_application::setup::ci_workflow(
+                match target {
+                    CiTargetArg::Github => vee_application::setup::CiTarget::Github,
+                    CiTargetArg::Gitlab => vee_application::setup::CiTarget::Gitlab,
+                },
+                &provider,
+                &model,
+                effort.map_or(vee_core::ReviewEffort::Medium, Into::into),
+            )
+            .map_err(usage_failure)?;
+            let workspace = operations::Workspace::discover(crate::local_stores())?;
+            vee_application::setup::write_ci_workflow(workspace.root(), &workflow)
+                .map_err(configuration_failure)?;
+            match output {
+                Output::Json => emit_json(&serde_json::json!({
+                    "schema_version": 1,
+                    "path": workflow.path,
+                    "secrets": workflow.secrets,
+                }))?,
+                Output::Text => {
+                    println!("Wrote {}.", workflow.path);
+                    println!(
+                        "Define these CI secrets before it runs: {}.",
+                        workflow.secrets.join(", ")
+                    );
+                    println!("Commit the file; the next pull request is reviewed in CI.");
+                }
+            }
+            Ok(0)
+        }
+        Command::Init {
+            provider,
+            model,
+            effort,
+            no_input,
+            ci: None,
             output,
         } => {
             let workspace = operations::Workspace::discover(crate::local_stores())?;
@@ -2921,6 +3007,39 @@ fn run() -> Result<u8> {
                 Ok(0)
             }
         },
+        Command::Ci {
+            command:
+                CiCommand::Run {
+                    approval,
+                    effort,
+                    policy_profile,
+                    actor_login,
+                    output,
+                },
+        } => {
+            let pull_request = vee_application::ci::detect(&|name| std::env::var(name).ok())?;
+            let cwd = std::env::current_dir()?;
+            let top = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
+            let run = vee_application::ci::run(
+                &operations::Workspace::new(top, crate::local_stores()),
+                pull_request,
+                vee_application::ci::CiRunOptions {
+                    approval,
+                    effort: effort.map(Into::into),
+                    policy_profile,
+                    actor_login,
+                },
+            )?;
+            match output {
+                Output::Json => emit_json(&serde_json::to_value(&run)?)?,
+                Output::Text => print_view(&run)?,
+            }
+            Ok(match run.gate {
+                GateStatus::Pass => 0,
+                GateStatus::Block => 1,
+                GateStatus::Incomplete => 2,
+            })
+        }
         Command::Hosting { command } => match command {
             HostingCommand::PrIssues {
                 repository,
@@ -3040,6 +3159,7 @@ fn run() -> Result<u8> {
                             actor_login,
                         },
                         approval,
+                        pull_request_threads: Vec::new(),
                     },
                 )?;
                 match output {

@@ -43,6 +43,10 @@ irm https://github.com/klarlabs-studio/vee/releases/latest/download/vee-installe
 
 The installers put `vee` in `~/.local/bin` (set `VEE_INSTALL_DIR` to change it) and refuse an archive whose checksum does not match. To check where an archive was built, run `gh attestation verify <archive> --repo klarlabs-studio/vee`. The Linux binaries need glibc 2.35 or later; on musl systems such as Alpine, build from source or use the container image. For CI runners there is a container image, `ghcr.io/klarlabs-studio/vee`, built from the same release binaries. It runs as a non-root user and holds Vee and Git, which suits API providers; a reviewer that uses an agent CLI needs that CLI added in a derived image. Until the first release is published, install from source as below.
 
+## Reviews on pull requests
+
+`vee init --ci github --provider anthropic-api --model <model>` writes a GitHub workflow that uses the Vee action (`klarlabs-studio/vee`, [action.yml](action.yml)) to review every pull request on your runner with your model key and publishes a check and finding threads; `--ci gitlab` writes a pipeline file that includes the [GitLab template](integrations/gitlab/vee.gitlab-ci.yml) for merge requests. In CI, `vee ci run` detects the pull request, reviews it from its base, publishes the result, and exits with the gate (0 pass, 1 block, 2 incomplete). JSON output follows [schemas/ci-run-v1.schema.json](schemas/ci-run-v1.schema.json). See [the pull request guide](docs/guides/pull-requests.md) and [ADR 0019](docs/adr/0019-reviews-on-pull-requests-run-in-the-teams-ci.md).
+
 ## Build
 
 Building the complete workspace requires Rust stable and a Git executable. The checked-in `web/dist` bundle is embedded in the CLI at compile time; Node.js 22 and npm are needed only to rebuild the UI or run browser tests. Install Vee from a source checkout with:
