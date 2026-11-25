@@ -1,6 +1,12 @@
 import { test, expect } from '@playwright/test'
 import { readFile } from 'node:fs/promises'
 
+// Saved views sit behind a disclosure that starts open only when views exist.
+async function openSavedViews(page) {
+  const toggle = page.locator('details.saved-views-toggle')
+  if (!(await toggle.evaluate(element => element.open))) await toggle.locator('summary').click()
+}
+
 const latest = {
   review_id: 'rev_latest', snapshot_id: 'sha256:latest', status: 'block',
   created_at: '2026-11-14 09:00:00',
@@ -31,9 +37,12 @@ const detail = (summary = latest) => ({
   },
   findings: [findingRecord],
   impact: {
-    schema_version: 3, snapshot_id: summary.snapshot_id, coverage_complete: false,
+    schema_version: 4, snapshot_id: summary.snapshot_id, coverage_complete: false,
     changed_paths: ['src/lib.rs'], changed_symbols: ['validate'],
-    paths: [{ affected_path: 'src/handler.rs', source_path: 'src/lib.rs', symbol: 'validate', relationship: 'resolved_symbol_reference', certainty: 'resolved_semantic', evidence_line: 18 }],
+    paths: [
+      { affected_path: 'src/handler.rs', source_path: 'src/lib.rs', symbol: 'validate', relationship: 'resolved_symbol_reference', certainty: 'resolved_semantic', evidence_line: 18 },
+      { affected_path: 'schemas/api.json', source_path: 'src/lib.rs', symbol: '', relationship: 'co_change', certainty: 'historical', evidence_line: 0, co_change: { together: 4, source_commits: 6 } },
+    ],
     limitations: ['Dynamic dispatch is not modeled.'],
   },
 })
@@ -60,7 +69,11 @@ const findingTask = {
   verification_runs: [{ run_id: 'verify_2', profile_id: 'unit', status: 'failed', snapshot_id: 'sha256:latest', created_at: '2026-11-14 13:00:00' }],
 }
 
+// Lets a test adjust the mocked analytics response before the page loads it.
+let patchAnalytics = body => body
+
 test.beforeEach(async ({ page }) => {
+  patchAnalytics = body => body
   let latestSummary = latest
   let latestDetail = detail(latest)
   await page.route('**/api/**', async route => {
@@ -129,11 +142,13 @@ test.beforeEach(async ({ page }) => {
       latestDetail.findings = [{ ...latestDetail.findings[0], status: update.status, status_reason: update.reason }]
       body = { schema_version: 1, finding_id: 'FIND-001', ...update, note: 'Lifecycle status is audit metadata. Use the waiver workflow for a scoped gate exception.' }
     }
+    else if (url.pathname === '/api/reviews/progress') body = { schema_version: 1, reviews: [] }
     else if (url.pathname === '/api/findings/FIND-001/task') body = findingTask
     else if (url.pathname === '/api/reviews/rev_latest') body = latestDetail
     else if (url.pathname === '/api/reviews/rev_prior') body = { ...detail(prior), superseded_by: { review_id: 'rev_latest', created_at: '2026-11-14 09:00:00', outdated_finding_ids: ['FIND-001'] } }
     else if (url.pathname === '/api/reviews/rev_started') body = latestDetail
     else body = { error: `Unexpected API path ${url.pathname}` }
+    if (url.pathname === '/api/analytics') body = patchAnalytics(body)
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
   })
 })
@@ -145,7 +160,11 @@ test('insights view renders local review trends and labels feedback counts', asy
   await expect(page.getByRole('heading', { name: 'Gate outcomes over time' })).toBeVisible()
   await expect(page.getByRole('img', { name: 'Stacked bar chart of daily gate outcomes' })).toBeVisible()
   await page.getByLabel('Recent date count').selectOption('7')
-  await expect(page.getByText(/Chart shows the 7 latest dates/)).toBeVisible()
+  // Explanations start collapsed so the charts lead.
+  const about = page.locator('.chart-about').first()
+  await expect(about.getByText(/Chart shows the 7 latest dates/)).toBeHidden()
+  await about.getByText('About this chart').click()
+  await expect(about.getByText(/Chart shows the 7 latest dates/)).toBeVisible()
   await expect(page.getByText('confirmed')).toBeVisible()
   await expect(page.getByText(/not calibrated acceptance or accuracy rates/)).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Findings by approved rule' })).toBeVisible()
@@ -185,6 +204,19 @@ test('initial saved review opens without waiting for analytics', async ({ page }
   await savedReview.click()
   await page.getByRole('button', { name: /Findings/ }).click()
   await expect(page.getByText('The changed branch skips validation.')).toBeVisible({ timeout: 3000 })
+})
+
+test('an analyzer run with no findings on changed lines charts as passed, as the gate treats it', async ({ page }) => {
+  patchAnalytics = body => ({
+    ...body,
+    verification_runs: body.verification_runs.map(run =>
+      run.run_id === 'verify_2' ? { ...run, profile_id: 'nox', analyzer_findings_on_changed_lines: 0 } : run),
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: /Insights/ }).click()
+  await page.getByLabel('Filter verification profile').selectOption('nox')
+  await page.getByRole('button', { name: /Show verification runs for 2026-11-14: 1 passed, 0 failed, 0 timed out/ }).click()
+  await expect(page.locator('.analytics-drilldown')).toContainText('nox · clean on changed lines')
 })
 
 test('verification chart filters by profile and date and drills into snapshot context', async ({ page }) => {
@@ -282,6 +314,7 @@ test('saved Insights views restore filters and date range across reloads', async
   await page.getByLabel('Chart date range').selectOption('custom')
   await page.getByLabel('Start date').fill('2026-11-14')
   await page.getByLabel('End date').fill('2026-11-14')
+  await openSavedViews(page)
   await page.getByLabel('New Insights view name').fill('Security on latest day')
   await page.getByRole('button', { name: 'Save view' }).click()
   await expect(page.getByRole('status')).toHaveText('Saved “Security on latest day”.')
@@ -487,6 +520,8 @@ test('review queue filters saved gate decisions and opens the matching review', 
   await expect(page.locator('.queue-card').first()).toContainText('security')
   await expect(page.locator('.queue-card').first()).toContainText('claude')
 
+  await openSavedViews(page)
+
   await page.getByLabel('New queue view name').fill('Blocked security')
   await page.getByRole('button', { name: 'Save view' }).click()
   await expect(page.getByRole('status')).toHaveText('Saved “Blocked security”.')
@@ -510,6 +545,7 @@ test('queue view save reports browser storage failure instead of claiming succes
   })
   await page.goto('/')
   await page.getByRole('button', { name: /Review queue/ }).click()
+  await openSavedViews(page)
   await page.getByLabel('New queue view name').fill('Do not claim saved')
   await page.getByRole('button', { name: 'Save view' }).click()
   await expect(page.getByRole('status')).toHaveText('Could not save this view in browser storage.')
@@ -526,6 +562,7 @@ test('queue view delete restores the view when browser storage fails', async ({ 
   })
   await page.goto('/')
   await page.getByRole('button', { name: /Review queue/ }).click()
+  await openSavedViews(page)
   await page.getByLabel('New queue view name').fill('Keep on failed delete')
   await page.getByRole('button', { name: 'Save view' }).click()
   await expect(page.getByRole('status')).toHaveText('Could not save this view in browser storage.')
@@ -555,6 +592,7 @@ test('Insights saved view deletion restores the view when browser storage fails'
   })
   await page.goto('/')
   await page.getByRole('button', { name: /Insights/ }).click()
+  await openSavedViews(page)
   await page.getByLabel('New Insights view name').fill('Keep insights view')
   await page.getByRole('button', { name: 'Save view' }).click()
   await page.getByLabel('Choose saved Insights view').selectOption({ label: 'Keep insights view' })
@@ -567,6 +605,7 @@ test('Insights saved view deletion restores the view when browser storage fails'
 test('saved queue view keys include the active repository identity', async ({ page }) => {
   await page.goto('/')
   await page.getByRole('button', { name: /Review queue/ }).click()
+  await openSavedViews(page)
   await page.getByLabel('New queue view name').fill('Repo one only')
   await page.getByRole('button', { name: 'Save view' }).click()
   const keys = await page.evaluate(() => Object.keys(localStorage))
@@ -589,12 +628,28 @@ test('finding disposition records a reason and refreshes lifecycle metadata', as
   })
   await page.goto('/')
   await page.getByRole('button', { name: /Findings/ }).click()
-  await page.getByLabel('Disposition for FIND-001').selectOption('resolved')
+  await page.getByRole('button', { name: 'Set disposition for FIND-001' }).click()
+  await page.getByLabel('Disposition for FIND-001', { exact: true }).selectOption('resolved')
   await page.getByLabel('Reason for FIND-001').fill('Fixed and confirmed with the targeted test.')
   await page.getByRole('button', { name: 'Save disposition' }).click()
   await expect(page.getByText('Saved disposition for FIND-001. This does not create a policy waiver.')).toBeVisible()
   await expect(page.getByText(/Disposition: resolved/)).toBeVisible()
   expect(submitted).toEqual({ status: 'resolved', reason: 'Fixed and confirmed with the targeted test.' })
+})
+
+test('disposition form opens on demand and cancel returns focus', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: /Findings/ }).click()
+  await expect(page.getByLabel('Disposition for FIND-001', { exact: true })).toHaveCount(0)
+  const trigger = page.getByRole('button', { name: 'Set disposition for FIND-001' })
+  await trigger.click()
+  await expect(page.getByLabel('Disposition for FIND-001', { exact: true })).toBeFocused()
+  await page.getByLabel('Reason for FIND-001').fill('Draft that is discarded')
+  await page.getByRole('button', { name: 'Cancel' }).click()
+  await expect(page.getByLabel('Disposition for FIND-001', { exact: true })).toHaveCount(0)
+  await expect(trigger).toBeFocused()
+  await trigger.click()
+  await expect(page.getByLabel('Reason for FIND-001')).toHaveValue('')
 })
 
 test('impact view renders relationship certainty and limitations', async ({ page }) => {
@@ -603,6 +658,8 @@ test('impact view renders relationship certainty and limitations', async ({ page
   await expect(page.getByText(/src\/handler.rs/)).toBeVisible()
   await expect(page.getByText(/resolved_semantic/)).toBeVisible()
   await expect(page.getByText('Dynamic dispatch is not modeled.')).toBeVisible()
+  await expect(page.getByText(/changed together in 4 of 6 commits/)).toBeVisible()
+  await expect(page.getByText(/line 0/)).toHaveCount(0)
 })
 
 test('reviewer view shows provider identity, version, and outcome', async ({ page }) => {
@@ -665,6 +722,85 @@ test('saved-review and Insights drilldown links are disabled while a new review 
   await expect(findingReview).toBeDisabled()
   releaseReview()
   await expect(page.getByRole('button', { name: /rev_started/ })).toBeVisible()
+})
+
+test('a running review shows each reviewer as it finishes', async ({ page }) => {
+  let releaseReview
+  let reviewRequested
+  const reviewGate = new Promise(resolve => { releaseReview = resolve })
+  const requestSeen = new Promise(resolve => { reviewRequested = resolve })
+  let reviewers = []
+  let token
+  await page.route('**/api/reviews', async route => {
+    if (route.request().method() === 'POST') {
+      token = route.request().postDataJSON().progress_token
+      reviewRequested()
+      await reviewGate
+    }
+    await route.fallback()
+  })
+  // Another review (another tab) runs too; the page must follow only its own.
+  const other = { progress_token: 'another-tab', phase: 'reviewing', elapsed_ms: 9000, reviewers: [{ reviewer_id: 'other-reviewer', runs: 1, finished: 1, failed: 0, cached: 0 }] }
+  await page.route('**/api/reviews/progress', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ schema_version: 1, reviews: [{ progress_token: token, phase: reviewers.length ? 'reviewing' : 'preparing', elapsed_ms: 1000, reviewers }, other] }),
+  }))
+  await page.goto('/')
+  await page.getByRole('button', { name: /Run review/ }).click()
+  await requestSeen
+  await expect(page.getByRole('status').filter({ hasText: 'Preparing review context…' })).toBeVisible()
+  reviewers = [
+    { reviewer_id: 'correctness', runs: 3, finished: 3, failed: 0, cached: 0 },
+    { reviewer_id: 'security', runs: 1, finished: 0, failed: 0, cached: 0 },
+    { reviewer_id: 'style', runs: 1, finished: 1, failed: 1, cached: 0 },
+  ]
+  const progress = page.getByRole('list', { name: 'Reviewer progress' })
+  await expect(page.getByRole('status').filter({ hasText: '2 of 3 reviewers finished' })).toBeVisible()
+  await expect(progress.getByRole('listitem').filter({ hasText: 'correctness' })).toContainText('done')
+  await expect(progress.getByRole('listitem').filter({ hasText: 'security' })).toContainText('running')
+  await expect(progress.getByRole('listitem').filter({ hasText: 'style' })).toContainText('failed')
+  await expect(progress.getByText('other-reviewer')).toHaveCount(0)
+  expect(token).toMatch(/^[A-Za-z0-9_-]{1,64}$/)
+  releaseReview()
+  await expect(page.getByText('Policy satisfied')).toBeVisible()
+  await expect(progress).toBeHidden()
+})
+
+test('a running review keeps the previous review visible and shows elapsed time', async ({ page }) => {
+  let releaseReview
+  let reviewRequested
+  const reviewGate = new Promise(resolve => { releaseReview = resolve })
+  const requestSeen = new Promise(resolve => { reviewRequested = resolve })
+  await page.route('**/api/reviews', async route => {
+    if (route.request().method() === 'POST') {
+      reviewRequested()
+      await reviewGate
+    }
+    await route.fallback()
+  })
+  await page.goto('/')
+  await expect(page.getByText('Action required')).toBeVisible()
+  await page.getByLabel('Change scope').selectOption('working_tree')
+  await page.getByRole('button', { name: /Run review/ }).click()
+  await requestSeen
+  await expect(page.getByText('Reviewing working tree…')).toBeVisible()
+  await expect(page.getByRole('status').filter({ hasText: 'The previous review stays visible' })).toBeVisible()
+  await expect(page.locator('.review-elapsed')).toContainText(/0:0\d elapsed/)
+  await expect(page.getByText('Action required')).toBeVisible()
+  releaseReview()
+  await expect(page.getByText('Policy satisfied')).toBeVisible()
+  await expect(page.locator('.review-elapsed')).toBeHidden()
+})
+
+test('launch controls show keyboard focus', async ({ page }) => {
+  await page.goto('/')
+  const scope = page.getByLabel('Change scope')
+  await scope.focus()
+  await expect(scope).toHaveCSS('outline-style', 'solid')
+  await page.keyboard.press('Tab')
+  await expect(page.getByLabel('Base branch')).toBeFocused()
+  await expect(page.getByLabel('Base branch')).toHaveCSS('outline-style', 'solid')
 })
 
 test('review launcher waits for initial history before starting a new review', async ({ page }) => {
@@ -883,7 +1019,8 @@ test('the finding drawer follows disposition saves and closes when another revie
   await page.getByRole('button', { name: 'Open details for FIND-001' }).click()
   const drawer = page.getByRole('dialog', { name: 'Finding details' })
   await expect(drawer).toContainText('correctness · open')
-  await page.getByLabel('Disposition for FIND-001').selectOption('verified')
+  await page.getByRole('button', { name: 'Set disposition for FIND-001' }).click()
+  await page.getByLabel('Disposition for FIND-001', { exact: true }).selectOption('verified')
   await page.getByLabel('Reason for FIND-001').fill('Reproduced locally')
   await page.getByRole('button', { name: 'Save disposition' }).click()
   await expect(drawer).toContainText('correctness · verified')
@@ -904,4 +1041,105 @@ test('opening a finding moves focus into the drawer and Escape closes it', async
   await page.keyboard.press('Escape')
   await expect(drawer).toBeHidden()
   await expect(opener).toBeFocused()
+})
+
+test('change risk card names the tier and the flagged factors', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByLabel('Change risk')).toHaveCount(0)
+  await page.route('**/api/reviews/rev_latest', route => route.fulfill({
+    json: {
+      ...detail(latest),
+      risk: {
+        schema_version: 1, snapshot_id: latest.snapshot_id, tier: 'elevated', limitations: [],
+        factors: [
+          { id: 'subsystems', label: 'Subsystems touched', value: 3, threshold: 3, flagged: true, detail: 'api, docs, store', basis: 'Mockus & Weiss 2000' },
+          { id: 'files', label: 'Files changed', value: 3, threshold: 20, flagged: false, detail: '3 file(s)', basis: 'Kamei et al. 2013' },
+        ],
+      },
+    },
+  }))
+  await page.reload()
+  const card = page.getByLabel('Change risk')
+  await expect(card).toContainText('elevated')
+  await expect(card).toContainText('1 of 2 flagged: subsystems touched 3')
+  await expect(card).not.toContainText('files changed')
+  await expect(card.locator('small')).toHaveAttribute('title', /Basis: Mockus & Weiss 2000/)
+})
+
+test('finding drawer shows the changed hunk and the finding kind', async ({ page }) => {
+  await page.route('**/api/findings/FIND-001/task', route => route.fulfill({ json: {
+    ...findingTask,
+    task: { ...findingTask.task, diff_hunk: {
+      path: 'src/lib.rs', header: '@@ -41,3 +41,3 @@', truncated: false,
+      lines: [
+        { kind: 'context', line: 41, base_line: 41, text: '    if input.is_empty() {' },
+        { kind: 'removed', line: null, base_line: 42, text: '        return Err(Empty);' },
+        { kind: 'added', line: 42, base_line: null, text: '        return process(input);' },
+      ],
+    } },
+  } }))
+  await page.goto('/')
+  await page.getByRole('button', { name: /Findings/ }).click()
+  await page.getByRole('button', { name: 'Open details for FIND-001' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Finding details' })
+  await expect(drawer.locator('.finding-kind')).toHaveText('defect')
+  const change = drawer.getByRole('region', { name: 'Change' })
+  await expect(change).toContainText('@@ -41,3 +41,3 @@')
+  await expect(change.locator('.source-line.removed')).toContainText('return Err(Empty);')
+  await expect(change.locator('.source-line.added.flagged')).toContainText('return process(input);')
+})
+
+test('finding drawer omits the change section when the flagged line is unchanged', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: /Findings/ }).click()
+  await page.getByRole('button', { name: 'Open details for FIND-001' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Finding details' })
+  await expect(drawer.getByText('Code reference')).toBeVisible()
+  await expect(drawer.getByRole('region', { name: 'Change' })).toHaveCount(0)
+})
+
+test('impact lists code references before history-only co-change leads', async ({ page }) => {
+  await page.route('**/api/reviews/rev_latest', route => route.fulfill({ json: {
+    ...detail(latest),
+    impact: { ...detail(latest).impact, paths: [
+      { affected_path: 'schemas/api.json', source_path: 'src/lib.rs', symbol: '', relationship: 'co_change', certainty: 'historical', evidence_line: 0, co_change: { together: 4, source_commits: 6 } },
+      { affected_path: 'src/handler.rs', source_path: 'src/lib.rs', symbol: 'validate', relationship: 'syntactic_symbol_reference', certainty: 'inferred_syntax', evidence_line: 18 },
+    ] },
+  } }))
+  await page.goto('/')
+  await page.getByRole('button', { name: /Impact/ }).click()
+  await expect(page.locator('.impact-row').first()).toContainText('src/handler.rs')
+  await expect(page.locator('.impact-row').nth(1)).toContainText('changed together in 4 of 6 commits')
+})
+
+test('overview findings use the finding title, not only its category', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.locator('.content-grid .finding-row strong').first()).toHaveText('The changed branch skips validation.')
+})
+
+test('a review whose checkout has moved says why impact and risk are missing', async ({ page }) => {
+  await page.route('**/api/reviews/rev_latest', route => route.fulfill({ json: { ...detail(latest), snapshot_current: false } }))
+  await page.goto('/')
+  await expect(page.getByRole('note').filter({ hasText: 'The checkout has changed since this review' })).toBeVisible()
+  await expect(page.getByLabel('Change risk')).toHaveCount(0)
+})
+
+test('a current review shows no moved-checkout notice', async ({ page }) => {
+  await page.route('**/api/reviews/rev_latest', route => route.fulfill({ json: { ...detail(latest), snapshot_current: true } }))
+  await page.goto('/')
+  await expect(page.getByRole('button', { name: 'Overview' })).toBeVisible()
+  await expect(page.getByText('The checkout has changed since this review')).toHaveCount(0)
+})
+
+test('task-alignment findings are labeled as task findings', async ({ page }) => {
+  const taskFinding = { ...findingRecord, finding: { ...findingRecord.finding, category: 'task-alignment', advisory: false } }
+  await page.route('**/api/findings/FIND-001/task', route => route.fulfill({ json: {
+    ...findingTask, task: { ...findingTask.task, finding: taskFinding },
+  } }))
+  await page.route('**/api/reviews/rev_latest/findings**', route => route.fulfill({ json: [taskFinding] }))
+  await page.route('**/api/reviews/rev_latest', route => route.fulfill({ json: { ...detail(latest), findings: [taskFinding] } }))
+  await page.goto('/')
+  await page.getByRole('button', { name: /Findings/ }).click()
+  await page.getByRole('button', { name: 'Open details for FIND-001' }).click()
+  await expect(page.getByRole('dialog', { name: 'Finding details' }).locator('.finding-kind')).toHaveText('task')
 })
