@@ -1276,6 +1276,73 @@ mod tests {
     }
 
     #[test]
+    fn the_user_config_init_writes_matches_its_published_schema() {
+        let schema_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../schemas/user-config-v1.schema.json"
+        );
+        let schema: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(schema_path).unwrap()).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let system = FakeSystem {
+            executables: [
+                ("codex", "1"),
+                ("agy", "1"),
+                ("gemini", "1"),
+                ("claude", "1"),
+            ]
+            .into(),
+            env: [
+                ("OPENAI_API_KEY", "k"),
+                ("ANTHROPIC_API_KEY", "k"),
+                ("GEMINI_API_KEY", "k"),
+            ]
+            .into(),
+            ollama: Some(vec!["qwen3:8b"]),
+            context_length: Some(40_960),
+        };
+        for candidate in &detect(&system).candidates {
+            let repository = tempfile::tempdir().unwrap();
+            let home = tempfile::tempdir().unwrap();
+            let user_config = home.path().join("vee/config.yaml");
+            init(
+                &system,
+                repository.path(),
+                &user_config,
+                InitRequest {
+                    candidate_id: Some(candidate.candidate_id.as_str()),
+                    model: candidate.requires_model.then_some("model-id"),
+                    effort: Some(vee_core::ReviewEffort::Medium),
+                },
+            )
+            .unwrap_or_else(|error| panic!("{}: {error:?}", candidate.candidate_id));
+            let written: serde_json::Value =
+                serde_yaml::from_slice(&std::fs::read(&user_config).unwrap()).unwrap();
+            let errors: Vec<String> = validator
+                .iter_errors(&written)
+                .map(|e| e.to_string())
+                .collect();
+            assert!(
+                errors.is_empty(),
+                "{}: {errors:?}\n{written}",
+                candidate.candidate_id
+            );
+        }
+    }
+
+    #[test]
+    fn user_and_repository_schemas_define_providers_alike() {
+        let load = |name: &str| -> serde_json::Value {
+            let path = format!("{}/../../schemas/{name}", env!("CARGO_MANIFEST_DIR"));
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+        };
+        assert_eq!(
+            load("user-config-v1.schema.json")["$defs"]["provider"],
+            load("repository-config-v1.schema.json")["$defs"]["provider"]
+        );
+    }
+
+    #[test]
     fn init_writes_portable_repository_config_and_machine_provider() {
         let system = FakeSystem {
             executables: [("codex", "codex-cli 0.40.0")].into(),
