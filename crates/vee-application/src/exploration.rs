@@ -200,11 +200,36 @@ impl SnapshotExplorer {
                 .filter(|path| glob.is_none_or(|glob| glob_matches(glob, path)))
                 .cloned()
                 .collect::<Vec<_>>();
-            let shown = matching.len().min(limit);
-            let mut text = format!("{shown} of {} matching snapshot paths\n", matching.len());
-            for path in &matching[..shown] {
-                text.push_str(path);
-                text.push('\n');
+            // The listing counts against the read budget like file text; the
+            // header and the cut-short note are reserved for first.
+            const CUT_SHORT: &str = "[listing cut short by the read budget]\n";
+            let header_len = format!(
+                "{} of {} matching snapshot paths\n",
+                matching.len(),
+                matching.len()
+            )
+            .len();
+            let budget = explorer
+                .remaining_bytes()
+                .saturating_sub(header_len + CUT_SHORT.len());
+            let mut listed = String::new();
+            let mut shown = 0;
+            let mut over_budget = false;
+            for path in matching.iter().take(limit) {
+                if listed.len() + path.len() + 1 > budget {
+                    over_budget = true;
+                    break;
+                }
+                listed.push_str(path);
+                listed.push('\n');
+                shown += 1;
+            }
+            let mut text = format!(
+                "{shown} of {} matching snapshot paths\n{listed}",
+                matching.len()
+            );
+            if over_budget {
+                text.push_str(CUT_SHORT);
             }
             Ok(Outcome::ok(text, Vec::new()))
         })
@@ -257,6 +282,17 @@ impl SnapshotExplorer {
                 }
                 let numbered = format!("{number:>6}| {line}\n");
                 if body.len() + numbered.len() > limit {
+                    if body.is_empty() {
+                        // One line longer than the limit: show its start and
+                        // move on, so the next call does not ask for it again.
+                        let mut cut = limit.saturating_sub(1).min(numbered.len());
+                        while !numbered.is_char_boundary(cut) {
+                            cut -= 1;
+                        }
+                        body.push_str(&numbered[..cut]);
+                        body.push('\n');
+                        last_line = number;
+                    }
                     truncated = true;
                     break;
                 }

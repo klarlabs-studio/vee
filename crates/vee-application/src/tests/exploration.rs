@@ -253,3 +253,35 @@ fn secret_paths_are_denied_whatever_their_case_or_directory() {
         assert!(!spec.denies(allowed), "{allowed} is denied");
     }
 }
+
+#[test]
+fn a_line_longer_than_the_limit_is_shown_in_part_and_reading_moves_on() {
+    let (directory, change_set) = repository();
+    let mut review = vee_core::ReviewConfig::default();
+    review.exploration.max_read_bytes = 20;
+    let mut explorer = explorer(directory.path(), &change_set, &review);
+    // Line 1 of src/billing.rs is longer than the 20-byte budget.
+    let text = explorer.read_file("src/billing.rs", Some(1), Some(2));
+    assert!(
+        text.contains("     1| pub fn"),
+        "the start of line 1 is shown: {text}"
+    );
+    assert!(
+        text.contains("start_line 2"),
+        "reading continues after line 1: {text}"
+    );
+    assert!(!text.contains("start_line 1 "), "{text}");
+}
+
+#[test]
+fn a_file_listing_stays_within_the_read_budget() {
+    let (directory, change_set) = repository();
+    let mut review = vee_core::ReviewConfig::default();
+    review.exploration.max_read_bytes = 100;
+    let mut explorer = explorer(directory.path(), &change_set, &review);
+    let listing = explorer.list_files(None, None);
+    let call = explorer.calls().last().unwrap();
+    assert!(call.bytes <= 100, "{} bytes: {listing}", call.bytes);
+    assert!(listing.lines().count() > 2, "some paths fit: {listing}");
+    assert!(listing.contains("read budget"), "{listing}");
+}
