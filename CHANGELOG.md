@@ -33,7 +33,28 @@ build provenance.
   first, findings located by a quoted changed line
   ([ADR 0007](docs/adr/0007-focused-review-strategy.md)).
 - Impact analysis that adds related source to each review, ranked with
-  production references before tests.
+  production references before tests. Names are resolved within their scope
+  ([ADR 0012](docs/adr/0012-scoped-name-resolution-for-impact.md)), and files
+  that changed together in history are a second signal
+  ([ADR 0013](docs/adr/0013-co-change-history-as-a-second-impact-signal.md)).
+- Snapshot exploration: reviewers on Claude Code can list, read and search
+  the unchanged code of the reviewed snapshot through budgeted, read-only
+  tools, limited to each reviewer's own paths and a deny list of secrets
+  ([ADR 0017](docs/adr/0017-reviewers-explore-the-review-snapshot.md)).
+- A fixed finding rubric: one defect per finding, and severity set by
+  consequence ([ADR 0018](docs/adr/0018-fixed-finding-rubric-and-severity-floors.md)).
+- A guided `vee init` that detects the AI backends on this machine and, in a
+  terminal, asks which one, which model and which effort to use, with
+  guidance from the measured results
+  ([best results](docs/guides/best-results.md)). The provider and effort are
+  recorded for this machine, outside the repository.
+- An opt-in, advisory task-alignment reviewer that checks a change against
+  its linked work item.
+- Live progress: the terminal, MCP progress notifications and the dashboard
+  show which reviewer runs have finished.
+- Usage limits: when a provider reports a usage, quota or rate limit, its
+  remaining runs are skipped and recorded as `rate_limited`, and the review
+  is incomplete.
 
 ### Gates, evidence and policy
 
@@ -50,11 +71,26 @@ build provenance.
   decisions ([ADR 0004](docs/adr/0004-gate-decisions-as-in-toto-attestations.md)).
 - Digest-pinned policy packs that can only tighten policy
   ([ADR 0003](docs/adr/0003-policy-packs-pinned-and-tighten-only.md)).
+- Severity floors: paths or categories whose findings are evaluated at no
+  less than a minimum severity, from the repository, packs or the protected
+  policy ([ADR 0018](docs/adr/0018-fixed-finding-rubric-and-severity-floors.md)).
+- Change risk as explained tiers (`low`, `elevated`, `high`) with the
+  factors behind them
+  ([ADR 0014](docs/adr/0014-change-risk-as-explained-tiers.md)).
+- Approval eligibility (`vee gate approval`): staged checks of whether a
+  passing change may be approved without a person, and an approval check
+  published with `vee hosting publish --approval`
+  ([ADR 0015](docs/adr/0015-layered-approval-eligibility.md)).
+- Review sessions (`vee reviews session`): several saved reviews, such as
+  one coding-agent session's commits, with a gate per change and one verdict
+  ([ADR 0016](docs/adr/0016-review-sessions-keep-per-change-gates.md)).
 
 ### Workflows
 
 - MCP stdio server and coding-agent skills for review, context, finding
   resolution, patch proposals, missing-test recommendations and PR drafts.
+  A plugin (`plugins/vee`) installs the skills and the MCP server in Claude
+  Code and in Codex.
   Every MCP tool declares an output schema, and saved reviews, verification
   runs and finding feedback can be listed over MCP as on the CLI.
 - Finding lifecycle, feedback, feedback-mined rule candidates with human
@@ -99,7 +135,8 @@ for method and limits.
   reject review requests over 100,000 bytes.
 - A `focused` review cannot split a single file larger than the model's
   input budget.
-- Finding categories are free text.
+- Finding categories are free text, so a category severity floor applies only
+  when the reviewer uses the floor's exact category name.
 - Review time grows with the number of changed files: Vee runs a Git diff
   and a base read per changed file and reviewer. A 100-file change in a
   5,000-file repository took about 5 s with a release build, excluding
