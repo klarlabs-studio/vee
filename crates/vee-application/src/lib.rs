@@ -3,6 +3,7 @@ pub mod acceptance;
 pub mod analytics;
 mod approval;
 pub mod attestation;
+pub mod ci;
 mod config;
 mod context_budget;
 pub mod coverage;

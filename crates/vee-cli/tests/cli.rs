@@ -3,7 +3,9 @@ use vee_core::ports::*;
 use vee_core::{ActorName, Reason};
 
 mod support;
-use support::{vee, vee_applying_without_terminal};
+use support::vee;
+#[cfg(unix)]
+use support::vee_applying_without_terminal;
 
 fn accept_with_timeout(listener: &std::net::TcpListener) -> std::io::Result<std::net::TcpStream> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);

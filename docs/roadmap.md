@@ -3,8 +3,9 @@
 These are the capabilities that teams compare AI code reviewers on and that
 Vee does not yet offer, ranked by their impact on Vee's position. That
 position is an open-source, local-first review gate for teams and coding
-agents, including regulated and zero-data-retention teams that hosted
-reviewers cannot serve.
+agents. It runs on the team's own machines and CI runners with the team's
+own model keys, so code goes only to the model the team chose; this suits
+regulated and zero-data-retention teams in particular.
 
 Effort is rough: **S** is under a week, **M** is one to three weeks, **L**
 is longer. Every item fits the shared-operations architecture
@@ -17,18 +18,38 @@ request.
 
 ### 1. Turnkey deployment in CI (M)
 
-Teams cannot adopt a gate they cannot install in minutes. Vee installs from
-source only, and the hosted lifecycle has not been run on a real host. For
-regulated teams, "runs in your own CI runner and sends nothing anywhere"
-has to be one block of YAML.
+Teams cannot adopt a gate they cannot install in minutes. Releases now ship
+binaries, installers and a container image, but running Vee on pull
+requests still takes hand-written CI, and the hosted lifecycle has not been
+run on a real host. For regulated teams, "runs in your own CI runner and
+sends nothing anywhere" has to be one block of YAML.
 
-- [ ] Signed release binaries, with Vee's own attestation of the build
-- [ ] A multi-stage, non-root container image
-- [ ] A GitHub Action and a GitLab CI template that run `vee review --gate`, then `vee hosting publish --approval`
-- [ ] A non-interactive CI preset in `vee init` that reads the CI environment
+- [x] Release binaries with checksums and build provenance, and shell and PowerShell installers ([release](release.md))
+- [x] A multi-stage, non-root container image, built from the release binaries
+- [ ] Release binaries signed with a maintainer key, beyond build provenance
+- [x] A GitHub Action and a GitLab CI template that run `vee ci run` ([guide](guides/pull-requests.md))
+- [x] `vee ci run`, which reads the CI environment, and `vee init --ci github|gitlab`, which writes the pipeline ([ADR 0019](adr/0019-reviews-on-pull-requests-run-in-the-teams-ci.md))
 - [ ] A first run of [the GitHub hosted acceptance runbook](acceptance/github-hosted.md)
 
-### 2. Observe mode for approvals (S–M)
+### 2. Approval and risk visible on the pull request (S)
+
+The gate decision is published as a check, but the approval verdict and the
+risk tier are only visible locally or in that check's text.
+
+- [ ] Publish an eligible approval as the host's own approval: an approving review on GitHub, an approval on GitLab and Bitbucket, a vote on Azure DevOps, a label vote on Gerrit
+- [ ] Risk-tier and gate labels on the pull request, so teams can filter and route by them
+- [ ] Withdraw both when a new push makes the review stale
+
+### 3. Incremental review after a push (M)
+
+Each push is reviewed as a whole change again. Reviewers want only what
+changed since the last review, with earlier findings carried over.
+
+- [ ] Review the range from the last reviewed head to the new head, with the whole change as context
+- [ ] Carry forward findings on unchanged lines without asking the model again
+- [ ] Resolve threads whose finding the new code fixed, and keep the gate over the whole change
+
+### 4. Observe mode for approvals (S–M)
 
 Teams will not turn on automatic approval without first seeing what it
 would have approved.
@@ -38,8 +59,9 @@ would have approved.
 - [ ] Agreement and override rates in `vee analytics`
 - [ ] Rate limits on automatic approvals
 - [ ] Close the remaining items of [ADR 0015](adr/0015-layered-approval-eligibility.md)
+- [ ] Code ownership in approval: require the owners of touched paths, or keep changes to some owners' paths for a person
 
-### 3. A PR steward on the user's own agent (M–L)
+### 5. A PR steward on the user's own agent (M–L)
 
 Fix failing CI, review feedback and simple merge conflicts, with an undo
 trail. Most of the parts exist:
@@ -56,44 +78,54 @@ What is missing is the loop.
 - [ ] Merge conflicts resolved only when the result can be verified; otherwise the change goes back to a person
 - [ ] Applying a patch stays approved by a person or permitted by policy
 
-### 4. Commands in PR comments (M)
+### 6. Commands in PR comments (M)
 
 - [ ] `@vee explain`, `dismiss <reason>`, `waive <expiry>`, `rereview` and `status`
 - [ ] Dismissals become finding feedback
 - [ ] Waivers only for actors that code ownership permits
 - [ ] Comment text stays untrusted and maps only to these operations
 
-### 5. Learn from PR feedback automatically (S–M)
+### 7. Learn from PR feedback automatically (S–M)
 
 - [ ] Reactions, resolved threads, and fix commits that touch a flagged line become weak labels, kept apart from explicit labels
 - [ ] Weak labels shown with their provenance in `vee rules candidates`
 - [ ] Rules still need a person's approval, and weak labels never affect the gate
 - [ ] Export learned guidance as a pull request to `REVIEW.md` or `AGENTS.md`
+- [ ] Retire noisy rules automatically: a rule whose findings are dismissed above a threshold is suspended, with an audit entry and a way to restore it
 
-### 6. Committable suggestions (S)
+### 8. Committable suggestions (S)
 
 - [ ] Publish a validated, single-hunk patch bound to the reviewed snapshot as a host suggestion (GitHub, GitLab)
 - [ ] Other hosts get a fenced diff
 
-### 7. Security presets and a regulated policy pack (S)
+### 9. Security presets and a regulated policy pack (S)
 
 - [ ] `vee init` detects gitleaks, semgrep, osv-scanner and trivy, and scaffolds trusted verification profiles and a `security` policy profile
 - [ ] A "regulated" policy pack: required analyzers, severity floors for protected paths, and automatic approval off
 - [ ] Analyzers stay external; Vee does not ship a scanner
 
-### 8. Jira and Linear work items (S–M each)
+### 10. Configurable standards sources (S)
+
+Reviewers read a fixed set of agent instruction files, such as `AGENTS.md`
+and `CLAUDE.md`. Teams keep standards elsewhere too.
+
+- [ ] Read `REVIEW.md`, `.cursorrules` and `.cursor/rules/`, and paths listed in `.vee.yaml`
+- [ ] Scope a source to paths, as the existing sources are scoped by directory
+- [ ] Keep provenance for each standard, as today
+
+### 11. Jira and Linear work items (S–M each)
 
 - [ ] Jira Cloud and Data Center adapters for `--work-item`, acceptance traceability and repository context
 - [ ] A Linear adapter
 - [ ] Acceptance criteria are mapped, and work items are digest-bound, as the existing connectors do
 
-### 9. A PR walkthrough with measured diagrams (S–M)
+### 12. A PR walkthrough with measured diagrams (S–M)
 
 - [ ] `vee hosting publish --describe` posts the PR draft and the risk tier
 - [ ] A Mermaid graph of the changed files and their impacted consumers and tests, with each edge labelled measured or heuristic
 - [ ] Generated text never affects the gate
 
-### 10. Team analytics without a server (M)
+### 13. Team analytics without a server (M)
 
 - [ ] `vee analytics aggregate` over evidence bundles or analytics exports collected from CI across repositories
 - [ ] One static report:
@@ -103,16 +135,20 @@ What is missing is the loop.
   - rule effectiveness, with denominators stated.
 - [ ] No server, no identity, and no per-person scores
 
-### 11. Natural-language policy conditions (M)
+### 14. Natural-language policy conditions (M)
 
 - [ ] A classifier reviewer whose output is a labelled condition, such as "changes the authentication flow" or "adds a migration without a rollback"
 - [ ] Conditions only route a change to a person through approval eligibility; they never pass or block the gate
 - [ ] The classifier's response, model and digest are recorded, so the decision replays
 
-### 12. A network webhook server, and acceptance on more hosts (M)
+### 15. A network webhook server, and acceptance on more hosts (M)
 
 - [ ] TLS for `vee webhook-serve` beyond loopback
-- [ ] Real-host acceptance runs for GitLab, Azure DevOps and Bitbucket
+- [ ] Real-host acceptance runs for GitLab, Azure DevOps, Bitbucket and Gerrit
+
+### 16. Bitbucket Data Center (M)
+
+- [ ] A Bitbucket Data Center and Server adapter for context, publication and webhooks; the current adapter covers Bitbucket Cloud only
 
 ## Review quality
 
