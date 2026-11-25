@@ -727,6 +727,30 @@ fn read_user_providers(path: &Path) -> Result<serde_yaml::Mapping, String> {
     Ok(mapping)
 }
 
+/// Rewrite the user config. A symlinked config is written through to its
+/// target, so a dotfiles link stays a link. Rewriting drops comments, so a
+/// previous file with comments is kept next to it as `<name>.bak`.
+fn write_user_config(path: &Path, contents: &str) -> Result<(), String> {
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            std::fs::canonicalize(path).map_err(|error| format!("{}: {error}", path.display()))?
+        }
+        _ => path.to_path_buf(),
+    };
+    if let Ok(previous) = std::fs::read_to_string(&target) {
+        if previous
+            .lines()
+            .any(|line| line.trim_start().starts_with('#'))
+        {
+            let mut backup = target.clone().into_os_string();
+            backup.push(".bak");
+            std::fs::write(&backup, previous)
+                .map_err(|error| format!("{}: {error}", target.display()))?;
+        }
+    }
+    write_atomically(&target, contents)
+}
+
 fn write_atomically(path: &Path, contents: &str) -> Result<(), String> {
     let parent = path
         .parent()
@@ -880,7 +904,7 @@ pub fn init(
     if provider_status == "written" || request.effort.is_some() {
         let yaml = serde_yaml::to_string(&serde_yaml::Value::Mapping(user))
             .map_err(|error| InitError::Configuration(error.to_string()))?;
-        write_atomically(user_config, &yaml).map_err(InitError::Configuration)?;
+        write_user_config(user_config, &yaml).map_err(InitError::Configuration)?;
     }
     if instructions_created {
         write_atomically(&instructions, REVIEWER_INSTRUCTIONS).map_err(InitError::Configuration)?;
@@ -1595,6 +1619,45 @@ mod tests {
             written.contains("claude_cli") && !written.contains("codex_cli"),
             "{written}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_writes_through_a_symlinked_user_config_and_keeps_its_comments() {
+        let system = FakeSystem {
+            executables: [("codex", "1")].into(),
+            ..Default::default()
+        };
+        let repository = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let dotfiles = home.path().join("dotfiles/vee.yaml");
+        std::fs::create_dir_all(dotfiles.parent().unwrap()).unwrap();
+        std::fs::write(&dotfiles, "# my notes\nversion: 1\n").unwrap();
+        let user_config = home.path().join("vee/config.yaml");
+        std::fs::create_dir_all(user_config.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&dotfiles, &user_config).unwrap();
+        init(
+            &system,
+            repository.path(),
+            &user_config,
+            InitRequest {
+                candidate_id: None,
+                model: None,
+                effort: None,
+            },
+        )
+        .unwrap();
+        assert!(std::fs::symlink_metadata(&user_config)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(std::fs::read_to_string(&dotfiles)
+            .unwrap()
+            .contains("codex_cli"));
+        let backup = home.path().join("dotfiles/vee.yaml.bak");
+        assert!(std::fs::read_to_string(backup)
+            .unwrap()
+            .contains("# my notes"));
     }
 
     #[test]
