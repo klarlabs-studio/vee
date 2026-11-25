@@ -90,7 +90,11 @@ runs:
         esac
         unset VEE_API_KEY
         vee init --provider "$VEE_PROVIDER" --model "$VEE_MODEL" --effort "$VEE_EFFORT" --no-input || exit 2
-        args=(ci run --output json)
+        # Comments run `vee ci command`; everything else reviews the pull request.
+        case "$GITHUB_EVENT_NAME" in
+          issue_comment|pull_request_review_comment) args=(ci command --output json) ;;
+          *) args=(ci run --output json) ;;
+        esac
         if [ "$VEE_APPROVAL" = "true" ]; then
           args+=(--approval)
         fi
@@ -98,8 +102,8 @@ runs:
         vee "${args[@]}" > "$result"
         status=$?
         if [ -s "$result" ]; then
-          echo "gate=$(jq -r '.gate // empty' "$result")" >> "$GITHUB_OUTPUT"
-          echo "review-id=$(jq -r '.review_id // empty' "$result")" >> "$GITHUB_OUTPUT"
-          jq -r '"Vee gate: \(.gate // "error")\(if .error then " — " + .error.message else "" end)"' "$result" || true
+          echo "gate=$(jq -r '.gate // .run.gate // empty' "$result")" >> "$GITHUB_OUTPUT"
+          echo "review-id=$(jq -r '.review_id // .run.review_id // empty' "$result")" >> "$GITHUB_OUTPUT"
+          jq -r 'if .outcome then "Vee command: \(.command // "none") \(.outcome): \(.message)" else "Vee gate: \(.gate // "error")\(if .error then " — " + .error.message else "" end)" end' "$result" || true
         fi
         exit "$status"

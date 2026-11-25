@@ -2032,17 +2032,49 @@ pub fn create_waiver(
             },
         )?,
     };
-    let reason = vee_core::Reason::new(request.reason).map_err(usage_failure)?;
-    let author = vee_core::ActorName::new("author", request.author).map_err(usage_failure)?;
     let created_at_unix = crate::current_unix_time().map_err(anyhow::Error::msg)?;
     let expires_at_unix = created_at_unix
         .checked_add(i64::from(request.expires_in_days) * 86_400)
         .context("waiver expiry exceeds supported timestamp")?;
+    record_waiver(
+        &mut *store,
+        RecordedWaiver {
+            fingerprint,
+            snapshot_id: review.snapshot_id,
+            reason: request.reason,
+            author: request.author,
+            provenance: "local_cli",
+            created_at_unix,
+            expires_at_unix,
+        },
+    )
+}
+
+/// A waiver whose finding, snapshot and times are already settled.
+pub(crate) struct RecordedWaiver<'a> {
+    pub fingerprint: String,
+    pub snapshot_id: String,
+    pub reason: &'a str,
+    pub author: &'a str,
+    /// Where the waiver came from: `local_cli` or `pull_request_command`.
+    pub provenance: &'a str,
+    pub created_at_unix: i64,
+    pub expires_at_unix: i64,
+}
+
+pub(crate) fn record_waiver(
+    store: &mut dyn Repositories,
+    recorded: RecordedWaiver<'_>,
+) -> Result<vee_core::Waiver> {
+    let reason = vee_core::Reason::new(recorded.reason).map_err(usage_failure)?;
+    let author = vee_core::ActorName::new("author", recorded.author).map_err(usage_failure)?;
+    let (created_at_unix, expires_at_unix) = (recorded.created_at_unix, recorded.expires_at_unix);
+    let fingerprint = recorded.fingerprint;
     let id = format!(
         "waiver_{}",
         &vee_core::digest(&serde_json::to_vec(&(
             fingerprint.as_str(),
-            review.snapshot_id.as_str(),
+            recorded.snapshot_id.as_str(),
             reason.as_str(),
             author.as_str(),
             created_at_unix,
@@ -2053,14 +2085,23 @@ pub fn create_waiver(
         schema_version: 1,
         id,
         finding_fingerprint: fingerprint,
-        snapshot_id: review.snapshot_id,
+        snapshot_id: recorded.snapshot_id,
         reason: reason.as_str().to_owned(),
         author: author.as_str().to_owned(),
-        provenance: "local_cli".into(),
+        provenance: recorded.provenance.into(),
         created_at_unix,
         expires_at_unix,
     };
-    store.create_waiver(&waiver).map_err(anyhow::Error::msg)?;
+    // The ID covers every field, so an existing one is this same waiver, as
+    // when a CI run on a reused checkout applies a pull request's waivers again.
+    let recorded_before = store
+        .waivers_for_snapshot(&waiver.snapshot_id)
+        .map_err(anyhow::Error::msg)?
+        .iter()
+        .any(|existing| existing.id == waiver.id);
+    if !recorded_before {
+        store.create_waiver(&waiver).map_err(anyhow::Error::msg)?;
+    }
     Ok(waiver)
 }
 

@@ -224,6 +224,23 @@ pub fn run(
         &earlier.report.issues,
         actor_login.as_deref().unwrap_or_default(),
     );
+    let decisions = if pull_request.provider == "github" {
+        decisions_on_pull_request(
+            root,
+            &pull_request,
+            actor_login.as_deref().unwrap_or_default(),
+        )
+        .unwrap_or_else(|error| {
+            // Without them the gate can only be stricter.
+            eprintln!(
+                "warning: dismissals and waivers on the pull request are not applied: {error:#}"
+            );
+            Default::default()
+        })
+    } else {
+        Default::default()
+    };
+    apply_waivers(workspace, &review, &pull_request, &decisions)?;
     let publication = crate::hosting::publish_review(
         workspace,
         crate::hosting::PublishRequest {
@@ -237,15 +254,80 @@ pub fn run(
             },
             approval: options.approval,
             pull_request_threads,
+            dismissed_fingerprints: decisions.dismissed_fingerprints(),
         },
     )?;
     Ok(CiRun {
         schema_version: 1,
-        gate: review.gate.status,
+        gate: publication.gate.unwrap_or(review.gate.status),
         review_id: review.review_id,
         pull_request,
         publication,
     })
+}
+
+/// The dismissals and waivers people gave in comments that still stand.
+fn decisions_on_pull_request(
+    root: &Path,
+    pull_request: &CiPullRequest,
+    actor_login: &str,
+) -> Result<crate::pr_commands::PullRequestDecisions> {
+    let host = crate::hosting::conversation_provider(
+        &pull_request.provider,
+        &pull_request.api_base,
+        &pull_request.token_env,
+        actor_login,
+    )?;
+    let reference = vee_hosting::PullRequestRef {
+        repository: vee_hosting::RepositoryRef {
+            host: pull_request.host.clone(),
+            full_name: pull_request.repository.clone(),
+        },
+        number: pull_request.number,
+    };
+    let comments = host
+        .list_conversation(&reference)
+        .map_err(|error| anyhow::anyhow!("reading the pull request's comments: {error}"))?;
+    let waived = comments.iter().any(|comment| {
+        comment.body.contains("<!-- vee:ack:") && comment.body.contains("\"waive\"")
+    });
+    let codeowners = if waived {
+        crate::pr_commands::base_codeowners(root, &pull_request.base_oid)?
+    } else {
+        None
+    };
+    let mut authorizer = crate::pr_commands::Authorizer::new(&*host, &reference, codeowners);
+    crate::pr_commands::pull_request_decisions(&comments, actor_login, &mut authorizer)
+}
+
+/// Record the waivers given on this head, so the published gate applies them.
+fn apply_waivers(
+    workspace: &Workspace,
+    review: &crate::ReviewResult,
+    pull_request: &CiPullRequest,
+    decisions: &crate::pr_commands::PullRequestDecisions,
+) -> Result<()> {
+    let now = crate::current_unix_time().map_err(anyhow::Error::msg)?;
+    let mut store = workspace.store()?;
+    for waiver in decisions
+        .waivers
+        .iter()
+        .filter(|waiver| waiver.head_oid == pull_request.head_oid && waiver.expires_at_unix > now)
+    {
+        crate::operations::record_waiver(
+            &mut *store,
+            crate::operations::RecordedWaiver {
+                fingerprint: waiver.fingerprint.clone(),
+                snapshot_id: review.snapshot_id.clone(),
+                reason: &waiver.reason,
+                author: &waiver.author,
+                provenance: "pull_request_command",
+                created_at_unix: waiver.created_at_unix,
+                expires_at_unix: waiver.expires_at_unix,
+            },
+        )?;
+    }
+    Ok(())
 }
 
 /// CI checks out a merge commit by default; Vee reviews and publishes the

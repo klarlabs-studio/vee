@@ -49,6 +49,9 @@ The job needs `checks: write` and `pull-requests: write` permissions. The
 action's outputs are `gate` (`pass`, `block` or `incomplete`) and
 `review-id`; it runs on Linux and macOS runners.
 
+The workflow `vee init --ci github` writes also answers commands in pull
+request comments; see [Commands in comments](#commands-in-comments).
+
 ## GitLab
 
 1. Write the pipeline file:
@@ -88,6 +91,50 @@ full history, and publishes a commit status and discussions.
 
 Add `--approval` to also publish whether the change may be approved without
 a person ([ADR 0015](../adr/0015-layered-approval-eligibility.md)).
+
+## Commands in comments
+
+On GitHub, people with write access can talk to Vee in a pull request's
+comments ([ADR 0020](../adr/0020-commands-in-pull-request-comments.md)).
+Write the command on its own line:
+
+| Command | What Vee does |
+|---|---|
+| `@vee review` | Reviews the pull request's head again and publishes the result. |
+| `@vee status` | Replies with its findings on the pull request and the waivers and dismissals in effect. |
+| `@vee explain` | Replies in the finding's thread with an explanation from the configured model. |
+| `@vee dismiss <reason>` | Records the finding as a false positive and resolves its thread. A finding that blocks keeps blocking. |
+| `@vee waive <days>d <reason>` | Waives the finding on the current head, for 1 to 90 days, and reviews again so the check shows the new verdict. |
+| `@vee help` | Lists the commands. |
+
+Write `explain`, `dismiss` and `waive` as a reply in the finding's thread, or
+name the finding anywhere: `@vee waive find_0123456789ab 7d accepted for the
+hotfix`.
+
+What Vee checks:
+
+- **Write access.** Vee asks GitHub for the commenter's access to the
+  repository each time. Comments from bots are ignored.
+- **Code ownership for waivers.** When `CODEOWNERS` on the base branch
+  assigns the finding's file, only those owners can waive it. To accept team
+  owners, give the action a `github-token` that can read the organization's
+  teams; the workflow's own token cannot, so Vee treats team owners as
+  unconfirmed and refuses.
+- **No forks for `review`, `explain` and `waive`.** These load the
+  repository's configuration, which names programs Vee runs, so Vee refuses
+  them on pull requests from forks. It fetches the head itself, after these
+  checks.
+- **The comment is data.** It selects one of these commands, and no part of
+  it reaches the model.
+
+A waiver applies to the head it was given on, like `vee waivers create`: a
+new push needs a new waiver. Every later run reads the pull request again
+and applies a dismissal or waiver only if its command is unedited and its
+author still has the access it needs, so Vee's own replies grant nothing by
+themselves.
+
+GitLab does not start pipelines for comments, so commands are GitHub-only
+for now.
 
 ## Suggested fixes
 

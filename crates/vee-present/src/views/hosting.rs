@@ -356,3 +356,27 @@ impl ToView for CiRun {
             ])
     }
 }
+
+impl ToView for vee_application::pr_commands::CommandOutcome {
+    fn to_view(&self) -> View {
+        let tone = match self.outcome.as_str() {
+            "done" => Tone::Success,
+            "ignored" => Tone::Neutral,
+            _ => Tone::Warning,
+        };
+        let title = match &self.command {
+            Some(command) => format!("@vee {command}"),
+            None => "Comment".into(),
+        };
+        let mut fields = vec![("Result".into(), Cell::plain(&self.message))];
+        if let Some(reply_id) = &self.reply_id {
+            fields.push(("Reply".into(), Cell::id(reply_id)));
+        }
+        if let Some(run) = &self.run {
+            fields.push(("Review".into(), Cell::id(&run.review_id)));
+        }
+        View::new()
+            .title(title, Some(Cell::badge(tone, &self.outcome)))
+            .fields(fields)
+    }
+}

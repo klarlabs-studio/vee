@@ -80,10 +80,11 @@ What is missing is the loop.
 
 ### 6. Commands in PR comments (M)
 
-- [ ] `@vee explain`, `dismiss <reason>`, `waive <expiry>`, `rereview` and `status`
-- [ ] Dismissals become finding feedback
-- [ ] Waivers only for actors that code ownership permits
-- [ ] Comment text stays untrusted and maps only to these operations
+- [x] `@vee explain`, `dismiss <reason>`, `waive <days>d <reason>`, `review` and `status` on GitHub ([ADR 0020](adr/0020-commands-in-pull-request-comments.md))
+- [x] Waivers only for actors that code ownership permits, read from the base branch
+- [x] Comment text stays untrusted and maps only to these operations
+- [ ] Dismissals become finding feedback in `vee rules candidates`
+- [ ] Commands on GitLab, through a webhook that starts a pipeline
 
 ### 7. Learn from PR feedback automatically (S–M)
 

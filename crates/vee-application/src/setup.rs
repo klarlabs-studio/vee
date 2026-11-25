@@ -303,21 +303,52 @@ pub fn ci_workflow(
 name: Vee review
 on:
   pull_request:
+  # `@vee review`, `status`, `explain`, `dismiss`, `waive` and `help` in
+  # pull request comments.
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
 permissions:
   contents: read
   checks: write
   pull-requests: write
+  issues: write
 jobs:
   vee:
     runs-on: ubuntu-latest
     # Pull requests from forks get no secrets; Vee needs the model key.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@v4
         with:
           # Vee reviews the pull request's head, not GitHub's merge commit,
           # and needs the history back to the base.
           ref: ${{{{ github.event.pull_request.head.sha }}}}
+          fetch-depth: 0
+      - uses: klarlabs-studio/vee@v{version}
+        with:
+          provider: {candidate_id}
+          model: "{model}"
+          effort: {effort}
+          api-key: ${{{{ secrets.{key} }}}}
+  vee-command:
+    runs-on: ubuntu-latest
+    # Comments that mention Vee on a pull request. Vee checks who wrote the
+    # command and refuses forks before it fetches the pull request's head.
+    if: >-
+      github.event_name != 'pull_request'
+      && (github.event.issue.pull_request || github.event.pull_request)
+      && contains(github.event.comment.body, '@vee')
+      && github.event.comment.user.type != 'Bot'
+    concurrency:
+      group: vee-command-${{{{ github.event.issue.number || github.event.pull_request.number }}}}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The default branch; Vee fetches the head itself when a command
+          # needs it.
           fetch-depth: 0
       - uses: klarlabs-studio/vee@v{version}
         with:

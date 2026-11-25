@@ -129,6 +129,12 @@ build provenance.
   install a pinned release and run `vee ci run`.
 - `vee init --ci github|gitlab` writes a pipeline that uses them, pinned to
   this release, with an API-key provider ([guide](docs/guides/pull-requests.md)).
+- Commands in pull request comments on GitHub (`vee ci command`):
+  `@vee review`, `status`, `explain`, `dismiss`, `waive` and `help`. Only
+  people with write access can run them, waivers also need code ownership
+  from the base branch's `CODEOWNERS`, and commands that load the
+  repository's configuration are refused on forks
+  ([ADR 0020](docs/adr/0020-commands-in-pull-request-comments.md)).
 - A reviewer may return a fix with a finding. It is posted as a suggestion
   that can be committed from the pull request on GitHub and GitLab, and as a
   diff on other hosts, after Vee checks that it replaces lines of the diff
