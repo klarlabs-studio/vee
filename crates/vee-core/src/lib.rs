@@ -628,6 +628,19 @@ impl Policy {
             .map_or(finding.severity, |floor| floor.minimum)
     }
 
+    /// Whether `severities` blocks this finding: some severity from the reported
+    /// one up to the effective one is in the list. Raising a severity therefore
+    /// never moves a finding out of a list with gaps, such as `[high]` alone.
+    pub fn blocks_at(&self, severities: &[Severity], finding: &Finding) -> bool {
+        let (low, high) = (
+            finding.severity.rank(),
+            self.effective_severity(finding).rank(),
+        );
+        severities
+            .iter()
+            .any(|severity| (low..=high).contains(&severity.rank()))
+    }
+
     /// The first floor with the highest minimum above the reported severity.
     pub fn raising_floor(&self, finding: &Finding) -> Option<&SeverityFloor> {
         self.severity_floors
@@ -996,16 +1009,15 @@ pub fn evaluate_gate_with_waivers_and_reviewer_policies(
         .map(|waiver| waiver.finding_fingerprint.as_str())
         .collect();
     let meets_blocking_policy = |f: &Finding| {
-        let severity = policy.effective_severity(f);
         !f.advisory
             && f.meets_sample_quorum()
-            && (policy.block_severities.contains(&severity)
+            && (policy.blocks_at(&policy.block_severities, f)
                 && f.confidence.unwrap_or(0) >= policy.minimum_confidence
                 || f.reviewer_ids.iter().any(|reviewer_id| {
                     reviewer_policies
                         .get(reviewer_id)
                         .is_some_and(|reviewer_policy| {
-                            reviewer_policy.block_severities.contains(&severity)
+                            policy.blocks_at(&reviewer_policy.block_severities, f)
                                 && f.confidence.unwrap_or(0) >= reviewer_policy.minimum_confidence
                         })
                 }))
@@ -1195,7 +1207,7 @@ pub fn evaluate_gate_with_waivers_and_reviewer_policies(
                 if reviewer_policies
                     .get(reviewer_id)
                     .is_some_and(|reviewer_policy| {
-                        reviewer_policy.block_severities.contains(&severity)
+                        policy.blocks_at(&reviewer_policy.block_severities, finding)
                             && finding.confidence.unwrap_or(0) >= reviewer_policy.minimum_confidence
                     })
                 {
@@ -1609,6 +1621,45 @@ mod tests {
         let mut unlocated = finding("unlocated", Severity::Low, Some(90));
         unlocated.path = None;
         assert_eq!(policy.effective_severity(&unlocated), Severity::Low);
+    }
+
+    #[test]
+    fn a_floor_never_stops_a_finding_that_would_block_from_blocking() {
+        // `[high]` alone: a floor that raises a high finding to critical must
+        // not move it out of the blocking set.
+        let policy = Policy {
+            block_severities: vec![Severity::High],
+            minimum_confidence: 0,
+            required_review_complete: true,
+            required_verifications: vec![],
+            analyzer_block_levels: Default::default(),
+            severity_floors: vec![floor(&[], &["security"], Severity::Critical)],
+        };
+        let mut high = finding("high-security", Severity::High, Some(90));
+        high.category = "security".into();
+        let mut low = finding("low-security", Severity::Low, Some(90));
+        low.category = "security".into();
+        let mut findings = vec![high, low];
+        let evidence = observed_test_evidence(&mut findings);
+        let decision = evaluate_gate(
+            "snapshot",
+            "config",
+            "policy",
+            &findings,
+            &policy,
+            true,
+            GateEvidence {
+                verification_runs: &[],
+                source_evidence: &evidence,
+                analyzer_reports: &[],
+            },
+        );
+        // Both pass through `high` on the way to `critical`, so both block.
+        assert_eq!(decision.status, GateStatus::Block);
+        assert_eq!(
+            decision.blocking_findings,
+            vec!["high-security", "low-security"]
+        );
     }
 
     #[test]
@@ -2500,6 +2551,23 @@ mod tests {
     }
 
     #[test]
+    fn a_selected_policy_profile_keeps_the_pack_policy_and_its_floors() {
+        let mut config: RepositoryConfig = serde_yaml::from_str(
+            "version: 1\npolicy_profiles:\n  fast:\n    block_severities: []\n    minimum_confidence: 90\n",
+        )
+        .unwrap();
+        let pack: PolicyConfig = serde_yaml::from_str(
+            "block_severities: [critical]\nminimum_confidence: 50\nseverity_floors:\n  - paths: [\"payments/**\"]\n    minimum: high\n",
+        )
+        .unwrap();
+        config.add_pack_policy(&pack);
+        config.select_policy_profile(Some("fast")).unwrap();
+        assert_eq!(config.policy.block_severities, ["critical"]);
+        assert_eq!(config.policy.minimum_confidence, 50);
+        assert_eq!(config.policy.severity_floors, pack.severity_floors);
+    }
+
+    #[test]
     fn named_policy_profiles_select_deterministic_policy_and_reject_unknown_names() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join(".vee.yaml");
@@ -3077,6 +3145,10 @@ pub struct RepositoryConfig {
     /// The effort a single review applied to every reviewer, if any.
     #[serde(skip)]
     pub active_review_effort: Option<ReviewEffort>,
+    /// Policies from pinned packs. They are merged into `policy` and into any
+    /// selected policy profile, so a profile cannot drop a pack's baseline.
+    #[serde(skip)]
+    pub pack_policies: Vec<PolicyConfig>,
     /// Digest-pinned policy packs merged into this configuration at load time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub packs: Vec<PackReference>,
@@ -3591,14 +3663,25 @@ impl RepositoryConfig {
         }
     }
 
+    /// Merge a pack's policy into the repository policy, and remember it for
+    /// any policy profile selected later.
+    pub fn add_pack_policy(&mut self, pack: &PolicyConfig) {
+        self.policy = packs::strictest(&self.policy, pack);
+        self.pack_policies.push(pack.clone());
+    }
+
     pub fn select_policy_profile(&mut self, profile: Option<&str>) -> Result<(), String> {
         self.active_policy_profile = None;
         if let Some(profile_id) = profile {
-            self.policy = self
+            let selected = self
                 .policy_profiles
                 .get(profile_id)
                 .cloned()
                 .ok_or_else(|| format!("unknown policy profile {profile_id}"))?;
+            self.policy = self
+                .pack_policies
+                .iter()
+                .fold(selected, |policy, pack| packs::strictest(&policy, pack));
             self.active_policy_profile = Some(profile_id.to_string());
         }
         Ok(())
