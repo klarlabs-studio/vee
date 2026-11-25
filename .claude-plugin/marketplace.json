@@ -1,0 +1,12 @@
+{
+  "name": "vee",
+  "description": "Vee: local, bring-your-own-model code review for Claude Code.",
+  "owner": { "name": "Klarlabs", "url": "https://github.com/klarlabs-studio" },
+  "plugins": [
+    {
+      "name": "vee",
+      "source": "./plugins/vee",
+      "description": "Vee's MCP review tools and its six agent skills. Requires the vee binary on PATH."
+    }
+  ]
+}

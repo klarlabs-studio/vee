@@ -857,6 +857,7 @@ mod tests {
                     symbol: "format".into(),
                     certainty: "inferred_syntax".into(),
                     evidence_line: 12,
+                    co_change: None,
                 },
                 crate::ImpactEdge {
                     source_path: "src/lib.rs".into(),
@@ -865,6 +866,7 @@ mod tests {
                     symbol: "format".into(),
                     certainty: "inferred_syntax".into(),
                     evidence_line: 8,
+                    co_change: None,
                 },
             ],
             limitations: vec!["fixture analyzer limitation".into()],

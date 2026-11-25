@@ -1,10 +1,14 @@
 use serde::{Deserialize, Serialize};
 pub mod acceptance;
 pub mod analytics;
+mod approval;
 pub mod attestation;
+pub mod ci;
 mod config;
+mod context_budget;
 pub mod coverage;
 pub mod evidence_bundle;
+pub mod exploration;
 pub mod failure;
 pub mod finding_task;
 mod focused_review;
@@ -24,8 +28,11 @@ mod providers;
 pub mod publication;
 pub mod repository_map;
 mod review;
+pub mod review_progress;
+mod risk;
 pub mod rule_candidates;
 pub mod sarif;
+mod session;
 pub mod setup;
 pub mod signing;
 mod source;
@@ -38,12 +45,16 @@ mod verification;
 pub mod verification_diagnosis;
 pub mod work_items;
 
+pub use approval::*;
 pub use config::*;
 pub use gate::*;
 pub use impact::*;
 pub use learning::*;
 pub use providers::*;
 pub use review::*;
+pub use review_progress::{ReviewProgress, ReviewProgressSink, ReviewerProgress};
+pub use risk::*;
+pub use session::*;
 pub use source::*;
 pub use verification::*;
 
@@ -99,7 +110,8 @@ pub fn verify_and_claim_webhook_delivery<P: vee_hosting::GitHostingProvider + ?S
 }
 #[cfg(test)]
 const MAX_CONTEXT_FILE_BYTES: usize = 128 * 1024;
-const REVIEW_CACHE_CONTRACT_VERSION: u32 = 1;
+// 2: reviewer instructions moved from the CLI payload into the prompt.
+const REVIEW_CACHE_CONTRACT_VERSION: u32 = 2;
 
 pub fn current_unix_time() -> Result<i64, String> {
     let duration = std::time::SystemTime::now()

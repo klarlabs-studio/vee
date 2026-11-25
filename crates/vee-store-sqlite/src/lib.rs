@@ -2120,6 +2120,7 @@ mod tests {
             required_review_complete: true,
             required_verifications: vec!["unit".into()],
             analyzer_block_levels: Default::default(),
+            severity_floors: Vec::new(),
         };
         let run = VerificationRun {
             schema_version: 1,

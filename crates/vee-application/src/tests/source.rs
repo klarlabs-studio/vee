@@ -111,3 +111,53 @@ fn snapshot_code_anchors_keep_fingerprints_stable_across_line_shifts() {
     assert_eq!(original.fingerprint, shifted.fingerprint);
     assert_ne!(original.fingerprint, distinct.fingerprint);
 }
+
+#[test]
+fn the_hunk_covering_a_flagged_line_is_returned_with_both_sides() {
+    let baseline = (1..=30).map(|n| format!("line {n}\n")).collect::<String>();
+    let current = baseline
+        .replace("line 5\n", "line five\n")
+        .replace("line 20\n", "line 20\nline 20b\n");
+    let diff = text_diff(
+        Some(baseline.as_bytes()),
+        Some(current.as_bytes()),
+        65_536,
+        2,
+    )
+    .unwrap()
+    .unwrap();
+
+    let hunk = hunk_at_line("src/a.rs", &diff, 21).unwrap();
+    assert!(
+        hunk.header.starts_with("@@ -19,4 +19,5 @@"),
+        "{}",
+        hunk.header
+    );
+    let added: Vec<_> = hunk
+        .lines
+        .iter()
+        .filter(|line| line.kind == "added")
+        .collect();
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].text, "line 20b");
+    assert_eq!(added[0].line, Some(21));
+    assert_eq!(added[0].base_line, None);
+    assert_eq!(hunk.lines[0].line, Some(19));
+    assert_eq!(hunk.lines[0].base_line, Some(19));
+
+    let first = hunk_at_line("src/a.rs", &diff, 5).unwrap();
+    let removed: Vec<_> = first
+        .lines
+        .iter()
+        .filter(|line| line.kind == "removed")
+        .collect();
+    assert_eq!(removed[0].text, "line 5");
+    assert_eq!(removed[0].base_line, Some(5));
+    assert!(!first.truncated);
+
+    assert_eq!(
+        hunk_at_line("src/a.rs", &diff, 12),
+        None,
+        "line 12 is unchanged"
+    );
+}

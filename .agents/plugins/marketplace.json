@@ -1,0 +1,20 @@
+{
+  "name": "vee",
+  "interface": {
+    "displayName": "Vee"
+  },
+  "plugins": [
+    {
+      "name": "vee",
+      "source": {
+        "source": "local",
+        "path": "./plugins/vee"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

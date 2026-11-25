@@ -1,0 +1,468 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vee.klarlabs.de/schemas/finding-work-package-v3.schema.json",
+  "title": "Vee finding work package v3",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "package_id",
+    "review_id",
+    "snapshot_id",
+    "snapshot_current",
+    "findings",
+    "instructions"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 3
+    },
+    "package_id": {
+      "type": "string",
+      "pattern": "^finding-package:sha256:[0-9a-f]{64}$"
+    },
+    "review_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "snapshot_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "snapshot_current": {
+      "type": "boolean"
+    },
+    "findings": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "items": {
+        "$ref": "#/$defs/task"
+      }
+    },
+    "instructions": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "task": {
+      "title": "Vee finding task v3",
+      "type": "object",
+      "required": [
+        "schema_version",
+        "task_id",
+        "review_id",
+        "snapshot_id",
+        "snapshot_current",
+        "finding",
+        "source_context",
+        "context_note",
+        "impact_paths",
+        "impact_coverage_complete",
+        "evidence",
+        "applicable_standards",
+        "standards_note",
+        "instructions",
+        "ownership",
+        "ownership_note",
+        "diff_hunk"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 4
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "review_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "snapshot_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "snapshot_current": {
+          "type": "boolean"
+        },
+        "finding": {
+          "type": "object"
+        },
+        "source_context": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "required": [
+                "path",
+                "start_line",
+                "end_line",
+                "content",
+                "classification"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "start_line": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "end_line": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "content": {
+                  "type": "string",
+                  "maxLength": 32768
+                },
+                "classification": {
+                  "const": "untrusted_repository_source"
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "context_note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "impact_paths": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "object",
+            "required": [
+              "source_path",
+              "affected_path",
+              "relationship",
+              "symbol",
+              "certainty",
+              "evidence_line"
+            ],
+            "properties": {
+              "source_path": {
+                "type": "string"
+              },
+              "affected_path": {
+                "type": "string"
+              },
+              "relationship": {
+                "type": "string"
+              },
+              "symbol": {
+                "type": "string"
+              },
+              "certainty": {
+                "type": "string"
+              },
+              "evidence_line": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "impact_coverage_complete": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "kind",
+              "provenance",
+              "source_path",
+              "start_line",
+              "end_line",
+              "content_digest",
+              "classification",
+              "verification"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "source",
+                  "static_analysis",
+                  "test",
+                  "model_inference",
+                  "dependency_path"
+                ]
+              },
+              "provenance": {
+                "type": "string"
+              },
+              "source_path": {
+                "type": "string"
+              },
+              "start_line": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1
+              },
+              "end_line": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1
+              },
+              "content_digest": {
+                "type": "string"
+              },
+              "classification": {
+                "enum": [
+                  "observed",
+                  "inferred",
+                  "unknown"
+                ]
+              },
+              "verification": {
+                "enum": [
+                  "unverified",
+                  "supported",
+                  "reproduced",
+                  "refuted",
+                  "inconclusive"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "applicable_standards": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "kind",
+              "scope",
+              "content_digest",
+              "source_digest",
+              "integrity",
+              "content",
+              "truncated",
+              "classification"
+            ],
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "scope": {
+                "type": "string"
+              },
+              "content_digest": {
+                "type": "string"
+              },
+              "source_digest": {
+                "type": "string"
+              },
+              "integrity": {
+                "type": "string"
+              },
+              "content": {
+                "type": "string",
+                "maxLength": 65536
+              },
+              "truncated": {
+                "type": "boolean"
+              },
+              "classification": {
+                "const": "repository_guidance_context"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "standards_note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "instructions": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ownership": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "required": [
+                "advisory_only",
+                "path",
+                "status",
+                "owners",
+                "codeowners_path",
+                "codeowners_digest",
+                "report_digest",
+                "coverage_complete",
+                "matching_rule_line",
+                "matching_pattern",
+                "classification"
+              ],
+              "properties": {
+                "advisory_only": {
+                  "const": true
+                },
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "status": {
+                  "enum": [
+                    "owned",
+                    "unowned",
+                    "no_codeowners"
+                  ]
+                },
+                "owners": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "codeowners_path": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "codeowners_digest": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "report_digest": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                },
+                "coverage_complete": {
+                  "type": "boolean"
+                },
+                "matching_rule_line": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1
+                },
+                "matching_pattern": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "classification": {
+                  "const": "advisory_ownership_context"
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "ownership_note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "diff_hunk": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "description": "The diff hunk covering the flagged line; null for unchanged lines, file-level findings, and untouched files.",
+          "required": [
+            "path",
+            "header",
+            "lines",
+            "truncated"
+          ],
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "header": {
+              "type": "string"
+            },
+            "truncated": {
+              "type": "boolean"
+            },
+            "lines": {
+              "type": "array",
+              "maxItems": 80,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "line",
+                  "base_line",
+                  "text"
+                ],
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "context",
+                      "added",
+                      "removed"
+                    ]
+                  },
+                  "line": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 1
+                  },
+                  "base_line": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 1
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
