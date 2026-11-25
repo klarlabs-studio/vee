@@ -1967,10 +1967,12 @@ fn exploration_review(
     (directory, snapshot, result)
 }
 
+#[cfg(unix)]
 /// Records each request and, like a reviewer calling the snapshot server,
 /// appends one `read_file` call to the request's exploration log.
 struct ExploringProvider(std::sync::Arc<std::sync::Mutex<Vec<ProviderRequest>>>);
 
+#[cfg(unix)]
 impl ReviewProvider for ExploringProvider {
     fn execute(
         &self,
