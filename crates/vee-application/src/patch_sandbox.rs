@@ -32,6 +32,7 @@ pub fn validate_bytes(root: &Path, patch: &[u8]) -> Result<PatchSandboxResult, S
     )?;
     run_git(sandbox.path(), &["apply", "--no-index", "--"], patch)?;
     let result_files = vee_git::snapshot_files(sandbox.path(), &paths)?;
+    check_result(sandbox.path(), &input_files, &result_files)?;
     let canonical =
         serde_json::to_vec(&(&input_files, &result_files)).map_err(|error| error.to_string())?;
     Ok(PatchSandboxResult {
@@ -104,16 +105,78 @@ fn add_path(paths: &mut Vec<PathBuf>, bytes: &[u8]) -> Result<(), String> {
                 Component::ParentDir | Component::RootDir | Component::Prefix(_)
             )
         })
-        || path
-            .components()
-            .next()
-            .is_none_or(|part| part.as_os_str() == ".vee")
+        || path.components().next().is_none()
     {
         return Err(format!(
             "patch path is outside the allowed repository scope: {value}"
         ));
     }
+    if is_protected_path(value) {
+        return Err(format!(
+            "a patch may not change Vee configuration, CI or Git hooks: {value}"
+        ));
+    }
     paths.push(path);
+    Ok(())
+}
+
+/// Paths whose contents decide what runs: Vee's own configuration and
+/// state, CI definitions and Git hooks. A proposed patch never changes them;
+/// a person edits them directly.
+const PROTECTED_PREFIXES: &[&str] = &[
+    ".vee/",
+    ".git/",
+    ".github/workflows/",
+    ".github/actions/",
+    ".gitlab/",
+    ".circleci/",
+    ".buildkite/",
+    ".githooks/",
+    ".husky/",
+];
+const PROTECTED_FILES: &[&str] = &[
+    ".vee.yaml",
+    ".vee",
+    ".git",
+    ".gitlab-ci.yml",
+    ".gitmodules",
+    "azure-pipelines.yml",
+    "bitbucket-pipelines.yml",
+    "Jenkinsfile",
+    ".pre-commit-config.yaml",
+];
+
+fn is_protected_path(path: &str) -> bool {
+    PROTECTED_FILES.contains(&path)
+        || PROTECTED_PREFIXES
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
+}
+
+/// The result of a patch may not newly make a file executable, and every
+/// symlink it leaves must point inside the repository.
+fn check_result(
+    sandbox: &Path,
+    input_files: &[SnapshotFile],
+    result_files: &[SnapshotFile],
+) -> Result<(), String> {
+    for result in result_files {
+        let before = input_files.iter().find(|input| input.path == result.path);
+        if result.status == "symlink" {
+            let relative = Path::new(&result.path);
+            let link =
+                std::fs::read_link(sandbox.join(relative)).map_err(|error| error.to_string())?;
+            validate_link_target(relative, &link)?;
+            continue;
+        }
+        let executable = |file: &SnapshotFile| file.mode != 0o120000 && file.mode & 0o111 != 0;
+        if executable(result) && !before.is_some_and(executable) {
+            return Err(format!(
+                "a patch may not make a file executable: {}",
+                result.path
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -253,4 +316,96 @@ fn set_mode(path: &Path, mode: u32) -> Result<(), String> {
 #[cfg(not(unix))]
 fn set_mode(_path: &Path, _mode: u32) -> Result<(), String> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repository() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q"]);
+        std::fs::write(root.join("src.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(root.join(".vee.yaml"), "version: 1\n").unwrap();
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.email=vee@example.invalid",
+            "-c",
+            "user.name=Vee",
+            "commit",
+            "-qm",
+            "base",
+        ]);
+        directory
+    }
+
+    #[test]
+    fn an_ordinary_source_change_is_accepted() {
+        let directory = repository();
+        let patch = "--- a/src.rs\n+++ b/src.rs\n@@ -1 +1 @@\n-fn a() {}\n+fn a() { 1; }\n";
+        validate_bytes(directory.path(), patch.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn patches_to_vee_configuration_ci_or_hooks_are_refused() {
+        let directory = repository();
+        for (path, patch) in [
+            (
+                ".vee.yaml",
+                "--- a/.vee.yaml\n+++ b/.vee.yaml\n@@ -1 +1,2 @@\n version: 1\n+offline: false\n"
+                    .to_string(),
+            ),
+            (
+                ".github/workflows/ci.yml",
+                "--- /dev/null\n+++ b/.github/workflows/ci.yml\n@@ -0,0 +1 @@\n+on: push\n"
+                    .to_string(),
+            ),
+            (
+                ".gitlab-ci.yml",
+                "--- /dev/null\n+++ b/.gitlab-ci.yml\n@@ -0,0 +1 @@\n+job: {}\n".to_string(),
+            ),
+            (
+                ".husky/pre-commit",
+                "--- /dev/null\n+++ b/.husky/pre-commit\n@@ -0,0 +1 @@\n+true\n".to_string(),
+            ),
+        ] {
+            let error = validate_bytes(directory.path(), patch.as_bytes())
+                .err()
+                .unwrap_or_else(|| panic!("{path} was accepted"));
+            assert!(error.contains(path), "{path}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_patch_may_not_make_files_executable_or_link_outside_the_repository() {
+        let directory = repository();
+        let executable = "diff --git a/run.sh b/run.sh\nnew file mode 100755\n--- /dev/null\n+++ b/run.sh\n@@ -0,0 +1 @@\n+echo hi\n";
+        let error = validate_bytes(directory.path(), executable.as_bytes())
+            .err()
+            .unwrap();
+        assert!(
+            error.contains("executable") && error.contains("run.sh"),
+            "{error}"
+        );
+
+        let mode_change = "diff --git a/src.rs b/src.rs\nold mode 100644\nnew mode 100755\n";
+        let error = validate_bytes(directory.path(), mode_change.as_bytes())
+            .err()
+            .unwrap();
+        assert!(error.contains("executable"), "{error}");
+
+        let link = "diff --git a/escape b/escape\nnew file mode 120000\n--- /dev/null\n+++ b/escape\n@@ -0,0 +1 @@\n+/etc/passwd\n\\ No newline at end of file\n";
+        assert!(validate_bytes(directory.path(), link.as_bytes()).is_err());
+    }
 }
