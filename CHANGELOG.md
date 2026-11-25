@@ -55,6 +55,9 @@ build provenance.
 - Usage limits: when a provider reports a usage, quota or rate limit, its
   remaining runs are skipped and recorded as `rate_limited`, and the review
   is incomplete.
+- Context for larger changes: every changed file first gets its bounded diff,
+  and leftover budget upgrades diffs to full contents, so a few large files
+  no longer crowd later files out of the reviewer's context.
 
 ### Gates, evidence and policy
 
@@ -82,7 +85,8 @@ build provenance.
   published with `vee hosting publish --approval`
   ([ADR 0015](docs/adr/0015-layered-approval-eligibility.md)).
 - Review sessions (`vee reviews session`): several saved reviews, such as
-  one coding-agent session's commits, with a gate per change and one verdict
+  one coding-agent session's commits, even across repositories
+  (`REPO:REVIEW_ID`), with a gate per change and one verdict
   ([ADR 0016](docs/adr/0016-review-sessions-keep-per-change-gates.md)).
 
 ### Workflows
@@ -94,7 +98,12 @@ build provenance.
   Every MCP tool declares an output schema, and saved reviews, verification
   runs and finding feedback can be listed over MCP as on the CLI.
 - Finding lifecycle, feedback, feedback-mined rule candidates with human
-  approval, and local quality analytics.
+  approval, and local quality analytics. Finding tasks and work packages
+  carry the changed hunk around the flagged line.
+- Patch proposals: an agent's fix is validated in a sandbox and saved under a
+  digest. Applying it needs a person to confirm at a terminal; a patch may
+  not change Vee configuration, CI definitions or Git hooks, make a file
+  executable, or link outside the repository.
 - Local web dashboard on a loopback address, with a review queue that names
   each review's next action, and a finding drawer showing the reviewed
   source, evidence and verification runs. The drawer copies a snapshot-bound
@@ -107,6 +116,8 @@ build provenance.
   live installation acceptance is still open. A hosting credential goes only to
   the provider's public service or to a host named with `--host`,
   `--api-base` or `VEE_HOSTING_HOSTS`, never to one set only in `.vee.yaml`.
+  When a finding moves to another line, its old thread is resolved and a new
+  one opens; threads of fixed findings are resolved.
 
 ### Pull requests in CI
 
