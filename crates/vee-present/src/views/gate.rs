@@ -126,3 +126,137 @@ impl ToView for vee_core::Waiver {
             )
     }
 }
+
+impl ToView for vee_application::ApprovalEligibility {
+    fn to_view(&self) -> View {
+        let badge = if self.eligible {
+            Cell::badge(Tone::Success, "eligible")
+        } else {
+            Cell::badge(Tone::Warning, "needs a human")
+        };
+        View::new()
+            .title("Approval", Some(badge))
+            .fields(vec![
+                ("Review".into(), Cell::id(&self.review_id)),
+                ("Snapshot".into(), Cell::code(&self.snapshot_id)),
+            ])
+            .section("Stages")
+            .table(
+                &["Stage", "Result", "Reason"],
+                self.stages
+                    .iter()
+                    .map(|stage| {
+                        vec![
+                            Cell::plain(&stage.id),
+                            if stage.passed {
+                                Cell::badge(Tone::Success, "passed")
+                            } else {
+                                Cell::badge(Tone::Danger, "failed")
+                            },
+                            Cell::plain(&stage.detail),
+                        ]
+                    })
+                    .collect(),
+            )
+    }
+}
+
+impl ToView for vee_application::ReviewSession {
+    fn to_view(&self) -> View {
+        let verdict = match self.verdict.as_str() {
+            "pass" => Cell::badge(Tone::Success, "pass"),
+            "block" => Cell::badge(Tone::Danger, "block"),
+            _ => Cell::badge(Tone::Warning, "incomplete"),
+        };
+        let gate = |status: &str| match status {
+            "pass" => Cell::badge(Tone::Success, "pass"),
+            "block" => Cell::badge(Tone::Danger, "block"),
+            _ => Cell::badge(Tone::Warning, "incomplete"),
+        };
+        let mut view = View::new()
+            .title(
+                format!("Review session ({} changes)", self.reviews.len()),
+                Some(verdict),
+            )
+            .fields(vec![
+                (
+                    "Open findings".into(),
+                    Cell::plain(self.open_findings.to_string()),
+                ),
+                (
+                    "Approval eligible".into(),
+                    Cell::plain(format!(
+                        "{} of {}",
+                        self.approval_eligible,
+                        self.reviews.len()
+                    )),
+                ),
+            ])
+            .section("Changes")
+            .table(
+                &[
+                    "Review",
+                    "Gate",
+                    "Current",
+                    "Risk",
+                    "Open findings",
+                    "Approval",
+                ],
+                self.reviews
+                    .iter()
+                    .map(|review| {
+                        let findings = if review.open_findings.is_empty() {
+                            Cell::muted("none")
+                        } else {
+                            Cell::plain(
+                                review
+                                    .open_findings
+                                    .iter()
+                                    .map(|(severity, count)| format!("{count} {severity}"))
+                                    .collect::<Vec<_>>()
+                                    .join(", "),
+                            )
+                        };
+                        vec![
+                            match &review.repository {
+                                Some(repository) => {
+                                    Cell::id(format!("{repository}:{}", review.review_id))
+                                }
+                                None => Cell::id(&review.review_id),
+                            },
+                            gate(&review.gate),
+                            Cell::plain(if review.snapshot_current {
+                                "yes"
+                            } else {
+                                "moved"
+                            }),
+                            review.risk_tier.map_or_else(
+                                || Cell::muted("unknown"),
+                                |tier| Cell::plain(tier.as_str()),
+                            ),
+                            findings,
+                            Cell::plain(if review.approval_eligible {
+                                "eligible"
+                            } else {
+                                "needs a human"
+                            }),
+                        ]
+                    })
+                    .collect(),
+            );
+        let reasons: Vec<Cell> = self
+            .reviews
+            .iter()
+            .flat_map(|review| {
+                review
+                    .reasons
+                    .iter()
+                    .map(move |reason| Cell::plain(format!("{}: {reason}", review.review_id)))
+            })
+            .collect();
+        if !reasons.is_empty() {
+            view = view.section("Reasons").list(reasons);
+        }
+        view
+    }
+}
