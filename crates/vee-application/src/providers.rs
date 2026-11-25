@@ -197,6 +197,24 @@ pub(crate) fn provider_request_prompt(
         .as_object_mut()
         .and_then(|object| object.remove("task_instructions"))
         .and_then(|value| value.as_str().map(str::to_owned));
+    // The reviewer's configured instructions come from the repository's own
+    // configuration, not from the change under review, so they are part of
+    // the trusted prompt rather than the payload the model must not follow.
+    let reviewer_instructions = if task_instructions.is_none() {
+        payload
+            .as_object_mut()
+            .and_then(|object| object.remove("instructions"))
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .filter(|text| !text.trim().is_empty())
+    } else {
+        None
+    };
+    let review_prompt = match reviewer_instructions {
+        Some(instructions) => format!(
+            "Reviewer instructions from the repository's Vee configuration; follow them:\n{instructions}\n\n{review_prompt}"
+        ),
+        None => review_prompt.to_owned(),
+    };
     let payload = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
     if let Some(task) = task_instructions {
         Ok(format!(
