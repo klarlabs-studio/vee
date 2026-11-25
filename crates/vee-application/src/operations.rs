@@ -859,7 +859,7 @@ pub fn current_review_config(
     review: &ReviewResult,
     token_env_override: Option<&str>,
 ) -> Result<CurrentReviewConfig> {
-    let config = workspace.saved_review_config(&review)?;
+    let config = workspace.saved_review_config(review)?;
     let current_work_item = match review.work_item.as_ref() {
         None => None,
         Some(_) if config.offline => {

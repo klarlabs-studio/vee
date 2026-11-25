@@ -134,7 +134,7 @@ pub fn ensure_credential_destination(
         .ok_or_else(|| configuration_failure(format!("hosting host {host} is not a host name")))?;
     for destination in [host, api_host] {
         let allowed = public_hosts(provider).contains(&destination.as_str())
-            || trusted.iter().any(|trusted| *trusted == destination);
+            || trusted.contains(&destination);
         if !allowed {
             return Err(configuration_failure(format!(
                 "the repository configuration would send hosting credentials to {destination}; confirm that host with --host or --api-base, or add it to {TRUSTED_HOSTS_ENV}"
