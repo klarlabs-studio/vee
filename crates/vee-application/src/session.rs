@@ -15,6 +15,10 @@ pub const MAX_SESSION_REVIEWS: usize = 20;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionReview {
+    /// The checkout the review was read from, as named in the request;
+    /// absent for this repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
     pub review_id: String,
     pub scope: String,
     pub snapshot_id: String,
@@ -86,6 +90,7 @@ pub fn session_review(
         reasons.extend(review.gate.reasons.iter().cloned());
     }
     SessionReview {
+        repository: None,
         review_id: review.review_id.clone(),
         scope: review.change_set.scope.clone(),
         snapshot_id: review.snapshot_id.clone(),
@@ -137,6 +142,7 @@ mod tests {
 
     fn line(gate: &str, current: bool, eligible: bool) -> SessionReview {
         SessionReview {
+            repository: None,
             review_id: format!("rev_{gate}"),
             scope: "commit".into(),
             snapshot_id: "sha256:snap".into(),

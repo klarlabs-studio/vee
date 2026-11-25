@@ -51,12 +51,22 @@ same Markdown and terminal rendering, so a session can be exported as text.
 - It reuses the per-change review, risk and approval documents, so it
   cannot disagree with them.
 
+**Cross-repository sessions.** A reference may name another checkout as
+`REPO:REVIEW_ID`, with REPO relative to the requesting repository's root:
+- Each change is read from its own repository's store, configuration and
+  approval guards, so it carries the same verdict it would there.
+- The CLI accepts any checkout root, such as a sibling `../api`. MCP
+  confines REPO beneath the server's root, without `.` or `..`, as
+  cross-repository impact already does.
+- Every reference is resolved before any review is read, so a bad path or
+  a repeat fails the whole request.
+
 **Not yet done:**
-- **Cross-repository sessions.** These need consumer checkouts confined
-  beneath the MCP server root, as cross-repository impact already does.
-- **Checking a change against its task.** The research's strongest
-  agent-specific signal is whether the diff does what the task asked. That
-  check is not built.
+- **Checking a change against its task** is available per change, not per
+  session: `vee init` scaffolds an opt-in, advisory `task-alignment`
+  reviewer that reads the work item attached with `--work-item`. It reports
+  missing requirements, changes the task does not ask for, and changes that
+  contradict it.
 - **Using one change's context in another's review.** Parent changes'
   diffs and decisions are not yet passed into the review of the next
   change.

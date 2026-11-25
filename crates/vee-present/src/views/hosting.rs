@@ -7,6 +7,7 @@
 use crate::view::{summary, Cell, ToView, Tone, View};
 use crate::views::governance::limitations_view;
 use crate::views::serde_name;
+use vee_application::ci::{CiRun, CiSystem};
 use vee_application::hosting::{PullRequestIssues, ReviewPublication, WebhookRetention};
 use vee_hosting::{
     PullRequestContextReport, PullRequestFile, PullRequestRef, PullRequestReviewIssue,
@@ -245,6 +246,13 @@ impl ToView for ReviewPublication {
                 ),
                 ("Snapshot".into(), Cell::code(&self.snapshot_id)),
                 ("Provider check".into(), Cell::id(&self.provider_check_id)),
+                (
+                    "Approval check".into(),
+                    self.approval_check_id
+                        .as_ref()
+                        .map(Cell::id)
+                        .unwrap_or_else(|| Cell::muted("not published")),
+                ),
                 ("Revision".into(), Cell::code(&self.revision)),
             ])
             .section(format!("Finding threads ({})", self.thread_ids.len()));
@@ -307,5 +315,44 @@ impl ToView for WebhookRetention {
                 self.deleted_receipts, self.retention_days
             )))
         }
+    }
+}
+
+impl ToView for CiRun {
+    fn to_view(&self) -> View {
+        let (tone, label) = match self.gate {
+            vee_core::GateStatus::Pass => (Tone::Success, "pass"),
+            vee_core::GateStatus::Block => (Tone::Danger, "block"),
+            vee_core::GateStatus::Incomplete => (Tone::Warning, "incomplete"),
+        };
+        let pull_request = &self.pull_request;
+        View::new()
+            .title(
+                format!(
+                    "Reviewed {}#{}",
+                    pull_request.repository, pull_request.number
+                ),
+                Some(Cell::badge(tone, label)),
+            )
+            .fields(vec![
+                (
+                    "CI".into(),
+                    Cell::plain(match pull_request.system {
+                        CiSystem::GithubActions => "GitHub Actions",
+                        CiSystem::GitlabCi => "GitLab CI",
+                    }),
+                ),
+                ("Host".into(), Cell::code(&pull_request.host)),
+                ("Head".into(), Cell::code(&pull_request.head_oid)),
+                ("Review".into(), Cell::id(&self.review_id)),
+                (
+                    "Provider check".into(),
+                    Cell::id(&self.publication.provider_check_id),
+                ),
+                (
+                    "Finding threads".into(),
+                    Cell::plain(self.publication.thread_ids.len().to_string()),
+                ),
+            ])
     }
 }

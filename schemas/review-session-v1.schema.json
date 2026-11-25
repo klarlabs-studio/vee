@@ -50,6 +50,11 @@
           "reasons"
         ],
         "properties": {
+          "repository": {
+            "description": "The checkout the review was read from, as named in the request; absent for the repository the session was requested in.",
+            "type": "string",
+            "minLength": 1
+          },
           "review_id": {
             "type": "string",
             "minLength": 1
