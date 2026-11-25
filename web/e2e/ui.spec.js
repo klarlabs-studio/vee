@@ -1143,3 +1143,17 @@ test('task-alignment findings are labeled as task findings', async ({ page }) =>
   await page.getByRole('button', { name: 'Open details for FIND-001' }).click()
   await expect(page.getByRole('dialog', { name: 'Finding details' }).locator('.finding-kind')).toHaveText('task')
 })
+
+test('the access token in the address is sent with API requests and removed from the address', async ({ page }) => {
+  const token = 'a'.repeat(64)
+  const authorizations = []
+  page.on('request', request => {
+    if (new URL(request.url()).pathname.startsWith('/api/')) authorizations.push(request.headers().authorization)
+  })
+  const firstRequest = page.waitForRequest(request => new URL(request.url()).pathname.startsWith('/api/'))
+  await page.goto(`/#token=${token}`)
+  await firstRequest
+  expect(new URL(page.url()).hash).toBe('')
+  expect(authorizations.length).toBeGreaterThan(0)
+  expect(authorizations.every(value => value === `Bearer ${token}`)).toBe(true)
+})

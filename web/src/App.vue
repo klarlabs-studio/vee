@@ -377,7 +377,7 @@ async function api(path, options = {}) {
   try { token = window.sessionStorage.getItem(tokenKey) } catch {}
   let response = await send(token)
   if (response.status === 401) {
-    const supplied = window.prompt('Enter the Vee network UI access token shown in the Vee terminal.')
+    const supplied = window.prompt('Enter the access token from the address `vee ui` printed (after #token=).')
     if (!supplied?.trim()) throw new Error('Vee network UI access token is required.')
     token = supplied.trim()
     try { window.sessionStorage.setItem(tokenKey, token) } catch {}

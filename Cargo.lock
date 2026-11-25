@@ -2649,6 +2649,7 @@ dependencies = [
  "anyhow",
  "axum",
  "jsonschema",
+ "ring",
  "serde",
  "serde_json",
  "serde_yaml",
