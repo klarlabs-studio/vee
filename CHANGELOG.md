@@ -6,11 +6,12 @@ change configuration and output contracts.
 
 ## 0.1.0 — unreleased
 
-First release. Install a release binary with `scripts/install.sh`, use the
-`ghcr.io/klarlabs-studio/vee` container image in CI, or build from a checkout
-with `cargo install --path crates/vee-cli --locked`; see
-[docs/release.md](docs/release.md). Release archives come with `SHA256SUMS`
-and build provenance.
+First release. Install a release binary with the shell or PowerShell
+installer attached to the release, use the `ghcr.io/klarlabs-studio/vee`
+container image in CI, or build from a checkout with
+`cargo install --path crates/vee-cli --locked`; see
+[docs/release.md](docs/release.md). Release archives come with checksums and
+build provenance.
 
 ### Review
 

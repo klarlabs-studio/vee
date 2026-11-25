@@ -29,13 +29,19 @@ The local UI's **Insights** view charts saved reviews using each review's latest
 
 ## Install
 
-Each release attaches binaries for Linux (x86_64, arm64), macOS (arm64, x86_64) and Windows (x86_64), a `SHA256SUMS` file, and build provenance. On Linux or macOS:
+Each release attaches binaries for Linux (x86_64, arm64), macOS (arm64, x86_64) and Windows (x86_64), with a checksum and build provenance for each archive, and an installer for each platform. On Linux or macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/klarlabs-studio/vee/main/scripts/install.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/klarlabs-studio/vee/releases/latest/download/vee-installer.sh | sh
 ```
 
-The script installs to `~/.local/bin` (set `VEE_INSTALL_DIR` to change it, `VEE_VERSION` to pin a release) and refuses an archive that does not match `SHA256SUMS`. To check where an archive was built, run `gh attestation verify <archive> --repo klarlabs-studio/vee`. The release binaries need glibc, so on musl systems such as Alpine, build from source or use the container image. For CI runners there is a container image, `ghcr.io/klarlabs-studio/vee`, built from the same release binaries. It runs as a non-root user and holds Vee and Git, which suits API providers; a reviewer that uses an agent CLI needs that CLI added in a derived image. Until the first release is published, install from source as below.
+On Windows (PowerShell):
+
+```powershell
+irm https://github.com/klarlabs-studio/vee/releases/latest/download/vee-installer.ps1 | iex
+```
+
+The installers put `vee` in `~/.local/bin` (set `VEE_INSTALL_DIR` to change it) and refuse an archive whose checksum does not match. To check where an archive was built, run `gh attestation verify <archive> --repo klarlabs-studio/vee`. The Linux binaries need glibc 2.35 or later; on musl systems such as Alpine, build from source or use the container image. For CI runners there is a container image, `ghcr.io/klarlabs-studio/vee`, built from the same release binaries. It runs as a non-root user and holds Vee and Git, which suits API providers; a reviewer that uses an agent CLI needs that CLI added in a derived image. Until the first release is published, install from source as below.
 
 ## Build
 
