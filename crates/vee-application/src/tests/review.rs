@@ -22,6 +22,45 @@ fn review_prompt_requires_exact_changed_line_anchors() {
 }
 
 #[test]
+fn review_prompt_asks_for_one_concise_defect_per_finding_and_rates_severity_by_consequence() {
+    let prompt = provider_request_prompt(
+        &serde_json::json!({"context_files": []}),
+        "Review the supplied change context.",
+        "review request",
+    )
+    .unwrap();
+    assert!(prompt.contains("Each finding reports one defect"));
+    assert!(prompt.contains("The first sentence states what goes wrong"));
+    assert!(prompt.contains("at most two further sentences"));
+    assert!(prompt.contains("Set severity by the consequence"));
+    assert!(prompt.contains("is at least medium"));
+}
+
+#[test]
+fn provider_findings_schema_carries_the_writing_and_severity_rules() {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../schemas/provider-findings-v1.schema.json"
+    ))
+    .unwrap();
+    let finding = &schema["properties"]["findings"]["items"]["properties"];
+    let severity = finding["severity"]["description"].as_str().unwrap();
+    assert!(severity.contains("is at least medium"));
+    let rationale = finding["rationale"]["description"].as_str().unwrap();
+    assert!(rationale.starts_with("One defect."));
+}
+
+#[test]
+fn task_prompts_do_not_receive_review_finding_rules() {
+    let prompt = provider_request_prompt(
+        &serde_json::json!({"task_instructions": "Summarize the change."}),
+        "Review the supplied change context.",
+        "task request",
+    )
+    .unwrap();
+    assert!(!prompt.contains("Each finding reports one defect"));
+}
+
+#[test]
 fn source_evidence_marks_unchanged_finding_lines_as_unknown() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
@@ -99,6 +138,7 @@ fn source_evidence_marks_unchanged_finding_lines_as_unknown() {
         required_review_complete: true,
         required_verifications: vec![],
         analyzer_block_levels: Default::default(),
+        severity_floors: Vec::new(),
     };
     let decision = vee_core::evaluate_gate(
         "snapshot",
@@ -179,6 +219,7 @@ fn legacy_review_without_policy_findings_falls_back_to_display_findings() {
         required_review_complete: true,
         required_verifications: vec![],
         analyzer_block_levels: Default::default(),
+        severity_floors: Vec::new(),
     };
     let finding = vee_core::Finding {
         id: "legacy-blocker".into(),
@@ -240,6 +281,7 @@ fn legacy_review_without_policy_findings_falls_back_to_display_findings() {
         reviewer_context: vec![],
         unreviewed_paths: Vec::new(),
         policy_profile: None,
+        review_effort: None,
         work_item: None,
         work_item_token_env: None,
     };
@@ -1577,7 +1619,8 @@ fn review_progress_reports_each_reviewer_run_as_it_finishes() {
                 // Process adapters report a failed process as `Ok` with its exit code.
                 return Ok(ProviderResult {
                     stdout: Vec::new(),
-                    stderr: b"usage limit reached".to_vec(),
+                    // Not a usage limit, which would skip the provider's other runs.
+                    stderr: b"provider crashed".to_vec(),
                     exit_code: Some(1),
                     usage: None,
                 });
@@ -1669,4 +1712,341 @@ fn review_progress_reports_each_reviewer_run_as_it_finishes() {
     assert_eq!(reviewer(last, "passing").failed, 0);
     assert_eq!(reviewer(last, "failing").failed, 1);
     assert_eq!(reviewer(last, "exiting").failed, 1);
+}
+
+/// After a provider reports a usage or rate limit, its runs that have not
+/// started are skipped instead of each failing the same way; other
+/// providers keep running.
+#[test]
+fn a_provider_usage_limit_skips_its_remaining_runs() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct LimitedProvider {
+        limited_calls: AtomicUsize,
+        other_calls: AtomicUsize,
+    }
+    impl ReviewProvider for LimitedProvider {
+        fn execute(
+            &self,
+            request: &ProviderRequest,
+            _cancellation: Option<&tokio_util::sync::CancellationToken>,
+        ) -> Result<ProviderResult, String> {
+            if request.executable == "limited" {
+                self.limited_calls.fetch_add(1, Ordering::SeqCst);
+                return Ok(ProviderResult {
+                    stdout: Vec::new(),
+                    stderr: b"Claude AI usage limit reached|1795440000".to_vec(),
+                    exit_code: Some(1),
+                    usage: None,
+                });
+            }
+            self.other_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ProviderResult {
+                stdout: br#"{"schema_version":1,"findings":[]}"#.to_vec(),
+                stderr: Vec::new(),
+                exit_code: Some(0),
+                usage: None,
+            })
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    std::fs::write(root.join("lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();
+    for name in ["a", "b", "c", "d"] {
+        std::fs::write(
+            root.join(format!("{name}.md")),
+            format!("Reviewer {name}.\n"),
+        )
+        .unwrap();
+    }
+    git(&["add", "."]);
+    git(&["commit", "-qm", "initial"]);
+    std::fs::write(root.join("lib.rs"), "pub fn value() -> u8 { 2 }\n").unwrap();
+    // One worker, so runs start one after another.
+    std::fs::write(
+        root.join(".vee.yaml"),
+        "version: 1\nreview:\n  max_concurrency: 1\nproviders:\n  limited: { kind: cli, executable: limited }\n  other: { kind: cli, executable: other }\nreviewers:\n  a: { provider: limited, instructions_file: a.md }\n  b: { provider: limited, instructions_file: b.md }\n  c: { provider: limited, instructions_file: c.md }\n  d: { provider: other, instructions_file: d.md }\n",
+    )
+    .unwrap();
+    let config = RepositoryConfig::load(&root.join(".vee.yaml")).unwrap();
+    let snapshot = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
+    std::fs::create_dir_all(root.join(".vee")).unwrap();
+    let mut store = ReviewStore::open(&root.join(".vee/vee.sqlite")).unwrap();
+    let provider = LimitedProvider {
+        limited_calls: AtomicUsize::new(0),
+        other_calls: AtomicUsize::new(0),
+    };
+
+    let review = run_review_with_provider_and_selection_context(
+        root,
+        snapshot,
+        &config,
+        &mut store,
+        ReviewRunOptions {
+            provider_adapter: &provider,
+            requested_reviewers: None,
+            cancellation: None,
+            work_item: None,
+            work_item_token_env: None,
+            progress: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(provider.limited_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.other_calls.load(Ordering::SeqCst), 1);
+    let outcome = |id: &str| {
+        review
+            .reviewer_outcomes
+            .iter()
+            .find(|outcome| outcome.reviewer_id == id)
+            .unwrap()
+            .status
+            .clone()
+    };
+    assert_eq!(outcome("d"), "completed");
+    for id in ["a", "b", "c"] {
+        assert_eq!(outcome(id), "rate_limited", "{id}");
+    }
+    assert!(!review.analysis_complete);
+}
+
+#[test]
+fn a_large_early_file_does_not_crowd_later_files_out_of_the_reviewer_context() {
+    use std::sync::{Arc, Mutex};
+    struct CapturingProvider(Arc<Mutex<Option<serde_json::Value>>>);
+    impl ReviewProvider for CapturingProvider {
+        fn execute(
+            &self,
+            request: &ProviderRequest,
+            _cancellation: Option<&tokio_util::sync::CancellationToken>,
+        ) -> Result<ProviderResult, String> {
+            *self.0.lock().unwrap() =
+                Some(serde_json::from_slice(&request.stdin).map_err(|error| error.to_string())?);
+            Ok(ProviderResult {
+                stdout: br#"{"schema_version":1,"findings":[]}"#.to_vec(),
+                stderr: Vec::new(),
+                exit_code: Some(0),
+                usage: None,
+            })
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    // 40-byte lines; `lines` lines with line `changed` edited when `edit`.
+    let source = |name: &str, lines: usize, edit: bool| {
+        (0..lines)
+            .map(|line| {
+                let marker = if edit && line == lines / 2 {
+                    "new"
+                } else {
+                    "old"
+                };
+                format!("// {name} line {line:04} {marker:<20}\n")
+            })
+            .collect::<String>()
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    for (name, lines) in [("a", 100), ("b", 50), ("c", 50)] {
+        std::fs::write(root.join(format!("{name}.rs")), source(name, lines, false)).unwrap();
+    }
+    std::fs::write(root.join("reviewer.md"), "Review correctness.\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "initial"]);
+    for (name, lines) in [("a", 100), ("b", 50), ("c", 50)] {
+        std::fs::write(root.join(format!("{name}.rs")), source(name, lines, true)).unwrap();
+    }
+    // a.rs alone takes 8,000 of the 10,000 bytes in full; b.rs's diff
+    // (its whole 50 lines) no longer fits after that.
+    std::fs::write(
+        root.join(".vee.yaml"),
+        "version: 1\nreview:\n  include: [\"**/*.rs\"]\n  max_context_bytes: 10000\nproviders:\n  p: { kind: cli, executable: unused }\nreviewers:\n  correctness: { provider: p, instructions_file: reviewer.md }\n",
+    )
+    .unwrap();
+    let config = RepositoryConfig::load(&root.join(".vee.yaml")).unwrap();
+    let snapshot = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
+    std::fs::create_dir_all(root.join(".vee")).unwrap();
+    let mut store = ReviewStore::open(&root.join(".vee/vee.sqlite")).unwrap();
+    let captured = Arc::new(Mutex::new(None));
+
+    let review = run_review_with_provider(
+        root,
+        snapshot,
+        &config,
+        &mut store,
+        &CapturingProvider(captured.clone()),
+        None,
+    )
+    .unwrap();
+
+    let input = captured.lock().unwrap().clone().unwrap();
+    for file in input["context_files"].as_array().unwrap() {
+        let supplied = file["content"].is_string() || file["diff"].is_string();
+        assert!(supplied, "{} was left out: {}", file["path"], file["note"]);
+    }
+    assert_eq!(input["context_complete"], true);
+    assert!(review.analysis_complete);
+}
+
+#[cfg(unix)]
+/// Reviewer `correctness` on provider `p`, with exploration on, over a change
+/// to `src/lib.rs` whose caller is `src/caller.rs`.
+fn exploration_review(
+    provider: &str,
+    adapter: &dyn ReviewProvider,
+) -> (tempfile::TempDir, ChangeSet, ReviewResult) {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn charge(cents: u64) {}\n").unwrap();
+    std::fs::write(
+        root.join("src/caller.rs"),
+        "fn pay() { crate::charge(1); }\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("reviewer.md"), "Review changed behavior.\n").unwrap();
+    // A stand-in reviewer CLI that only answers the version probe.
+    let cli = root.join("fake-cli");
+    std::fs::write(&cli, "#!/bin/sh\necho '2.1.0 (Claude Code)'\n").unwrap();
+    std::fs::set_permissions(&cli, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "initial"]);
+    std::fs::write(root.join("src/lib.rs"), "pub fn charge(dollars: u64) {}\n").unwrap();
+    let config_path = root.join(".vee.yaml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "version: 1\nproviders:\n  p: {{ kind: {provider}, executable: {} }}\nreviewers:\n  correctness:\n    provider: p\n    instructions_file: reviewer.md\n    include: [src/**]\nreview:\n  exploration:\n    enabled: true\n    max_tool_calls: 5\npolicy:\n  on_incomplete: block\n",
+            cli.display()
+        ),
+    )
+    .unwrap();
+    let config = RepositoryConfig::load(&config_path).unwrap();
+    let snapshot = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
+    std::fs::create_dir_all(root.join(".vee")).unwrap();
+    let mut store = ReviewStore::open(&root.join(".vee/vee.sqlite")).unwrap();
+    let result =
+        run_review_with_provider(root, snapshot.clone(), &config, &mut store, adapter, None)
+            .unwrap();
+    (directory, snapshot, result)
+}
+
+#[cfg(unix)]
+/// Records each request and, like a reviewer calling the snapshot server,
+/// appends one `read_file` call to the request's exploration log.
+struct ExploringProvider(std::sync::Arc<std::sync::Mutex<Vec<ProviderRequest>>>);
+
+#[cfg(unix)]
+impl ReviewProvider for ExploringProvider {
+    fn execute(
+        &self,
+        request: &ProviderRequest,
+        _cancellation: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<ProviderResult, String> {
+        self.0.lock().unwrap().push(request.clone());
+        if let Some(launch) = &request.exploration {
+            let log = launch
+                .args
+                .iter()
+                .skip_while(|arg| *arg != "--log")
+                .nth(1)
+                .unwrap();
+            std::fs::write(
+                log,
+                r#"{"tool":"read_file","arguments":{"path":"src/caller.rs"},"paths":["src/caller.rs"],"bytes":40,"outcome":"ok"}
+"#,
+            )
+            .unwrap();
+        }
+        Ok(ProviderResult {
+            stdout: br#"{"schema_version":1,"findings":[]}"#.to_vec(),
+            stderr: Vec::new(),
+            exit_code: Some(0),
+            usage: None,
+        })
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn exploring_reviewers_get_the_snapshot_server_and_their_reads_are_recorded() {
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (_directory, snapshot, result) =
+        exploration_review("claude_cli", &ExploringProvider(requests.clone()));
+
+    let requests = requests.lock().unwrap();
+    let launch = requests[0].exploration.clone().expect("exploration launch");
+    assert_eq!(launch.args[..3], ["mcp", "snapshot", "--spec"]);
+    assert_eq!(launch.args[4], "--log");
+    assert!(
+        launch.descriptor.contains("\"max_tool_calls\":5"),
+        "{}",
+        launch.descriptor
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&requests[0].stdin).unwrap();
+    assert_eq!(
+        payload["exploration"]["tools"],
+        serde_json::json!(vee_core::EXPLORATION_TOOLS)
+    );
+    // The spec and logs live only as long as the review.
+    assert!(!Path::new(&launch.args[3]).exists());
+
+    let exploration = result.reviewer_context[0].exploration.clone().unwrap();
+    assert_eq!(exploration.status, "used");
+    assert_eq!(exploration.tool_calls, 1);
+    assert_eq!(exploration.read_bytes, 40);
+    assert_eq!(exploration.files, ["src/caller.rs"]);
+    assert_eq!(result.change_set.digest, snapshot.digest);
+}
+
+#[cfg(unix)]
+#[test]
+fn providers_without_snapshot_tools_review_the_bundle_and_say_so() {
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (_directory, _snapshot, result) =
+        exploration_review("cli", &ExploringProvider(requests.clone()));
+
+    let requests = requests.lock().unwrap();
+    assert!(requests[0].exploration.is_none());
+    let payload: serde_json::Value = serde_json::from_slice(&requests[0].stdin).unwrap();
+    assert!(payload.get("exploration").is_none());
+    let exploration = result.reviewer_context[0].exploration.clone().unwrap();
+    assert_eq!(exploration.status, "unsupported");
+    assert!(result.analysis_complete, "{:?}", result.reasons);
 }

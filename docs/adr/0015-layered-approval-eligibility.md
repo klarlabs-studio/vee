@@ -38,15 +38,15 @@ every one with its reason. A change is eligible only when all pass.
 | `paths` | No changed path matches `approval.never_paths`. |
 | `authors` | No commit in the change has an author whose name or email matches `approval.never_authors`. |
 | `risk` | The change-risk tier ([ADR 0014](0014-change-risk-as-explained-tiers.md)) is within `approval.max_risk` (`low` by default, or `elevated`). Missing risk fails. |
-| `gate` | The latest gate decision passed. |
+| `gate` | The gate passes when evaluated now, against the current snapshot, configuration and verification runs. The decision is not recorded, so approval stays read-only, and a verification run since the last `gate check` counts. |
 
 **Output:**
 - The command exits 0 when the change is eligible and 1 otherwise, like
   `gate check`.
 - The author stage reports only the pattern that matched, never an
   author's name or email.
-- `approval` is omitted from the effective configuration when unset, so
-  existing configuration digests do not change.
+- `approval` is left out of the effective configuration digest, so adding
+  or changing guards never makes existing reviews stale.
 
 ## Consequences
 
@@ -56,10 +56,23 @@ every one with its reason. A change is eligible only when all pass.
 - Every reason is visible, so nobody has to guess why a change needs a
   human.
 
+**Publishing to hosts.** `vee hosting publish --approval` publishes the
+verdict as a separate `Vee approval` check, so branch protection or
+auto-merge can require it independently of the gate's `Vee` check:
+- An eligible change is a success. Anything else is neutral, never a
+  failure, because a change that needs a person is not a broken change.
+  Bitbucket has no neutral state, so it shows as stopped and never as
+  successful.
+- The check lists every stage with its detail.
+- Eligibility is evaluated before anything is written.
+- Gerrit, which publishes one tagged review message rather than separate
+  checks, is refused.
+
+Vee publishes a check rather than a native approval or a label. A check
+carries the reasons and stays read-only toward the review itself; whether a
+passing check approves or merges is the repository's own policy.
+
 **Not yet done:**
-- **Publishing to hosts.** Publishing the verdict to a Git host as an
-  approval or a label needs each hosting adapter to support it. Until then,
-  CI can act on the exit status.
 - **Anti-rubber-stamp signals.** Rate limits on automated approvals, and
   tracking of override and dismissal rates, are not built.
 - **Carrying approval across trivial deltas.** Carrying an approval across

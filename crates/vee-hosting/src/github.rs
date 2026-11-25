@@ -337,6 +337,7 @@ impl GitHubAdapter {
                         .to_owned();
                     let line = comment
                         .get("line")
+                        .filter(|value| !value.is_null())
                         .or_else(|| comment.get("original_line"))
                         .and_then(|value| value.as_u64())
                         .unwrap_or(0);
@@ -360,80 +361,118 @@ impl GitHubAdapter {
                     .into(),
             ));
         }
-        let comment_id = if let Some((id, old_path, old_line, old_side)) = existing_comment {
-            let side = match thread.side {
-                DiffSide::Old => "LEFT",
-                DiffSide::New => "RIGHT",
-            };
-            let location_matches =
-                old_path == thread.path && old_line == thread.line && old_side == side;
-            if !location_matches && thread.resolution == ThreadResolution::Open {
-                return Err(HostingError::InvalidResponse("GitHub cannot move an existing review comment; finding location changed and needs manual thread reconciliation".into()));
+        let side = match thread.side {
+            DiffSide::Old => "LEFT",
+            DiffSide::New => "RIGHT",
+        };
+        // (comment, whether its body is refreshed). A finding that moved keeps
+        // no thread: the old one is marked as moved and resolved, and a new
+        // comment opens at the new line.
+        let reused = match existing_comment {
+            Some((id, old_path, old_line, old_side)) => {
+                let location_matches =
+                    old_path == thread.path && old_line == thread.line && old_side == side;
+                if location_matches {
+                    Some((id, true))
+                } else if thread.resolution == ThreadResolution::Resolved {
+                    Some((id, false))
+                } else {
+                    self.retire_moved_comment(thread, id)?;
+                    None
+                }
             }
-            if !location_matches {
-                id
-            } else {
-                let url = self
-                    .config
-                    .api_base
-                    .join(&format!(
-                        "repos/{}/pulls/comments/{id}",
-                        thread.pull_request.repository.full_name
-                    ))
-                    .map_err(|error| HostingError::InvalidResponse(error.to_string()))?;
+            None if thread.resolution == ThreadResolution::Resolved => return Ok(None),
+            None => None,
+        };
+        let comment_id = match reused {
+            Some((id, false)) => id,
+            Some((id, true)) => self.update_comment_body(&thread.pull_request, id, &body)?,
+            None => {
+                let url = self.path(&thread.pull_request, "/comments")?;
                 let response = self
-                    .request(Method::PATCH, url)?
-                    .json(&serde_json::json!({"body": body}))
+                    .request(Method::POST, url)?
+                    .json(&serde_json::json!({
+                        "body": body, "commit_id": snapshot.head_oid, "path": thread.path,
+                        "line": thread.line, "side": side
+                    }))
                     .send()
                     .map_err(|error| {
-                        HostingError::Transport(format!("updating review comment: {error}"))
+                        HostingError::Transport(format!("creating review comment: {error}"))
                     })?;
                 let response = self.send(response)?;
-                let updated: serde_json::Value = Self::json(response)?;
-                updated
+                let created: serde_json::Value = Self::json(response)?;
+                created
                     .get("id")
                     .and_then(|value| value.as_u64())
                     .ok_or_else(|| {
-                        HostingError::InvalidResponse("updated GitHub comment has no ID".into())
+                        HostingError::InvalidResponse("created GitHub comment has no ID".into())
                     })?
             }
-        } else {
-            if thread.resolution == ThreadResolution::Resolved {
-                return Ok(None);
-            }
-            let url = self.path(&thread.pull_request, "/comments")?;
-            let side = match thread.side {
-                DiffSide::Old => "LEFT",
-                DiffSide::New => "RIGHT",
-            };
-            let response = self
-                .request(Method::POST, url)?
-                .json(&serde_json::json!({
-                    "body": body, "commit_id": snapshot.head_oid, "path": thread.path,
-                    "line": thread.line, "side": side
-                }))
-                .send()
-                .map_err(|error| {
-                    HostingError::Transport(format!("creating review comment: {error}"))
-                })?;
-            let response = self.send(response)?;
-            let created: serde_json::Value = Self::json(response)?;
-            created
-                .get("id")
-                .and_then(|value| value.as_u64())
-                .ok_or_else(|| {
-                    HostingError::InvalidResponse("created GitHub comment has no ID".into())
-                })?
         };
-        let owner = thread
-            .pull_request
+        let should_resolve = thread.resolution == ThreadResolution::Resolved;
+        let thread_id =
+            self.reconcile_resolution(&thread.pull_request, comment_id, should_resolve)?;
+        Ok(Some(thread_id))
+    }
+
+    /// Replace the body of one of Vee's review comments.
+    fn update_comment_body(
+        &self,
+        pull_request: &PullRequestRef,
+        id: u64,
+        body: &str,
+    ) -> Result<u64, HostingError> {
+        let url = self
+            .config
+            .api_base
+            .join(&format!(
+                "repos/{}/pulls/comments/{id}",
+                pull_request.repository.full_name
+            ))
+            .map_err(|error| HostingError::InvalidResponse(error.to_string()))?;
+        let response = self
+            .request(Method::PATCH, url)?
+            .json(&serde_json::json!({"body": body}))
+            .send()
+            .map_err(|error| {
+                HostingError::Transport(format!("updating review comment: {error}"))
+            })?;
+        let response = self.send(response)?;
+        let updated: serde_json::Value = Self::json(response)?;
+        updated
+            .get("id")
+            .and_then(|value| value.as_u64())
+            .ok_or_else(|| HostingError::InvalidResponse("updated GitHub comment has no ID".into()))
+    }
+
+    /// GitHub cannot move a review comment. The old one says where the finding
+    /// went and loses its fingerprint marker, so later publications no longer
+    /// match it, and its thread is resolved.
+    fn retire_moved_comment(&self, thread: &ReviewThread, id: u64) -> Result<(), HostingError> {
+        let body = format!(
+            "Vee now reports this finding at `{}` line {}; see the thread there.\n<!-- vee:moved:{} -->",
+            thread.path, thread.line, thread.fingerprint
+        );
+        self.update_comment_body(&thread.pull_request, id, &body)?;
+        self.reconcile_resolution(&thread.pull_request, id, true)?;
+        Ok(())
+    }
+
+    /// Resolve or reopen the review thread holding Vee's comment `comment_id`,
+    /// returning the thread's node ID.
+    fn reconcile_resolution(
+        &self,
+        pull_request: &PullRequestRef,
+        comment_id: u64,
+        should_resolve: bool,
+    ) -> Result<String, HostingError> {
+        let owner = pull_request
             .repository
             .full_name
             .split('/')
             .next()
             .unwrap_or_default();
-        let name = thread
-            .pull_request
+        let name = pull_request
             .repository
             .full_name
             .split('/')
@@ -452,7 +491,7 @@ impl GitHubAdapter {
             }
             let data = self.graphql(
                 query,
-                serde_json::json!({"owner":owner,"name":name,"number":thread.pull_request.number,"after":after}),
+                serde_json::json!({"owner":owner,"name":name,"number":pull_request.number,"after":after}),
             )?;
             let connection = data
                 .pointer("/data/repository/pullRequest/reviewThreads")
@@ -525,7 +564,6 @@ impl GitHubAdapter {
             .get("isResolved")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
-        let should_resolve = thread.resolution == ThreadResolution::Resolved;
         if is_resolved != should_resolve {
             let (mutation, operation) = if should_resolve {
                 ("resolveReviewThread", "resolveReviewThread")
@@ -544,7 +582,7 @@ impl GitHubAdapter {
                 ));
             }
         }
-        Ok(Some(thread_id))
+        Ok(thread_id)
     }
 }
 
@@ -2411,5 +2449,88 @@ mod tests {
             9,
             "stale location should not patch or recreate comment"
         );
+    }
+
+    #[test]
+    fn github_replaces_the_thread_of_an_open_finding_whose_line_moved() {
+        let (base, server) = fixture_server(vec![
+            (
+                200,
+                vec![("ETag".into(), "\"rev-1\"".into())],
+                r#"{"number":9,"title":"Change","body":null,"state":"open","merged":false,"base":{"sha":"base123"},"head":{"sha":"head456"}}"#.into(),
+            ),
+            (200, vec![], r#"{"check_runs":[]}"#.into()),
+            (201, vec![], r#"{"id":321}"#.into()),
+            stable_pr_response(),
+            (
+                200,
+                vec![],
+                r#"[{"id":501,"path":"src/old.rs","line":null,"original_line":17,"side":"RIGHT","body":"old <!-- vee:fingerprint:sha256:f1 -->","user":{"login":"vee[bot]"}}]"#.into(),
+            ),
+            (200, vec![], r#"{"id":501}"#.into()),
+            (
+                200,
+                vec![],
+                r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"PRRT_old","isResolved":false,"comments":{"nodes":[{"databaseId":501,"body":"moved","author":{"login":"vee[bot]"}}]}}],"pageInfo":{"hasNextPage":false,"endCursor":"c"}}}}}}"#.into(),
+            ),
+            (
+                200,
+                vec![],
+                r#"{"data":{"resolveReviewThread":{"thread":{"id":"PRRT_old","isResolved":true}}}}"#.into(),
+            ),
+            (201, vec![], r#"{"id":777}"#.into()),
+            (
+                200,
+                vec![],
+                r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"PRRT_new","isResolved":false,"comments":{"nodes":[{"databaseId":777,"body":"new","author":{"login":"vee[bot]"}}]}}],"pageInfo":{"hasNextPage":false,"endCursor":"c"}}}}}}"#.into(),
+            ),
+            (
+                200,
+                vec![("ETag".into(), "\"rev-1\"".into())],
+                r#"{"number":9,"title":"Change","body":null,"state":"open","merged":false,"base":{"sha":"base123"},"head":{"sha":"head456"}}"#.into(),
+            ),
+        ]);
+        let adapter = GitHubAdapter::new(
+            GitHubConfig::new(&base, "test-token".into(), "webhook-secret".into())
+                .unwrap()
+                .with_actor_login("vee[bot]"),
+        )
+        .unwrap();
+        let pull_request = reference("127.0.0.1");
+        let publication = ReviewPublication {
+            pull_request: pull_request.clone(),
+            expected_revision: "\"rev-1\":base123:head456".into(),
+            check: CheckRun {
+                pull_request: pull_request.clone(),
+                external_id: "review-3".into(),
+                name: "Vee assurance".into(),
+                status: CheckStatus::Completed,
+                conclusion: Some(CheckConclusion::Success),
+                title: "Review passed".into(),
+                summary: "Resolved finding".into(),
+                snapshot_id: "sha256:snapshot".into(),
+                idempotency_key: "review:sha256:snapshot".into(),
+            },
+            threads: vec![ReviewThread {
+                pull_request,
+                fingerprint: "sha256:f1".into(),
+                path: "src/new.rs".into(),
+                line: 3,
+                side: DiffSide::New,
+                body: "Still wrong".into(),
+                resolution: ThreadResolution::Open,
+                snapshot_id: "sha256:snapshot".into(),
+                idempotency_key: "thread:sha256:f1:resolved".into(),
+            }],
+        };
+        let receipt = adapter.publish_review(publication).unwrap();
+        assert_eq!(receipt.thread_ids.get("sha256:f1").unwrap(), "PRRT_new");
+        let requests = server.join().unwrap();
+        assert!(requests[5].starts_with("PATCH /api/v3/repos/octo/repo/pulls/comments/501"));
+        assert!(requests[5].contains("src/new.rs") && !requests[5].contains("vee:fingerprint"));
+        assert!(requests[7].contains("resolveReviewThread"));
+        assert!(requests[8].starts_with("POST /api/v3/repos/octo/repo/pulls/9/comments"));
+        assert!(requests[8].contains("\"line\":3"));
+        assert_eq!(requests.len(), 11);
     }
 }

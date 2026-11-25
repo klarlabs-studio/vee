@@ -347,6 +347,16 @@ struct StandardsInput {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct ReviewSessionInput {
+    /// Saved reviews to read together (1 to 20, no repeats), in display order:
+    /// a review ID, or `REPO:REVIEW_ID` for a review saved in a checkout
+    /// beneath this server's repository root.
+    #[schemars(length(min = 1, max = 20), extend("uniqueItems" = true))]
+    review_ids: Vec<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ReviewInput {
     /// Saved review ID.
     review_id: String,
@@ -439,10 +449,32 @@ fn scope_request(input: &StartReviewInput) -> anyhow::Result<ScopeRequest> {
     ScopeRequest::from_kind(kind, input.base.clone(), input.commit.clone())
 }
 
+/// Forwards each progress snapshot's counts and summary to an async task,
+/// which reports them to the client as MCP progress notifications.
+struct ChannelProgress(tokio::sync::mpsc::UnboundedSender<(u32, u32, String)>);
+
+impl vee_application::ReviewProgressSink for ChannelProgress {
+    fn report(&self, progress: &vee_application::ReviewProgress) {
+        let (done, total) = progress.counts();
+        let _ = self.0.send((done, total, progress.summary()));
+    }
+}
+
+/// Shows a task-run review's progress as the task's status message.
+struct TaskStatusProgress(mcp_rs::protocol::task_manager::TaskContext);
+
+impl vee_application::ReviewProgressSink for TaskStatusProgress {
+    fn report(&self, progress: &vee_application::ReviewProgress) {
+        self.0
+            .set_status_message(format!("Reviewing: {}", progress.summary()));
+    }
+}
+
 fn run_review(
     workspace: &Workspace,
     input: &StartReviewInput,
     cancellation: &tokio_util::sync::CancellationToken,
+    progress: Option<&dyn vee_application::ReviewProgressSink>,
 ) -> anyhow::Result<vee_application::ReviewResult> {
     operations::review(
         workspace,
@@ -453,7 +485,7 @@ fn run_review(
             effort: input.effort.map(Into::into),
             work_item: input.work_item.as_deref(),
             hosting: Default::default(),
-            progress: None,
+            progress,
         },
         Some(cancellation),
     )
@@ -517,8 +549,9 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
                 async move {
                     let cancellation = ctx.ct.clone();
                     let task_cancel = task.clone();
+                    let status = TaskStatusProgress(task.clone());
                     let work = tokio::task::spawn_blocking(move || {
-                        run_review(&workspace, &input, &cancellation)
+                        run_review(&workspace, &input, &cancellation, Some(&status))
                     });
                     let internal = |message: String| {
                         mcp_rs::protocol::ErrorData::internal_error(message, None)
@@ -550,8 +583,26 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
             let workspace = state.clone();
             // Client cancellation (notifications/cancelled) stops reviewer subprocesses.
             let cancellation = ctx.ct.clone();
+            // Progress notifications reach clients that sent a progress token;
+            // for others `Session::progress` does nothing.
+            let session = mcp_rs::session::Session::from_context(&ctx);
             async move {
-                view_result(&run_blocking(move || run_review(&workspace, &input, &cancellation)).await?)
+                let (sender, mut updates) = tokio::sync::mpsc::unbounded_channel();
+                let forward = tokio::spawn(async move {
+                    while let Some((done, total, message)) = updates.recv().await {
+                        let _ = session
+                            .progress(f64::from(done), Some(f64::from(total)), Some(message))
+                            .await;
+                    }
+                });
+                let review = run_blocking(move || {
+                    let sink = ChannelProgress(sender);
+                    run_review(&workspace, &input, &cancellation, Some(&sink))
+                })
+                .await;
+                // The sender dropped with the sink, so the forwarder drains and ends.
+                let _ = forward.await;
+                view_result(&review?)
             }
         })?;
 
@@ -656,6 +707,11 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         "impact-assessment-v4",
         "Analyze files and tests likely affected by a saved review's snapshot, with evidence paths and uncertainty. Same document as `vee impact --review <id> --output json`.",
         |ws, input: ReviewInput| operations::impact(&ws, operations::ChangeTarget::Review(input.review_id)));
+
+    viewed_tool!(server, workspace, "review_session", "Review session", read_only_tool(),
+        "review-session-v1",
+        "Read several saved reviews together, such as the changes one coding-agent session produced: each change keeps its own gate, risk tier, open findings by severity, and approval eligibility, and the session verdict passes only when every change passed on a current snapshot. A review saved in another checkout beneath this server's repository root is named `REPO:REVIEW_ID`. Same document as `vee reviews session --review <id>... --output json`.",
+        |ws, input: ReviewSessionInput| operations::review_session(&ws, &input.review_ids, operations::RepositoryPaths::Confined));
 
     viewed_tool!(server, workspace, "check_approval_eligibility", "Check approval eligibility", read_only_tool(),
         "approval-eligibility-v1",
@@ -934,6 +990,7 @@ mod tests {
                 work_item: None,
             },
             &tokio_util::sync::CancellationToken::new(),
+            None,
         )
         .unwrap_err();
 
