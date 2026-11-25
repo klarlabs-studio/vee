@@ -3792,6 +3792,39 @@ impl vee_application::ReviewProgressSink for TerminalProgress {
     }
 }
 
+/// A person confirms each patch application at a terminal. Without one, as in
+/// an agent's shell, applying needs `patches.allow_noninteractive_apply` in
+/// this machine's user configuration, which lives outside the repository.
+fn confirm_patch_application(
+    kind: &str,
+    id: &str,
+    location: &std::path::Path,
+) -> anyhow::Result<()> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    if !interactive {
+        if vee_application::noninteractive_patch_apply_allowed().map_err(configuration_failure)? {
+            return Ok(());
+        }
+        return Err(usage_failure(
+            "applying a patch needs a person to confirm it at a terminal; to allow it without one on this machine, set `patches: { allow_noninteractive_apply: true }` in your Vee user config",
+        ));
+    }
+    let mut stderr = std::io::stderr();
+    write!(
+        stderr,
+        "Apply {kind} {id}?\nReview it first: {}\nType `apply` to continue: ",
+        location.display()
+    )?;
+    stderr.flush()?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    if answer.trim() != "apply" {
+        return Err(usage_failure(format!("{kind} {id} was not applied")));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
@@ -4131,37 +4164,4 @@ mod tests {
         );
         assert!(skill_dir.join("SKILL.md").is_file());
     }
-}
-
-/// A person confirms each patch application at a terminal. Without one, as in
-/// an agent's shell, applying needs `patches.allow_noninteractive_apply` in
-/// this machine's user configuration, which lives outside the repository.
-fn confirm_patch_application(
-    kind: &str,
-    id: &str,
-    location: &std::path::Path,
-) -> anyhow::Result<()> {
-    use std::io::{BufRead, IsTerminal, Write};
-    let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-    if !interactive {
-        if vee_application::noninteractive_patch_apply_allowed().map_err(configuration_failure)? {
-            return Ok(());
-        }
-        return Err(usage_failure(
-            "applying a patch needs a person to confirm it at a terminal; to allow it without one on this machine, set `patches: { allow_noninteractive_apply: true }` in your Vee user config",
-        ));
-    }
-    let mut stderr = std::io::stderr();
-    write!(
-        stderr,
-        "Apply {kind} {id}?\nReview it first: {}\nType `apply` to continue: ",
-        location.display()
-    )?;
-    stderr.flush()?;
-    let mut answer = String::new();
-    std::io::stdin().lock().read_line(&mut answer)?;
-    if answer.trim() != "apply" {
-        return Err(usage_failure(format!("{kind} {id} was not applied")));
-    }
-    Ok(())
 }
