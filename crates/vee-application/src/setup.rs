@@ -732,9 +732,8 @@ fn read_user_providers(path: &Path) -> Result<serde_yaml::Mapping, String> {
 /// previous file with comments is kept next to it as `<name>.bak`.
 fn write_user_config(path: &Path, contents: &str) -> Result<(), String> {
     let target = match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            std::fs::canonicalize(path).map_err(|error| format!("{}: {error}", path.display()))?
-        }
+        Ok(metadata) if metadata.file_type().is_symlink() => vee_core::paths::canonicalize(path)
+            .map_err(|error| format!("{}: {error}", path.display()))?,
         _ => path.to_path_buf(),
     };
     if let Ok(previous) = std::fs::read_to_string(&target) {
