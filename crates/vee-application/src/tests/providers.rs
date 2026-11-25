@@ -1502,3 +1502,10 @@ fn reviewer_instructions_are_trusted_prompt_text_not_payload_data() {
     assert!(!payload.contains("filter by tenant"), "{payload}");
     assert!(payload.contains("snapshot-test"));
 }
+
+#[test]
+fn the_cache_key_covers_the_prompt_the_adapters_add() {
+    let digest = crate::providers::adapter_prompt_digest();
+    assert!(digest.starts_with("sha256:"), "{digest}");
+    assert_eq!(digest, crate::providers::adapter_prompt_digest());
+}

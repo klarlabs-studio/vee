@@ -88,8 +88,12 @@ policy:
 ## Consequences
 
 **Benefits:**
-- Teams set a higher bar exactly where they need it, and that bar does not
-  depend on the reviewer model following an instruction.
+- Teams set a higher bar exactly where they need it. A path floor does not
+  depend on the reviewer model following an instruction. A category floor
+  does in part: the category is free text the model writes, matched without
+  regard to case, so a floor on `security` misses a finding the model files
+  as `auth`. Use path floors where the bar must hold, and list the category
+  names a floor should catch.
 - Severity means the same thing in every repository, so packs and
   attestations stay comparable.
 - Improvements to the rubric reach every repository on upgrade.

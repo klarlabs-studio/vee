@@ -2205,11 +2205,12 @@ fn run() -> Result<u8> {
             let cwd = std::env::current_dir()?;
             let root = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
             let address = std::net::SocketAddr::new(host, port);
-            let auth_token = None;
-            eprintln!("Vee UI: http://{address}");
-            if let Some(token) = auth_token.as_deref() {
-                eprintln!("Vee network UI access token (enter it in the browser prompt): {token}");
-            }
+            // A token for this process only. It travels in the URL fragment,
+            // which the browser keeps to itself; the page then sends it with
+            // every API request.
+            let auth_token = vee_http::new_access_token()?;
+            eprintln!("Vee UI: http://{address}/#token={auth_token}");
+            eprintln!("Open this address; the token in it keeps other users and programs out.");
             tokio::runtime::Runtime::new()?.block_on(vee_http::serve(
                 root,
                 address,
@@ -3319,20 +3320,13 @@ fn run() -> Result<u8> {
                     lock: std::sync::Mutex::new(()),
                 });
                 let address = std::net::SocketAddr::new(bind, port);
-                let auth_token = None;
                 eprintln!("Vee {provider_id} webhook listener: http://{address}/api/webhooks/{provider_id}");
-                if let Some(token) = auth_token.as_deref() {
-                    eprintln!(
-                        "Vee dashboard access token (enter it in the browser prompt): {token}"
-                    );
-                }
                 tokio::runtime::Runtime::new()?.block_on(vee_http::serve_with_webhooks(
                     root,
                     address,
                     allow_network,
                     provider,
                     handler,
-                    auth_token,
                 ))?;
                 Ok(0)
             }

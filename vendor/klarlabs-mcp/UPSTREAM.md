@@ -10,7 +10,11 @@ Rust generics, Serde, Schemars, and the repository-owned protocol engine. The
 default transport policy is MCP 2026-07-28 with discovery only. Vee adds an
 explicit stdio compatibility entry point for pre-2026 `initialize` clients;
 HTTP and the default stdio entry point retain modern-only behavior. This
-compatibility is covered by Vee's CLI integration test.
+compatibility is covered by Vee's CLI integration test. Because the static
+`Server` handler now knows the legacy versions, `tests/modern_only.rs` expects
+modern-only discovery from live servers and from the transport entry points,
+not from the raw static handler. A live server advertises only the versions it
+accepts, rather than the static handler's list.
 Vee also adds `ToolBuilder::output_schema_json`, which declares an output schema
 from a JSON Schema document, so tools can publish the same schema files the CLI
 emits instead of a schema derived from a Rust type.

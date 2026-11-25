@@ -640,6 +640,35 @@ pub fn repository_config_view(workspace: &Workspace) -> Result<RepositoryConfigV
     })
 }
 
+/// Providers and verification profiles name programs Vee runs. The UI's
+/// editor may change everything else; these are edited in `.vee.yaml` itself,
+/// so a request to the UI cannot make Vee run a new program.
+fn ensure_programs_unchanged(workspace: &Workspace, replacement: &str) -> Result<()> {
+    let parse = |text: &str| -> Result<(serde_json::Value, serde_json::Value)> {
+        let config: RepositoryConfig = serde_yaml::from_str(text)
+            .map_err(|error| usage_failure(format!("invalid configuration: {error}")))?;
+        Ok((
+            serde_json::to_value(&config.providers)?,
+            serde_json::to_value(&config.verification)?,
+        ))
+    };
+    let path = workspace.root().join(".vee.yaml");
+    let current = match std::fs::read_to_string(&path) {
+        Ok(text) => parse(&text)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            (serde_json::json!({}), serde_json::json!({}))
+        }
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    let (providers, verification) = parse(replacement)?;
+    if providers != current.0 || verification != current.1 {
+        return Err(usage_failure(
+            "providers and verification profiles run programs, so they are edited in .vee.yaml, not here",
+        ));
+    }
+    Ok(())
+}
+
 /// Validate a replacement repository configuration and atomically write it to
 /// `.vee.yaml`. Nothing is written unless every cross-reference and protected
 /// requirement holds.
@@ -651,6 +680,7 @@ pub fn replace_repository_config(
     if body.len() > MAX_REPOSITORY_CONFIG_BYTES {
         return Err(usage_failure("configuration exceeds 256 KiB"));
     }
+    ensure_programs_unchanged(workspace, &body)?;
     crate::validate_repository_config_yaml(workspace.root(), &body).map_err(usage_failure)?;
     let mut temporary = tempfile::NamedTempFile::new_in(workspace.root())?;
     std::io::Write::write_all(temporary.as_file_mut(), body.as_bytes())?;

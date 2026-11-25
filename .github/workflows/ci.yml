@@ -17,7 +17,7 @@ jobs:
     name: Rust dependency advisories
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           toolchain: stable
@@ -27,6 +27,24 @@ jobs:
       - name: Audit locked dependencies
         run: cargo audit
 
+  release-checks:
+    name: Workflows and container image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Lint workflows and the action
+        run: |
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.10/scripts/download-actionlint.bash) 1.7.10
+          ./actionlint -color
+      - name: Check the release workflow patch is applied and stable
+        run: |
+          python3 scripts/patch-release-workflow.py
+          git diff --exit-code .github/workflows/release.yml
+      - name: Build the container image from source
+        run: docker build --tag vee:ci .
+      - name: Run the container image
+        run: docker run --rm vee:ci --version
+
   web:
     name: Web assets and browser workflows (${{ matrix.os }})
     strategy:
@@ -35,8 +53,8 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -69,18 +87,18 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install Python for mutation-effectiveness fixtures
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
       - name: Install Java for mutation-effectiveness fixtures
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
         with:
           distribution: temurin
           java-version: '21'
       - name: Install Go for mutation-effectiveness fixtures
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: '1.24.x'
       - name: Install gopls for Go impact acceptance
@@ -94,7 +112,7 @@ jobs:
           export PATH="$GOBIN:$PATH"
           gopls version
       - name: Install Node.js for mutation-effectiveness fixtures
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
       - name: Install Ruby for mutation-effectiveness fixtures
@@ -125,6 +143,11 @@ jobs:
         env:
           VEE_TEST_REQUIRE_LANGUAGE_SERVERS: '1'
         run: cargo test --workspace --locked --no-fail-fast -- --test-threads=1
+      - name: Test the vendored MCP crates
+        if: runner.os == 'Linux'
+        run: |
+          cargo test --manifest-path vendor/klarlabs-mcp-protocol/Cargo.toml --locked
+          cargo test --manifest-path vendor/klarlabs-mcp/Cargo.toml --locked
       - name: Verify project-aware TypeScript impact
         run: cargo test -p vee-application typescript_project_references_resolve_aliases_without_same_name_false_edges --locked
       - name: Install CLI from workspace

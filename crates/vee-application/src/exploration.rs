@@ -106,11 +106,25 @@ impl ExplorationSpec {
         review_path_is_included(path, &review) && reviewer_allows && !self.is_denied(path)
     }
 
-    fn is_denied(&self, path: &str) -> bool {
+    /// Whether `path` is on the deny list. Matching ignores case, since
+    /// `.ENV` and `ID_RSA` hold secrets as well, and a pattern without a slash
+    /// matches any path component, so `credentials` denies a whole
+    /// `credentials/` directory.
+    pub fn denies(&self, path: &str) -> bool {
+        let path = path.to_ascii_lowercase();
         self.deny.iter().any(|pattern| {
-            glob_matches(pattern, path)
-                || (!pattern.contains('/') && glob_matches(&format!("**/{pattern}"), path))
+            let pattern = pattern.to_ascii_lowercase();
+            if pattern.contains('/') {
+                glob_matches(&pattern, &path) || glob_matches(&format!("**/{pattern}"), &path)
+            } else {
+                path.split('/')
+                    .any(|component| glob_matches(&pattern, component))
+            }
         })
+    }
+
+    fn is_denied(&self, path: &str) -> bool {
+        self.denies(path)
     }
 }
 
@@ -186,11 +200,36 @@ impl SnapshotExplorer {
                 .filter(|path| glob.is_none_or(|glob| glob_matches(glob, path)))
                 .cloned()
                 .collect::<Vec<_>>();
-            let shown = matching.len().min(limit);
-            let mut text = format!("{shown} of {} matching snapshot paths\n", matching.len());
-            for path in &matching[..shown] {
-                text.push_str(path);
-                text.push('\n');
+            // The listing counts against the read budget like file text; the
+            // header and the cut-short note are reserved for first.
+            const CUT_SHORT: &str = "[listing cut short by the read budget]\n";
+            let header_len = format!(
+                "{} of {} matching snapshot paths\n",
+                matching.len(),
+                matching.len()
+            )
+            .len();
+            let budget = explorer
+                .remaining_bytes()
+                .saturating_sub(header_len + CUT_SHORT.len());
+            let mut listed = String::new();
+            let mut shown = 0;
+            let mut over_budget = false;
+            for path in matching.iter().take(limit) {
+                if listed.len() + path.len() + 1 > budget {
+                    over_budget = true;
+                    break;
+                }
+                listed.push_str(path);
+                listed.push('\n');
+                shown += 1;
+            }
+            let mut text = format!(
+                "{shown} of {} matching snapshot paths\n{listed}",
+                matching.len()
+            );
+            if over_budget {
+                text.push_str(CUT_SHORT);
             }
             Ok(Outcome::ok(text, Vec::new()))
         })
@@ -243,6 +282,17 @@ impl SnapshotExplorer {
                 }
                 let numbered = format!("{number:>6}| {line}\n");
                 if body.len() + numbered.len() > limit {
+                    if body.is_empty() {
+                        // One line longer than the limit: show its start and
+                        // move on, so the next call does not ask for it again.
+                        let mut cut = limit.saturating_sub(1).min(numbered.len());
+                        while !numbered.is_char_boundary(cut) {
+                            cut -= 1;
+                        }
+                        body.push_str(&numbered[..cut]);
+                        body.push('\n');
+                        last_line = number;
+                    }
                     truncated = true;
                     break;
                 }

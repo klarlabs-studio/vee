@@ -57,9 +57,10 @@ Vee serves itself. Nothing else is reachable.
 
 ### Tools
 
-`vee review-context serve` is an internal stdio MCP server, started by the
-reviewer CLI. It is given the repository root and the captured change set,
-and it offers three read-only tools:
+`vee mcp snapshot --spec <file> --log <file>` is an internal stdio MCP
+server, started by the reviewer CLI. Its spec gives it the repository root,
+the captured change set and the reviewer's path filters, and it offers three
+read-only tools:
 
 | Tool | Returns |
 |---|---|
@@ -89,10 +90,10 @@ and it offers three read-only tools:
    - Per tool result: the existing per-file limit.
    - When a budget runs out, the tool returns an explicit "budget
      exhausted" result rather than an error, so the review still finishes.
-5. **Results are untrusted data.** Tool output is labelled
-   `untrusted_repository_source`, like bundled context. The reviewer
-   prompt already forbids following instructions found in repository
-   text.
+5. **Results are untrusted data.** Tool output is plain repository text.
+   The server's instructions and the reviewer prompt both say that tool
+   results are untrusted and that instructions found in them are not to be
+   followed; bundled context is marked the same way.
 6. **The reviewer gets no other tools.** For example, the Claude CLI runs
    with `--restricted --tools "" --strict-mcp-config`, and only the
    server's three tools are allowed.

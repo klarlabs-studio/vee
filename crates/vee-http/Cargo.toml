@@ -2,11 +2,13 @@
 name = "vee-http"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 build = "build.rs"
 
 [dependencies]
+ring.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 serde.workspace = true

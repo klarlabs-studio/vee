@@ -576,12 +576,39 @@ pub fn router_with_webhooks(
     provider: Arc<dyn vee_hosting::GitHostingProvider>,
     handler: Arc<dyn WebhookEventHandler>,
 ) -> Router {
-    build_router(
-        root,
-        address,
-        None,
-        Some(Arc::new(WebhookState { provider, handler })),
-    )
+    build_webhook_router(root, address, Arc::new(WebhookState { provider, handler }))
+}
+
+/// A random access token for one UI process: 32 bytes as hex. The UI prints
+/// it in the URL fragment, which browsers do not send to the server.
+pub fn new_access_token() -> anyhow::Result<String> {
+    use ring::rand::SecureRandom;
+    let mut bytes = [0u8; 32];
+    ring::rand::SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| anyhow::anyhow!("could not generate an access token"))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// A webhook receiver: the hosting webhook and the health check only. A
+/// webhook server may sit behind a tunnel or proxy, so it exposes no UI and
+/// no review or configuration API.
+fn build_webhook_router(root: PathBuf, address: SocketAddr, webhook: Arc<WebhookState>) -> Router {
+    let path = format!("/api/webhooks/{}", webhook.provider.provider_id());
+    Router::new()
+        .route("/api/health", get(health))
+        .route(
+            &path,
+            axum::routing::post(receive_hosting_webhook)
+                .layer(DefaultBodyLimit::max(MAX_WEBHOOK_BODY_BYTES)),
+        )
+        .with_state(AppState {
+            workspace: Workspace::new(root, Arc::new(SqliteRepositoryStores)),
+            origin: format!("http://{address}"),
+            auth_token: None,
+            webhook: Some(webhook),
+            reviews_in_progress: Default::default(),
+        })
 }
 
 fn build_router(
@@ -790,11 +817,14 @@ fn unix_time() -> i64 {
         .unwrap_or(0)
 }
 
+/// Serve the local UI and its API. Every API request must carry
+/// `auth_token` as a bearer token, so other local users and processes cannot
+/// read reviews, change configuration or start reviews.
 pub async fn serve(
     root: PathBuf,
     address: SocketAddr,
     allow_network: bool,
-    auth_token: Option<String>,
+    auth_token: String,
 ) -> anyhow::Result<()> {
     if address.ip().is_unspecified() {
         anyhow::bail!(
@@ -811,7 +841,7 @@ pub async fn serve(
     let actual_address = listener.local_addr()?;
     axum::serve(
         listener,
-        build_router(root, actual_address, auth_token, None),
+        build_router(root, actual_address, Some(auth_token), None),
     )
     .await?;
     Ok(())
@@ -825,7 +855,6 @@ pub async fn serve_with_webhooks(
     allow_network: bool,
     provider: Arc<dyn vee_hosting::GitHostingProvider>,
     handler: Arc<dyn WebhookEventHandler>,
-    auth_token: Option<String>,
 ) -> anyhow::Result<()> {
     if address.ip().is_unspecified() {
         anyhow::bail!("wildcard binding is not supported; bind to a specific interface address");
@@ -840,11 +869,10 @@ pub async fn serve_with_webhooks(
     let actual_address = listener.local_addr()?;
     axum::serve(
         listener,
-        build_router(
+        build_webhook_router(
             root,
             actual_address,
-            auth_token,
-            Some(Arc::new(WebhookState { provider, handler })),
+            Arc::new(WebhookState { provider, handler }),
         ),
     )
     .await?;
@@ -1199,6 +1227,111 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(shell.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_config_editor_cannot_change_which_programs_vee_runs() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(root.join("reviewer.md"), "Review.\n").unwrap();
+        std::fs::write(
+            root.join(".vee.yaml"),
+            "version: 1\nproviders:\n  p: { kind: cli, executable: true }\nreviewers:\n  correctness: { provider: p, instructions_file: reviewer.md }\n",
+        )
+        .unwrap();
+        let address: SocketAddr = "127.0.0.1:7878".parse().unwrap();
+        let app = router(root.to_owned(), address);
+        let current = operations::repository_config_view(&Workspace::new(
+            root.to_owned(),
+            Arc::new(SqliteRepositoryStores),
+        ))
+        .unwrap();
+        let put = |config: serde_json::Value| {
+            app.clone().oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/config")
+                    .header(header::HOST, "127.0.0.1:7878")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "config": config }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+        };
+        let mut config = serde_json::to_value(&current.config).unwrap();
+        config["providers"]["p"]["executable"] = "/tmp/evil".into();
+        let refused = put(config).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(refused.into_body(), 4096).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("edited in .vee.yaml"));
+        assert!(!std::fs::read_to_string(root.join(".vee.yaml"))
+            .unwrap()
+            .contains("evil"));
+
+        let mut config = serde_json::to_value(&current.config).unwrap();
+        config["policy"]["minimum_confidence"] = 55.into();
+        let accepted = put(config).await.unwrap();
+        assert_eq!(accepted.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn access_tokens_are_long_random_hex() {
+        let first = new_access_token().unwrap();
+        assert_eq!(first.len(), 64);
+        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(first, new_access_token().unwrap());
+    }
+
+    #[test]
+    fn a_webhook_server_exposes_no_ui_or_review_api() {
+        let directory = tempfile::tempdir().unwrap();
+        let provider = Arc::new(
+            vee_hosting::github::GitHubAdapter::new(
+                vee_hosting::github::GitHubConfig::new(
+                    "https://api.github.com",
+                    "token".into(),
+                    "secret".into(),
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        let app = router_with_webhooks(
+            directory.path().to_owned(),
+            "127.0.0.1:7878".parse().unwrap(),
+            provider,
+            Arc::new(|_: &vee_hosting::WebhookEnvelope| Ok(())),
+        );
+        // The adapter's blocking client must be dropped outside async code.
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for (method, uri, expected) in [
+            ("GET", "/api/health", StatusCode::OK),
+            ("GET", "/", StatusCode::NOT_FOUND),
+            ("GET", "/api/reviews", StatusCode::NOT_FOUND),
+            ("PUT", "/api/config", StatusCode::NOT_FOUND),
+            ("POST", "/api/findings/x/status", StatusCode::NOT_FOUND),
+        ] {
+            let response = runtime
+                .block_on(
+                    app.clone().oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(uri)
+                            .header(header::HOST, "127.0.0.1:7878")
+                            .body(Body::empty())
+                            .unwrap(),
+                    ),
+                )
+                .unwrap();
+            assert_eq!(response.status(), expected, "{method} {uri}");
+        }
     }
 
     #[tokio::test]
@@ -2299,7 +2432,7 @@ mod tests {
             PathBuf::from("."),
             "192.0.2.1:7878".parse().unwrap(),
             true,
-            Some("test-token".into()),
+            "test-token".into(),
         )
         .await
         .unwrap_err();
@@ -2312,7 +2445,7 @@ mod tests {
             PathBuf::from("."),
             "0.0.0.0:7878".parse().unwrap(),
             true,
-            None,
+            "test-token".into(),
         )
         .await
         .unwrap_err();
@@ -2340,7 +2473,6 @@ mod tests {
                 true,
                 provider,
                 Arc::new(|_: &vee_hosting::WebhookEnvelope| Ok(())),
-                Some("test-token".into()),
             ))
             .unwrap_err();
         assert!(error.to_string().contains("serve TLS directly"));
