@@ -13,7 +13,7 @@ Vee installs from release binaries, a container image, or a source checkout. A c
 
 ## Supported installation and upgrade
 
-Users need Rust stable and Git. Build the workspace and install the CLI from a checkout with `cargo install --path crates/vee-cli --locked`. Upgrade by checking out the desired revision and rerunning the command with `--force`. Repository review history is stored under `.vee/`; recommend a backup before upgrades that include storage migrations.
+Install a release with the shell or PowerShell installer attached to it, or use the container image (see the README). To build from source instead, you need Rust stable and Git: install the CLI from a checkout with `cargo install --path crates/vee-cli --locked`. Upgrade by checking out the desired revision and rerunning the command with `--force`. Repository review history is stored under `.vee/`; recommend a backup before upgrades that include storage migrations.
 
 Provider CLIs and credentials are configured by each user and are not bundled. Node.js is needed to rebuild the checked-in local UI bundle and to run its browser workflow tests, not to build a checkout that already contains current `web/dist` assets.
 
@@ -135,8 +135,8 @@ review/gate, CLI-to-MCP review retrieval, stale-snapshot rejection, and the
 historical-review safety acceptance. This confirms the current local source
 installation path on macOS. It does not establish Windows runtime results,
 representative model review quality, or registry-free setup. No public release
-artifacts were produced. Binary packaging/signing and a registry publication
-path remain unconfigured; source installation is still the supported route.
+artifacts were produced. That check predates the release workflow: binaries,
+installers and the container image are now built by dist on a version tag.
 
 Release-candidate acceptance on 2026-11-21 (macOS arm64, Rust 1.100.0), after
 the finding drawer, outdated findings, review-queue next actions and

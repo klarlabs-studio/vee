@@ -871,7 +871,7 @@ pub fn run_review_with_provider_and_selection_context(
         }
         let exploration_launch = exploration
             .as_ref()
-            .map(|exploration| exploration.launch(index, provider.kind))
+            .map(|exploration| exploration.launch(index, provider.kind, reviewer))
             .transpose()?
             .flatten();
         if exploration_launch.is_some() {

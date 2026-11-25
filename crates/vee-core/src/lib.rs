@@ -3562,6 +3562,25 @@ pub struct UserProviderConfig {
     pub providers: std::collections::BTreeMap<String, ProviderConfig>,
     #[serde(default)]
     pub review: UserReviewDefaults,
+    #[serde(default, skip_serializing_if = "UserPatchSettings::is_default")]
+    pub patches: UserPatchSettings,
+}
+
+/// How this machine applies proposed patches.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UserPatchSettings {
+    /// Apply an approved patch without a person confirming it at a terminal,
+    /// for example in automation this machine's owner set up. Off by default,
+    /// so an agent that may only propose patches cannot apply them itself.
+    #[serde(default)]
+    pub allow_noninteractive_apply: bool,
+}
+
+impl UserPatchSettings {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 /// Review defaults for this machine. Repository configuration wins.

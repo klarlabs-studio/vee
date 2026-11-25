@@ -311,6 +311,83 @@ pub struct PublishedReview<'a> {
     pub review_id: &'a str,
     pub snapshot_id: &'a str,
     pub findings: &'a [Finding],
+    /// Vee's threads read back from the pull request. When there is no local
+    /// ledger, as in CI, these are the record of what Vee published before.
+    pub pull_request_threads: &'a [PullRequestThread],
+}
+
+/// One of Vee's own threads, as the pull request shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullRequestThread {
+    pub fingerprint: String,
+    pub path: String,
+    pub line: u64,
+}
+
+/// Vee's threads among a pull request's review comments: comments by
+/// `actor_login` that carry a fingerprint marker.
+pub fn vee_threads_on_pull_request(
+    issues: &[vee_hosting::PullRequestReviewIssue],
+    actor_login: &str,
+) -> Vec<PullRequestThread> {
+    const MARKER: &str = "<!-- vee:fingerprint:";
+    let mut threads: Vec<PullRequestThread> = issues
+        .iter()
+        .filter(|issue| {
+            !actor_login.is_empty()
+                && issue
+                    .author
+                    .as_deref()
+                    .is_some_and(|author| author.eq_ignore_ascii_case(actor_login))
+        })
+        .filter_map(|issue| {
+            let start = issue.body.find(MARKER)? + MARKER.len();
+            let end = issue.body[start..].find(" -->")?;
+            let fingerprint = issue.body[start..start + end].trim();
+            (!fingerprint.is_empty()).then(|| PullRequestThread {
+                fingerprint: fingerprint.to_owned(),
+                path: issue.path.clone().unwrap_or_default(),
+                line: issue.line.unwrap_or(0),
+            })
+        })
+        .collect();
+    threads.sort_by(|a, b| a.fingerprint.cmp(&b.fingerprint));
+    threads.dedup_by(|a, b| a.fingerprint == b.fingerprint);
+    threads
+}
+
+/// Resolutions for Vee's threads on the pull request whose findings this
+/// review no longer reports and that are not otherwise being published.
+fn resolve_unreported_pull_request_threads(
+    review: &PublishedReview<'_>,
+    pull_request: &PullRequestRef,
+    threads: &[ReviewThread],
+) -> Vec<ReviewThread> {
+    let reported: BTreeSet<&str> = review
+        .findings
+        .iter()
+        .map(|finding| finding.fingerprint.as_str())
+        .chain(threads.iter().map(|thread| thread.fingerprint.as_str()))
+        .collect();
+    review
+        .pull_request_threads
+        .iter()
+        .filter(|thread| !reported.contains(thread.fingerprint.as_str()))
+        .map(|thread| ReviewThread {
+            pull_request: pull_request.clone(),
+            fingerprint: thread.fingerprint.clone(),
+            path: thread.path.clone(),
+            line: thread.line,
+            side: DiffSide::New,
+            body: format!(
+                "**Resolved finding**\n\nVee no longer reports this finding at the reviewed head.\n\nSnapshot `{}`",
+                review.snapshot_id
+            ),
+            resolution: ThreadResolution::Resolved,
+            snapshot_id: review.snapshot_id.to_owned(),
+            idempotency_key: format!("{}:{}:resolved", review.review_id, thread.fingerprint),
+        })
+        .collect()
 }
 
 /// Publish `threads`, plus resolutions for previously published findings that
@@ -344,6 +421,8 @@ where
         review.review_id,
         review.snapshot_id,
     ));
+    let from_pull_request = resolve_unreported_pull_request_threads(review, pull_request, &threads);
+    threads.extend(from_pull_request);
     let published = updated_hosted_finding_fingerprints(&previously_published, &threads);
     let intent = hosting_thread_intent_fingerprints(&previously_published, &threads);
     store.replace_hosted_finding_threads(&target, &intent)?;
@@ -354,6 +433,77 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn threads_vee_published_are_read_back_and_resolved_when_no_longer_reported() {
+        let issue = |author: &str, body: &str| vee_hosting::PullRequestReviewIssue {
+            external_id: "1".into(),
+            author: Some(author.into()),
+            body: body.into(),
+            path: Some("src/lib.rs".into()),
+            line: Some(3),
+            side: None,
+            source_url: None,
+            created_at: None,
+            updated_at: None,
+            classification: "review_comment".into(),
+        };
+        let threads = vee_threads_on_pull_request(
+            &[
+                issue(
+                    "vee-bot",
+                    "Fixed now\n\n<!-- vee:fingerprint:sha256:gone -->\n<!-- vee:idempotency:k -->",
+                ),
+                issue(
+                    "vee-bot",
+                    "Still there <!-- vee:fingerprint:sha256:kept -->",
+                ),
+                issue("someone", "Copied <!-- vee:fingerprint:sha256:forged -->"),
+                issue("vee-bot", "Moved <!-- vee:moved:sha256:old -->"),
+            ],
+            "Vee-Bot",
+        );
+        assert_eq!(
+            threads
+                .iter()
+                .map(|t| t.fingerprint.as_str())
+                .collect::<Vec<_>>(),
+            ["sha256:gone", "sha256:kept"]
+        );
+        let kept = Finding {
+            id: "f".into(),
+            fingerprint: "sha256:kept".into(),
+            category: "correctness".into(),
+            severity: Severity::High,
+            confidence: Some(90),
+            rationale: "r".into(),
+            path: Some("src/lib.rs".into()),
+            line: Some(3),
+            provenance: "model_inference".into(),
+            reviewer_ids: vec![],
+            evidence_ids: vec![],
+            rule_attributions: vec![],
+            sample_agreement: None,
+            advisory: false,
+        };
+        let pull_request = PullRequestRef {
+            repository: vee_hosting::RepositoryRef {
+                host: "github.com".into(),
+                full_name: "o/r".into(),
+            },
+            number: 1,
+        };
+        let review = PublishedReview {
+            review_id: "review",
+            snapshot_id: "snapshot",
+            findings: std::slice::from_ref(&kept),
+            pull_request_threads: &threads,
+        };
+        let resolved = resolve_unreported_pull_request_threads(&review, &pull_request, &[]);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].fingerprint, "sha256:gone");
+        assert_eq!(resolved[0].resolution, ThreadResolution::Resolved);
+    }
 
     #[test]
     fn published_findings_carry_the_severity_a_floor_raised_them_to() {
@@ -612,6 +762,7 @@ mod tests {
             review_id: "review-3",
             snapshot_id: "sha256:snapshot",
             findings: &findings,
+            pull_request_threads: &[],
         };
 
         let failed: Result<(), String> = publish_with_thread_ledger(

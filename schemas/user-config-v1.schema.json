@@ -20,6 +20,16 @@
           "description": "Effort for reviewers whose repository configuration sets neither effort nor samples: low runs once, medium three times, high five times, keeping findings the runs agree on."
         }
       }
+    },
+    "patches": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow_noninteractive_apply": {
+          "type": "boolean",
+          "description": "Apply an approved patch without a person confirming it at a terminal. Off by default, so an agent that may only propose patches cannot apply them."
+        }
+      }
     }
   },
   "$defs": {
