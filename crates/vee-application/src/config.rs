@@ -51,6 +51,19 @@ pub(crate) fn user_config_path() -> Option<PathBuf> {
     user_config_location().filter(|path| path.exists())
 }
 
+/// Whether this machine's user configuration allows applying an approved
+/// patch without a person confirming it at a terminal.
+pub fn noninteractive_patch_apply_allowed() -> Result<bool, String> {
+    let Some(path) = user_config_path() else {
+        return Ok(false);
+    };
+    let raw =
+        std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let user: vee_core::UserProviderConfig =
+        serde_yaml::from_str(&raw).map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(user.patches.allow_noninteractive_apply)
+}
+
 /// Validate a proposed repository YAML configuration with the same schema,
 /// provider defaults, and protected-policy checks used for normal commands.
 pub fn validate_repository_config_yaml(
@@ -107,10 +120,15 @@ pub fn apply_protected_policy(root: &Path, config: &mut RepositoryConfig) -> Res
     if !path.exists() {
         return Ok(());
     }
-    let protected: vee_core::PolicyConfig = serde_yaml::from_slice(
-        &std::fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?,
-    )
-    .map_err(|error| format!("{}: {error}", path.display()))?;
+    let bytes = std::fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let protected: vee_core::PolicyConfig =
+        serde_yaml::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))?;
+    // `minimum_confidence` has a default, so only a threshold the file states
+    // is applied.
+    let sets_confidence = serde_yaml::from_slice::<serde_yaml::Value>(&bytes)
+        .ok()
+        .and_then(|value| value.get("minimum_confidence").cloned())
+        .is_some();
     if protected.minimum_confidence > 100 {
         return Err("protected policy minimum_confidence must be 0..=100".into());
     }
@@ -124,6 +142,7 @@ pub fn apply_protected_policy(root: &Path, config: &mut RepositoryConfig) -> Res
             ));
         }
     }
+    vee_core::validate_severity_floors("protected policy", &protected.severity_floors)?;
     if protected.on_incomplete != "block" && protected.on_incomplete != "allow" {
         return Err("protected policy on_incomplete must be 'block' or 'allow'".into());
     }
@@ -169,10 +188,18 @@ pub fn apply_protected_policy(root: &Path, config: &mut RepositoryConfig) -> Res
         .extend(protected.block_severities);
     config.policy.block_severities.sort();
     config.policy.block_severities.dedup();
-    config.policy.minimum_confidence = config
-        .policy
-        .minimum_confidence
-        .max(protected.minimum_confidence);
+    for floor in protected.severity_floors {
+        if !config.policy.severity_floors.contains(&floor) {
+            config.policy.severity_floors.push(floor);
+        }
+    }
+    // A finding blocks at or above the threshold, so a lower threshold is stricter.
+    if sets_confidence {
+        config.policy.minimum_confidence = config
+            .policy
+            .minimum_confidence
+            .min(protected.minimum_confidence);
+    }
     if protected.on_incomplete == "block" {
         config.policy.on_incomplete = "block".into();
     }

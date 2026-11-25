@@ -50,6 +50,7 @@ pub fn status_text(status: &str) -> Cell {
         | "source_changed_during_review"
         | "version_probe_failed" => Tone::Danger,
         "incomplete"
+        | "rate_limited"
         | "partial"
         | "context_limited"
         | "context_budget_exceeded"

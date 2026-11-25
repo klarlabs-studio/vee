@@ -1,0 +1,72 @@
+# ADR 0016: Review sessions keep per-change gates
+
+- **Status:** Accepted
+- **Date:** 2026-11-23
+
+## Context
+
+Coding agents produce several related changes in one session: commits on a
+branch, or a stack of branches. Reviewing them one at a time loses the
+overview. Merging them into one review would let a passing change mask a
+failing one.
+
+Research on agent-authored pull requests
+([review](../research/review-literature.md), section 6) finds:
+- acceptance well below that of human changes;
+- failures concentrated in large changes, CI failures and work that
+  doesn't match the task.
+
+The research also recommends reviewing related changes with shared context
+while **gating each change**, and invalidating a verdict when its change
+moves. That last recommendation is our inference; no peer-reviewed study of
+stacked review was found.
+
+## Decision
+
+`vee reviews session --review <id>...` (MCP: `review_session`, schema
+`review-session-v1`) reads 1–20 saved reviews of one repository together.
+
+**Per change:**
+- its own gate, evaluated now without recording a decision;
+- whether the snapshot is still current;
+- its risk tier ([ADR 0014](0014-change-risk-as-explained-tiers.md));
+- its open findings by severity;
+- its approval eligibility ([ADR 0015](0015-layered-approval-eligibility.md));
+- the reasons it does not pass.
+
+**Session verdict:**
+- `block` if any change blocked;
+- `pass` only if every change passed on a current snapshot;
+- `incomplete` otherwise.
+
+Like the gate, the command exits 0 on `pass`, 1 on `block`, and 2 on
+`incomplete`; a repeated review ID is a usage error, which exits 3 like
+every other usage error. The MCP text and the CLI view are the
+same Markdown and terminal rendering, so a session can be exported as text.
+
+## Consequences
+
+**Benefits:**
+- A session never hides a failing or moved change behind passing ones.
+- It reuses the per-change review, risk and approval documents, so it
+  cannot disagree with them.
+
+**Cross-repository sessions.** A reference may name another checkout as
+`REPO:REVIEW_ID`, with REPO relative to the requesting repository's root:
+- Each change is read from its own repository's store, configuration and
+  approval guards, so it carries the same verdict it would there.
+- The CLI accepts any checkout root, such as a sibling `../api`. MCP
+  confines REPO beneath the server's root, without `.` or `..`, as
+  cross-repository impact already does.
+- Every reference is resolved before any review is read, so a bad path or
+  a repeat fails the whole request.
+
+**Not yet done:**
+- **Checking a change against its task** is available per change, not per
+  session: `vee init` scaffolds an opt-in, advisory `task-alignment`
+  reviewer that reads the work item attached with `--work-item`. It reports
+  missing requirements, changes the task does not ask for, and changes that
+  contradict it.
+- **Using one change's context in another's review.** Parent changes'
+  diffs and decisions are not yet passed into the review of the next
+  change.

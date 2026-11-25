@@ -61,6 +61,10 @@
         "network"
       ]
     },
+    "effort": {
+      "enum": ["low", "medium", "high"],
+      "description": "This machine's review effort after init, when one is set."
+    },
     "detection": {
       "$ref": "provider-detection-v1.schema.json"
     }

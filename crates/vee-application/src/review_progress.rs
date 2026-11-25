@@ -20,10 +20,49 @@ pub struct ReviewerProgress {
     pub runs: u32,
     /// Runs that have finished, including failed and cached ones.
     pub finished: u32,
-    /// Finished runs whose provider failed to execute.
+    /// Finished runs whose provider failed to execute or exited non-zero.
+    /// A run whose output is later rejected as invalid is not counted here;
+    /// the saved review's reviewer outcome is authoritative.
     pub failed: u32,
     /// Finished runs answered from the provider cache.
     pub cached: u32,
+}
+
+impl ReviewProgress {
+    /// Finished and total runs across every reviewer.
+    pub fn counts(&self) -> (u32, u32) {
+        self.reviewers
+            .iter()
+            .fold((0, 0), |(done, total), reviewer| {
+                (
+                    done + reviewer.finished.min(reviewer.runs),
+                    total + reviewer.runs,
+                )
+            })
+    }
+
+    /// One line both transports show while a review runs, such as
+    /// `3 of 8 reviewer runs finished · running: correctness, security · failed: docs`.
+    pub fn summary(&self) -> String {
+        let (done, total) = self.counts();
+        let mut line = format!("{done} of {total} reviewer runs finished");
+        let names = |keep: &dyn Fn(&ReviewerProgress) -> bool| {
+            self.reviewers
+                .iter()
+                .filter(|reviewer| keep(reviewer))
+                .map(|reviewer| reviewer.reviewer_id.as_str())
+                .collect::<Vec<_>>()
+        };
+        let running = names(&|reviewer| !reviewer.is_finished());
+        if !running.is_empty() {
+            line.push_str(&format!(" · running: {}", running.join(", ")));
+        }
+        let failed = names(&|reviewer| reviewer.failed > 0);
+        if !failed.is_empty() {
+            line.push_str(&format!(" · failed: {}", failed.join(", ")));
+        }
+        line
+    }
 }
 
 impl ReviewerProgress {
@@ -125,5 +164,40 @@ impl<'a> ProgressTracker<'a> {
                 sink.report(&state);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reviewer(id: &str, runs: u32, finished: u32, failed: u32) -> ReviewerProgress {
+        ReviewerProgress {
+            reviewer_id: id.into(),
+            runs,
+            finished,
+            failed,
+            cached: 0,
+        }
+    }
+
+    #[test]
+    fn the_summary_counts_runs_and_names_running_and_failed_reviewers() {
+        let progress = ReviewProgress {
+            reviewers: vec![
+                reviewer("correctness", 2, 1, 0),
+                reviewer("security", 1, 0, 0),
+                reviewer("docs", 1, 1, 1),
+            ],
+        };
+        assert_eq!(progress.counts(), (2, 4));
+        assert_eq!(
+            progress.summary(),
+            "2 of 4 reviewer runs finished · running: correctness, security · failed: docs"
+        );
+        let done = ReviewProgress {
+            reviewers: vec![reviewer("correctness", 1, 1, 0)],
+        };
+        assert_eq!(done.summary(), "1 of 1 reviewer runs finished");
     }
 }

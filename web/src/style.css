@@ -46,3 +46,12 @@
 .drawer-head small,.drawer-section>small,.evidence-item small{font-size:12px;color:#9a9da6}
 .chart-empty{min-height:110px}
 .reviewer-progress{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px}.reviewer-progress li{display:flex;align-items:center;gap:6px;color:#d6d8de}.reviewer-progress li.done>span:first-child{color:#a8dfc0}.reviewer-progress li.failed>span:first-child{color:#ff9b9b}.reviewer-progress li.running>span:first-child{color:#9a9da6}.reviewer-progress-detail{color:#9a9da6;font-family:'DM Mono',monospace;font-size:11px}
+/* The change-risk card joins the summary row only when risk is available. */
+.summary-row:has(.risk-card){grid-template-columns:minmax(0,2fr) repeat(3,minmax(0,1fr))}
+@media(max-width:1000px){.summary-row:has(.risk-card){grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* Finding kind chip and the diff hunk in the drawer. */
+.finding-kind{font:11px 'DM Mono',monospace;text-transform:uppercase;letter-spacing:.5px;border:1px solid #3a3d46;border-radius:4px;padding:3px 6px;margin-left:6px;color:#b9bcc4}
+.diff-hunk .source-line.added{background:rgba(122,212,165,.12)}.diff-hunk .source-line.removed{background:rgba(240,120,120,.12)}
+.diff-marker{display:inline-block;width:1.2em;color:#9b9da6}
+.visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.risk-card>small{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.45}
