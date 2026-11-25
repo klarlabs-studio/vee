@@ -104,7 +104,8 @@ build provenance.
   digest. Applying it needs a person to confirm at a terminal; a patch may
   not change Vee configuration, CI definitions or Git hooks, make a file
   executable, or link outside the repository.
-- Local web dashboard on a loopback address, with a review queue that names
+- Local web dashboard on a loopback address, opened with a per-run access
+  token that every API request must carry, with a review queue that names
   each review's next action, and a finding drawer showing the reviewed
   source, evidence and verification runs. The drawer copies a snapshot-bound
   work package for a coding agent. Findings a later review of the same base
@@ -156,6 +157,8 @@ for method and limits.
   reject review requests over 100,000 bytes.
 - A `focused` review cannot split a single file larger than the model's
   input budget.
+- Configuration is parsed with `serde_yaml` 0.9, which is no longer
+  maintained; a replacement is planned.
 - Finding categories are free text, so a category severity floor applies only
   when the reviewer uses the floor's exact category name.
 - Review time grows with the number of changed files: Vee runs a Git diff
