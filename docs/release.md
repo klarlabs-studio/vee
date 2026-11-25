@@ -13,7 +13,7 @@ Vee installs from release binaries, a container image, or a source checkout. A c
 
 ## Supported installation and upgrade
 
-Install a release with the shell or PowerShell installer attached to it, or use the container image (see the README). To build from source instead, you need Rust stable and Git: install the CLI from a checkout with `cargo install --path crates/vee-cli --locked`. Upgrade by checking out the desired revision and rerunning the command with `--force`. Repository review history is stored under `.vee/`; recommend a backup before upgrades that include storage migrations.
+Install a release with the shell or PowerShell installer attached to it, or use the container image (see the README). To build from source instead, you need Rust 1.89 or later and Git: install the CLI from a checkout with `cargo install --path crates/vee-cli --locked`. Upgrade by checking out the desired revision and rerunning the command with `--force`. Repository review history is stored under `.vee/`; recommend a backup before upgrades that include storage migrations.
 
 Provider CLIs and credentials are configured by each user and are not bundled. Node.js is needed to rebuild the checked-in local UI bundle and to run its browser workflow tests, not to build a checkout that already contains current `web/dist` assets.
 

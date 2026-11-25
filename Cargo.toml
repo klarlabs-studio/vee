@@ -1,5 +1,7 @@
 [workspace]
 resolver = "2"
+# The vendored crates keep their own lockfiles and are tested on their own.
+exclude = ["vendor/klarlabs-mcp", "vendor/klarlabs-mcp-protocol"]
 members = ["crates/vee-core", "crates/vee-store-sqlite", "crates/vee-process", "crates/vee-application", "crates/vee-git", "crates/vee-hosting", "crates/vee-http", "crates/vee-present", "crates/vee-cli"]
 
 [workspace.package]
@@ -7,6 +9,8 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/klarlabs-studio/vee"
+# The vendored MCP crates need 1.89.
+rust-version = "1.89"
 
 [workspace.dependencies]
 anyhow = "1"

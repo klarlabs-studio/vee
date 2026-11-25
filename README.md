@@ -49,7 +49,7 @@ The installers put `vee` in `~/.local/bin` (set `VEE_INSTALL_DIR` to change it) 
 
 ## Build
 
-Building the complete workspace requires Rust stable and a Git executable. The checked-in `web/dist` bundle is embedded in the CLI at compile time; Node.js 22 and npm are needed only to rebuild the UI or run browser tests. Install Vee from a source checkout with:
+Building the complete workspace requires Rust 1.89 or later (stable) and a Git executable. The checked-in `web/dist` bundle is embedded in the CLI at compile time; Node.js 22 and npm are needed only to rebuild the UI or run browser tests. Install Vee from a source checkout with:
 
 ```sh
 cargo build --workspace --locked

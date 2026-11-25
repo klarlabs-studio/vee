@@ -73,10 +73,20 @@ async fn static_and_live_servers_reject_initialize_and_advertise_only_modern_dis
             .discover(RequestMetaObject::new())
             .await
             .unwrap();
-        assert_eq!(
-            discovery.supported_versions,
-            vec![ProtocolVersion::V_2026_07_28]
-        );
+        // A live server is modern-only. The static handler also knows the
+        // legacy versions, which only Vee's opt-in compatible stdio entry
+        // point negotiates; the default stdio and HTTP entry points wrap it in
+        // the modern-only layer (see `transport/modern.rs` tests).
+        if live {
+            assert_eq!(
+                discovery.supported_versions,
+                vec![ProtocolVersion::V_2026_07_28]
+            );
+        } else {
+            assert!(discovery
+                .supported_versions
+                .contains(&ProtocolVersion::V_2026_07_28));
+        }
         client.peer().list_tools(None).await.unwrap();
         for method in [
             "tasks/list",

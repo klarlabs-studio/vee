@@ -70,6 +70,8 @@ impl ServerHandler for LiveServer {
     async fn discover(&self, _: Context) -> Result<DiscoverResult, ErrorData> {
         let mut result = self.state.load_full().discovery()?;
         mark_lists_changed(&mut result.capabilities);
+        // Advertise only what `initialize`/discovery here accept.
+        result.supported_versions = self.supported_protocol_versions().into_owned();
         Ok(result)
     }
     fn supported_protocol_versions(&self) -> std::borrow::Cow<'static, [ProtocolVersion]> {
