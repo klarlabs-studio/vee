@@ -47,9 +47,11 @@ Rules that follow from running in CI:
   pipeline `vee init --ci` writes configures an API-key provider with
   `vee init --provider <vendor>-api --model <model>` on the runner.
 
-`vee init --ci github|gitlab` writes the pipeline: a GitHub workflow, or a
-GitLab file to include. It pins the Vee release that wrote it, and it never
-overwrites an existing file.
+A composite GitHub Action (`action.yml` at the repository root) and a GitLab
+template (`integrations/gitlab/vee.gitlab-ci.yml`) install a pinned release
+and run `vee ci run`, so a pipeline references Vee instead of copying steps.
+`vee init --ci github|gitlab` writes a pipeline that uses them. It pins the
+Vee release that wrote it, and it never overwrites an existing file.
 
 ## Consequences
 
