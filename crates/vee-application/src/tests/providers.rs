@@ -1433,6 +1433,7 @@ fn argument_prompt_adapters_reject_requests_over_the_argument_limit() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_cli_provider_that_exits_on_a_usage_limit_is_reported_as_rate_limited() {
     use std::os::unix::fs::PermissionsExt;

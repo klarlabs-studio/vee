@@ -387,6 +387,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_patch_may_not_make_files_executable_or_link_outside_the_repository() {
         let directory = repository();

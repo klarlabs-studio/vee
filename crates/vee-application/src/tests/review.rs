@@ -1912,6 +1912,7 @@ fn a_large_early_file_does_not_crowd_later_files_out_of_the_reviewer_context() {
     assert!(review.analysis_complete);
 }
 
+#[cfg(unix)]
 /// Reviewer `correctness` on provider `p`, with exploration on, over a change
 /// to `src/lib.rs` whose caller is `src/caller.rs`.
 fn exploration_review(
@@ -2000,6 +2001,7 @@ impl ReviewProvider for ExploringProvider {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn exploring_reviewers_get_the_snapshot_server_and_their_reads_are_recorded() {
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -2031,6 +2033,7 @@ fn exploring_reviewers_get_the_snapshot_server_and_their_reads_are_recorded() {
     assert_eq!(result.change_set.digest, snapshot.digest);
 }
 
+#[cfg(unix)]
 #[test]
 fn providers_without_snapshot_tools_review_the_bundle_and_say_so() {
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
