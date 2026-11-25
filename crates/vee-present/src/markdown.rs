@@ -32,31 +32,45 @@ pub fn marker(tone: Tone) -> &'static str {
 }
 
 /// Escapes Markdown and HTML syntax in untrusted inline text and keeps it on one line.
+///
+/// Only characters that can start markup where they stand are escaped, so
+/// prose and identifiers stay readable (and cheap for agents): `snake_case`,
+/// `v1.2`, and `(see above)` pass through unchanged.
 pub fn inline(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in sanitize(value).chars() {
-        if matches!(
-            character,
-            '\\' | '`'
-                | '*'
-                | '_'
-                | '{'
-                | '}'
-                | '['
-                | ']'
-                | '<'
-                | '>'
-                | '('
-                | ')'
-                | '#'
-                | '+'
-                | '-'
-                | '.'
-                | '!'
-                | '|'
-                | '~'
-                | '&'
-        ) {
+    let text = sanitize(value);
+    let chars: Vec<char> = text.chars().collect();
+    let first = chars
+        .iter()
+        .position(|character| !character.is_whitespace());
+    let mut escaped = String::with_capacity(text.len());
+    for (index, &character) in chars.iter().enumerate() {
+        let previous = index.checked_sub(1).map(|at| chars[at]);
+        let next = chars.get(index + 1).copied();
+        let at_start = first == Some(index);
+        let escape = match character {
+            // Emphasis, code, links, raw HTML and entities, table cells, strikethrough.
+            '\\' | '`' | '*' | '[' | ']' | '<' | '>' | '&' | '|' | '~' => true,
+            // GFM ignores intraword underscores, so only boundary ones can emphasize.
+            '_' => {
+                !(previous.is_some_and(char::is_alphanumeric)
+                    && next.is_some_and(char::is_alphanumeric))
+            }
+            // Headings, list items, block quotes, and setext underlines start a line.
+            '#' | '-' | '+' | '=' => at_start,
+            // `1.` or `1)` at the start of a line opens an ordered list.
+            '.' | ')' => first.is_some_and(|start| {
+                start < index && chars[start..index].iter().all(char::is_ascii_digit)
+            }),
+            // Bare `scheme://` and `www.` become links under GFM autolinking.
+            ':' => next == Some('/') && chars.get(index + 2) == Some(&'/'),
+            _ => false,
+        } || (character == '.'
+            && index >= 3
+            && chars[index - 3..index]
+                .iter()
+                .collect::<String>()
+                .eq_ignore_ascii_case("www"));
+        if escape {
             escaped.push('\\');
         }
         escaped.push(character);

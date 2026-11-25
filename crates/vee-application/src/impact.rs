@@ -10,7 +10,115 @@ pub struct ImpactEdge {
     pub relationship: String,
     pub symbol: String,
     pub certainty: String,
+    /// Line of the reference in `affected_path`; 0 for a `co_change` edge,
+    /// which has no line.
     pub evidence_line: u32,
+    /// For a `co_change` edge, how often the two files changed together.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub co_change: Option<CoChange>,
+}
+
+/// History evidence for a `co_change` edge: of the `source_commits` commits
+/// that changed the source file, `together` also changed the affected file.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoChange {
+    pub together: u32,
+    pub source_commits: u32,
+}
+
+/// Commits of history mined for co-change, newest first before the base.
+const CO_CHANGE_HISTORY_COMMITS: usize = 1_000;
+/// Commits touching more files than this are bulk or tangled changes
+/// (formatting, renames, vendoring) and say nothing about coupling.
+const CO_CHANGE_MAX_COMMIT_FILES: usize = 30;
+/// A pair must have changed together at least this often (the support
+/// Zimmermann et al. 2005 use when precision matters; two shared commits in
+/// a short history is close to chance)...
+const CO_CHANGE_MIN_SUPPORT: u32 = 3;
+/// ...and in at least this share (percent) of the source file's commits.
+const CO_CHANGE_MIN_CONFIDENCE_PERCENT: u32 = 30;
+/// ...and that share must be at least this many times (lift) the affected
+/// file's base rate of change, so hub files that change with nearly every
+/// commit (changelogs, central registries) are not reported as coupling.
+const CO_CHANGE_MIN_LIFT: u32 = 2;
+/// Strongest co-change edges kept per changed file.
+const CO_CHANGE_MAX_EDGES_PER_FILE: usize = 5;
+
+/// Files that historically changed together with each changed file, mined
+/// from first-parent history before the change's base, so the result is
+/// fixed for a snapshot. Edges are a second, independent signal to code
+/// references: co-change finds coupling that has no reference (schemas,
+/// configuration, docs), and union with references beats either alone.
+pub(crate) fn co_change_edges(
+    commits: &[Vec<String>],
+    changed: &std::collections::BTreeSet<String>,
+    eligible: &dyn Fn(&str) -> bool,
+) -> Vec<ImpactEdge> {
+    let commits: Vec<&Vec<String>> = commits
+        .iter()
+        .filter(|paths| !paths.is_empty() && paths.len() <= CO_CHANGE_MAX_COMMIT_FILES)
+        .collect();
+    let total = commits.len() as u64;
+    let mut changes = std::collections::HashMap::<&str, u64>::new();
+    for paths in &commits {
+        for path in paths.iter() {
+            *changes.entry(path.as_str()).or_default() += 1;
+        }
+    }
+    let mut edges = Vec::new();
+    for source in changed.iter().filter(|path| !is_documentation_path(path)) {
+        let mut source_commits = 0u32;
+        let mut together = std::collections::BTreeMap::<&str, u32>::new();
+        for paths in &commits {
+            if !paths.iter().any(|path| path == source) {
+                continue;
+            }
+            source_commits += 1;
+            for path in paths.iter() {
+                if path != source
+                    && !changed.contains(path)
+                    && !is_documentation_path(path)
+                    && eligible(path)
+                {
+                    *together.entry(path.as_str()).or_default() += 1;
+                }
+            }
+        }
+        let mut candidates: Vec<(&str, u32)> = together
+            .into_iter()
+            .filter(|(path, count)| {
+                // Lift: count / source_commits >= MIN_LIFT * changes(path) / total.
+                let base_rate = changes.get(path).copied().unwrap_or_default();
+                *count >= CO_CHANGE_MIN_SUPPORT
+                    && count * 100 >= source_commits * CO_CHANGE_MIN_CONFIDENCE_PERCENT
+                    && u64::from(*count) * total
+                        >= u64::from(CO_CHANGE_MIN_LIFT) * u64::from(source_commits) * base_rate
+            })
+            .collect();
+        // Strongest first: the denominator is shared, so more shared commits
+        // means higher confidence; ties break by path.
+        candidates.sort_by(|(left_path, left), (right_path, right)| {
+            right.cmp(left).then(left_path.cmp(right_path))
+        });
+        edges.extend(
+            candidates
+                .into_iter()
+                .take(CO_CHANGE_MAX_EDGES_PER_FILE)
+                .map(|(path, count)| ImpactEdge {
+                    source_path: source.clone(),
+                    affected_path: path.to_owned(),
+                    relationship: "co_change".into(),
+                    symbol: String::new(),
+                    certainty: "historical".into(),
+                    evidence_line: 0,
+                    co_change: Some(CoChange {
+                        together: count,
+                        source_commits,
+                    }),
+                }),
+        );
+    }
+    edges
 }
 
 /// Rank an impact edge for the bounded reviewer context; lower sorts first.
@@ -24,7 +132,7 @@ pub(crate) fn impact_context_edge_priority(edge: &ImpactEdge) -> (u8, u8, u8) {
         "syntactic_symbol_reference" => 1,
         "textual_symbol_reference" => 2,
         "likely_test_reference" => 3,
-        "inferred_import" => 4,
+        "inferred_import" | "co_change" => 4,
         "shared_local_dependency" => 5,
         _ => 6,
     };
@@ -46,6 +154,9 @@ pub struct ImpactGroup {
     pub member_paths: Vec<String>,
     pub certainty: String,
 }
+
+/// Version of the impact assessment document (`impact-assessment-v4`).
+pub const IMPACT_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImpactAssessment {
@@ -106,25 +217,155 @@ pub(crate) type TypeScriptReferenceQuery = (
     bool,
 );
 
+/// Analyze the likely impact of `change_set`.
+///
+/// The analysis parses every candidate source file, and the dashboard and MCP
+/// server ask for the same snapshot repeatedly (each review and finding open),
+/// so results are memoized per process while their inputs are unchanged: the
+/// change set, the tracked paths, the live checkout state (which covers the
+/// `Cargo.toml` files and, for semantic analyzers, the workspace they read),
+/// and the tool lookup path. Results from a failed or partial semantic
+/// analyzer are not memoized, so a timeout is retried on the next request.
+///
+/// Paths outside the repository review filter (`review.include` and
+/// `review.exclude`, such as generated bundles) are neither scanned nor used
+/// as changed-symbol sources; a repository without a readable configuration
+/// is analyzed unfiltered.
 pub fn analyze_impact(root: &Path, change_set: &ChangeSet) -> Result<ImpactAssessment, String> {
     let typescript_server = find_typescript_server();
-    analyze_impact_with_typescript_server(root, change_set, typescript_server.as_deref())
+    let review_filter = impact_review_filter(root);
+    let key = impact_memo_key(
+        root,
+        change_set,
+        typescript_server.as_deref(),
+        review_filter.as_ref(),
+    );
+    if let Some(hit) = key.as_ref().and_then(memoized_impact) {
+        return Ok(hit);
+    }
+    let assessment = analyze_impact_with_typescript_server(
+        root,
+        change_set,
+        typescript_server.as_deref(),
+        review_filter.as_ref(),
+    )?;
+    if let Some(key) = key {
+        memoize_impact(key, &assessment);
+    }
+    Ok(assessment)
+}
+
+/// The repository review filter, or `None` when the configuration cannot be
+/// read (an unconfigured repository is analyzed unfiltered).
+pub(crate) fn impact_review_filter(root: &Path) -> Option<vee_core::ReviewConfig> {
+    crate::load_repository_config(root)
+        .ok()
+        .map(|config| config.review)
+}
+
+const IMPACT_MEMO_CAPACITY: usize = 8;
+
+type ImpactMemoKey = [u8; 32];
+
+fn impact_memo(
+) -> &'static std::sync::Mutex<std::collections::VecDeque<(ImpactMemoKey, ImpactAssessment)>> {
+    static MEMO: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::VecDeque<(ImpactMemoKey, ImpactAssessment)>>,
+    > = std::sync::OnceLock::new();
+    MEMO.get_or_init(Default::default)
+}
+
+/// `None` when an input cannot be read; the analysis then runs unmemoized.
+fn impact_memo_key(
+    root: &Path,
+    change_set: &ChangeSet,
+    typescript_server: Option<&Path>,
+    review_filter: Option<&vee_core::ReviewConfig>,
+) -> Option<ImpactMemoKey> {
+    use sha2::{Digest, Sha256};
+    let change = serde_json::to_vec(change_set).ok()?;
+    let tracked = vee_git::tracked_paths(root).ok()?;
+    let live = vee_git::workspace_state(root).ok()?;
+    let lookup_path = std::env::var_os("PATH").unwrap_or_default();
+    let filter =
+        serde_json::to_vec(&review_filter.map(|filter| (&filter.include, &filter.exclude))).ok()?;
+    let mut hasher = Sha256::new();
+    let mut part = |bytes: &[u8]| {
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    };
+    part(root.as_os_str().as_encoded_bytes());
+    part(&change);
+    part(&live);
+    part(typescript_server.map_or(&[][..], |path| path.as_os_str().as_encoded_bytes()));
+    part(lookup_path.as_encoded_bytes());
+    part(&filter);
+    for path in &tracked {
+        part(path.as_os_str().as_encoded_bytes());
+    }
+    Some(hasher.finalize().into())
+}
+
+fn memoized_impact(key: &ImpactMemoKey) -> Option<ImpactAssessment> {
+    let memo = impact_memo().lock().ok()?;
+    memo.iter()
+        .find(|(entry, _)| entry == key)
+        .map(|(_, assessment)| assessment.clone())
+}
+
+fn memoize_impact(key: ImpactMemoKey, assessment: &ImpactAssessment) {
+    if assessment
+        .analyzers
+        .iter()
+        .any(|analyzer| matches!(analyzer.status.as_str(), "failed" | "partial"))
+    {
+        return;
+    }
+    let Ok(mut memo) = impact_memo().lock() else {
+        return;
+    };
+    memo.retain(|(entry, _)| *entry != key);
+    if memo.len() >= IMPACT_MEMO_CAPACITY {
+        memo.pop_front();
+    }
+    memo.push_back((key, assessment.clone()));
 }
 
 pub(crate) fn analyze_impact_with_typescript_server(
     root: &Path,
     change_set: &ChangeSet,
     typescript_server: Option<&Path>,
+    review_filter: Option<&vee_core::ReviewConfig>,
 ) -> Result<ImpactAssessment, String> {
     const MAX_SOURCE_FILES: usize = 10_000;
     const MAX_SOURCE_BYTES: usize = 32 * 1024 * 1024;
     const MAX_FILE_BYTES: usize = 512 * 1024;
-    let changed: std::collections::BTreeSet<String> = change_set
+    // Changed paths outside the review filter (include and exclude) seed no
+    // symbols; excluded files are not scanned for references. Files merely
+    // outside `include` still are, since their callers remain real impact.
+    let in_review_filter = |path: &str| {
+        review_filter.is_none_or(|filter| crate::review::review_path_is_included(path, filter))
+    };
+    let not_excluded = |path: &str| {
+        review_filter.is_none_or(|filter| {
+            !filter
+                .exclude
+                .iter()
+                .any(|pattern| crate::review::glob_matches(pattern, path))
+        })
+    };
+    let all_changed: std::collections::BTreeSet<String> = change_set
         .files
         .iter()
         .map(|file| file.path.clone())
         .collect();
+    let changed: std::collections::BTreeSet<String> = all_changed
+        .iter()
+        .filter(|path| in_review_filter(path))
+        .cloned()
+        .collect();
     let mut candidates = vee_git::tracked_paths(root)?;
+    let candidates_all = candidates.clone();
     candidates.extend(
         change_set
             .files
@@ -134,8 +375,8 @@ pub(crate) fn analyze_impact_with_typescript_server(
     candidates.retain(|path| {
         matches!(
             path.extension().and_then(|extension| extension.to_str()),
-            Some("rs" | "go" | "ts" | "tsx" | "js" | "jsx" | "mts" | "cts" | "py" | "java")
-        )
+            Some("rs" | "go" | "ts" | "tsx" | "js" | "jsx" | "mts" | "cts" | "py" | "java" | "vue")
+        ) && not_excluded(&path.to_string_lossy().replace('\\', "/"))
     });
     candidates.sort_by_key(|path| {
         let relative = path.to_string_lossy().replace('\\', "/");
@@ -176,6 +417,13 @@ pub(crate) fn analyze_impact_with_typescript_server(
             {
                 scanned_bytes += bytes.len();
                 if let Ok(text) = String::from_utf8(bytes) {
+                    // Only a component's script blocks are code; template and
+                    // style lines are blanked so line numbers stay true.
+                    let text = if is_vue_path(&relative) {
+                        vue_script_code(&text)
+                    } else {
+                        text
+                    };
                     source.insert(relative, text);
                 } else {
                     coverage_complete = false;
@@ -229,13 +477,58 @@ pub(crate) fn analyze_impact_with_typescript_server(
         .zip(&symbol_paths)
         .filter_map(|(bytes, path)| Some((path.as_str(), bytes?)))
         .collect();
+    // Changed Rust symbols that no declaration exports beyond its crate.
+    let mut crate_private_symbols =
+        std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+    // Declaration kinds of each changed Rust file's changed symbols, from both
+    // sides; absent when a side does not parse, so any occurrence matches.
+    let mut rust_kinds_by_path = std::collections::BTreeMap::<
+        String,
+        std::collections::BTreeMap<String, std::collections::BTreeSet<RustDeclKind>>,
+    >::new();
     for path in &changed {
-        let path_symbols = changed_file_symbols(
-            path,
-            source.get(path),
-            base_bytes.remove(path.as_str()),
-            &mut coverage_complete,
-        );
+        let base = base_bytes.remove(path.as_str());
+        let path_symbols =
+            changed_file_symbols(path, source.get(path), base.clone(), &mut coverage_complete);
+        if path.ends_with(".rs") {
+            let base_text = base.and_then(|bytes| String::from_utf8(bytes).ok());
+            let kinds = [source.get(path).map(String::as_str), base_text.as_deref()]
+                .into_iter()
+                .flatten()
+                .map(rust_declaration_kinds)
+                .collect::<Option<Vec<_>>>();
+            if let Some(kinds) = kinds {
+                let mut merged = std::collections::BTreeMap::<
+                    String,
+                    std::collections::BTreeSet<RustDeclKind>,
+                >::new();
+                for side in kinds {
+                    for (name, side_kinds) in side {
+                        if path_symbols.contains(&name) {
+                            merged.entry(name).or_default().extend(side_kinds);
+                        }
+                    }
+                }
+                rust_kinds_by_path.insert(path.clone(), merged);
+            }
+            let exported = [source.get(path).map(String::as_str), base_text.as_deref()]
+                .into_iter()
+                .flatten()
+                .map(rust_exported_symbols)
+                .collect::<Option<Vec<_>>>();
+            if let Some(exported) = exported {
+                let exported: std::collections::BTreeSet<_> =
+                    exported.into_iter().flatten().collect();
+                crate_private_symbols.insert(
+                    path.clone(),
+                    path_symbols
+                        .iter()
+                        .filter(|symbol| !exported.contains(*symbol))
+                        .cloned()
+                        .collect(),
+                );
+            }
+        }
         symbols.extend(path_symbols.iter().cloned());
         changed_symbols_by_path.insert(path.clone(), path_symbols);
     }
@@ -248,6 +541,10 @@ pub(crate) fn analyze_impact_with_typescript_server(
         coverage_complete = false;
     }
     let rust_test_modules = rust_test_module_paths(&source);
+    let packages: std::collections::BTreeMap<&str, Option<String>> = source
+        .iter()
+        .map(|(path, text)| (path.as_str(), package_id(root, path, text)))
+        .collect();
     let mut analyzers = Vec::new();
     if has_rust_changes {
         analyzers.push(ImpactAnalyzer {
@@ -302,8 +599,7 @@ pub(crate) fn analyze_impact_with_typescript_server(
             .flatten()
             .map(String::as_str),
     );
-    let mut rust_occurrences =
-        std::collections::HashMap::<&str, Option<Vec<(String, u32, bool)>>>::new();
+    let mut rust_occurrences = std::collections::HashMap::<&str, Option<RustOccurrences>>::new();
     // Comment- and string-stripped TypeScript, Python, and Java, computed once per file.
     let mut stripped_code = std::collections::HashMap::<&str, String>::new();
     for changed_path in &changed {
@@ -313,14 +609,41 @@ pub(crate) fn analyze_impact_with_typescript_server(
             .unwrap_or_default()
             .into_iter()
             .collect();
+        let crate_private = crate_private_symbols.get(changed_path);
+        let exported_symbols: Vec<_> = local_symbols
+            .iter()
+            .filter(|symbol| crate_private.is_none_or(|private| !private.contains(*symbol)))
+            .cloned()
+            .collect();
         let symbol_matcher = SymbolMatcher::new(&local_symbols);
-        let wanted: std::collections::HashSet<&str> =
+        let exported_matcher = SymbolMatcher::new(&exported_symbols);
+        let local_wanted: std::collections::HashSet<&str> =
             local_symbols.iter().map(String::as_str).collect();
+        let exported_wanted: std::collections::HashSet<&str> =
+            exported_symbols.iter().map(String::as_str).collect();
+        let changed_package = packages.get(changed_path.as_str()).cloned().flatten();
+        let rust_kinds = rust_kinds_by_path.get(changed_path);
         for (candidate_path, candidate_text) in &source {
             let same_file_rust = candidate_path == changed_path && candidate_path.ends_with(".rs");
-            if !should_scan_impact_candidate(&changed, changed_path, candidate_path) {
+            // Only Rust keeps same-file edges, for in-file test modules; any
+            // other file naming its own declarations is not impact.
+            if (candidate_path == changed_path && !same_file_rust)
+                || !should_scan_impact_candidate(&changed, changed_path, candidate_path)
+                || !same_language_family(changed_path, candidate_path)
+            {
                 continue;
             }
+            // Crate-private items are only reachable from their own package.
+            let same_package = changed_package.is_some()
+                && packages
+                    .get(candidate_path.as_str())
+                    .and_then(Option::as_ref)
+                    == changed_package.as_ref();
+            let (symbol_matcher, wanted) = if same_package {
+                (&symbol_matcher, &local_wanted)
+            } else {
+                (&exported_matcher, &exported_wanted)
+            };
             if candidate_path.ends_with(".rs") {
                 let occurrences = rust_occurrences
                     .entry(candidate_path.as_str())
@@ -330,15 +653,32 @@ pub(crate) fn analyze_impact_with_typescript_server(
                                 changed_symbol_filter.contains(name)
                             })
                         } else {
-                            Some(Vec::new())
+                            Some(RustOccurrences::default())
                         }
                     });
+                let mut mentioned = std::collections::HashMap::<String, bool>::new();
+                let mut mentions = |owner: &str| {
+                    *mentioned
+                        .entry(owner.to_owned())
+                        .or_insert_with(|| contains_identifier(candidate_text, owner))
+                };
                 let references = occurrences.as_ref().map(|occurrences| {
-                    occurrences
+                    let mut references: Vec<(String, u32, bool)> = occurrences
+                        .found
                         .iter()
-                        .filter(|(name, _, _)| wanted.contains(name.as_str()))
-                        .cloned()
-                        .collect::<Vec<_>>()
+                        .filter(|occurrence| {
+                            same_file_rust || !occurrences.names_local_item(occurrence)
+                        })
+                        .filter(|(name, _, _, role)| {
+                            wanted.contains(name.as_str())
+                                && rust_kinds.and_then(|kinds| kinds.get(name)).is_none_or(
+                                    |kinds| rust_role_matches(kinds, role, &mut mentions),
+                                )
+                        })
+                        .map(|(name, line, in_test, _)| (name.clone(), *line, *in_test))
+                        .collect();
+                    references.dedup();
+                    references
                 });
                 match references {
                     Some(references) => {
@@ -361,6 +701,7 @@ pub(crate) fn analyze_impact_with_typescript_server(
                                 symbol,
                                 certainty: "inferred_syntax".into(),
                                 evidence_line: line,
+                                co_change: None,
                             });
                         }
                     }
@@ -386,6 +727,7 @@ pub(crate) fn analyze_impact_with_typescript_server(
                                         symbol: symbol.clone(),
                                         certainty: "inferred_heuristic".into(),
                                         evidence_line: (line_index + 1) as u32,
+                                        co_change: None,
                                     });
                                 }
                             }
@@ -394,17 +736,21 @@ pub(crate) fn analyze_impact_with_typescript_server(
                 }
                 continue;
             }
-            if is_typescript_path(candidate_path) {
+            if is_typescript_path(candidate_path) || is_vue_path(candidate_path) {
                 let code = stripped_code
                     .entry(candidate_path.as_str())
                     .or_insert_with(|| {
                         typescript_code_without_comments_and_strings(candidate_text)
                     });
+                // tsserver does not load components, so its answer never
+                // covers references from a `.vue` file.
+                let resolved_by_server = !is_vue_path(candidate_path);
                 for (line_index, line) in code.lines().enumerate() {
                     for symbol in symbol_matcher.matches(line) {
-                        if typescript_analysis
-                            .resolved_symbols
-                            .contains(&(changed_path.clone(), symbol.clone()))
+                        if resolved_by_server
+                            && typescript_analysis
+                                .resolved_symbols
+                                .contains(&(changed_path.clone(), symbol.clone()))
                         {
                             // A complete tsserver query is authoritative for this
                             // declaration; lexical matching would reintroduce false
@@ -424,6 +770,7 @@ pub(crate) fn analyze_impact_with_typescript_server(
                                 symbol: symbol.clone(),
                                 certainty: "inferred_heuristic".into(),
                                 evidence_line: (line_index + 1) as u32,
+                                co_change: None,
                             });
                         }
                     }
@@ -454,6 +801,7 @@ pub(crate) fn analyze_impact_with_typescript_server(
                                 symbol: symbol.clone(),
                                 certainty: "inferred_heuristic".into(),
                                 evidence_line: (line_index + 1) as u32,
+                                co_change: None,
                             });
                         }
                     }
@@ -479,6 +827,7 @@ pub(crate) fn analyze_impact_with_typescript_server(
                                 symbol: symbol.clone(),
                                 certainty: "inferred_heuristic".into(),
                                 evidence_line: (line_index + 1) as u32,
+                                co_change: None,
                             });
                         }
                     }
@@ -507,11 +856,37 @@ pub(crate) fn analyze_impact_with_typescript_server(
                             symbol: symbol.clone(),
                             certainty: "inferred_heuristic".into(),
                             evidence_line: (line_index + 1) as u32,
+                            co_change: None,
                         });
                     }
                 }
             }
         }
+    }
+    let history_revision = change_set
+        .base_oid
+        .as_deref()
+        .or(change_set.head_oid.as_deref());
+    let tracked: std::collections::HashSet<String> = candidates_all
+        .iter()
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .collect();
+    let history = history_revision
+        .map(|revision| vee_git::commit_paths(root, revision, CO_CHANGE_HISTORY_COMMITS));
+    analyzers.push(ImpactAnalyzer {
+        id: "git-co-change".into(),
+        version: None,
+        status: match &history {
+            Some(Ok(_)) => "used",
+            Some(Err(_)) => "failed",
+            None => "unavailable",
+        }
+        .into(),
+    });
+    if let Some(Ok(commits)) = &history {
+        paths.extend(co_change_edges(commits, &changed, &|path| {
+            tracked.contains(path) && not_excluded(path)
+        }));
     }
     paths.sort_by(|a, b| {
         (&a.source_path, &a.affected_path, a.evidence_line, &a.symbol).cmp(&(
@@ -524,7 +899,7 @@ pub(crate) fn analyze_impact_with_typescript_server(
     paths.dedup();
     let mut group_map = std::collections::BTreeMap::<String, (Vec<String>, Vec<String>)>::new();
     for path in source.keys() {
-        if let Some(package) = package_id(root, path, &source[path]) {
+        if let Some(package) = packages.get(path.as_str()).cloned().flatten() {
             let entry = group_map.entry(package).or_default();
             entry.1.push(path.clone());
             if changed.contains(path) {
@@ -560,6 +935,8 @@ pub(crate) fn analyze_impact_with_typescript_server(
         "Rust references are syntax-derived identifier paths, not type-resolved; aliases and dynamic dispatch may be missed.".into(),
         "Package membership is inferred from Rust Cargo.toml ancestry or Go package declarations.".into(),
         "Generated code, reflection, cross-service calls, and runtime behavior are not modeled.".into(),
+        format!("Co-change edges come from the {CO_CHANGE_HISTORY_COMMITS} most recent first-parent commits before the base, skip commits touching more than {CO_CHANGE_MAX_COMMIT_FILES} files, and need {CO_CHANGE_MIN_SUPPORT}+ shared commits in at least {CO_CHANGE_MIN_CONFIDENCE_PERCENT}% of the changed file's commits and {CO_CHANGE_MIN_LIFT}x the other file's base rate of change; they show coupling, not a code dependency."),
+        "Vue components contribute their script blocks and, when PascalCase, their file name; template-only usages are not scanned.".into(),
         "TypeScript and JavaScript references use tsserver project resolution when the reviewed snapshot matches the live workspace; otherwise lexical heuristics may miss aliases, overloads, dynamic imports, template expressions, and runtime dispatch.".into(),
         "Python references are lexical heuristics; imports, aliases, decorators, dynamic dispatch, and runtime behavior are not resolved.".into(),
         "Java references are lexical heuristics; overloads, imports, inheritance, generated code, and runtime dispatch are not resolved.".into(),
@@ -576,15 +953,19 @@ pub(crate) fn analyze_impact_with_typescript_server(
     if !coverage_complete {
         limitations.push("Some source files were omitted because they were binary, invalid UTF-8, larger than 512 KiB, or the scan reached its file or 32 MiB content limit.".into());
     }
+    let filtered_out = all_changed.len() - changed.len();
+    if filtered_out > 0 {
+        limitations.push(format!("{filtered_out} changed path(s) outside the repository review filter were not analyzed for changed symbols, and files it excludes were not scanned for references."));
+    }
     if scan_limit_reached {
         limitations.push("Impact scanning is bounded to 10,000 source files and 32 MiB of decoded source content per assessment.".into());
     }
     Ok(ImpactAssessment {
-        schema_version: 3,
+        schema_version: IMPACT_SCHEMA_VERSION,
         snapshot_id: change_set.digest.clone(),
         coverage_complete,
         analyzers,
-        changed_paths: changed.into_iter().collect(),
+        changed_paths: all_changed.into_iter().collect(),
         changed_symbols: symbols.into_iter().collect(),
         groups,
         paths,
@@ -593,8 +974,9 @@ pub(crate) fn analyze_impact_with_typescript_server(
 }
 
 /// Whether impact analysis extracts declared symbols from files at `path`.
-fn declares_symbols(path: &str) -> bool {
-    path.ends_with(".rs")
+pub(crate) fn declares_symbols(path: &str) -> bool {
+    is_vue_path(path)
+        || path.ends_with(".rs")
         || path.ends_with(".go")
         || is_typescript_path(path)
         || is_python_path(path)
@@ -602,54 +984,154 @@ fn declares_symbols(path: &str) -> bool {
 }
 
 /// Symbols declared by a changed file in its current and base versions.
+/// The symbols a change adds, removes, or modifies in one file.
+///
+/// Each declaration is fingerprinted on both sides of the change, and only
+/// names whose fingerprints differ are reported. Treating every declaration
+/// in a touched file as changed would make one edited function pull in every
+/// caller of its unrelated siblings.
 pub(crate) fn changed_file_symbols(
     path: &str,
     current: Option<&String>,
     base: Option<Vec<u8>>,
     coverage_complete: &mut bool,
 ) -> std::collections::BTreeSet<String> {
-    let mut symbols = std::collections::BTreeSet::new();
     if !declares_symbols(path) {
-        return symbols;
+        return std::collections::BTreeSet::new();
     }
-    let mut add = |text: &str| {
-        if path.ends_with(".rs") {
-            match rust_declared_symbols(text) {
-                Some(found) => symbols.extend(found),
-                None => {
-                    *coverage_complete = false;
-                    symbols.extend(declared_symbols(path, text));
-                }
+    if is_vue_path(path) {
+        // A component is referenced by the name it is imported under, which by
+        // convention is its PascalCase file name; any edit to it changes it.
+        return vue_component_name(path).into_iter().collect();
+    }
+    let base = match base.map(String::from_utf8) {
+        Some(Ok(text)) => Some(text),
+        Some(Err(_)) => {
+            // Without a readable base side every current declaration may have changed.
+            *coverage_complete = false;
+            return current
+                .map(|text| declaration_fingerprints(path, text, coverage_complete))
+                .unwrap_or_default()
+                .into_keys()
+                .collect();
+        }
+        None => None,
+    };
+    let rust_sides = path.ends_with(".rs").then(|| {
+        (
+            current.map(|text| rust_declaration_fingerprints(text)),
+            base.as_deref().map(rust_declaration_fingerprints),
+        )
+    });
+    // Compare like with like: if either Rust side fails to parse, both sides
+    // fall back to the lexical fingerprints.
+    let (current_fingerprints, base_fingerprints) = match rust_sides {
+        Some((current_side, base_side))
+            if current_side.as_ref().is_none_or(Option::is_some)
+                && base_side.as_ref().is_none_or(Option::is_some) =>
+        {
+            (
+                current_side.flatten().unwrap_or_default(),
+                base_side.flatten().unwrap_or_default(),
+            )
+        }
+        rust_sides => {
+            if rust_sides.is_some() {
+                *coverage_complete = false;
             }
-        } else if is_typescript_path(path) {
-            symbols.extend(declared_symbols(
-                path,
-                &typescript_code_without_comments_and_strings(text),
-            ));
-        } else if is_python_path(path) {
-            symbols.extend(declared_symbols(
-                path,
-                &python_code_without_comments_and_strings(text),
-            ));
-        } else if is_java_path(path) {
-            symbols.extend(java_declared_symbols(
-                &java_code_without_comments_and_strings(text),
-            ));
-        } else {
-            symbols.extend(declared_symbols(path, text));
+            (
+                current
+                    .map(|text| lexical_declaration_fingerprints(path, text))
+                    .unwrap_or_default(),
+                base.as_deref()
+                    .map(|text| lexical_declaration_fingerprints(path, text))
+                    .unwrap_or_default(),
+            )
         }
     };
-    if let Some(text) = current {
-        add(text);
+    let mut changed: std::collections::BTreeSet<String> = current_fingerprints
+        .keys()
+        .chain(base_fingerprints.keys())
+        .filter(|name| current_fingerprints.get(*name) != base_fingerprints.get(*name))
+        .cloned()
+        .collect();
+    if let Some(helpers) = current
+        .filter(|_| path.ends_with(".rs"))
+        .and_then(|text| rust_test_helper_mentions(text))
+    {
+        extend_with_test_helpers(&mut changed, &helpers);
+        // Helpers private to a test module carry the change but are not
+        // themselves reachable from other files.
+        changed.retain(|name| {
+            current_fingerprints.contains_key(name) || base_fingerprints.contains_key(name)
+        });
     }
-    if let Some(bytes) = base {
-        if let Ok(text) = String::from_utf8(bytes) {
-            add(&text);
+    changed
+}
+
+/// Every declaration in a file, keyed by name, with one fingerprint per
+/// declaration of that name (sorted, so reordering is not a change).
+pub(crate) type DeclarationFingerprints = std::collections::BTreeMap<String, Vec<String>>;
+
+fn declaration_fingerprints(
+    path: &str,
+    text: &str,
+    coverage_complete: &mut bool,
+) -> DeclarationFingerprints {
+    if path.ends_with(".rs") {
+        if let Some(found) = rust_declaration_fingerprints(text) {
+            return found;
+        }
+        *coverage_complete = false;
+    }
+    lexical_declaration_fingerprints(path, text)
+}
+
+/// Lexical fingerprints: a declaration spans from its declaring line to the
+/// next declaring line, compared with whitespace trimmed.
+pub(crate) fn lexical_declaration_fingerprints(path: &str, text: &str) -> DeclarationFingerprints {
+    let code = if is_typescript_path(path) {
+        typescript_code_without_comments_and_strings(text)
+    } else if is_python_path(path) {
+        python_code_without_comments_and_strings(text)
+    } else if is_java_path(path) {
+        java_code_without_comments_and_strings(text)
+    } else {
+        text.to_owned()
+    };
+    let mut fingerprints = DeclarationFingerprints::new();
+    let mut open: Vec<String> = Vec::new();
+    let mut region = String::new();
+    let mut close = |open: &mut Vec<String>, region: &mut String| {
+        for name in open.drain(..) {
+            fingerprints.entry(name).or_default().push(region.clone());
+        }
+        region.clear();
+    };
+    let top_level = declaration_line_mask(path, &code);
+    for (line, top_level) in code.lines().zip(top_level) {
+        let names = if !top_level {
+            Vec::new()
+        } else if is_java_path(path) {
+            java_line_declared_symbols(line)
         } else {
-            *coverage_complete = false;
+            line_declared_symbol(path, line).into_iter().collect()
+        };
+        if !names.is_empty() {
+            close(&mut open, &mut region);
+            open = names;
+        }
+        let trimmed = line.trim();
+        if !open.is_empty() && !trimmed.is_empty() {
+            region.push_str(trimmed);
+            region.push('\n');
         }
     }
-    symbols
+    close(&mut open, &mut region);
+    for regions in fingerprints.values_mut() {
+        regions.sort();
+    }
+    fingerprints
 }
 
 pub(crate) fn snapshot_go_module_path(
@@ -769,6 +1251,7 @@ pub(crate) fn go_local_dependency_edges(
                     symbol: format!("{module_path}/{package_dir}"),
                     certainty: "inferred_import".into(),
                     evidence_line: *evidence_line,
+                    co_change: None,
                 });
                 if edges.len() >= MAX_EDGES {
                     return edges;
@@ -777,6 +1260,30 @@ pub(crate) fn go_local_dependency_edges(
         }
     }
     edges
+}
+
+/// Whether two paths are in the same language family. Lexical matches
+/// across languages (a Rust `run` against Python's `subprocess.run`) are noise.
+fn same_language_family(changed_path: &str, candidate_path: &str) -> bool {
+    fn family(path: &str) -> Option<&'static str> {
+        if path.ends_with(".rs") {
+            Some("rust")
+        } else if path.ends_with(".go") {
+            Some("go")
+        } else if is_typescript_path(path) || is_vue_path(path) {
+            Some("typescript")
+        } else if is_python_path(path) {
+            Some("python")
+        } else if is_java_path(path) {
+            Some("java")
+        } else {
+            None
+        }
+    }
+    match (family(changed_path), family(candidate_path)) {
+        (Some(changed), Some(candidate)) => changed == candidate,
+        _ => true,
+    }
 }
 
 pub(crate) fn should_scan_impact_candidate(
@@ -1284,6 +1791,12 @@ pub(crate) fn query_typescript_references(
             let Some(text) = source.get(changed_path.as_str()) else {
                 continue;
             };
+            // Outside a tsconfig or jsconfig project the server sees only the
+            // open file and what it imports, so it would miss references from
+            // other files; those files keep the labelled heuristic edges.
+            if !in_typescript_project(&root, changed_path) {
+                continue;
+            }
             let absolute = root.join(changed_path);
             if !absolute.starts_with(&root) {
                 failures = true;
@@ -1389,6 +1902,10 @@ pub(crate) fn query_typescript_references(
                         saw_declaration = true;
                         continue;
                     }
+                    // A changed file is not impact of itself.
+                    if relative == **changed_path {
+                        continue;
+                    }
                     edges.push(ImpactEdge {
                         source_path: (*changed_path).clone(),
                         affected_path: relative.clone(),
@@ -1401,6 +1918,7 @@ pub(crate) fn query_typescript_references(
                         symbol: symbol.clone(),
                         certainty: "resolved_semantic".into(),
                         evidence_line: reference_line,
+                        co_change: None,
                     });
                 }
                 if saw_declaration {
@@ -1428,6 +1946,20 @@ pub(crate) fn query_typescript_references(
     })();
     terminate_typescript_server(&mut child);
     outcome
+}
+
+/// Whether `relative` lies under a `tsconfig.json` or `jsconfig.json` within
+/// `root`, so the TypeScript server loads the whole project around it.
+fn in_typescript_project(root: &Path, relative: &str) -> bool {
+    let mut directory = Path::new(relative).parent();
+    while let Some(current) = directory {
+        let absolute = root.join(current);
+        if absolute.join("tsconfig.json").is_file() || absolute.join("jsconfig.json").is_file() {
+            return true;
+        }
+        directory = current.parent();
+    }
+    false
 }
 
 #[cfg(unix)]
@@ -1777,6 +2309,10 @@ pub(crate) fn query_gopls_references(
                         saw_declaration = true;
                         continue;
                     }
+                    // A changed file is not impact of itself.
+                    if relative == **changed_path {
+                        continue;
+                    }
                     edges.push(ImpactEdge {
                         source_path: (*changed_path).clone(),
                         affected_path: relative.clone(),
@@ -1789,6 +2325,7 @@ pub(crate) fn query_gopls_references(
                         symbol: symbol.clone(),
                         certainty: "resolved_semantic".into(),
                         evidence_line,
+                        co_change: None,
                     });
                 }
                 if saw_declaration && !query_failed && !symbol_limited {
@@ -1903,54 +2440,255 @@ pub(crate) fn go_symbol_occurrences(
     occurrences
 }
 
-pub(crate) fn rust_declared_symbols(source: &str) -> Option<std::collections::BTreeSet<String>> {
-    struct Declarations(std::collections::BTreeSet<String>);
+/// Rust declarations fingerprinted by their token streams, so formatting and
+/// ordinary comments are not changes; `None` when the source does not parse.
+///
+/// A module records only its presence: an edit inside `mod tests` changes the
+/// items it contains, not every reference to the module name.
+pub(crate) fn rust_declaration_fingerprints(source: &str) -> Option<DeclarationFingerprints> {
+    use quote::ToTokens;
+    struct Declarations {
+        fingerprints: DeclarationFingerprints,
+        /// Depth of enclosing `#[cfg(test)]` modules.
+        in_test: usize,
+    }
+    impl Declarations {
+        /// Records a declaration. A private item inside a test module is
+        /// unreachable from other files, and its same-file references are
+        /// already test-context edges, so it is not recorded.
+        fn record(&mut self, name: &syn::Ident, vis: &syn::Visibility, item: &impl ToTokens) {
+            if self.in_test > 0 && matches!(vis, syn::Visibility::Inherited) {
+                return;
+            }
+            self.record_text(name, item.to_token_stream().to_string());
+        }
+        fn record_text(&mut self, name: &syn::Ident, fingerprint: String) {
+            self.fingerprints
+                .entry(name.to_string())
+                .or_default()
+                .push(fingerprint);
+        }
+    }
     impl<'ast> syn::visit::Visit<'ast> for Declarations {
         fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
-            self.0.insert(item.sig.ident.to_string());
+            self.record(&item.sig.ident, &item.vis, item);
             syn::visit::visit_item_fn(self, item);
         }
         fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
-            self.0.insert(item.ident.to_string());
+            self.record(&item.ident, &item.vis, item);
             syn::visit::visit_item_struct(self, item);
         }
         fn visit_item_enum(&mut self, item: &'ast syn::ItemEnum) {
-            self.0.insert(item.ident.to_string());
+            self.record(&item.ident, &item.vis, item);
             syn::visit::visit_item_enum(self, item);
         }
         fn visit_item_trait(&mut self, item: &'ast syn::ItemTrait) {
-            self.0.insert(item.ident.to_string());
+            self.record(&item.ident, &item.vis, item);
             syn::visit::visit_item_trait(self, item);
         }
         fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
-            self.0.insert(item.ident.to_string());
+            let test = rust_is_test_cfg(&item.attrs);
+            if !test {
+                self.record_text(&item.ident, "mod".into());
+            }
+            self.in_test += test as usize;
             syn::visit::visit_item_mod(self, item);
+            self.in_test -= test as usize;
         }
         fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
-            self.0.insert(item.ident.to_string());
+            self.record(&item.ident, &item.vis, item);
             syn::visit::visit_item_type(self, item);
         }
         fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
-            self.0.insert(item.ident.to_string());
+            self.record(&item.ident, &item.vis, item);
             syn::visit::visit_item_const(self, item);
         }
         fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
-            self.0.insert(item.ident.to_string());
+            self.record(&item.ident, &item.vis, item);
             syn::visit::visit_item_static(self, item);
         }
         fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
-            self.0.insert(item.sig.ident.to_string());
+            self.record(&item.sig.ident, &item.vis, item);
             syn::visit::visit_impl_item_fn(self, item);
         }
         fn visit_trait_item_fn(&mut self, item: &'ast syn::TraitItemFn) {
-            self.0.insert(item.sig.ident.to_string());
+            self.record(
+                &item.sig.ident,
+                &syn::Visibility::Public(Default::default()),
+                item,
+            );
             syn::visit::visit_trait_item_fn(self, item);
         }
     }
     let file = syn::parse_file(source).ok()?;
-    let mut visitor = Declarations(std::collections::BTreeSet::new());
+    let mut visitor = Declarations {
+        fingerprints: DeclarationFingerprints::new(),
+        in_test: 0,
+    };
     syn::visit::Visit::visit_file(&mut visitor, &file);
-    Some(visitor.0)
+    for fingerprints in visitor.fingerprints.values_mut() {
+        fingerprints.sort();
+    }
+    Some(visitor.fingerprints)
+}
+
+/// Test-only Rust functions (under `#[cfg(test)]`) with the identifiers each
+/// one mentions; `None` when the source does not parse.
+///
+/// A test helper that calls a changed function is how tests elsewhere reach
+/// that change, so it is treated as changed for test selection.
+/// Rust symbols declared `pub`, or reachable through a trait, so callable
+/// from other crates; `None` when the source does not parse.
+fn rust_exported_symbols(source: &str) -> Option<std::collections::BTreeSet<String>> {
+    struct Exported {
+        names: std::collections::BTreeSet<String>,
+        in_trait: usize,
+    }
+    impl Exported {
+        fn record(&mut self, name: &syn::Ident, vis: &syn::Visibility) {
+            if self.in_trait > 0 || matches!(vis, syn::Visibility::Public(_)) {
+                self.names.insert(name.to_string());
+            }
+        }
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Exported {
+        fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+            self.record(&item.sig.ident, &item.vis);
+            syn::visit::visit_item_fn(self, item);
+        }
+        fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
+            self.record(&item.ident, &item.vis);
+        }
+        fn visit_item_enum(&mut self, item: &'ast syn::ItemEnum) {
+            self.record(&item.ident, &item.vis);
+        }
+        fn visit_item_trait(&mut self, item: &'ast syn::ItemTrait) {
+            self.record(&item.ident, &item.vis);
+            self.in_trait += 1;
+            syn::visit::visit_item_trait(self, item);
+            self.in_trait -= 1;
+        }
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            self.record(&item.ident, &item.vis);
+            syn::visit::visit_item_mod(self, item);
+        }
+        fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
+            self.record(&item.ident, &item.vis);
+        }
+        fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
+            self.record(&item.ident, &item.vis);
+        }
+        fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
+            self.record(&item.ident, &item.vis);
+        }
+        fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
+            // `macro_rules!` with `#[macro_export]` is exported; keep any macro's name.
+            if let Some(ident) = &item.ident {
+                self.names.insert(ident.to_string());
+            }
+        }
+        fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+            let trait_impl = item.trait_.is_some() as usize;
+            self.in_trait += trait_impl;
+            syn::visit::visit_item_impl(self, item);
+            self.in_trait -= trait_impl;
+        }
+        fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+            self.record(&item.sig.ident, &item.vis);
+            syn::visit::visit_impl_item_fn(self, item);
+        }
+        fn visit_trait_item_fn(&mut self, item: &'ast syn::TraitItemFn) {
+            self.names.insert(item.sig.ident.to_string());
+        }
+    }
+    let file = syn::parse_file(source).ok()?;
+    let mut visitor = Exported {
+        names: std::collections::BTreeSet::new(),
+        in_trait: 0,
+    };
+    syn::visit::Visit::visit_file(&mut visitor, &file);
+    Some(visitor.names)
+}
+
+/// Whether attributes include a `cfg` that names `test`, such as `#[cfg(test)]`.
+fn rust_is_test_cfg(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        attr.path().is_ident("cfg")
+            && matches!(&attr.meta, syn::Meta::List(list)
+                if list.tokens.clone().into_iter().any(|tree| matches!(tree, proc_macro2::TokenTree::Ident(ident) if ident == "test")))
+    })
+}
+
+fn rust_test_helper_mentions(
+    source: &str,
+) -> Option<Vec<(String, std::collections::BTreeSet<String>)>> {
+    use quote::ToTokens;
+    fn mentions(tokens: proc_macro2::TokenStream, into: &mut std::collections::BTreeSet<String>) {
+        for tree in tokens {
+            match tree {
+                proc_macro2::TokenTree::Ident(ident) => {
+                    into.insert(ident.to_string());
+                }
+                proc_macro2::TokenTree::Group(group) => mentions(group.stream(), into),
+                _ => {}
+            }
+        }
+    }
+    struct Helpers {
+        in_test: usize,
+        found: Vec<(String, std::collections::BTreeSet<String>)>,
+    }
+    impl Helpers {
+        fn record(&mut self, attrs: &[syn::Attribute], name: &syn::Ident, block: &syn::Block) {
+            if self.in_test > 0 || rust_is_test_cfg(attrs) {
+                let mut names = std::collections::BTreeSet::new();
+                mentions(block.to_token_stream(), &mut names);
+                self.found.push((name.to_string(), names));
+            }
+        }
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Helpers {
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            let test = rust_is_test_cfg(&item.attrs);
+            self.in_test += test as usize;
+            syn::visit::visit_item_mod(self, item);
+            self.in_test -= test as usize;
+        }
+        fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+            self.record(&item.attrs, &item.sig.ident, &item.block);
+            syn::visit::visit_item_fn(self, item);
+        }
+        fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+            self.record(&item.attrs, &item.sig.ident, &item.block);
+            syn::visit::visit_impl_item_fn(self, item);
+        }
+    }
+    let file = syn::parse_file(source).ok()?;
+    let mut visitor = Helpers {
+        in_test: 0,
+        found: Vec::new(),
+    };
+    syn::visit::Visit::visit_file(&mut visitor, &file);
+    Some(visitor.found)
+}
+
+/// Adds every test helper that, directly or through another helper,
+/// mentions a changed symbol.
+fn extend_with_test_helpers(
+    changed: &mut std::collections::BTreeSet<String>,
+    helpers: &[(String, std::collections::BTreeSet<String>)],
+) {
+    loop {
+        let before = changed.len();
+        for (name, mentioned) in helpers {
+            if !changed.contains(name) && mentioned.iter().any(|symbol| changed.contains(symbol)) {
+                changed.insert(name.clone());
+            }
+        }
+        if changed.len() == before {
+            break;
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2106,38 +2844,323 @@ pub(crate) fn rust_test_module_paths(
     output
 }
 
+/// How a Rust identifier occurrence can name an item, which decides the kinds
+/// of declaration it may refer to.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum RustRole {
+    /// A path segment. `qualifier` is the segment before it, if any; `last`
+    /// is false for a module or type prefix such as `review` in `review::run`.
+    Path {
+        qualifier: Option<String>,
+        last: bool,
+    },
+    /// A method call such as `value.report()`.
+    Method,
+    /// A name in a `use` tree.
+    Use,
+    /// An identifier inside macro tokens, which are not parsed.
+    Macro,
+}
+
+/// What kind of item a Rust declaration is, for matching occurrences.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum RustDeclKind {
+    /// A free function, constant, or static: named by a final path segment.
+    Value,
+    /// A struct, enum, union, trait, or type alias: named by any path segment.
+    Type,
+    /// A module: named only by a path prefix.
+    Module,
+    /// A `macro_rules!` macro.
+    Macro,
+    /// A function or constant in an `impl` or `trait` for `owner`: named by
+    /// `Owner::name`, or by a method call in a file that names its owner.
+    Associated { owner: String },
+}
+
+/// One identifier occurrence: name, line, test context, and role.
+pub(crate) type RustOccurrence = (String, u32, bool, RustRole);
+
+/// A parsed file's matching occurrences, with the names of the items the
+/// file itself declares (outside `impl` and `trait` blocks). An unqualified
+/// path naming one of those resolves to the file's own item, which shadows
+/// any glob import of a same-named item from elsewhere.
+#[derive(Default)]
+pub(crate) struct RustOccurrences {
+    pub(crate) found: Vec<RustOccurrence>,
+    pub(crate) local_items: std::collections::HashSet<String>,
+}
+
+impl RustOccurrences {
+    /// Whether `occurrence` is an unqualified path to an item this file declares.
+    pub(crate) fn names_local_item(&self, occurrence: &RustOccurrence) -> bool {
+        matches!(
+            &occurrence.3,
+            RustRole::Path {
+                qualifier: None,
+                last: true
+            }
+        ) && self.local_items.contains(&occurrence.0)
+    }
+}
+
+/// Whether an occurrence in `role` can name a declaration of one of `kinds`.
+/// `mentions` reports whether the occurrence's file names an identifier, which
+/// stands in for the type or trait being in scope at a method call.
+pub(crate) fn rust_role_matches(
+    kinds: &std::collections::BTreeSet<RustDeclKind>,
+    role: &RustRole,
+    mentions: &mut dyn FnMut(&str) -> bool,
+) -> bool {
+    kinds.iter().any(|kind| match (kind, role) {
+        (_, RustRole::Use) => !matches!(kind, RustDeclKind::Associated { .. }),
+        (RustDeclKind::Value | RustDeclKind::Macro, RustRole::Path { last, .. }) => *last,
+        (RustDeclKind::Value | RustDeclKind::Type | RustDeclKind::Macro, RustRole::Macro) => true,
+        (RustDeclKind::Type, RustRole::Path { .. }) => true,
+        (RustDeclKind::Module, RustRole::Path { last, .. }) => !last,
+        (
+            RustDeclKind::Associated { owner },
+            RustRole::Path {
+                qualifier: Some(qualifier),
+                last: true,
+            },
+        ) => qualifier == owner || (qualifier == "Self" && mentions(owner)),
+        (RustDeclKind::Associated { owner }, RustRole::Method | RustRole::Macro) => mentions(owner),
+        _ => false,
+    })
+}
+
+/// The kinds of every item declared in a Rust file, by name; `None` when the
+/// file does not parse.
+pub(crate) fn rust_declaration_kinds(
+    source: &str,
+) -> Option<std::collections::BTreeMap<String, std::collections::BTreeSet<RustDeclKind>>> {
+    #[derive(Default)]
+    struct Kinds {
+        found: std::collections::BTreeMap<String, std::collections::BTreeSet<RustDeclKind>>,
+        owners: Vec<Vec<String>>,
+    }
+    impl Kinds {
+        fn record(&mut self, name: &syn::Ident, kind: RustDeclKind) {
+            self.found.entry(name.to_string()).or_default().insert(kind);
+        }
+        fn record_associated(&mut self, name: &syn::Ident) {
+            let owners = self.owners.last().cloned().unwrap_or_default();
+            for owner in owners {
+                self.record(name, RustDeclKind::Associated { owner });
+            }
+        }
+    }
+    fn last_ident(path: &syn::Path) -> Option<String> {
+        path.segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Kinds {
+        fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+            self.record(&item.sig.ident, RustDeclKind::Value);
+            syn::visit::visit_item_fn(self, item);
+        }
+        fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
+            self.record(&item.ident, RustDeclKind::Value);
+        }
+        fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
+            self.record(&item.ident, RustDeclKind::Value);
+        }
+        fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
+            self.record(&item.ident, RustDeclKind::Type);
+        }
+        fn visit_item_enum(&mut self, item: &'ast syn::ItemEnum) {
+            self.record(&item.ident, RustDeclKind::Type);
+        }
+        fn visit_item_union(&mut self, item: &'ast syn::ItemUnion) {
+            self.record(&item.ident, RustDeclKind::Type);
+        }
+        fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
+            self.record(&item.ident, RustDeclKind::Type);
+        }
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            self.record(&item.ident, RustDeclKind::Module);
+            syn::visit::visit_item_mod(self, item);
+        }
+        fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
+            if let Some(ident) = &item.ident {
+                self.record(ident, RustDeclKind::Macro);
+            }
+        }
+        fn visit_item_trait(&mut self, item: &'ast syn::ItemTrait) {
+            self.record(&item.ident, RustDeclKind::Type);
+            self.owners.push(vec![item.ident.to_string()]);
+            syn::visit::visit_item_trait(self, item);
+            self.owners.pop();
+        }
+        fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+            let mut owners = Vec::new();
+            if let syn::Type::Path(path) = item.self_ty.as_ref() {
+                owners.extend(last_ident(&path.path));
+            }
+            if let Some((_, path, _)) = &item.trait_ {
+                owners.extend(last_ident(path));
+            }
+            self.owners.push(owners);
+            syn::visit::visit_item_impl(self, item);
+            self.owners.pop();
+        }
+        fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+            self.record_associated(&item.sig.ident);
+            syn::visit::visit_impl_item_fn(self, item);
+        }
+        fn visit_impl_item_const(&mut self, item: &'ast syn::ImplItemConst) {
+            self.record_associated(&item.ident);
+        }
+        fn visit_trait_item_fn(&mut self, item: &'ast syn::TraitItemFn) {
+            self.record_associated(&item.sig.ident);
+            syn::visit::visit_trait_item_fn(self, item);
+        }
+        fn visit_trait_item_const(&mut self, item: &'ast syn::TraitItemConst) {
+            self.record_associated(&item.ident);
+        }
+    }
+    let file = syn::parse_file(source).ok()?;
+    let mut visitor = Kinds::default();
+    syn::visit::Visit::visit_file(&mut visitor, &file);
+    Some(visitor.found)
+}
+
 /// Identifier occurrences in Rust paths, method calls, `use` trees, and macro
-/// tokens whose name satisfies `keep`, as sorted, deduplicated
-/// `(name, line, in_test_context)` triples. `None` when the file does not parse.
+/// tokens whose name satisfies `keep`, sorted and deduplicated, each with the
+/// role that decides what it can name. `None` when the file does not parse.
+///
+/// A single-segment path or macro token naming a local binding (a parameter,
+/// `let`, closure, `for`, or match-arm pattern) is the binding, not an item,
+/// so it is skipped.
 pub(crate) fn rust_identifier_occurrences_matching(
     source: &str,
     keep: &dyn Fn(&str) -> bool,
-) -> Option<Vec<(String, u32, bool)>> {
+) -> Option<RustOccurrences> {
     struct References<'a> {
         keep: &'a dyn Fn(&str) -> bool,
-        found: Vec<(String, u32, bool)>,
+        found: Vec<RustOccurrence>,
         in_test_context: bool,
+        /// Local bindings per enclosing scope, innermost last.
+        scopes: Vec<std::collections::HashSet<String>>,
     }
-    impl References<'_> {
-        fn record_path(&mut self, path: &syn::Path) {
-            for segment in &path.segments {
-                let name = segment.ident.to_string();
-                if (self.keep)(&name) {
-                    self.found.push((
-                        name,
-                        segment.ident.span().start().line as u32,
-                        self.in_test_context,
-                    ));
-                }
+    fn pattern_bindings(pat: &syn::Pat, into: &mut std::collections::HashSet<String>) {
+        struct Bindings<'b>(&'b mut std::collections::HashSet<String>);
+        impl<'ast> syn::visit::Visit<'ast> for Bindings<'_> {
+            fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+                self.0.insert(node.ident.to_string());
+                syn::visit::visit_pat_ident(self, node);
             }
         }
+        syn::visit::Visit::visit_pat(&mut Bindings(into), pat);
+    }
+    impl References<'_> {
+        fn is_local(&self, name: &str) -> bool {
+            self.scopes.iter().any(|scope| scope.contains(name))
+        }
+        fn bind(&mut self, pat: &syn::Pat) {
+            if let Some(scope) = self.scopes.last_mut() {
+                pattern_bindings(pat, scope);
+            }
+        }
+        fn push(&mut self, name: String, line: usize, role: RustRole) {
+            self.found
+                .push((name, line as u32, self.in_test_context, role));
+        }
+        fn record_path(&mut self, path: &syn::Path, local_candidate: bool) {
+            let count = path.segments.len();
+            if local_candidate && count == 1 && path.leading_colon.is_none() {
+                let ident = &path.segments[0].ident;
+                if self.is_local(&ident.to_string()) {
+                    return;
+                }
+            }
+            let mut qualifier: Option<String> = None;
+            for (index, segment) in path.segments.iter().enumerate() {
+                let name = segment.ident.to_string();
+                if (self.keep)(&name) {
+                    self.push(
+                        name.clone(),
+                        segment.ident.span().start().line,
+                        RustRole::Path {
+                            qualifier: qualifier.clone(),
+                            last: index + 1 == count,
+                        },
+                    );
+                }
+                qualifier = Some(name);
+            }
+        }
+        fn scoped(&mut self, bindings: &[&syn::Pat], visit: impl FnOnce(&mut Self)) {
+            let mut scope = std::collections::HashSet::new();
+            for pat in bindings {
+                pattern_bindings(pat, &mut scope);
+            }
+            self.scopes.push(scope);
+            visit(self);
+            self.scopes.pop();
+        }
+    }
+    fn fn_inputs(
+        inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
+    ) -> Vec<&syn::Pat> {
+        inputs
+            .iter()
+            .filter_map(|input| match input {
+                syn::FnArg::Typed(typed) => Some(typed.pat.as_ref()),
+                syn::FnArg::Receiver(_) => None,
+            })
+            .collect()
     }
     impl<'ast> syn::visit::Visit<'ast> for References<'_> {
         fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
             let previous = self.in_test_context;
             self.in_test_context |= is_test_context_attribute(&node.attrs);
-            syn::visit::visit_item_fn(self, node);
+            let inputs = fn_inputs(&node.sig.inputs);
+            self.scoped(&inputs, |this| syn::visit::visit_item_fn(this, node));
             self.in_test_context = previous;
+        }
+        fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+            let inputs = fn_inputs(&node.sig.inputs);
+            self.scoped(&inputs, |this| syn::visit::visit_impl_item_fn(this, node));
+        }
+        fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+            let inputs = fn_inputs(&node.sig.inputs);
+            self.scoped(&inputs, |this| syn::visit::visit_trait_item_fn(this, node));
+        }
+        fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+            let inputs: Vec<&syn::Pat> = node.inputs.iter().collect();
+            self.scoped(&inputs, |this| syn::visit::visit_expr_closure(this, node));
+        }
+        fn visit_block(&mut self, node: &'ast syn::Block) {
+            self.scoped(&[], |this| syn::visit::visit_block(this, node));
+        }
+        fn visit_local(&mut self, node: &'ast syn::Local) {
+            // The initializer is evaluated before its bindings exist.
+            if let Some(init) = &node.init {
+                syn::visit::Visit::visit_expr(self, &init.expr);
+                if let Some((_, diverge)) = &init.diverge {
+                    syn::visit::Visit::visit_expr(self, diverge);
+                }
+            }
+            syn::visit::Visit::visit_pat(self, &node.pat);
+            self.bind(&node.pat);
+        }
+        fn visit_expr_let(&mut self, node: &'ast syn::ExprLet) {
+            syn::visit::Visit::visit_expr(self, &node.expr);
+            syn::visit::Visit::visit_pat(self, &node.pat);
+            self.bind(&node.pat);
+        }
+        fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+            syn::visit::Visit::visit_expr(self, &node.expr);
+            self.scoped(&[node.pat.as_ref()], |this| {
+                syn::visit::Visit::visit_pat(this, &node.pat);
+                syn::visit::Visit::visit_block(this, &node.body);
+            });
+        }
+        fn visit_arm(&mut self, node: &'ast syn::Arm) {
+            self.scoped(&[&node.pat], |this| syn::visit::visit_arm(this, node));
         }
         fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
             let previous = self.in_test_context;
@@ -2146,39 +3169,57 @@ pub(crate) fn rust_identifier_occurrences_matching(
             self.in_test_context = previous;
         }
         fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
-            self.record_path(&node.path);
+            self.record_path(&node.path, node.qself.is_none());
             syn::visit::visit_expr_path(self, node);
         }
         fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
-            self.record_path(&node.path);
+            self.record_path(&node.path, false);
             syn::visit::visit_expr_struct(self, node);
         }
         fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
-            self.record_path(&node.path);
+            self.record_path(&node.path, false);
             syn::visit::visit_type_path(self, node);
+        }
+        fn visit_pat_tuple_struct(&mut self, node: &'ast syn::PatTupleStruct) {
+            self.record_path(&node.path, false);
+            syn::visit::visit_pat_tuple_struct(self, node);
+        }
+        fn visit_pat_struct(&mut self, node: &'ast syn::PatStruct) {
+            self.record_path(&node.path, false);
+            syn::visit::visit_pat_struct(self, node);
         }
         fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
             let name = node.method.to_string();
             if (self.keep)(&name) {
-                self.found.push((
-                    name,
-                    node.method.span().start().line as u32,
-                    self.in_test_context,
-                ));
+                self.push(name, node.method.span().start().line, RustRole::Method);
             }
             syn::visit::visit_expr_method_call(self, node);
         }
         fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
             syn::visit::visit_item_use(self, node);
+            // A path prefix (`review` in `use review::*`) names a module or
+            // type; only a final name or rename can import any item.
             let mut names = Vec::new();
-            fn collect(tree: &syn::UseTree, names: &mut Vec<String>) {
+            fn collect(tree: &syn::UseTree, names: &mut Vec<(String, RustRole)>) {
+                let prefix = |name: String| {
+                    (
+                        name,
+                        RustRole::Path {
+                            qualifier: None,
+                            last: false,
+                        },
+                    )
+                };
                 match tree {
                     syn::UseTree::Path(path) => {
-                        names.push(path.ident.to_string());
+                        names.push(prefix(path.ident.to_string()));
                         collect(&path.tree, names);
                     }
-                    syn::UseTree::Name(name) => names.push(name.ident.to_string()),
-                    syn::UseTree::Rename(rename) => names.push(rename.rename.to_string()),
+                    syn::UseTree::Name(name) => names.push((name.ident.to_string(), RustRole::Use)),
+                    syn::UseTree::Rename(rename) => {
+                        names.push((rename.ident.to_string(), RustRole::Use));
+                        names.push((rename.rename.to_string(), RustRole::Use));
+                    }
                     syn::UseTree::Group(group) => {
                         for item in &group.items {
                             collect(item, names);
@@ -2188,49 +3229,46 @@ pub(crate) fn rust_identifier_occurrences_matching(
                 }
             }
             collect(&node.tree, &mut names);
-            for name in names {
+            let line = node.tree.span().start().line;
+            for (name, role) in names {
                 if (self.keep)(&name) {
-                    self.found.push((
-                        name,
-                        node.tree.span().start().line as u32,
-                        self.in_test_context,
-                    ));
+                    self.push(name, line, role);
                 }
             }
         }
         fn visit_macro(&mut self, node: &'ast syn::Macro) {
-            self.record_path(&node.path);
-            fn visit_tokens(
-                tokens: proc_macro2::TokenStream,
-                keep: &dyn Fn(&str) -> bool,
-                in_test_context: bool,
-                found: &mut Vec<(String, u32, bool)>,
-            ) {
+            self.record_path(&node.path, false);
+            // Macro bodies are unparsed tokens; `let name` (or `let mut
+            // name`) inside one still binds a local for the rest of the body.
+            fn visit_tokens(tokens: proc_macro2::TokenStream, visitor: &mut References<'_>) {
+                let mut after_let = false;
                 for token in tokens {
                     match token {
                         proc_macro2::TokenTree::Ident(ident) => {
                             let name = ident.to_string();
-                            if keep(&name) {
-                                found.push((
-                                    name,
-                                    ident.span().start().line as u32,
-                                    in_test_context,
-                                ));
+                            if after_let && name != "mut" {
+                                if let Some(scope) = visitor.scopes.last_mut() {
+                                    scope.insert(name.clone());
+                                }
+                            }
+                            after_let = name == "let" || (after_let && name == "mut");
+                            if (visitor.keep)(&name) && !visitor.is_local(&name) {
+                                visitor.push(name, ident.span().start().line, RustRole::Macro);
                             }
                         }
                         proc_macro2::TokenTree::Group(group) => {
-                            visit_tokens(group.stream(), keep, in_test_context, found)
+                            after_let = false;
+                            visit_tokens(group.stream(), visitor)
                         }
-                        proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => {}
+                        proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => {
+                            after_let = false;
+                        }
                     }
                 }
             }
-            visit_tokens(
-                node.tokens.clone(),
-                self.keep,
-                self.in_test_context,
-                &mut self.found,
-            );
+            self.scopes.push(std::collections::HashSet::new());
+            visit_tokens(node.tokens.clone(), self);
+            self.scopes.pop();
             syn::visit::visit_macro(self, node);
         }
     }
@@ -2239,11 +3277,26 @@ pub(crate) fn rust_identifier_occurrences_matching(
         keep,
         found: Vec::new(),
         in_test_context: false,
+        scopes: Vec::new(),
     };
     syn::visit::Visit::visit_file(&mut visitor, &file);
     visitor.found.sort();
     visitor.found.dedup();
-    Some(visitor.found)
+    let local_items = rust_declaration_kinds(source)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(name, kinds)| {
+            keep(name)
+                && kinds
+                    .iter()
+                    .any(|kind| !matches!(kind, RustDeclKind::Associated { .. }))
+        })
+        .map(|(name, _)| name)
+        .collect();
+    Some(RustOccurrences {
+        found: visitor.found,
+        local_items,
+    })
 }
 
 /// Every identifier occurrence in a Rust file (see
@@ -2255,6 +3308,15 @@ pub(crate) fn rust_references(
 ) -> Option<Vec<(String, u32, bool)>> {
     rust_identifier_occurrences_matching(source, &|name| {
         symbols.iter().any(|symbol| symbol == name)
+    })
+    .map(|found| {
+        let mut triples: Vec<_> = found
+            .found
+            .into_iter()
+            .map(|(name, line, in_test, _)| (name, line, in_test))
+            .collect();
+        triples.dedup();
+        triples
     })
 }
 
@@ -2307,6 +3369,55 @@ pub(crate) fn is_test_context_attribute(attributes: &[syn::Attribute]) -> bool {
                     .parse_args::<syn::Ident>()
                     .is_ok_and(|ident| ident == "test")
         })
+}
+
+/// Prose documentation: Markdown, reStructuredText, and AsciiDoc files, and
+/// anything under a `docs/` directory. Plain `.txt` is not included, since it
+/// also names build and dependency manifests (`CMakeLists.txt`,
+/// `requirements.txt`) that do couple to code. Documentation is updated alongside features, so it says
+/// nothing about code coupling or code diffusion.
+pub(crate) fn is_documentation_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.starts_with("docs/")
+        || lower.contains("/docs/")
+        || [".md", ".mdx", ".markdown", ".rst", ".adoc"]
+            .iter()
+            .any(|extension| lower.ends_with(extension))
+}
+
+pub(crate) fn is_vue_path(path: &str) -> bool {
+    path.ends_with(".vue")
+}
+
+/// The component name a `.vue` file is conventionally imported under: its
+/// file stem, when PascalCase. Lower-case stems (such as routed `index.vue`
+/// pages) are not imported by name.
+fn vue_component_name(path: &str) -> Option<String> {
+    let stem = Path::new(path).file_stem()?.to_str()?;
+    (stem.len() > 1
+        && stem.starts_with(|character: char| character.is_ascii_uppercase())
+        && stem.chars().all(is_identifier_character))
+    .then(|| stem.to_owned())
+}
+
+/// A single-file component's `<script>` block contents, with every other
+/// line (template, style, and the script tags themselves) left empty so line
+/// numbers match the file.
+pub(crate) fn vue_script_code(text: &str) -> String {
+    let mut in_script = false;
+    let mut output = String::with_capacity(text.len());
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if !in_script && trimmed.starts_with("<script") {
+            in_script = !trimmed.contains("</script>");
+        } else if in_script && trimmed.starts_with("</script>") {
+            in_script = false;
+        } else if in_script {
+            output.push_str(line);
+        }
+        output.push('\n');
+    }
+    output
 }
 
 pub(crate) fn is_typescript_path(path: &str) -> bool {
@@ -2565,6 +3676,7 @@ pub(crate) fn analyze_python_references(
                     symbol: edge.symbol,
                     certainty: "inferred_syntax".into(),
                     evidence_line: edge.evidence_line,
+                    co_change: None,
                 })
                 .collect();
             PythonImpactAnalysis {
@@ -2842,8 +3954,42 @@ pub fn java_code_without_comments_and_strings(source: &str) -> String {
 }
 
 pub fn declared_symbols(path: &str, source: &str) -> std::collections::BTreeSet<String> {
-    let mut symbols = std::collections::BTreeSet::new();
-    for line in source.lines() {
+    let top_level = declaration_line_mask(path, source);
+    source
+        .lines()
+        .zip(top_level)
+        .filter(|(_, top_level)| *top_level)
+        .filter_map(|(line, _)| line_declared_symbol(path, line))
+        .collect()
+}
+
+/// Which lines of comment- and string-free `code` may hold a declaration
+/// other files can reference. For TypeScript and JavaScript only lines that
+/// start outside every brace qualify: a `const` inside a function or test
+/// callback is a local. Other languages keep every line.
+fn declaration_line_mask(path: &str, code: &str) -> Vec<bool> {
+    if !is_typescript_path(path) && !is_vue_path(path) {
+        return code.lines().map(|_| true).collect();
+    }
+    let mut depth = 0usize;
+    code.lines()
+        .map(|line| {
+            let top_level = depth == 0;
+            for character in line.chars() {
+                match character {
+                    '{' => depth += 1,
+                    '}' => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+            }
+            top_level
+        })
+        .collect()
+}
+
+/// The symbol a single source line declares, by lexical keyword.
+fn line_declared_symbol(path: &str, line: &str) -> Option<String> {
+    {
         let trimmed = line.trim_start();
         let words: Vec<_> = trimmed.split_whitespace().collect();
         let keyword_index = if words.first() == Some(&"pub") { 1 } else { 0 };
@@ -2906,21 +4052,26 @@ pub fn declared_symbols(path: &str, source: &str) -> std::collections::BTreeSet<
             }
             _ => None,
         };
-        if let Some(candidate) = candidate {
-            let symbol: String = candidate
-                .chars()
-                .take_while(|character| character.is_alphanumeric() || *character == '_')
-                .collect();
-            if symbol.len() > 1 {
-                symbols.insert(symbol);
-            }
-        }
+        let symbol: String = candidate?
+            .chars()
+            .take_while(|character| character.is_alphanumeric() || *character == '_')
+            .collect();
+        (symbol.len() > 1).then_some(symbol)
     }
-    symbols
 }
 
 pub fn java_declared_symbols(source: &str) -> std::collections::BTreeSet<String> {
-    let mut symbols = declared_symbols("Source.java", source);
+    source
+        .lines()
+        .flat_map(java_line_declared_symbols)
+        .collect()
+}
+
+/// The types and methods a single Java source line declares.
+fn java_line_declared_symbols(line: &str) -> Vec<String> {
+    let mut symbols: Vec<String> = line_declared_symbol("Source.java", line)
+        .into_iter()
+        .collect();
     const NON_DECLARATION_CALLS: &[&str] = &[
         "if",
         "for",
@@ -2938,7 +4089,7 @@ pub fn java_declared_symbols(source: &str) -> std::collections::BTreeSet<String>
         "do",
         "yield",
     ];
-    for line in source.lines() {
+    {
         for (open, _) in line
             .char_indices()
             .filter(|(_, character)| *character == '(')
@@ -2983,7 +4134,7 @@ pub fn java_declared_symbols(source: &str) -> std::collections::BTreeSet<String>
                 .last()
                 .is_some_and(|word| word.chars().any(|character| character.is_alphanumeric()))
             {
-                symbols.insert(name.to_owned());
+                symbols.push(name.to_owned());
             }
         }
     }

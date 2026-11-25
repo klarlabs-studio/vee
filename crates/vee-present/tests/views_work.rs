@@ -32,7 +32,7 @@ fn record(id: &str, severity: &str, rationale: &str) -> FindingRecord {
 
 fn task(id: &str, current: bool) -> FindingTask {
     FindingTask {
-        schema_version: 3,
+        schema_version: 4,
         task_id: format!("finding-task:sha256:{id}"),
         review_id: "rev_1".into(),
         snapshot_id: "sha256:snap".into(),
@@ -50,6 +50,25 @@ fn task(id: &str, current: bool) -> FindingTask {
                 .into(),
             classification: "untrusted_repository_source".to_string(),
         }),
+        diff_hunk: Some(vee_application::DiffHunk {
+            path: "domain/lockout.go".into(),
+            header: "@@ -165,3 +165,3 @@".into(),
+            truncated: false,
+            lines: vec![
+                vee_application::DiffLine {
+                    kind: "removed".into(),
+                    line: None,
+                    base_line: Some(166),
+                    text: "\tl.count++".into(),
+                },
+                vee_application::DiffLine {
+                    kind: "added".into(),
+                    line: Some(166),
+                    base_line: None,
+                    text: "\tl.count = l.count + 1".into(),
+                },
+            ],
+        }),
         context_note: None,
         impact_paths: vec![ImpactEdge {
             source_path: "domain/lockout.go".into(),
@@ -58,6 +77,7 @@ fn task(id: &str, current: bool) -> FindingTask {
             symbol: "Fail".into(),
             certainty: "inferred_heuristic".into(),
             evidence_line: 12,
+            co_change: None,
         }],
         impact_coverage_complete: Some(true),
         evidence: vec![serde_json::from_value(serde_json::json!({
@@ -96,6 +116,14 @@ fn task(id: &str, current: bool) -> FindingTask {
 fn finding_task_shows_finding_source_impact_and_verification_step() {
     let task = task("find_a", true);
     let text = ansi::render(&task.to_view(), false);
+    assert!(text.contains("Change\n"), "{text}");
+    assert!(text.contains("@@ -165,3 +165,3 @@"), "{text}");
+    assert!(
+        text.lines()
+            .any(|line| line.trim_start().starts_with("166   +")
+                && line.contains("l.count = l.count + 1")),
+        "{text}"
+    );
     assert!(
         text.starts_with("Task for finding find_a  ✖ high · concurrency\n"),
         "{text}"
@@ -287,7 +315,7 @@ fn recorded_feedback_shows_label_and_how_to_list_it() {
     );
     let md = markdown::render(&feedback.to_view());
     assert!(
-        md.starts_with("## Feedback recorded for finding find\\_a"),
+        md.starts_with("## Feedback recorded for finding find_a"),
         "{md}"
     );
 }

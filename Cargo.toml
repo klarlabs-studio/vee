@@ -38,6 +38,7 @@ reqwest = { version = "=0.13.5", default-features = false, features = ["blocking
 roxmltree = "=0.21.2"
 syn = { version = "2", features = ["full", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
+quote = "1"
 url = "=2.5.9"
 
 [patch.crates-io]
@@ -45,3 +46,8 @@ url = "=2.5.9"
 # lifecycle for clients that have not adopted MCP's 2026 discovery lifecycle.
 klarlabs-mcp = { path = "vendor/klarlabs-mcp" }
 klarlabs-mcp-protocol = { path = "vendor/klarlabs-mcp-protocol" }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

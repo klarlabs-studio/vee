@@ -42,10 +42,13 @@ fn init(repository_written: bool, provider_status: &str) -> InitReport {
         provider_id: "local".into(),
         candidate_id: Some("ollama".into()),
         egress: "local".into(),
+        effort: Some(vee_core::ReviewEffort::Medium),
         detection: DetectionReport {
             schema_version: 1,
             candidates: vec![],
             recommended: Some("ollama".into()),
+            model_suggestions: Default::default(),
+            effort_options: vec![],
         },
     }
 }
@@ -58,6 +61,11 @@ fn init_view_shows_what_was_created_and_the_next_commands() {
     assert!(plain.contains(".vee.yaml ✔ created"), "{plain}");
     assert!(plain.contains("REVIEW.md ✔ created"), "{plain}");
     assert!(plain.contains("local ✔ configured from ollama"), "{plain}");
+    assert!(
+        plain.contains("medium (three runs per reviewer)"),
+        "{plain}"
+    );
+    assert!(plain.contains("best-results.md"), "{plain}");
     assert!(plain.contains("→ vee doctor"), "{plain}");
     assert!(plain.contains("→ vee review"), "{plain}");
     let markdown = md(&report);
@@ -157,6 +165,7 @@ fn passing_review() -> ReviewResult {
         required_review_complete: true,
         required_verifications: vec![],
         analyzer_block_levels: Default::default(),
+        severity_floors: Vec::new(),
     };
     let gate = vee_core::evaluate_gate(
         "sha256:snap",
@@ -201,6 +210,7 @@ fn passing_review() -> ReviewResult {
         reviewer_context: vec![],
         unreviewed_paths: vec![],
         policy_profile: None,
+        review_effort: None,
         work_item: None,
         work_item_token_env: None,
     }
@@ -228,10 +238,7 @@ fn patch_application_view_shows_the_patch_then_the_follow_up_review() {
     assert!(!plain.contains("concurrently"), "{plain}");
     let markdown = md(&applied);
     assert!(markdown.starts_with("## Patch applied"), "{markdown}");
-    assert!(
-        markdown.contains("## Review rev\\_follow\\_up"),
-        "{markdown}"
-    );
+    assert!(markdown.contains("## Review rev_follow_up"), "{markdown}");
     assert_round_trip(&applied);
 }
 

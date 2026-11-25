@@ -181,6 +181,33 @@ fn analyzer_results_on_changed_lines_block_and_can_be_waived() {
     assert!(check["reasons"].to_string().contains("waiver"), "{check:#}");
 }
 
+/// Insights must not chart an analyzer run as a plain failure: the analyzer
+/// exits 1 whenever it reports anything, so analytics carries what the gate
+/// evaluates on the changed lines.
+#[test]
+fn analytics_reports_analyzer_findings_on_changed_lines() {
+    let (_fixture, root) = repository(reporting_analyzer);
+    let (code, run) = vee(&root, &["verify", "--profile", "lint", "--working-tree"]);
+    assert_eq!(code, Some(1), "the analyzer exited 1: {run:#}");
+
+    let workspace = vee_application::operations::Workspace::new(
+        root.clone(),
+        std::sync::Arc::new(vee_store_sqlite::SqliteRepositoryStores),
+    );
+    let analytics = vee_application::operations::local_analytics(&workspace).unwrap();
+    let value = serde_json::to_value(&analytics).unwrap();
+    let schema: Value = serde_json::from_str(include_str!(
+        "../../../schemas/local-review-analytics-v10.schema.json"
+    ))
+    .unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    assert!(validator.is_valid(&value), "{value:#}");
+    let runs = value["verification_runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["status"], "failed");
+    assert_eq!(runs[0]["analyzer_findings_on_changed_lines"], 2);
+}
+
 #[test]
 fn an_analyzer_without_valid_sarif_leaves_the_gate_incomplete() {
     let (_fixture, root) = repository(|_| "#!/bin/sh\necho 'not sarif'\n".into());

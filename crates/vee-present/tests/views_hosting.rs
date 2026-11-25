@@ -136,7 +136,7 @@ fn pull_request_issues_view_says_when_there_are_no_discussions() {
         "{text}"
     );
     assert!(!text.contains('→'), "nothing to archive: {text}");
-    assert!(md(&issues).contains("_No review discussions on this pull request\\._"));
+    assert!(md(&issues).contains("_No review discussions on this pull request._"));
 }
 
 fn pull_request_context() -> PullRequestContextReport {

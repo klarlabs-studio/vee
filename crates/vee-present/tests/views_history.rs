@@ -93,7 +93,7 @@ fn external_feedback_list_view_tabulates_labels_and_says_when_none_exist() {
     assert!(rendered.contains("▲ false_positive  43"), "{rendered}");
     assert!(rendered.contains("sha256:aaaaaaaaaaaa\n"), "{rendered}");
     assert!(rendered.ends_with("→ vee rules candidates\n"), "{rendered}");
-    assert!(md(&list).contains("| 🟡 **false\\_positive** | `42` | example/service \\#9 |"));
+    assert!(md(&list).contains("| 🟡 **false_positive** | `42` | example/service #9 |"));
     assert_round_trip(&list);
 
     let empty: ExternalFeedbackList = serde_json::from_value(json!({

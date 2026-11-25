@@ -75,7 +75,7 @@ fn terminal_output_neutralizes_escape_sequences_and_bidi_overrides() {
 fn markdown_output_uses_tables_markers_and_escapes_untrusted_text() {
     let text = markdown::render(&sample());
     assert!(
-        text.starts_with("## Review rev\\_1 · 🔴 **block**\n"),
+        text.starts_with("## Review rev_1 · 🔴 **block**\n"),
         "{text}"
     );
     assert!(text.contains("| Severity | Location | Finding |\n|---|---|---|\n| 🔴 **high** | `a.go:12` | Lost increment |"), "{text}");
@@ -96,7 +96,7 @@ fn markdown_output_cannot_be_given_structure_by_untrusted_text() {
         .paragraph(Cell::code("a`b|c"));
     let text = markdown::render(&view);
     assert!(
-        text.contains("x \\| y \\#\\# forged \\<img src=x\\> \\[link\\]\\(http://e\\)"),
+        text.contains("x \\| y ## forged \\<img src=x\\> \\[link\\](http\\://e)"),
         "{text}"
     );
     assert!(text.contains("``a`b\\|c``"), "{text}");
@@ -123,7 +123,7 @@ fn cells_join_spans_with_single_spaces() {
     );
     assert_eq!(
         markdown::render(&View::new().paragraph(cell)),
-        "`a.go` _\\(new\\)_\n"
+        "`a.go` _(new)_\n"
     );
 }
 
@@ -148,11 +148,21 @@ fn strip_ansi(text: &str) -> String {
 fn markdown_escaping_keeps_model_text_inert_and_code_intact() {
     assert_eq!(
         markdown::inline("[click](https://example.invalid)"),
-        "\\[click\\]\\(https://example\\.invalid\\)"
+        "\\[click\\](https\\://example.invalid)"
     );
     assert_eq!(
         markdown::inline("title\n## forged section"),
-        "title \\#\\# forged section"
+        "title ## forged section"
+    );
+    assert_eq!(markdown::inline("## forged heading"), "\\## forged heading");
+    assert_eq!(markdown::inline("1. forged item"), "1\\. forged item");
+    assert_eq!(
+        markdown::inline("see www.example.invalid"),
+        "see www\\.example.invalid"
+    );
+    assert_eq!(
+        markdown::inline("rev_follow_up v1.2 (see above) _emphasis_"),
+        "rev_follow_up v1.2 (see above) \\_emphasis\\_"
     );
     assert_eq!(markdown::code("file`name.rs"), "``file`name.rs``");
     assert_eq!(markdown::code("`edge"), "`` `edge ``");

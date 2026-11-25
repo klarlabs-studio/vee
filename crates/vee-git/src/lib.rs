@@ -91,6 +91,114 @@ pub fn merge_base(path: &Path, base_ref: &str) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
+/// The merge base of two commits, or `None` when either is not available
+/// locally or they share no history.
+pub fn merge_base_of(path: &Path, left: &str, right: &str) -> Option<String> {
+    validate_revision(left).ok()?;
+    validate_revision(right).ok()?;
+    let output = git(path, &["merge-base", left, right]).ok()?;
+    String::from_utf8(output)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// One commit in first-parent history: its author's email and the paths it changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryCommit {
+    pub author_email: String,
+    pub paths: Vec<String>,
+}
+
+/// The newest `limit` commits reachable from `revision`, newest first,
+/// following first parents only and without rename detection. Merge commits
+/// contribute no paths. Bound to `revision`, the result is the same on every run.
+pub fn commit_history(
+    root: &Path,
+    revision: &str,
+    limit: usize,
+) -> Result<Vec<HistoryCommit>, String> {
+    validate_revision(revision)?;
+    let limit = format!("--max-count={limit}");
+    let output = git(
+        root,
+        &[
+            "log",
+            "-z",
+            "--first-parent",
+            "--no-renames",
+            "--format=%x01%ae%x02",
+            "--name-only",
+            &limit,
+            revision,
+            "--",
+        ],
+    )?;
+    let mut commits = Vec::new();
+    for record in output.split(|byte| *byte == 0x01).skip(1) {
+        let split = record
+            .iter()
+            .position(|byte| *byte == 0x02)
+            .ok_or("unexpected git log record")?;
+        let author_email =
+            String::from_utf8(record[..split].to_vec()).map_err(|error| error.to_string())?;
+        let paths = record[split + 1..]
+            .split(|byte| *byte == 0)
+            .map(|path| path.strip_prefix(b"\n").unwrap_or(path))
+            .filter(|path| !path.is_empty())
+            .map(|path| String::from_utf8(path.to_vec()).map_err(|error| error.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        commits.push(HistoryCommit {
+            author_email,
+            paths,
+        });
+    }
+    Ok(commits)
+}
+
+/// The paths each of the newest `limit` commits reachable from `revision`
+/// changed (see [`commit_history`]).
+pub fn commit_paths(root: &Path, revision: &str, limit: usize) -> Result<Vec<Vec<String>>, String> {
+    Ok(commit_history(root, revision, limit)?
+        .into_iter()
+        .map(|commit| commit.paths)
+        .collect())
+}
+
+/// The author name and email of every commit in `base..head`, oldest first.
+pub fn commit_authors(
+    root: &Path,
+    base: &str,
+    head: &str,
+) -> Result<Vec<(String, String)>, String> {
+    validate_revision(base)?;
+    validate_revision(head)?;
+    let range = format!("{base}..{head}");
+    let output = git(
+        root,
+        &[
+            "log",
+            "-z",
+            "--reverse",
+            "--format=%an%x01%ae",
+            &range,
+            "--",
+        ],
+    )?;
+    output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .map(|record| {
+            let text = String::from_utf8(record.to_vec()).map_err(|error| error.to_string())?;
+            let (name, email) = text
+                .trim_start_matches('\n')
+                .split_once('\u{1}')
+                .ok_or("unexpected git log author record")?;
+            Ok((name.to_owned(), email.to_owned()))
+        })
+        .collect()
+}
+
 pub fn tracked_paths(path: &Path) -> Result<Vec<PathBuf>, String> {
     let root = repository_root(path)?;
     let output = git(&root, &["ls-files", "-z"])?;
@@ -99,6 +207,45 @@ pub fn tracked_paths(path: &Path) -> Result<Vec<PathBuf>, String> {
     paths.sort();
     paths.dedup();
     Ok(paths)
+}
+
+/// Bytes that change whenever the live checkout changes in a way Git can see:
+/// the current `HEAD`, the porcelain status including untracked files, and the
+/// size and modification time of every path that status lists. Callers hash it
+/// to tell whether a result derived from the live workspace is still current.
+pub fn workspace_state(path: &Path) -> Result<Vec<u8>, String> {
+    let root = repository_root(path)?;
+    // An unborn branch has no HEAD; the status below still describes the tree.
+    let mut state = git(&root, &["rev-parse", "--verify", "--quiet", "HEAD"]).unwrap_or_default();
+    let status = git(
+        &root,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )?;
+    for entry in status
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        state.extend_from_slice(entry);
+        state.push(0);
+        // Rename sources follow their entry without a status prefix; statting
+        // them as `XY path` simply finds nothing, which is still deterministic.
+        let Some(relative) = entry
+            .get(3..)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        else {
+            continue;
+        };
+        if let Ok(metadata) = std::fs::symlink_metadata(root.join(relative)) {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |duration| duration.as_nanos());
+            state.extend_from_slice(&metadata.len().to_le_bytes());
+            state.extend_from_slice(&modified.to_le_bytes());
+        }
+    }
+    Ok(state)
 }
 
 /// Whether commands run from the checkout would observe the staged index tree for
@@ -197,6 +344,117 @@ pub fn read_snapshot_tree_file(
         );
     };
     read_tree_file(root, treeish, relative)
+}
+
+/// Paths of the snapshot tree: the captured head tree's tracked files with
+/// the change applied, so added files are present and deleted ones absent.
+/// Sorted; paths that are not UTF-8 are skipped. Never reads the working tree.
+pub fn snapshot_paths(root: &Path, change_set: &ChangeSet) -> Result<Vec<String>, String> {
+    let mut paths = std::collections::BTreeSet::new();
+    if let Some(head) = change_set.head_oid.as_deref() {
+        validate_revision(head)?;
+        let output = git(
+            root,
+            &["ls-tree", "-r", "-z", "--name-only", "--full-tree", head],
+        )?;
+        for raw in output
+            .split(|byte| *byte == 0)
+            .filter(|raw| !raw.is_empty())
+        {
+            if let Ok(path) = String::from_utf8(raw.to_vec()) {
+                paths.insert(path);
+            }
+        }
+    }
+    for file in &change_set.files {
+        if file.status == "deleted" {
+            paths.remove(&file.path);
+        } else {
+            paths.insert(file.path.clone());
+        }
+    }
+    Ok(paths.into_iter().collect())
+}
+
+/// One line of a tree search.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TreeMatch {
+    pub path: String,
+    pub line: u64,
+    pub text: String,
+}
+
+/// Lines of text files in commit `treeish` that contain `needle` as a fixed
+/// string, at most `per_file` per file, sorted by path and line. Binary files
+/// are skipped. Reads Git objects only, never the working tree.
+pub fn grep_tree(
+    root: &Path,
+    treeish: &str,
+    needle: &str,
+    ignore_case: bool,
+    per_file: usize,
+) -> Result<Vec<TreeMatch>, String> {
+    validate_revision(treeish)?;
+    if needle.is_empty() || needle.contains('\n') || needle.contains('\0') {
+        return Err("search pattern must be one non-empty line".into());
+    }
+    let per_file = per_file.max(1).to_string();
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(root)
+        .args([
+            "grep",
+            "--null",
+            "-n",
+            "-I",
+            "-F",
+            "--no-color",
+            "--max-count",
+        ])
+        .arg(&per_file);
+    if ignore_case {
+        command.arg("-i");
+    }
+    let output = command
+        .args(["-e", needle, treeish])
+        .output()
+        .map_err(git_spawn_error)?;
+    match output.status.code() {
+        Some(0) => {}
+        // `git grep` exits 1 when nothing matches.
+        Some(1) => return Ok(Vec::new()),
+        _ => return Err("git grep failed".into()),
+    }
+    let prefix = format!("{treeish}:");
+    let mut matches = Vec::new();
+    for record in output.stdout.split(|byte| *byte == b'\n') {
+        // `<treeish>:<path>\0<line>\0<text>`
+        let mut fields = record.splitn(3, |byte| *byte == 0);
+        let (Some(location), Some(line), Some(text)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let Ok(location) = std::str::from_utf8(location) else {
+            continue;
+        };
+        let Some(path) = location.strip_prefix(prefix.as_str()) else {
+            continue;
+        };
+        let Some(line) = std::str::from_utf8(line)
+            .ok()
+            .and_then(|line| line.parse().ok())
+        else {
+            continue;
+        };
+        matches.push(TreeMatch {
+            path: path.to_string(),
+            line,
+            text: String::from_utf8_lossy(text).into_owned(),
+        });
+    }
+    Ok(matches)
 }
 
 /// Read a file as represented by a captured ChangeSet. Changed files are verified
@@ -1148,6 +1406,59 @@ fn git_index_tree(root: &Path) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn commit_paths_lists_each_commit_newest_first() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "vee@example.invalid"]);
+        git(&["config", "user.name", "Vee test"]);
+        std::fs::write(root.join("a.rs"), "1").unwrap();
+        std::fs::write(root.join("b c.rs"), "1").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "first"]);
+        std::fs::write(root.join("a.rs"), "2").unwrap();
+        git(&["commit", "-qam", "second"]);
+
+        let commits = super::commit_paths(root, "HEAD", 10).unwrap();
+
+        assert_eq!(
+            commits,
+            vec![
+                vec!["a.rs".to_owned()],
+                vec!["a.rs".to_owned(), "b c.rs".to_owned()]
+            ]
+        );
+        assert_eq!(super::commit_paths(root, "HEAD", 1).unwrap().len(), 1);
+        assert_eq!(
+            super::commit_history(root, "HEAD", 1).unwrap()[0].author_email,
+            "vee@example.invalid"
+        );
+        let first = String::from_utf8(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(["rev-list", "--max-parents=0", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        assert_eq!(
+            super::commit_authors(root, first.trim(), "HEAD").unwrap(),
+            vec![("Vee test".to_owned(), "vee@example.invalid".to_owned())]
+        );
+    }
 
     #[test]
     fn batched_snapshot_reads_match_single_reads() {

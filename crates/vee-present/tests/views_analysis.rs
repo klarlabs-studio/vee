@@ -337,3 +337,123 @@ fn clean_analyzer_report_says_so() {
 fn analyzer_report_round_trips_through_json() {
     assert_round_trip(&analyzer_report());
 }
+
+fn analyzer_run(exit_code: i32) -> vee_core::VerificationRun {
+    serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "run_id": "run_lint",
+        "snapshot_id": "sha256:snap",
+        "profile_id": "clippy",
+        "targets": [],
+        "command_digest": "sha256:cmd",
+        "status": if exit_code == 0 { "passed" } else { "failed" },
+        "exit_code": exit_code,
+        "stdout_digest": "sha256:out",
+        "stderr_digest": "sha256:err",
+        "stdout_artifact": null,
+        "stderr_artifact": null
+    }))
+    .unwrap()
+}
+
+#[test]
+fn an_analyzer_run_is_judged_by_its_results_on_changed_lines_not_its_exit_code() {
+    let mut report = analyzer_report();
+    report.findings.clear();
+    let result = vee_application::operations::VerificationResult {
+        run: analyzer_run(1),
+        analyzer: Some(report),
+    };
+    let text = ansi::render(&result.to_view(), false);
+    assert!(
+        text.starts_with("Verification clippy  ✔ clean on changed lines\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("5 results, 0 on changed lines, 3 pre-existing"),
+        "{text}"
+    );
+    assert!(
+        text.contains("A non-zero exit is how the analyzer reports results"),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("→ vee verification findings run_lint\n"),
+        "{text}"
+    );
+    assert!(markdown::render(&result.to_view()).contains("`get_analyzer_findings`"));
+    // The document stays the run itself.
+    assert_eq!(
+        serde_json::to_value(&result).unwrap(),
+        serde_json::to_value(&result.run).unwrap()
+    );
+}
+
+#[test]
+fn a_run_without_an_analyzer_report_keeps_its_exit_status() {
+    let result = vee_application::operations::VerificationResult {
+        run: analyzer_run(1),
+        analyzer: None,
+    };
+    let text = ansi::render(&result.to_view(), false);
+    assert!(
+        text.starts_with("Verification clippy  ✖ failed\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn co_change_edges_show_how_often_the_files_changed_together() {
+    let mut impact = impact();
+    impact.paths.push(
+        serde_json::from_value(serde_json::json!({
+            "source_path": "domain/lockout.go",
+            "affected_path": "schemas/lockout.json",
+            "relationship": "co_change",
+            "symbol": "",
+            "certainty": "historical",
+            "evidence_line": 0,
+            "co_change": {"together": 4, "source_commits": 6},
+        }))
+        .unwrap(),
+    );
+    let text = ansi::render(&impact.to_view(), false);
+    assert!(
+        text.contains("changed together in 4 of 6 commits"),
+        "{text}"
+    );
+    assert!(!text.contains("schemas/lockout.json:0"), "{text}");
+    assert_round_trip(&impact);
+}
+
+#[test]
+fn change_risk_names_the_tier_and_every_flagged_factor() {
+    let risk: vee_application::ChangeRisk = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "snapshot_id": "sha256:snap",
+        "tier": "elevated",
+        "factors": [
+            {"id": "subsystems", "label": "Subsystems touched", "value": 3, "threshold": 3,
+             "flagged": true, "detail": "api, docs, store", "basis": "Mockus & Weiss 2000"},
+            {"id": "files", "label": "Files changed", "value": 3, "threshold": 20,
+             "flagged": false, "detail": "3 file(s)", "basis": "Kamei et al. 2013"},
+        ],
+        "limitations": ["The tier is a rule over the flagged factors."],
+    }))
+    .unwrap();
+    let text = ansi::render(&risk.to_view(), false);
+    assert!(text.starts_with("Change risk  ▲ elevated\n"), "{text}");
+    assert!(text.contains("1 of 2"), "{text}");
+    assert!(text.contains("api, docs, store"), "{text}");
+    assert!(
+        text.contains("Subsystems touched: Mockus & Weiss 2000"),
+        "{text}"
+    );
+    assert!(
+        text.contains("The tier is a rule over the flagged factors."),
+        "{text}"
+    );
+    let md = markdown::render(&risk.to_view());
+    assert!(md.contains("Subsystems touched"), "{md}");
+    assert_round_trip(&risk);
+}

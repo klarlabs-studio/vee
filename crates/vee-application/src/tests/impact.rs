@@ -63,7 +63,7 @@ fn typescript_impact_is_heuristic_and_ignores_comments_and_strings() {
     .unwrap();
 
     let change_set = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
-    let impact = analyze_impact_with_typescript_server(root, &change_set, None).unwrap();
+    let impact = analyze_impact_with_typescript_server(root, &change_set, None, None).unwrap();
 
     assert_eq!(impact.snapshot_id, change_set.digest);
     assert!(impact.changed_symbols.contains(&"ChangedAPI".to_owned()));
@@ -209,7 +209,7 @@ fn typescript_project_references_resolve_aliases_without_same_name_false_edges()
 
     let change_set = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
     let impact =
-        analyze_impact_with_typescript_server(root, &change_set, Some(&executable)).unwrap();
+        analyze_impact_with_typescript_server(root, &change_set, Some(&executable), None).unwrap();
 
     assert!(impact.coverage_complete);
     assert!(impact.changed_symbols.contains(&"ChangedAPI".into()));
@@ -600,7 +600,7 @@ fn impact_reports_evidenced_rust_and_go_references_with_uncertainty() {
     let impact = analyze_impact(root, &change_set).unwrap();
 
     assert_eq!(impact.snapshot_id, change_set.digest);
-    assert_eq!(impact.schema_version, 3);
+    assert_eq!(impact.schema_version, 4);
     assert!(impact.changed_symbols.contains(&"changed_api".to_string()));
     assert!(impact.changed_symbols.contains(&"ChangedAPI".to_string()));
     assert!(impact
@@ -1068,7 +1068,7 @@ fn go_impact_uses_semantic_references_when_gopls_is_available() {
 
     let impact = analyze_impact(root, &change_set).unwrap();
 
-    assert_eq!(impact.schema_version, 3);
+    assert_eq!(impact.schema_version, 4);
     let analyzer = impact
         .analyzers
         .iter()
@@ -1218,4 +1218,591 @@ fn only_files_naming_a_changed_symbol_need_parsing() {
     assert!(!filter.may_mention("fn main() { parse_config_file(); }"));
     assert!(!filter.may_mention("fn unrelated() {}"));
     assert!(!ChangedSymbolFilter::new(std::iter::empty()).may_mention("parse_config"));
+}
+
+#[test]
+fn only_declarations_whose_content_changed_are_changed_symbols() {
+    let base = "fn untouched() -> u8 { 1 }\n\nfn edited() -> u8 { 1 }\n\n#[cfg(test)]\nmod tests {\n    fn helper() {}\n}\n";
+    let current = "fn untouched() -> u8 {\n    1\n}\n\n// reformatted above\nfn edited() -> u8 { 2 }\n\n#[cfg(test)]\nmod tests {\n    fn helper() { let _ = 1; }\n}\n";
+    let mut coverage_complete = true;
+    let symbols = changed_file_symbols(
+        "src/lib.rs",
+        Some(&current.to_owned()),
+        Some(base.as_bytes().to_vec()),
+        &mut coverage_complete,
+    );
+    assert_eq!(
+        symbols.into_iter().collect::<Vec<_>>(),
+        vec!["edited".to_owned()],
+        "the private helper inside the test module is unreachable from other files"
+    );
+    assert!(coverage_complete);
+}
+
+#[test]
+fn lexical_languages_report_only_edited_declarations() {
+    let base =
+        "package app\n\nfunc Stable() int {\n\treturn 1\n}\n\nfunc Edited() int {\n\treturn 1\n}\n";
+    let current = "package app\n\nfunc Stable() int {\n\treturn 1\n}\n\nfunc Edited() int {\n\treturn 2\n}\n\nfunc Added() {}\n";
+    let mut coverage_complete = true;
+    let symbols = changed_file_symbols(
+        "app/app.go",
+        Some(&current.to_owned()),
+        Some(base.as_bytes().to_vec()),
+        &mut coverage_complete,
+    );
+    assert_eq!(
+        symbols.into_iter().collect::<Vec<_>>(),
+        vec!["Added".to_owned(), "Edited".to_owned()]
+    );
+}
+
+#[test]
+fn unparseable_rust_falls_back_to_lexical_comparison_on_both_sides() {
+    let base = "fn stable() {}\nfn edited() { 1 }\n";
+    let current = "fn stable() {}\nfn edited() { 2 \n";
+    let mut coverage_complete = true;
+    let symbols = changed_file_symbols(
+        "src/lib.rs",
+        Some(&current.to_owned()),
+        Some(base.as_bytes().to_vec()),
+        &mut coverage_complete,
+    );
+    assert_eq!(
+        symbols.into_iter().collect::<Vec<_>>(),
+        vec!["edited".to_owned()]
+    );
+    assert!(!coverage_complete);
+}
+
+#[test]
+fn crate_private_and_cross_language_matches_are_not_impact() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    for (path, contents) in [
+        (
+            "cli/Cargo.toml",
+            "[package]\nname='cli'\nversion='0.1.0'\nedition='2021'\n",
+        ),
+        (
+            "cli/src/main.rs",
+            "fn run() -> u8 { 1 }\npub fn shared() -> u8 { 1 }\nfn main() { run(); }\n",
+        ),
+        ("cli/src/commands.rs", "fn dispatch() { super::run(); }\n"),
+        (
+            "other/Cargo.toml",
+            "[package]\nname='other'\nversion='0.1.0'\nedition='2021'\n",
+        ),
+        (
+            "other/src/lib.rs",
+            "pub fn run() {}\npub fn caller() { run(); cli::shared(); }\n",
+        ),
+        (
+            "scripts/tool.py",
+            "import subprocess\nsubprocess.run(['true'])\n",
+        ),
+    ] {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+    git(&["add", "."]);
+    git(&["commit", "-qm", "baseline"]);
+    std::fs::write(
+        root.join("cli/src/main.rs"),
+        "fn run() -> u8 { 2 }\npub fn shared() -> u8 { 2 }\nfn main() { run(); }\n",
+    )
+    .unwrap();
+    let change_set = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
+
+    let impact = analyze_impact(root, &change_set).unwrap();
+
+    let affected = |symbol: &str| -> std::collections::BTreeSet<String> {
+        impact
+            .paths
+            .iter()
+            .filter(|edge| edge.symbol == symbol)
+            .map(|edge| edge.affected_path.clone())
+            .collect()
+    };
+    assert_eq!(
+        affected("run"),
+        std::collections::BTreeSet::from(["cli/src/commands.rs".to_owned()]),
+        "a private fn is reachable only inside its own package, never from Python"
+    );
+    assert_eq!(
+        affected("shared"),
+        std::collections::BTreeSet::from(["other/src/lib.rs".to_owned()]),
+        "a pub fn stays visible to other packages"
+    );
+}
+
+/// The dashboard reopens the same snapshot often, so impact is memoized, but
+/// never past a change to what the analysis reads from the live checkout.
+#[test]
+fn impact_memo_reuses_results_until_the_live_checkout_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"first\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "pub fn changed() -> u8 { 1 }\nmod caller;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/caller.rs"),
+        "fn call() -> u8 { crate::changed() }\n",
+    )
+    .unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "baseline"]);
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "pub fn changed(extra: u8) -> u8 { extra }\nmod caller;\n",
+    )
+    .unwrap();
+    let change_set = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
+
+    let first = analyze_impact(root, &change_set).unwrap();
+    let key = impact_memo_key(
+        root,
+        &change_set,
+        find_typescript_server().as_deref(),
+        impact_review_filter(root).as_ref(),
+    )
+    .unwrap();
+    assert_eq!(memoized_impact(&key), Some(first.clone()));
+    assert_eq!(analyze_impact(root, &change_set).unwrap(), first);
+    assert!(first
+        .groups
+        .iter()
+        .any(|group| group.package_id.ends_with(":first")));
+
+    // Package names come from the live manifest, outside the reviewed snapshot.
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"second\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let second = analyze_impact(root, &change_set).unwrap();
+    assert!(
+        second
+            .groups
+            .iter()
+            .any(|group| group.package_id.ends_with(":second")),
+        "{:?}",
+        second.groups
+    );
+}
+
+#[test]
+fn impact_skips_paths_outside_the_repository_review_filter() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee Test"]);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("dist")).unwrap();
+    std::fs::write(
+        root.join(".vee.yaml"),
+        "version: 1\nreview:\n  exclude: [\"dist/**\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/api.js"),
+        "export function ChangedAPI() { return 1; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/consumer.js"),
+        "export function call() { return ChangedAPI() + Ae(); }\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("dist/app.js"), "function Ae() { return 1; }\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "baseline"]);
+    std::fs::write(
+        root.join("src/api.js"),
+        "export function ChangedAPI() { return 2; }\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("dist/app.js"), "function Ae() { return 2; }\n").unwrap();
+
+    let change_set = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
+    let impact = analyze_impact(root, &change_set).unwrap();
+
+    assert!(impact.changed_paths.contains(&"dist/app.js".to_owned()));
+    assert!(impact.changed_symbols.contains(&"ChangedAPI".to_owned()));
+    assert!(
+        !impact.changed_symbols.contains(&"Ae".to_owned()),
+        "{:?}",
+        impact.changed_symbols
+    );
+    assert!(impact
+        .paths
+        .iter()
+        .all(|edge| !edge.source_path.starts_with("dist/")
+            && !edge.affected_path.starts_with("dist/")));
+    assert!(impact
+        .limitations
+        .iter()
+        .any(|limitation| limitation.contains("review filter")));
+}
+
+fn impact_fixture(
+    files: &[(&str, &str)],
+    changes: &[(&str, &str)],
+) -> (tempfile::TempDir, ImpactAssessment) {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    for (path, contents) in files {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+    git(&["add", "."]);
+    git(&["commit", "-qm", "baseline"]);
+    for (path, contents) in changes {
+        std::fs::write(root.join(path), contents).unwrap();
+    }
+    let change_set = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
+    let impact = analyze_impact(root, &change_set).unwrap();
+    (directory, impact)
+}
+
+fn affected_by(impact: &ImpactAssessment, symbol: &str) -> std::collections::BTreeSet<String> {
+    impact
+        .paths
+        .iter()
+        .filter(|edge| edge.symbol == symbol)
+        .map(|edge| edge.affected_path.clone())
+        .collect()
+}
+
+/// Generic names such as `new`, `report`, or `review` are only references
+/// when they can name the changed declaration: a local variable, another
+/// type's `new`, or a method call on a type the file never mentions is not.
+#[test]
+fn rust_references_match_the_changed_declaration_kind_and_owner() {
+    let progress = |body: &str| {
+        format!(
+            "pub trait Sink {{ fn report(&self) {{ {body} }} }}\n\
+             pub struct Tracker;\n\
+             impl Tracker {{ pub fn new() -> Self {{ {body}; Tracker }} }}\n\
+             pub fn review() {{ {body} }}\n"
+        )
+    };
+    let (_directory, impact) = impact_fixture(
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname='app'\nversion='0.1.0'\nedition='2021'\n",
+            ),
+            (
+                "src/lib.rs",
+                "pub mod progress;\npub mod caller;\npub mod noise;\npub mod shadow;\npub mod review { pub fn helper() {} }\npub use review::helper;\n",
+            ),
+            ("src/progress.rs", &progress("")),
+            (
+                "src/caller.rs",
+                "use crate::progress::{Sink, Tracker};\n\
+                 pub fn call(sink: &dyn Sink) {\n\
+                     sink.report();\n\
+                     let _tracker = Tracker::new();\n\
+                     crate::progress::review();\n\
+                 }\n",
+            ),
+            (
+                "src/noise.rs",
+                "struct Other;\n\
+                 impl Other { fn new() -> Self { Other } fn report(&self) {} }\n\
+                 pub fn noise(review: u8) -> u8 {\n\
+                     let other = Other::new();\n\
+                     other.report();\n\
+                     let total = review + 1;\n\
+                     let review = total;\n\
+                     println!(\"{}\", review);\n\
+                     review\n\
+                 }\n\
+                 pub mod review_module { pub use super::*; }\n\
+                 pub fn macro_locals() { vec![{ let review = 1; review }]; }\n",
+            ),
+            (
+                "src/shadow.rs",
+                "use crate::progress::*;\nfn review() {}\npub fn shadowed() { review(); }\n",
+            ),
+        ],
+        &[("src/progress.rs", &progress("let _ = 1;"))],
+    );
+
+    let caller = std::collections::BTreeSet::from(["src/caller.rs".to_owned()]);
+    assert_eq!(
+        affected_by(&impact, "report"),
+        caller,
+        "{:#?}",
+        impact.paths
+    );
+    assert_eq!(affected_by(&impact, "new"), caller, "{:#?}", impact.paths);
+    assert_eq!(
+        affected_by(&impact, "review"),
+        caller,
+        "{:#?}",
+        impact.paths
+    );
+}
+
+/// Locals inside JavaScript callbacks are not declarations other files can
+/// reference, and a changed file is not impact of itself.
+#[test]
+fn javascript_changes_report_only_top_level_symbols_and_no_self_edges() {
+    let spec = |label: &str| {
+        format!(
+            "export function openReview(page) {{ return page.goto('/'); }}\n\
+             test('{label}', async ({{ page }}) => {{\n\
+                 const report = await openReview(page);\n\
+                 let drilldown = report;\n\
+                 expect(drilldown).toBeTruthy();\n\
+             }});\n"
+        )
+    };
+    let (_directory, impact) = impact_fixture(
+        &[
+            ("web/e2e/ui.spec.js", &spec("before")),
+            (
+                "web/e2e/other.spec.js",
+                "import { openReview } from './ui.spec.js';\nconst report = 1;\n",
+            ),
+        ],
+        &[(
+            "web/e2e/ui.spec.js",
+            &spec("after").replace("goto('/')", "goto('/x')"),
+        )],
+    );
+
+    assert_eq!(
+        impact.changed_symbols,
+        vec!["openReview".to_owned()],
+        "{:#?}",
+        impact.paths
+    );
+    assert!(
+        impact
+            .paths
+            .iter()
+            .all(|edge| edge.source_path != edge.affected_path),
+        "{:#?}",
+        impact.paths
+    );
+    assert_eq!(
+        affected_by(&impact, "openReview"),
+        std::collections::BTreeSet::from(["web/e2e/other.spec.js".to_owned()])
+    );
+}
+
+/// Vue single-file components import TypeScript and JavaScript modules from
+/// their script blocks, and are themselves imported by component name.
+#[test]
+fn vue_script_blocks_are_impact_candidates_with_original_line_numbers() {
+    let component = "<template>\n  <ReviewList :items=\"items\" />\n</template>\n\
+                     <script setup>\n\
+                     import { fetchReviews } from './api.js'\n\
+                     import ReviewList from './ReviewList.vue'\n\
+                     const items = await fetchReviews()\n\
+                     </script>\n";
+    let (_directory, impact) = impact_fixture(
+        &[
+            (
+                "web/src/api.js",
+                "export async function fetchReviews() { return [] }\n",
+            ),
+            ("web/src/App.vue", component),
+            (
+                "web/src/ReviewList.vue",
+                "<template><ul></ul></template>\n<script setup>\ndefineProps(['items'])\n</script>\n",
+            ),
+        ],
+        &[
+            (
+                "web/src/api.js",
+                "export async function fetchReviews() { return [1] }\n",
+            ),
+            (
+                "web/src/ReviewList.vue",
+                "<template><ol></ol></template>\n<script setup>\ndefineProps(['items'])\n</script>\n",
+            ),
+        ],
+    );
+
+    let edges: Vec<_> = impact
+        .paths
+        .iter()
+        .filter(|edge| edge.affected_path == "web/src/App.vue")
+        .map(|edge| (edge.symbol.as_str(), edge.evidence_line))
+        .collect();
+    assert!(edges.contains(&("fetchReviews", 5)), "{:#?}", impact.paths);
+    assert!(edges.contains(&("fetchReviews", 7)), "{:#?}", impact.paths);
+    assert!(edges.contains(&("ReviewList", 6)), "{:#?}", impact.paths);
+    assert!(
+        !edges.iter().any(|(_, line)| *line == 2),
+        "template markup is not script code: {:#?}",
+        impact.paths
+    );
+}
+
+/// Files that repeatedly changed together with a changed file are impact
+/// leads even without a code reference (configuration, schemas, docs).
+/// Bulk commits are skipped, since they tangle unrelated changes, and so are
+/// hub files that change with nearly everything.
+#[test]
+fn files_that_repeatedly_change_together_are_co_change_edges() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    let write = |path: &str, contents: String| {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    };
+    // CHANGELOG.md changes in nearly every commit: a hub, not coupling.
+    for round in 0..3 {
+        write(
+            "src/other.rs",
+            format!("pub fn other() -> u8 {{ {round} }}\n"),
+        );
+        write("CHANGELOG.md", format!("other {round}\n"));
+        git(&["add", "."]);
+        git(&["commit", "-qm", "unrelated change"]);
+    }
+    for round in 0..3 {
+        write(
+            "src/lib.rs",
+            format!("pub fn version() -> u8 {{ {round} }}\n"),
+        );
+        write("schemas/api.json", format!("{{\"version\": {round}}}\n"));
+        write("CHANGELOG.md", format!("paired {round}\n"));
+        // Documentation that always changes with the code is not coupling.
+        write("docs/api.md", format!("version {round}\n"));
+        if round == 0 {
+            write("README.md", "docs\n".into());
+        }
+        git(&["add", "."]);
+        git(&["commit", "-qm", "paired change"]);
+    }
+    // One bulk commit touching everything must not count as pairing.
+    for index in 0..40 {
+        write(&format!("bulk/file{index}.txt"), "x\n".into());
+    }
+    write("src/lib.rs", "pub fn version() -> u8 { 9 }\n".into());
+    write("README.md", "bulk docs\n".into());
+    git(&["add", "."]);
+    git(&["commit", "-qm", "bulk"]);
+    write("src/lib.rs", "pub fn version() -> u8 { 10 }\n".into());
+    let change_set = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
+
+    let impact = analyze_impact(root, &change_set).unwrap();
+
+    let history: Vec<_> = impact
+        .paths
+        .iter()
+        .filter(|edge| edge.relationship == "co_change")
+        .collect();
+    assert_eq!(history.len(), 1, "{:#?}", impact.paths);
+    let edge = history[0];
+    assert_eq!(edge.source_path, "src/lib.rs");
+    assert_eq!(edge.affected_path, "schemas/api.json");
+    assert_eq!(edge.certainty, "historical");
+    assert_eq!(
+        edge.co_change,
+        Some(CoChange {
+            together: 3,
+            source_commits: 3
+        })
+    );
+    assert!(impact
+        .analyzers
+        .iter()
+        .any(|analyzer| analyzer.id == "git-co-change" && analyzer.status == "used"));
+    assert_eq!(impact.schema_version, 4);
+}
+
+#[test]
+fn documentation_paths_are_prose_not_build_manifests() {
+    for path in [
+        "README.md",
+        "docs/guide.html",
+        "web/docs/intro.rst",
+        "api/NOTES.adoc",
+    ] {
+        assert!(is_documentation_path(path), "{path}");
+    }
+    for path in [
+        "CMakeLists.txt",
+        "requirements.txt",
+        "src/lib.rs",
+        "schemas/api.json",
+    ] {
+        assert!(!is_documentation_path(path), "{path}");
+    }
 }

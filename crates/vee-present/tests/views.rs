@@ -32,6 +32,7 @@ fn review(findings: Vec<Finding>, blocking: Vec<String>, complete: bool) -> Revi
         required_review_complete: true,
         required_verifications: vec![],
         analyzer_block_levels: Default::default(),
+        severity_floors: Vec::new(),
     };
     let mut gate = vee_core::evaluate_gate(
         "sha256:snap",
@@ -88,6 +89,7 @@ fn review(findings: Vec<Finding>, blocking: Vec<String>, complete: bool) -> Revi
         reviewer_context: vec![],
         unreviewed_paths: vec!["core/lib.rs".into()],
         policy_profile: None,
+        review_effort: None,
         work_item: None,
         work_item_token_env: None,
     }
@@ -126,7 +128,7 @@ fn review_view_shows_gate_reviewers_findings_and_next_step() {
     assert!(text.ends_with("→ vee findings show find_a\n"), "{text}");
 
     let md = markdown::render(&review.to_view());
-    assert!(md.starts_with("## Review rev\\_1 · 🔴 **block**\n"), "{md}");
+    assert!(md.starts_with("## Review rev_1 · 🔴 **block**\n"), "{md}");
     assert!(
         md.contains("| 🔴 **high** **blocks** | `domain/lockout.go:166` | concurrency |"),
         "{md}"
@@ -219,7 +221,7 @@ fn markdown_report_adds_full_finding_details_without_an_interactive_next_step() 
     let report = markdown::render(&vee_present::review_report(&review));
     assert!(report.contains("### Finding details"), "{report}");
     assert!(
-        report.contains("Second line with detail\\."),
+        report.contains("Second line with detail."),
         "full rationale is kept: {report}"
     );
     assert!(!report.contains("Next:"), "{report}");

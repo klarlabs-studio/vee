@@ -1,4 +1,4 @@
-//! Local review analytics for the dashboard (`local-review-analytics-v9`):
+//! Local review analytics for the dashboard (`local-review-analytics-v10`):
 //! gate outcomes by day, finding drill-down, explicit feedback, verification
 //! history, and provider latency and cost. Reads only the local review store.
 
@@ -128,6 +128,10 @@ pub struct AnalyticsVerificationRun {
     pub profile_id: String,
     pub status: String,
     pub created_at: String,
+    /// Set by the application layer for failed runs of a SARIF analyzer
+    /// profile: the analyzer findings on the snapshot's changed lines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analyzer_findings_on_changed_lines: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -290,7 +294,7 @@ pub fn build(root: &Path, store: &dyn Repositories) -> Result<LocalAnalytics, St
                 total.2 += 1;
                 daily.2 += 1;
             }
-            if outcome.status == "failed" {
+            if matches!(outcome.status.as_str(), "failed" | "rate_limited") {
                 *provider_failures
                     .entry(outcome.provider_id.clone())
                     .or_default() += 1;
@@ -466,7 +470,7 @@ pub fn build(root: &Path, store: &dyn Repositories) -> Result<LocalAnalytics, St
         *explicit_feedback_by_label.entry(label).or_insert(0) += 1;
     }
     Ok(LocalAnalytics {
-        schema_version: 9,
+        schema_version: 10,
         review_count: reviews.len(),
         history_complete,
         dimensions_complete,
@@ -499,6 +503,7 @@ pub fn build(root: &Path, store: &dyn Repositories) -> Result<LocalAnalytics, St
                 profile_id: run.profile_id,
                 status: run.status,
                 created_at: run.created_at,
+                analyzer_findings_on_changed_lines: None,
             })
             .collect(),
         provider_latency: {
