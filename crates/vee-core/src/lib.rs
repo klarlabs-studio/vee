@@ -3304,6 +3304,18 @@ pub const EXPLORATION_DENIED_PATHS: &[&str] = &[
     "credentials",
     "credentials.json",
     "secrets.*",
+    ".envrc",
+    "*.tfvars",
+    "*.tfstate",
+    "*.tfstate.*",
+    ".htpasswd",
+    "kubeconfig*",
+    ".kube",
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    "*.p8",
+    "*.kdbx",
 ];
 
 impl Default for ReviewConfig {

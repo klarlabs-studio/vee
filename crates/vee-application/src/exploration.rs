@@ -106,11 +106,25 @@ impl ExplorationSpec {
         review_path_is_included(path, &review) && reviewer_allows && !self.is_denied(path)
     }
 
-    fn is_denied(&self, path: &str) -> bool {
+    /// Whether `path` is on the deny list. Matching ignores case, since
+    /// `.ENV` and `ID_RSA` hold secrets as well, and a pattern without a slash
+    /// matches any path component, so `credentials` denies a whole
+    /// `credentials/` directory.
+    pub fn denies(&self, path: &str) -> bool {
+        let path = path.to_ascii_lowercase();
         self.deny.iter().any(|pattern| {
-            glob_matches(pattern, path)
-                || (!pattern.contains('/') && glob_matches(&format!("**/{pattern}"), path))
+            let pattern = pattern.to_ascii_lowercase();
+            if pattern.contains('/') {
+                glob_matches(&pattern, &path) || glob_matches(&format!("**/{pattern}"), &path)
+            } else {
+                path.split('/')
+                    .any(|component| glob_matches(&pattern, component))
+            }
         })
+    }
+
+    fn is_denied(&self, path: &str) -> bool {
+        self.denies(path)
     }
 }
 

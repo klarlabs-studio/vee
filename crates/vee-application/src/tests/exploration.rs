@@ -219,3 +219,37 @@ fn a_reviewer_explores_only_the_paths_its_own_filters_allow() {
     let found = explorer.search("charge in cents", None, false, None);
     assert!(!found.contains("billing.rs"), "{found}");
 }
+
+#[test]
+fn secret_paths_are_denied_whatever_their_case_or_directory() {
+    let (directory, change_set) = repository();
+    let spec = ExplorationSpec::new(
+        directory.path(),
+        &change_set,
+        &vee_core::ReviewConfig::default(),
+    );
+    for denied in [
+        ".ENV",
+        "server.PEM",
+        "keys/ID_RSA",
+        "credentials/token",
+        "deploy/.envrc",
+        "infra/prod.tfvars",
+        "infra/terraform.tfstate",
+        "infra/terraform.tfstate.backup",
+        "site/.htpasswd",
+        "ops/kubeconfig",
+        ".kube/config",
+        ".ssh/known_hosts",
+        ".aws/credentials",
+    ] {
+        assert!(spec.denies(denied), "{denied} is readable");
+    }
+    for allowed in [
+        "src/billing.rs",
+        "docs/environment.md",
+        "src/credentials_form.rs",
+    ] {
+        assert!(!spec.denies(allowed), "{allowed} is denied");
+    }
+}
