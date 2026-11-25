@@ -9,9 +9,14 @@ use std::collections::BTreeMap;
 
 pub mod azure_devops;
 pub mod bitbucket;
+pub mod conversation;
 pub mod gerrit;
 pub mod github;
 pub mod gitlab;
+pub use conversation::{
+    ConversationComment, ConversationKind, PullRequestConversationProvider, PullRequestOrigin,
+    ReplyTarget, RepositoryPermission,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]

@@ -1195,6 +1195,256 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// Most comments read from one pull request before Vee refuses to act on a
+/// partial conversation.
+const MAX_CONVERSATION_COMMENTS: usize = 3000;
+
+impl GitHubAdapter {
+    /// `/repos/{owner}/{name}{suffix}` on the configured API, after the same
+    /// host check as pull request paths.
+    fn repository_path(
+        &self,
+        reference: &PullRequestRef,
+        suffix: &str,
+    ) -> Result<Url, HostingError> {
+        let mut url = self.path(reference, "")?;
+        let prefix = self.config.api_base.path().trim_end_matches('/').to_owned();
+        url.set_path(&format!(
+            "{prefix}/repos/{}{suffix}",
+            reference.repository.full_name
+        ));
+        Ok(url)
+    }
+
+    fn get_json(&self, url: Url) -> Result<serde_json::Value, HostingError> {
+        let response = self
+            .request(Method::GET, url)?
+            .send()
+            .map_err(|error| HostingError::Transport(format!("calling GitHub: {error}")))?;
+        Self::json(self.send(response)?)
+    }
+
+    /// Every page of a comment listing, bounded.
+    fn comment_pages(
+        &self,
+        reference: &PullRequestRef,
+        suffix: &str,
+        comments: &mut Vec<serde_json::Value>,
+    ) -> Result<(), HostingError> {
+        for page in 1.. {
+            let mut url = self.repository_path(reference, suffix)?;
+            url.query_pairs_mut()
+                .append_pair("per_page", "100")
+                .append_pair("page", &page.to_string());
+            let listed = self.get_json(url)?;
+            let listed = listed.as_array().ok_or_else(|| {
+                HostingError::InvalidResponse("GitHub comment listing is not a list".into())
+            })?;
+            comments.extend(listed.iter().cloned());
+            if comments.len() > MAX_CONVERSATION_COMMENTS {
+                return Err(HostingError::InvalidResponse(format!(
+                    "the pull request has more than {MAX_CONVERSATION_COMMENTS} comments"
+                )));
+            }
+            if listed.len() < 100 {
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn github_comment(
+    value: &serde_json::Value,
+    kind: ConversationKind,
+) -> Option<ConversationComment> {
+    let text = |key: &str| value.get(key).and_then(serde_json::Value::as_str);
+    let user = value.get("user")?;
+    Some(ConversationComment {
+        id: value.get("id")?.as_u64()?.to_string(),
+        kind,
+        author: user.get("login")?.as_str()?.to_owned(),
+        author_is_bot: user.get("type").and_then(serde_json::Value::as_str) == Some("Bot"),
+        body: text("body").unwrap_or_default().to_owned(),
+        created_at: text("created_at")?.to_owned(),
+        in_reply_to: value
+            .get("in_reply_to_id")
+            .and_then(serde_json::Value::as_u64)
+            .map(|id| id.to_string()),
+        path: text("path").map(str::to_owned),
+        line: value
+            .get("line")
+            .filter(|line| !line.is_null())
+            .or_else(|| value.get("original_line"))
+            .and_then(serde_json::Value::as_u64),
+    })
+}
+
+fn numeric_id(id: &str) -> Result<u64, HostingError> {
+    id.parse()
+        .map_err(|_| HostingError::InvalidResponse(format!("{id} is not a GitHub comment ID")))
+}
+
+impl PullRequestConversationProvider for GitHubAdapter {
+    fn list_conversation(
+        &self,
+        pull_request: &PullRequestRef,
+    ) -> Result<Vec<ConversationComment>, HostingError> {
+        let mut conversation = Vec::new();
+        self.comment_pages(
+            pull_request,
+            &format!("/issues/{}/comments", pull_request.number),
+            &mut conversation,
+        )?;
+        let mut review = Vec::new();
+        self.comment_pages(
+            pull_request,
+            &format!("/pulls/{}/comments", pull_request.number),
+            &mut review,
+        )?;
+        let comments = conversation
+            .iter()
+            .map(|value| github_comment(value, ConversationKind::Conversation))
+            .chain(
+                review
+                    .iter()
+                    .map(|value| github_comment(value, ConversationKind::Review)),
+            )
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                HostingError::InvalidResponse(
+                    "a GitHub comment lacks its ID, author or time".into(),
+                )
+            })?;
+        Ok(comments)
+    }
+
+    fn permission(
+        &self,
+        pull_request: &PullRequestRef,
+        login: &str,
+    ) -> Result<RepositoryPermission, HostingError> {
+        if !crate::conversation::valid_login(login) {
+            return Ok(RepositoryPermission::None);
+        }
+        let url =
+            self.repository_path(pull_request, &format!("/collaborators/{login}/permission"))?;
+        let answer = match self.get_json(url) {
+            Ok(answer) => answer,
+            Err(HostingError::NotFound) => return Ok(RepositoryPermission::None),
+            Err(error) => return Err(error),
+        };
+        // `role_name` names maintain and triage, which `permission` folds
+        // into write and read.
+        let role = answer
+            .get("role_name")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| answer.get("permission").and_then(serde_json::Value::as_str))
+            .unwrap_or("none");
+        Ok(match role {
+            "admin" => RepositoryPermission::Admin,
+            "maintain" => RepositoryPermission::Maintain,
+            "write" | "push" => RepositoryPermission::Write,
+            "triage" => RepositoryPermission::Triage,
+            "read" | "pull" => RepositoryPermission::Read,
+            _ => RepositoryPermission::None,
+        })
+    }
+
+    fn is_team_member(
+        &self,
+        pull_request: &PullRequestRef,
+        team: &str,
+        login: &str,
+    ) -> Result<bool, HostingError> {
+        let Some((org, slug)) = team.split_once('/').filter(|_| {
+            crate::conversation::valid_team(team) && crate::conversation::valid_login(login)
+        }) else {
+            return Ok(false);
+        };
+        let mut url = self.repository_path(pull_request, "")?;
+        let prefix = self.config.api_base.path().trim_end_matches('/').to_owned();
+        url.set_path(&format!(
+            "{prefix}/orgs/{org}/teams/{slug}/memberships/{login}"
+        ));
+        match self.get_json(url) {
+            Ok(answer) => {
+                Ok(answer.get("state").and_then(serde_json::Value::as_str) == Some("active"))
+            }
+            Err(HostingError::NotFound) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn pull_request_origin(
+        &self,
+        pull_request: &PullRequestRef,
+    ) -> Result<PullRequestOrigin, HostingError> {
+        let answer = self.get_json(self.path(pull_request, "")?)?;
+        let text = |pointer: &str| answer.pointer(pointer).and_then(serde_json::Value::as_str);
+        let missing = |what: &str| {
+            HostingError::InvalidResponse(format!("GitHub pull request has no {what}"))
+        };
+        Ok(PullRequestOrigin {
+            head_oid: text("/head/sha")
+                .ok_or_else(|| missing("head commit"))?
+                .to_owned(),
+            base_oid: text("/base/sha")
+                .ok_or_else(|| missing("base commit"))?
+                .to_owned(),
+            base_repository: text("/base/repo/full_name")
+                .unwrap_or(&pull_request.repository.full_name)
+                .to_owned(),
+            head_repository: text("/head/repo/full_name").map(str::to_owned),
+            open: text("/state") == Some("open"),
+        })
+    }
+
+    fn reply(
+        &self,
+        pull_request: &PullRequestRef,
+        target: &ReplyTarget,
+        body: &str,
+    ) -> Result<String, HostingError> {
+        if body.len() > 65_535 {
+            return Err(HostingError::InvalidResponse(
+                "reply exceeds GitHub's comment limit".into(),
+            ));
+        }
+        let url = match target {
+            ReplyTarget::Conversation => self.repository_path(
+                pull_request,
+                &format!("/issues/{}/comments", pull_request.number),
+            )?,
+            ReplyTarget::Thread { comment_id } => self.path(
+                pull_request,
+                &format!("/comments/{}/replies", numeric_id(comment_id)?),
+            )?,
+        };
+        let response = self
+            .request(Method::POST, url)?
+            .json(&serde_json::json!({ "body": body }))
+            .send()
+            .map_err(|error| HostingError::Transport(format!("posting a reply: {error}")))?;
+        let created: serde_json::Value = Self::json(self.send(response)?)?;
+        created
+            .get("id")
+            .and_then(serde_json::Value::as_u64)
+            .map(|id| id.to_string())
+            .ok_or_else(|| HostingError::InvalidResponse("GitHub reply has no ID".into()))
+    }
+
+    fn set_thread_resolved(
+        &self,
+        pull_request: &PullRequestRef,
+        comment_id: &str,
+        resolved: bool,
+    ) -> Result<(), HostingError> {
+        self.reconcile_resolution(pull_request, numeric_id(comment_id)?, resolved)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2594,6 +2844,101 @@ mod tests {
         assert!(!requests
             .iter()
             .any(|request| request.starts_with("POST /api/v3/repos/octo/repo/pulls/9/comments")));
+    }
+
+    #[test]
+    fn github_reads_the_conversation_permissions_and_origin_and_replies_in_threads() {
+        let (base, server) = fixture_server(vec![
+            (
+                200,
+                vec![],
+                r#"[{"id":1,"user":{"login":"alice","type":"User"},"body":"@vee status","created_at":"2026-11-25T12:00:00Z"}]"#.into(),
+            ),
+            (
+                200,
+                vec![],
+                r#"[{"id":2,"user":{"login":"vee[bot]","type":"Bot"},"body":"finding","created_at":"2026-11-25T11:00:00Z","path":"src/a.rs","line":3},{"id":3,"in_reply_to_id":2,"user":{"login":"bob","type":"User"},"body":"@vee dismiss nope","created_at":"2026-11-25T12:01:00Z","path":"src/a.rs","line":null,"original_line":3}]"#.into(),
+            ),
+            (200, vec![], r#"{"permission":"write","role_name":"maintain"}"#.into()),
+            (404, vec![], r#"{"message":"Not Found"}"#.into()),
+            (
+                200,
+                vec![],
+                r#"{"state":"open","head":{"sha":"h1","repo":{"full_name":"someone/repo"}},"base":{"sha":"b1","repo":{"full_name":"octo/repo"}}}"#.into(),
+            ),
+            (201, vec![], r#"{"id":44}"#.into()),
+        ]);
+        let adapter = GitHubAdapter::new(
+            GitHubConfig::new(&base, "test-token".into(), String::new()).unwrap(),
+        )
+        .unwrap();
+        let pull_request = reference("127.0.0.1");
+        let comments = adapter.list_conversation(&pull_request).unwrap();
+        assert_eq!(comments.len(), 3);
+        assert_eq!(comments[0].kind, ConversationKind::Conversation);
+        assert!(comments[1].author_is_bot && !comments[0].author_is_bot);
+        assert_eq!(comments[2].in_reply_to.as_deref(), Some("2"));
+        assert_eq!(
+            comments[2].line,
+            Some(3),
+            "outdated comments keep their original line"
+        );
+        assert_eq!(
+            adapter.permission(&pull_request, "carol").unwrap(),
+            RepositoryPermission::Maintain
+        );
+        assert_eq!(
+            adapter.permission(&pull_request, "nobody").unwrap(),
+            RepositoryPermission::None
+        );
+        assert_eq!(
+            adapter.permission(&pull_request, "../admin").unwrap(),
+            RepositoryPermission::None,
+            "an unsafe login is never sent"
+        );
+        let origin = adapter.pull_request_origin(&pull_request).unwrap();
+        assert!(origin.is_fork() && origin.open);
+        assert_eq!(
+            adapter
+                .reply(
+                    &pull_request,
+                    &ReplyTarget::Thread {
+                        comment_id: "2".into()
+                    },
+                    "ok"
+                )
+                .unwrap(),
+            "44"
+        );
+        let requests = server.join().unwrap();
+        assert!(
+            requests[0]
+                .starts_with("GET /api/v3/repos/octo/repo/issues/9/comments?per_page=100&page=1"),
+            "{}",
+            requests[0]
+        );
+        assert!(
+            requests[1]
+                .starts_with("GET /api/v3/repos/octo/repo/pulls/9/comments?per_page=100&page=1"),
+            "{}",
+            requests[1]
+        );
+        assert!(
+            requests[2].starts_with("GET /api/v3/repos/octo/repo/collaborators/carol/permission"),
+            "{}",
+            requests[2]
+        );
+        assert!(
+            requests[4].starts_with("GET /api/v3/repos/octo/repo/pulls/9 "),
+            "{}",
+            requests[4]
+        );
+        assert!(
+            requests[5].starts_with("POST /api/v3/repos/octo/repo/pulls/9/comments/2/replies"),
+            "{}",
+            requests[5]
+        );
+        assert_eq!(requests.len(), 6);
     }
 
     #[test]
