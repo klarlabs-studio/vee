@@ -95,8 +95,8 @@ What is missing is the loop.
 
 ### 8. Committable suggestions (S)
 
-- [ ] Publish a validated, single-hunk patch bound to the reviewed snapshot as a host suggestion (GitHub, GitLab)
-- [ ] Other hosts get a fenced diff
+- [x] Publish a reviewer's fix, checked against one hunk of the pull request's diff, as a host suggestion (GitHub, GitLab)
+- [x] Other hosts get a fenced diff
 
 ### 9. Security presets and a regulated policy pack (S)
 

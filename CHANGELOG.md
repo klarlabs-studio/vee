@@ -129,6 +129,10 @@ build provenance.
   install a pinned release and run `vee ci run`.
 - `vee init --ci github|gitlab` writes a pipeline that uses them, pinned to
   this release, with an API-key provider ([guide](docs/guides/pull-requests.md)).
+- A reviewer may return a fix with a finding. It is posted as a suggestion
+  that can be committed from the pull request on GitHub and GitLab, and as a
+  diff on other hosts, after Vee checks that it replaces lines of the diff
+  ([guide](docs/guides/pull-requests.md#suggested-fixes)).
 
 ### CLI and MCP output
 
