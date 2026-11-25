@@ -1,6 +1,7 @@
 {
   "mcpServers": {
     "vee": {
+      "type": "stdio",
       "command": "vee",
       "args": ["mcp", "serve", "--transport", "stdio"]
     }

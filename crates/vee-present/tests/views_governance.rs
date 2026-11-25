@@ -626,3 +626,29 @@ fn approval_lists_every_stage_with_its_reason() {
     );
     assert!(markdown::render(&approval.to_view()).contains("needs a human"));
 }
+
+#[test]
+fn review_session_shows_each_change_and_the_reasons_it_does_not_pass() {
+    let session: vee_application::ReviewSession = serde_json::from_value(json!({
+        "schema_version": 1,
+        "verdict": "block",
+        "open_findings": 1,
+        "approval_eligible": 1,
+        "reviews": [
+            {"review_id": "rev_a", "scope": "commit", "snapshot_id": "sha256:a", "gate": "pass",
+             "snapshot_current": true, "risk_tier": "low", "open_findings": {}, "approval_eligible": true, "reasons": []},
+            {"review_id": "rev_b", "scope": "commit", "snapshot_id": "sha256:b", "gate": "block",
+             "snapshot_current": true, "risk_tier": "elevated", "open_findings": {"high": 1},
+             "approval_eligible": false, "reasons": ["1 blocking finding"]},
+        ],
+    }))
+    .unwrap();
+    let text = ansi::render(&session.to_view(), false);
+    assert!(
+        text.starts_with("Review session (2 changes)  ✖ block\n"),
+        "{text}"
+    );
+    assert!(text.contains("1 high"), "{text}");
+    assert!(text.contains("rev_b: 1 blocking finding"), "{text}");
+    assert!(markdown::render(&session.to_view()).contains("needs a human"));
+}

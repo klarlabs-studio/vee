@@ -4,6 +4,8 @@ use vee_core::{ActorName, Reason};
 
 mod support;
 use support::vee;
+#[cfg(unix)]
+use support::vee_applying_without_terminal;
 
 fn accept_with_timeout(listener: &std::net::TcpListener) -> std::io::Result<std::net::TcpStream> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
@@ -268,7 +270,7 @@ fn test_generation_saves_snapshot_bound_sandbox_checked_patch_without_applying()
     assert!(!root.join("tests/changed_test.rs").exists());
 
     let proposal_id = report["proposal_id"].as_str().unwrap();
-    let wrong_approval = vee()
+    let wrong_approval = vee_applying_without_terminal()
         .args([
             "tests",
             "apply",
@@ -287,7 +289,7 @@ fn test_generation_saves_snapshot_bound_sandbox_checked_patch_without_applying()
         "pub fn changed() -> bool { true }\n",
     )
     .unwrap();
-    let stale_apply = vee()
+    let stale_apply = vee_applying_without_terminal()
         .args(["tests", "apply", proposal_id, "--approve", proposal_id])
         .current_dir(root)
         .output()
@@ -301,7 +303,7 @@ fn test_generation_saves_snapshot_bound_sandbox_checked_patch_without_applying()
     )
     .unwrap();
 
-    let apply = vee()
+    let apply = vee_applying_without_terminal()
         .args([
             "tests",
             "apply",
@@ -390,7 +392,7 @@ fn test_generation_saves_snapshot_bound_sandbox_checked_patch_without_applying()
     assert_eq!(refined["refinement"]["attempt"], 1);
 
     let refined_id = refined["proposal_id"].as_str().unwrap();
-    let refined_apply = vee()
+    let refined_apply = vee_applying_without_terminal()
         .args([
             "tests",
             "apply",
@@ -1160,6 +1162,7 @@ fn change_package_explicitly_refreshes_and_binds_linked_provider_state() {
             "json",
         ])
         .env("VEE_TEST_GH_TOKEN", "test-token")
+        .env("VEE_HOSTING_HOSTS", "127.0.0.1")
         .output()
         .unwrap();
     server.join().unwrap();
@@ -1317,6 +1320,7 @@ fn change_package_refresh_routes_through_all_other_hosting_adapters() {
                 "json",
             ])
             .env("VEE_TEST_HOSTING_TOKEN", "test-token")
+            .env("VEE_HOSTING_HOSTS", "127.0.0.1")
             .output()
             .unwrap();
         server.join().unwrap();
@@ -3084,6 +3088,10 @@ fn finding_task_exports_bounded_snapshot_context_and_reports_staleness() {
         .as_str()
         .unwrap()
         .contains("risky_value"));
+    // General analyzer limitations stay in the impact report, not every task.
+    assert!(task["context_note"]
+        .as_str()
+        .is_none_or(|note| !note.contains("syntax-derived")));
     // The flagged line is part of the change, so the task carries its hunk.
     let hunk_lines = task["diff_hunk"]["lines"].as_array().unwrap();
     assert!(hunk_lines.contains(&serde_json::json!({
@@ -3632,6 +3640,54 @@ fn gerrit_publish_command_emits_revision_bound_tagged_gate_summary() {
 #[cfg(unix)]
 #[test]
 fn github_publish_command_emits_snapshot_bound_check_run() {
+    let (requests, receipt, base_oid, head_oid) = github_publish_fixture(&[], 7);
+    assert_eq!(receipt["review_id"], "review-github-publish");
+    assert_eq!(receipt["revision"], format!("{base_oid}:{head_oid}"));
+    assert_eq!(receipt["provider_check_id"], "1234");
+    assert!(receipt.get("approval_check_id").is_none());
+    assert_eq!(requests.len(), 7);
+    assert!(requests[0].starts_with("GET /repos/team/repo/pulls/9 HTTP/1.1"));
+    let check_run = requests
+        .iter()
+        .find(|request| request.starts_with("POST /repos/team/repo/check-runs "))
+        .expect("GitHub check-run publication request");
+    assert!(check_run.contains(&head_oid));
+    assert!(check_run.contains("Vee passed"));
+}
+
+/// `--approval` adds a separate "Vee approval" check after the gate check.
+#[cfg(unix)]
+#[test]
+fn github_publish_with_approval_adds_a_separate_approval_check() {
+    let (requests, receipt, _, head_oid) = github_publish_fixture(&["--approval"], 11);
+    assert_eq!(receipt["provider_check_id"], "1234");
+    assert_eq!(receipt["approval_check_id"], "1234");
+    let checks: Vec<&String> = requests
+        .iter()
+        .filter(|request| request.starts_with("POST /repos/team/repo/check-runs "))
+        .collect();
+    assert_eq!(checks.len(), 2, "{requests:#?}");
+    assert!(checks[0].contains("Vee passed"));
+    let approval = checks[1];
+    assert!(approval.contains(&head_oid));
+    assert!(approval.contains("\"name\":\"Vee approval\""), "{approval}");
+    assert!(approval.contains("review-github-publish:approval"));
+    // Every stage is listed, whatever the verdict.
+    for stage in ["snapshot", "paths", "authors", "risk", "gate"] {
+        assert!(
+            approval.contains(&format!("{stage} ")),
+            "{stage}: {approval}"
+        );
+    }
+}
+
+#[cfg(unix)]
+/// Publishes a passing review to a fake GitHub server and returns the
+/// requests it received, the receipt, and the head commit.
+fn github_publish_fixture(
+    extra_args: &[&str],
+    request_count: usize,
+) -> (Vec<String>, serde_json::Value, String, String) {
     use std::{
         io::{Read, Write},
         net::TcpListener,
@@ -3739,7 +3795,7 @@ fn github_publish_command_emits_snapshot_bound_check_run() {
     let expected_head = head_oid.clone();
     let server = thread::spawn(move || {
         let mut requests = Vec::new();
-        for _ in 0..7 {
+        for _ in 0..request_count {
             let mut stream = accept_with_timeout(&listener).unwrap();
             let mut request = Vec::new();
             let mut chunk = [0u8; 1024];
@@ -3827,6 +3883,7 @@ fn github_publish_command_emits_snapshot_bound_check_run() {
             "--output",
             "json",
         ])
+        .args(extra_args)
         .env("VEE_FIXTURE_GITHUB_TOKEN", "fixture-token")
         .current_dir(root)
         .output()
@@ -3839,18 +3896,7 @@ fn github_publish_command_emits_snapshot_bound_check_run() {
         String::from_utf8_lossy(&output.stderr),
     );
     let receipt: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(receipt["review_id"], "review-github-publish");
-    assert_eq!(receipt["revision"], format!("{base_oid}:{head_oid}"));
-    assert_eq!(receipt["provider_check_id"], "1234");
-    let requests = server.join().unwrap();
-    assert_eq!(requests.len(), 7);
-    assert!(requests[0].starts_with("GET /repos/team/repo/pulls/9 HTTP/1.1"));
-    let check_run = requests
-        .iter()
-        .find(|request| request.starts_with("POST /repos/team/repo/check-runs "))
-        .expect("GitHub check-run publication request");
-    assert!(check_run.contains(&head_oid));
-    assert!(check_run.contains("Vee passed"));
+    (server.join().unwrap(), receipt, base_oid, head_oid)
 }
 
 #[cfg(unix)]
@@ -4683,6 +4729,7 @@ fn gitlab_issue_context_is_available_through_the_cli() {
             "12",
         ])
         .env("VEE_TEST_GITLAB_TOKEN", "fixture-token")
+        .env("VEE_HOSTING_HOSTS", "127.0.0.1")
         .args(["--output", "json"])
         .current_dir(directory.path())
         .output()
@@ -4882,6 +4929,7 @@ fn gate_check_rejects_review_after_remote_work_item_changes() {
             "org/repo#5",
         ])
         .env("VEE_TEST_GITLAB_TOKEN", "test-token")
+        .env("VEE_HOSTING_HOSTS", "127.0.0.1")
         .current_dir(root)
         .output()
         .unwrap();
@@ -8730,9 +8778,26 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
     .unwrap();
     assert_eq!(preserved_proposal["review_id"], review_id);
 
+    // An agent's shell has no terminal: without the machine's opt-in, a
+    // correctly approved patch is still not applied.
+    let unconfirmed = vee()
+        .args(["findings", "apply-patch", digest, "--approve", digest])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!unconfirmed.status.success());
+    assert!(
+        String::from_utf8_lossy(&unconfirmed.stdout).contains("confirm it at a terminal"),
+        "{unconfirmed:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("src.rs")).unwrap(),
+        "pub fn value() -> i32 { 1 }\n"
+    );
+
     let apply_lock = root.join(".vee/proposals/apply.lock");
     fs::write(&apply_lock, "pid=another-process\n").unwrap();
-    let concurrent_apply = vee()
+    let concurrent_apply = vee_applying_without_terminal()
         .args(["findings", "apply-patch", digest, "--approve", digest])
         .current_dir(root)
         .output()
@@ -8747,7 +8812,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
     let instruction_path = root.join("reviewer.md");
     let original_instructions = fs::read_to_string(&instruction_path).unwrap();
     fs::write(&instruction_path, "The review instructions have changed.\n").unwrap();
-    let stale_config = vee()
+    let stale_config = vee_applying_without_terminal()
         .args(["findings", "apply-patch", digest, "--approve", digest])
         .current_dir(root)
         .output()
@@ -8759,7 +8824,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
     );
     fs::write(&instruction_path, original_instructions).unwrap();
 
-    let rejected = vee()
+    let rejected = vee_applying_without_terminal()
         .args([
             "findings",
             "apply-patch",
@@ -8776,7 +8841,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
         "pub fn value() -> i32 { 1 }\n"
     );
 
-    let applied = vee()
+    let applied = vee_applying_without_terminal()
         .args([
             "findings",
             "apply-patch",
@@ -8815,7 +8880,7 @@ fn approved_patch_is_digest_gated_and_reruns_the_original_review_scope() {
         proposal_record["follow_up_review_id"],
         applied["review"]["review_id"]
     );
-    let replay = vee()
+    let replay = vee_applying_without_terminal()
         .args(["findings", "apply-patch", digest, "--approve", digest])
         .current_dir(root)
         .output()
@@ -8904,7 +8969,7 @@ fn an_incomplete_follow_up_review_says_why_in_text_output() {
     let proposed: serde_json::Value = serde_json::from_slice(&proposed.stdout).unwrap();
     let digest = proposed["patch_digest"].as_str().unwrap();
 
-    let applied = vee()
+    let applied = vee_applying_without_terminal()
         .args(["findings", "apply-patch", digest, "--approve", digest])
         .current_dir(root)
         .output()
@@ -10206,6 +10271,7 @@ fn mcp_tools_declare_titles_safety_annotations_and_documented_inputs() {
         "analyze_impact",
         "assess_change_risk",
         "check_approval_eligibility",
+        "review_session",
         "analyze_cross_repository_impact",
         "acceptance_traceability",
         "get_repository_context",
@@ -10253,6 +10319,15 @@ fn mcp_tools_declare_titles_safety_annotations_and_documented_inputs() {
         "MCP tool contract gaps:\n{}",
         problems.join("\n")
     );
+
+    // A session's review IDs are bounded and unique, as documented.
+    let session_ids = &tools
+        .iter()
+        .find(|tool| tool["name"] == "review_session")
+        .unwrap()["inputSchema"]["properties"]["review_ids"];
+    assert_eq!(session_ids["minItems"], 1);
+    assert_eq!(session_ids["maxItems"], 20);
+    assert_eq!(session_ids["uniqueItems"], true);
 
     let enum_values = |tool: &str, property: &str| -> Vec<String> {
         let tool = tools.iter().find(|item| item["name"] == tool).unwrap();
@@ -10670,6 +10745,22 @@ fn review_effort_flag_sets_the_runs_per_reviewer_and_is_recorded_in_the_config_d
         "the effort used is part of the recorded configuration"
     );
     assert_eq!(medium["reviewer_outcomes"][0]["status"], "completed");
+    assert_eq!(medium["review_effort"], "medium");
+
+    // A later gate check reproduces the review's configuration, effort included,
+    // so the review is not reported stale.
+    let review_id = medium["review_id"].as_str().unwrap();
+    let checked = vee()
+        .args(["gate", "check", review_id, "--output", "json"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let decision: serde_json::Value = serde_json::from_slice(&checked.stdout)
+        .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&checked.stderr)));
+    assert!(
+        !decision.to_string().contains("stale"),
+        "gate check after --effort: {decision}"
+    );
 
     let rejected = vee()
         .args(["review", "--working-tree", "--effort", "max"])
@@ -11127,7 +11218,7 @@ fn gate_approval_layers_snapshot_path_author_risk_and_gate_guards() {
     permissions.set_mode(0o755);
     fs::set_permissions(&provider, permissions).unwrap();
     let config = format!(
-        "version: 1\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\npolicy:\n  required_reviewers: [correctness]\n  on_incomplete: block\n",
+        "version: 1\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\nverification:\n  unit: {{ executable: /bin/sh, args: [-c, \"exit 0\"], timeout_seconds: 5 }}\npolicy:\n  required_reviewers: [correctness]\n  required_verifications: [unit]\n  on_incomplete: block\n",
         provider.display()
     );
     fs::write(root.join(".vee.yaml"), &config).unwrap();
@@ -11187,6 +11278,20 @@ fn gate_approval_layers_snapshot_path_author_risk_and_gate_guards() {
             .clone()
     };
 
+    // The required verification has not run: the gate is incomplete.
+    let waiting = approval(1);
+    assert_eq!(stage(&waiting, "gate")["passed"], false, "{waiting:#}");
+    let verify = vee()
+        .args(["verify", "--profile", "unit", "--commit", "HEAD"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        verify.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    // Approval evaluates the gate as of now, so no `gate check` is needed.
     let eligible = approval(0);
     assert_eq!(eligible["eligible"], true, "{eligible:#}");
     let order: Vec<_> = eligible["stages"]
@@ -11219,6 +11324,18 @@ fn gate_approval_layers_snapshot_path_author_risk_and_gate_guards() {
         "no author identity is reported"
     );
     assert_eq!(stage(&guarded, "gate")["passed"], true);
+    // Approval is read-only: it evaluates the gate without recording a decision.
+    let history = vee()
+        .args(["gate", "history", "--review", review_id, "--output", "json"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let history: serde_json::Value = serde_json::from_slice(&history.stdout).unwrap();
+    assert_eq!(
+        history["decisions"].as_array().map(Vec::len),
+        Some(1),
+        "{history:#}"
+    );
 }
 
 /// The Claude Code and Codex plugins package the bundled skills and the MCP
@@ -11239,30 +11356,58 @@ fn agent_plugins_match_the_bundled_skills_version_and_mcp_command() {
         .collect();
     packaged.sort();
     assert_eq!(names, packaged, "plugin skills differ from bundled skills");
-    for name in &names {
-        assert_eq!(
-            fs::read_to_string(bundled.join(name).join("SKILL.md")).unwrap(),
-            fs::read_to_string(plugin.join("skills").join(name).join("SKILL.md")).unwrap(),
-            "{name:?}: copy crates/vee-cli/skills into plugins/vee/skills"
-        );
+    // Every file of every skill, not only SKILL.md.
+    fn files(root: &std::path::Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        let mut found = std::collections::BTreeMap::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(&directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    found.insert(
+                        path.strip_prefix(root).unwrap().to_path_buf(),
+                        fs::read(&path).unwrap(),
+                    );
+                }
+            }
+        }
+        found
     }
+    assert_eq!(
+        files(&bundled),
+        files(&plugin.join("skills")),
+        "copy crates/vee-cli/skills into plugins/vee/skills"
+    );
     let json = |path: std::path::PathBuf| -> serde_json::Value {
         serde_json::from_str(&fs::read_to_string(&path).unwrap())
             .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
     };
     let version = env!("CARGO_PKG_VERSION");
     assert_eq!(json(plugin.join("plugin.json"))["version"], version);
-    assert_eq!(json(plugin.join(".claude-plugin/plugin.json"))["version"], version);
+    assert_eq!(
+        json(plugin.join(".claude-plugin/plugin.json"))["version"],
+        version
+    );
     let portable = &json(plugin.join("mcp.json"))["mcpServers"]["vee"];
     let claude = &json(plugin.join(".mcp.json"))["mcpServers"]["vee"];
+    // One definition in both files: differing definitions of a server name
+    // look like server shadowing to MCP scanners (OWASP MCP09).
+    assert_eq!(
+        portable, claude,
+        "mcp.json and .mcp.json must define vee identically"
+    );
     assert_eq!(portable["type"], "stdio");
-    assert_eq!(portable["command"], claude["command"]);
-    assert_eq!(portable["args"], claude["args"]);
+    assert_eq!(portable["command"], "vee", "the installed binary's name");
     let args: Vec<String> = serde_json::from_value(claude["args"].clone()).unwrap();
     let mut help_args = args.clone();
     help_args.push("--help".into());
     let help = vee().args(&help_args).output().unwrap();
-    assert!(help.status.success(), "the plugin's MCP command must be valid: {args:?}");
+    assert!(
+        help.status.success(),
+        "the plugin's MCP command must be valid: {args:?}"
+    );
     for marketplace in [
         ".claude-plugin/marketplace.json",
         ".agents/plugins/marketplace.json",
@@ -11270,4 +11415,358 @@ fn agent_plugins_match_the_bundled_skills_version_and_mcp_command() {
         let entry = &json(repo.join(marketplace))["plugins"][0];
         assert_eq!(entry["name"], "vee", "{marketplace}");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn review_session_reads_several_reviews_with_one_verdict() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();
+    fs::write(root.join("reviewer.md"), "Review changed code.\n").unwrap();
+    // The provider reports a blocking finding only for the second change.
+    let provider = directory.path().join("fake-provider");
+    fs::write(
+        &provider,
+        "#!/bin/sh\ninput=$(cat)\nif printf '%s' \"$input\" | grep -q 'value() -> u8 { 3 }'; then printf '%s' '{\"schema_version\":1,\"findings\":[{\"category\":\"correctness\",\"severity\":\"high\",\"confidence\":95,\"rationale\":\"Three is wrong.\",\"path\":\"src/lib.rs\",\"line\":1}]}'; else printf '%s' '{\"schema_version\":1,\"findings\":[]}'; fi\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&provider).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&provider, permissions).unwrap();
+    fs::write(
+        root.join(".vee.yaml"),
+        format!(
+            "version: 1\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\npolicy:\n  required_reviewers: [correctness]\n  block_severities: [high]\n  on_incomplete: block\n",
+            provider.display()
+        ),
+    )
+    .unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "baseline"]);
+    let mut review_ids = Vec::new();
+    for value in [2, 3] {
+        fs::write(
+            root.join("src/lib.rs"),
+            format!("pub fn value() -> u8 {{ {value} }}\n"),
+        )
+        .unwrap();
+        git(&["commit", "-qam", "change"]);
+        let review = vee()
+            .args(["review", "--commit", "HEAD", "--output", "json"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        let review: serde_json::Value = serde_json::from_slice(&review.stdout).unwrap();
+        review_ids.push(review["review_id"].as_str().unwrap().to_owned());
+    }
+    let session = |ids: &[&String]| {
+        let mut command = vee();
+        command.args(["reviews", "session", "--output", "json"]);
+        for id in ids {
+            command.args(["--review", id.as_str()]);
+        }
+        command.current_dir(root).output().unwrap()
+    };
+
+    let first = session(&[&review_ids[0]]);
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let both = session(&[&review_ids[0], &review_ids[1]]);
+    assert_eq!(
+        both.status.code(),
+        Some(1),
+        "a blocked session exits 1, like the gate"
+    );
+    let repeated = session(&[&review_ids[0], &review_ids[0]]);
+    assert_eq!(
+        repeated.status.code(),
+        Some(3),
+        "a repeated review is a usage error"
+    );
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&repeated.stdout),
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+    assert!(reported.contains("listed more than once"), "{reported}");
+    let value: serde_json::Value = serde_json::from_slice(&both.stdout).unwrap();
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/review-session-v1.schema.json"
+    ))
+    .unwrap();
+    assert!(
+        jsonschema::validator_for(&schema).unwrap().is_valid(&value),
+        "{value:#}"
+    );
+    assert_eq!(value["verdict"], "block");
+    assert_eq!(value["open_findings"], 1);
+    assert_eq!(value["reviews"][0]["gate"], "pass");
+    assert_eq!(value["reviews"][1]["gate"], "block");
+    assert_eq!(value["reviews"][1]["open_findings"]["high"], 1);
+}
+
+/// MCP clients that send a progress token see each reviewer run finish as
+/// a `notifications/progress` message before the review result.
+#[cfg(unix)]
+#[test]
+fn mcp_review_changes_reports_progress_notifications() {
+    use std::io::{BufRead, Write};
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    fs::write(root.join("lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();
+    fs::write(root.join("reviewer.md"), "Review changed code.\n").unwrap();
+    let provider = directory.path().join("fake-provider");
+    fs::write(
+        &provider,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s' '{\"schema_version\":1,\"findings\":[]}'\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&provider).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&provider, permissions).unwrap();
+    fs::write(
+        root.join(".vee.yaml"),
+        format!(
+            "version: 1\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\n  security: {{ provider: fake, instructions_file: reviewer.md }}\n",
+            provider.display()
+        ),
+    )
+    .unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "baseline"]);
+    fs::write(root.join("lib.rs"), "pub fn value() -> u8 { 2 }\n").unwrap();
+
+    let mut server = vee()
+        .args(["mcp", "serve", "--transport", "stdio"])
+        .current_dir(root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = server.stdin.take().unwrap();
+    let mut stdout = std::io::BufReader::new(server.stdout.take().unwrap());
+    let mut send = |message: serde_json::Value| {
+        writeln!(stdin, "{message}").unwrap();
+        stdin.flush().unwrap();
+    };
+    let mut read_until = |id: u64, seen: &mut Vec<serde_json::Value>| loop {
+        let mut line = String::new();
+        assert!(stdout.read_line(&mut line).unwrap() > 0, "server closed");
+        let message: serde_json::Value = serde_json::from_str(&line).unwrap();
+        if message["id"] == id {
+            return message;
+        }
+        seen.push(message);
+    };
+    let mut seen = Vec::new();
+    send(
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}),
+    );
+    read_until(1, &mut seen);
+    send(serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    send(
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"review_changes","arguments":{"scope":"working_tree"},"_meta":{"progressToken":"review-1"}}}),
+    );
+    let response = read_until(2, &mut seen);
+    drop(stdin);
+    let _ = server.wait();
+
+    assert!(
+        response["result"]["structuredContent"]["review_id"].is_string(),
+        "{response:#}"
+    );
+    let progress: Vec<&serde_json::Value> = seen
+        .iter()
+        .filter(|message| message["method"] == "notifications/progress")
+        .map(|message| &message["params"])
+        .collect();
+    // The start of execution, then one per finished run.
+    assert_eq!(progress.len(), 3, "{seen:#?}");
+    assert!(progress
+        .iter()
+        .all(|params| params["progressToken"] == "review-1" && params["total"] == 2.0));
+    assert_eq!(
+        progress.last().unwrap()["message"],
+        "2 of 2 reviewer runs finished"
+    );
+}
+
+#[test]
+fn hosting_publish_refuses_an_approval_check_on_gerrit() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["init", "-q"])
+        .status()
+        .unwrap()
+        .success());
+    fs::write(root.join(".vee.yaml"), "version: 1\n").unwrap();
+    let output = vee()
+        .args([
+            "hosting",
+            "publish",
+            "--provider",
+            "gerrit",
+            "--review",
+            "rev_missing",
+            "--repository",
+            "team/repo",
+            "--number",
+            "1",
+            "--approval",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("publish without --approval"));
+}
+
+/// A session can combine reviews from several repositories: `REPO:REVIEW_ID`
+/// names a checkout relative to this repository's root, and each change is
+/// read from its own repository's store and configuration.
+#[cfg(unix)]
+#[test]
+fn review_session_combines_reviews_from_several_repositories() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let provider = directory.path().join("fake-provider");
+    fs::write(
+        &provider,
+        "#!/bin/sh\ninput=$(cat)\nif printf '%s' \"$input\" | grep -q 'value() -> u8 { 3 }'; then printf '%s' '{\"schema_version\":1,\"findings\":[{\"category\":\"correctness\",\"severity\":\"high\",\"confidence\":95,\"rationale\":\"Three is wrong.\",\"path\":\"src/lib.rs\",\"line\":1}]}'; else printf '%s' '{\"schema_version\":1,\"findings\":[]}'; fi\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&provider).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&provider, permissions).unwrap();
+    // Reviews one change to `value` in a new repository at `root`.
+    let reviewed_repository = |root: &std::path::Path, value: u8| -> String {
+        fs::create_dir_all(root.join("src")).unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "vee@example.invalid"]);
+        git(&["config", "user.name", "Vee test"]);
+        fs::write(root.join("src/lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();
+        fs::write(root.join("reviewer.md"), "Review changed code.\n").unwrap();
+        fs::write(
+            root.join(".vee.yaml"),
+            format!(
+                "version: 1\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\npolicy:\n  required_reviewers: [correctness]\n  block_severities: [high]\n  on_incomplete: block\n",
+                provider.display()
+            ),
+        )
+        .unwrap();
+        fs::write(root.join(".gitignore"), "/api/\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "baseline"]);
+        fs::write(
+            root.join("src/lib.rs"),
+            format!("pub fn value() -> u8 {{ {value} }}\n"),
+        )
+        .unwrap();
+        git(&["commit", "-qam", "change"]);
+        let review = vee()
+            .args(["review", "--commit", "HEAD", "--output", "json"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        let review: serde_json::Value = serde_json::from_slice(&review.stdout).unwrap();
+        review["review_id"].as_str().unwrap().to_owned()
+    };
+    let root = directory.path().join("app");
+    let blocking = reviewed_repository(&root, 3);
+    let passing = reviewed_repository(&root.join("api"), 2);
+
+    let session = |references: &[String]| {
+        let mut command = vee();
+        command.args(["reviews", "session", "--output", "json"]);
+        for reference in references {
+            command.args(["--review", reference.as_str()]);
+        }
+        command.current_dir(&root).output().unwrap()
+    };
+    let output = session(&[blocking.clone(), format!("api:{passing}")]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["verdict"], "block");
+    assert!(document["reviews"][0].get("repository").is_none());
+    assert_eq!(document["reviews"][0]["gate"], "block");
+    assert_eq!(document["reviews"][1]["repository"], "api");
+    assert_eq!(document["reviews"][1]["review_id"], passing.as_str());
+    assert_eq!(document["reviews"][1]["gate"], "pass");
+    assert_eq!(document["reviews"][1]["snapshot_current"], true);
+
+    // The other repository's review alone passes.
+    let output = session(&[format!("api:{passing}")]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // A review that exists only in the other repository is not found here.
+    let output = session(std::slice::from_ref(&passing));
+    assert_ne!(output.status.code(), Some(0));
+    // A path that is not a checkout root is a usage error.
+    let output = session(&[format!("src:{passing}")]);
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

@@ -28,16 +28,27 @@ four points:
 ## Decision
 
 `vee risk` (MCP: `assess_change_risk`, schema `change-risk-v1`) reports a
-`low`, `elevated` or `high` tier over five measured factors. Each factor
+`low`, `elevated` or `high` tier over five measured factors, plus two
+history factors when the repository has enough history. Each factor
 carries its value, its threshold, what was counted, and its research basis.
 
 | Factor | Flag at | Basis |
 |---|---|---|
-| Subsystems touched (top-level directory, or two levels under `crates/`, `packages/` and similar) | ≥ 3 | Mockus & Weiss 2000; Kamei 2013 |
+| Code subsystems touched (top-level directory, or two levels under `crates/`, `packages/` and similar; documentation excluded) | ≥ 3 | Mockus & Weiss 2000; Kamei 2013 |
 | Files changed | ≥ 20 | Kamei 2013; Czerwonka 2015 |
 | Lines added and deleted | ≥ 400 | Kamei 2013; Cisco case study (weak evidence) |
 | Production files referencing changed code | ≥ 10 | Hattori 2008; impact analysis |
 | Changed source files with no test changed or referencing them | ≥ 1 | McIntosh & Kamei 2018; agent-change studies |
+| Earlier changes to the touched code (NUC) | above this repository's 90th percentile | Kamei 2013 (history) |
+| People who changed the touched code (NDEV) | above this repository's 90th percentile | Kamei 2013 (history) |
+
+**History factors calibrate themselves.** No labelled defects are needed.
+Every commit in the last 1,000 first-parent commits before the base is
+measured the same way at the time it was made; bulk commits (more than 30
+files) and documentation are skipped. A change is flagged above the 90th
+percentile of those values. With fewer than 20 usable commits the factors
+are left out, and a limitation says so. Only counts are reported, never who
+the authors are.
 
 **Tiers.** No flagged factor gives low, one or two give elevated, and three
 or more give high.
@@ -60,7 +71,7 @@ appears in three places:
   configurable without changing the document.
 
 **Not yet included:**
-- History factors: author experience, prior changes and file age.
+- Author experience and file age.
 - Change purpose (fix vs feature).
 - Size-normalised ordering of findings, which effort-aware evaluation
   recommends.

@@ -46,3 +46,8 @@ url = "=2.5.9"
 # lifecycle for clients that have not adopted MCP's 2026 discovery lifecycle.
 klarlabs-mcp = { path = "vendor/klarlabs-mcp" }
 klarlabs-mcp-protocol = { path = "vendor/klarlabs-mcp-protocol" }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
