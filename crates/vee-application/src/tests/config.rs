@@ -53,13 +53,88 @@ acceptance:
     assert_eq!(config.policy.required_reviewers, vec!["correctness"]);
     assert_eq!(config.policy.required_verifications, vec!["unit"]);
     assert_eq!(config.policy.block_severities, vec!["critical"]);
-    assert_eq!(config.policy.minimum_confidence, 90);
+    // A finding blocks at or above the threshold, so the lower value is the
+    // stricter one: the profile's 0 stays.
+    assert_eq!(config.policy.minimum_confidence, 0);
     assert_eq!(config.policy.on_incomplete, "block");
     assert!(config.policy.acceptance.require_passing_verification);
     assert_eq!(
         config.policy.acceptance.required_verification_profiles,
         vec!["unit"]
     );
+}
+
+#[test]
+fn protected_policy_adds_severity_floors_that_the_repository_cannot_drop() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join(".vee")).unwrap();
+    std::fs::write(
+        directory.path().join(".vee.yaml"),
+        "version: 1\npolicy:\n  severity_floors:\n    - categories: [security]\n      minimum: high\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join(".vee/policy.yaml"),
+        "severity_floors:\n  - paths: [\"payments/**\"]\n    minimum: critical\n",
+    )
+    .unwrap();
+    let mut config = RepositoryConfig::load(&directory.path().join(".vee.yaml")).unwrap();
+    apply_protected_policy(directory.path(), &mut config).unwrap();
+    assert_eq!(config.policy.severity_floors.len(), 2);
+    assert_eq!(
+        config.policy.severity_floors[1].minimum,
+        vee_core::Severity::Critical
+    );
+    std::fs::write(
+        directory.path().join(".vee/policy.yaml"),
+        "severity_floors:\n  - minimum: high\n",
+    )
+    .unwrap();
+    let mut config = RepositoryConfig::load(&directory.path().join(".vee.yaml")).unwrap();
+    assert!(apply_protected_policy(directory.path(), &mut config)
+        .unwrap_err()
+        .contains("protected policy.severity_floors"));
+}
+
+#[test]
+fn protected_policy_lowers_the_confidence_threshold_but_never_raises_it() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join(".vee")).unwrap();
+    std::fs::write(
+        directory.path().join(".vee.yaml"),
+        "version: 1\npolicy:\n  minimum_confidence: 40\n",
+    )
+    .unwrap();
+    let load = || RepositoryConfig::load(&directory.path().join(".vee.yaml")).unwrap();
+
+    std::fs::write(
+        directory.path().join(".vee/policy.yaml"),
+        "minimum_confidence: 20\n",
+    )
+    .unwrap();
+    let mut config = load();
+    apply_protected_policy(directory.path(), &mut config).unwrap();
+    assert_eq!(config.policy.minimum_confidence, 20);
+
+    std::fs::write(
+        directory.path().join(".vee/policy.yaml"),
+        "minimum_confidence: 90\n",
+    )
+    .unwrap();
+    let mut config = load();
+    apply_protected_policy(directory.path(), &mut config).unwrap();
+    assert_eq!(config.policy.minimum_confidence, 40);
+
+    // A protected file that does not mention the threshold leaves it alone,
+    // rather than applying the field's default.
+    std::fs::write(
+        directory.path().join(".vee/policy.yaml"),
+        "block_severities: [critical]\n",
+    )
+    .unwrap();
+    let mut config = load();
+    apply_protected_policy(directory.path(), &mut config).unwrap();
+    assert_eq!(config.policy.minimum_confidence, 40);
 }
 
 #[test]

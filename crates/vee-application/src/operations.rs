@@ -76,6 +76,16 @@ impl Workspace {
             .map_err(anyhow::Error::msg)
     }
 
+    /// The configuration a saved review ran with: its policy profile and any
+    /// effort override reapplied to the current repository configuration.
+    pub fn saved_review_config(&self, review: &ReviewResult) -> Result<RepositoryConfig> {
+        let mut config = self.effective_config(review.policy_profile.as_deref())?;
+        if let Some(effort) = review.review_effort {
+            config.override_review_effort(effort);
+        }
+        Ok(config)
+    }
+
     /// Repository configuration with the named policy profile and protected local
     /// policy applied, exactly as reviews and gates evaluate it.
     pub fn effective_config(&self, policy_profile: Option<&str>) -> Result<RepositoryConfig> {
@@ -849,7 +859,7 @@ pub fn current_review_config(
     review: &ReviewResult,
     token_env_override: Option<&str>,
 ) -> Result<CurrentReviewConfig> {
-    let config = workspace.effective_config(review.policy_profile.as_deref())?;
+    let config = workspace.saved_review_config(review)?;
     let current_work_item = match review.work_item.as_ref() {
         None => None,
         Some(_) if config.offline => {
@@ -1346,7 +1356,7 @@ pub fn acceptance_validate(
 ) -> Result<crate::acceptance::AcceptanceValidation> {
     let store = workspace.store()?;
     let review = workspace.saved_review(&*store, review_id)?;
-    let config = workspace.effective_config(review.policy_profile.as_deref())?;
+    let config = workspace.saved_review_config(&review)?;
     let metadata = std::fs::symlink_metadata(mapping)
         .map_err(|error| configuration_failure(format!("cannot read mapping file: {error}")))?;
     if !metadata.file_type().is_file() || metadata.len() > MAX_ACCEPTANCE_MAPPING_BYTES {
@@ -1783,10 +1793,16 @@ pub fn doctor(workspace: &Workspace) -> Result<crate::setup::DoctorReport> {
 
 /// Create a reviewer setup from the detected backends, or configure this machine
 /// for a repository that already has one.
+/// This machine's configured provider and review effort, for guided setup.
+pub fn machine_setup() -> Result<crate::setup::MachineSetup> {
+    crate::setup::machine_setup(&user_config_location()?).map_err(configuration_failure)
+}
+
 pub fn init(
     workspace: &Workspace,
     candidate_id: Option<&str>,
     model: Option<&str>,
+    effort: Option<vee_core::ReviewEffort>,
 ) -> Result<crate::setup::InitReport> {
     let user_config = user_config_location()?;
     crate::setup::init(
@@ -1796,6 +1812,7 @@ pub fn init(
         crate::setup::InitRequest {
             candidate_id,
             model,
+            effort,
         },
     )
     .map_err(|error| match error {
