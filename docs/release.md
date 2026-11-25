@@ -1,6 +1,6 @@
 # Release qualification
 
-Vee currently supports installation from a source checkout. A crates.io release is not configured: internal workspace crates use path dependencies, and the project has no configured release remote or publishing workflow.
+Vee installs from release binaries, a container image, or a source checkout. A crates.io release is not configured: internal workspace crates use path dependencies.
 
 ## Before tagging a version
 
@@ -17,9 +17,28 @@ Users need Rust stable and Git. Build the workspace and install the CLI from a c
 
 Provider CLIs and credentials are configured by each user and are not bundled. Node.js is needed to rebuild the checked-in local UI bundle and to run its browser workflow tests, not to build a checkout that already contains current `web/dist` assets.
 
+## Publishing a release
+
+`.github/workflows/release.yml` builds releases; nothing is published without a maintainer.
+
+1. **Tag the commit.** Push a `vX.Y.Z` tag on the tested commit. The tag must match the workspace version. The workflow then:
+   - builds `vee` for Linux x86_64 and arm64, macOS arm64 and x86_64, and Windows x86_64;
+   - smoke-tests each binary with `vee --version`;
+   - writes `SHA256SUMS`;
+   - attests build provenance for every archive;
+   - opens a **draft** release with the archives attached.
+2. **Check the draft.** Download an archive and run `gh attestation verify <archive> --repo klarlabs-studio/vee`. Confirm it matches `SHA256SUMS` and runs.
+3. **Publish the draft.** This starts the container job. It downloads the release's Linux binaries, checks them against `SHA256SUMS` and their attestation, packages them with the `release` stage of `Dockerfile`, pushes `ghcr.io/klarlabs-studio/vee:<tag>`, and attests the image. A prerelease does not move `:latest`.
+
+`scripts/install.sh` installs the latest published release, or `VEE_VERSION`, and verifies the archive against `SHA256SUMS`. `VEE_RELEASE_BASE` points it at a mirror of the release files.
+
+The Linux binaries are built on Ubuntu 22.04 and need glibc 2.35 or later.
+
 ## Release boundary
 
-Do not advertise a registry package, signed binary, installer, or automated public release until its publishing source, version policy, artifact provenance, signing, and upgrade support have been configured and tested. CI is configured to validate source installation on Linux, macOS, and Windows, but only local macOS and Linux acceptance is recorded for the current worktree; a hosted Windows run remains unverified. The workflow does not publish artifacts.
+- **Do not advertise a registry package or an installer for Windows** until it is configured and tested.
+- **Releases are not signed with a maintainer key.** Their integrity rests on GitHub's provenance attestation and `SHA256SUMS`.
+- **Hosted acceptance is still open.** Hosted CI runs on Linux, macOS and Windows; the GitHub lifecycle acceptance runbook has not yet been run against a real repository.
 
 ## Latest clean-source acceptance
 

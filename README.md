@@ -27,6 +27,16 @@ Rust CLI, stdio MCP server, and optional local UI (loopback only; direct network
 
 The local UI's **Insights** view charts saved reviews using each review's latest gate decision and showing reviews without a gate separately. Provider latency compares measured adapter p50/p95 durations and daily history across the latest 2,000 reviews with measured, unmeasured, and failed sample counts; exports include the selected date/provider measurements and history coverage. These values exclude cached outcomes, preparation, and gate evaluation and do not represent model compute time. Choose the 7 or 14 latest active dates, or set a custom inclusive start/end date range. Save named filter and date-range views in the current browser profile for this local Vee instance. Gate trend date filters apply to the available latest 500 saved reviews; exports record the date bounds and completeness state. Finding severity shows current unique findings; feedback is shown only as explicit label counts. Export JSON or CSV from Insights to retain the displayed gate trend window alongside full severity/feedback counts and completeness notes. The dashboard never treats unlabeled findings as accepted/rejected feedback or presents those counts as a quality rate.
 
+## Install
+
+Each release attaches binaries for Linux (x86_64, arm64), macOS (arm64, x86_64) and Windows (x86_64), a `SHA256SUMS` file, and build provenance. On Linux or macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/klarlabs-studio/vee/main/scripts/install.sh | sh
+```
+
+The script installs to `~/.local/bin` (set `VEE_INSTALL_DIR` to change it, `VEE_VERSION` to pin a release) and refuses an archive that does not match `SHA256SUMS`. To check where an archive was built, run `gh attestation verify <archive> --repo klarlabs-studio/vee`. The release binaries need glibc, so on musl systems such as Alpine, build from source or use the container image. For CI runners there is a container image, `ghcr.io/klarlabs-studio/vee`, built from the same release binaries. It runs as a non-root user and holds Vee and Git, which suits API providers; a reviewer that uses an agent CLI needs that CLI added in a derived image. Until the first release is published, install from source as below.
+
 ## Build
 
 Building the complete workspace requires Rust stable and a Git executable. The checked-in `web/dist` bundle is embedded in the CLI at compile time; Node.js 22 and npm are needed only to rebuild the UI or run browser tests. Install Vee from a source checkout with:
