@@ -609,6 +609,8 @@ pub fn publish_review(
     let reevaluated = crate::operations::reevaluate_gate(workspace, request.review_id, None)?;
     let mut reviewed = reevaluated.review;
     reviewed.gate = reevaluated.decision;
+    reviewed.findings =
+        crate::publication::findings_for_publication(&reviewed.findings, &reviewed.gate);
     ensure_publishable(root, &reviewed)?;
     // Evaluated before anything is written, so a failure publishes nothing.
     let approval = if request.approval {

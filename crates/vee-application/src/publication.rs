@@ -51,6 +51,31 @@ pub fn diff_contains_added_line(patch: Option<&str>, wanted: u32) -> bool {
     false
 }
 
+/// The findings as the gate evaluated them: each at its effective severity, so
+/// a finding a severity floor raised is posted (even from `info`) and labelled
+/// with the severity that blocked it. A raised finding says so in its text.
+pub fn findings_for_publication(findings: &[Finding], gate: &GateDecision) -> Vec<Finding> {
+    let Some(inputs) = gate.replay_inputs.as_ref() else {
+        return findings.to_vec();
+    };
+    findings
+        .iter()
+        .map(|finding| {
+            let mut published = finding.clone();
+            if let Some(floor) = inputs.policy.raising_floor(finding) {
+                published.severity = inputs.policy.effective_severity(finding);
+                published.rationale = format!(
+                    "Raised from {} by a severity floor ({}).\n\n{}",
+                    finding.severity.as_str(),
+                    floor.describe(),
+                    finding.rationale
+                );
+            }
+            published
+        })
+        .collect()
+}
+
 /// The finding's path and line when it can be a pull request thread at all:
 /// informational findings and findings without a location are never posted.
 pub fn thread_location(finding: &Finding) -> Option<(&str, u32)> {
@@ -329,6 +354,66 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn published_findings_carry_the_severity_a_floor_raised_them_to() {
+        let floor = vee_core::SeverityFloor {
+            paths: vec!["payments/**".into()],
+            categories: vec![],
+            minimum: Severity::High,
+        };
+        let policy = vee_core::Policy {
+            block_severities: vec![Severity::High],
+            minimum_confidence: 0,
+            required_review_complete: true,
+            required_verifications: vec![],
+            analyzer_block_levels: Default::default(),
+            severity_floors: vec![floor],
+        };
+        let gate: GateDecision = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "decision_id": "d", "snapshot_id": "s",
+            "effective_config_digest": "c", "policy_digest": "p", "status": "block",
+            "blocking_findings": [], "verification_run_ids": [], "evidence_digest": "e",
+            "reasons": [],
+            "replay_inputs": {
+                "schema_version": 1, "policy": policy, "reviewer_policies": {},
+                "complete": true, "verification_runs": [], "waivers": [],
+                "evaluation_time_unix": 0
+            }
+        }))
+        .unwrap();
+        let finding = |id: &str, path: &str| Finding {
+            id: id.into(),
+            fingerprint: id.into(),
+            category: "correctness".into(),
+            severity: Severity::Info,
+            confidence: Some(90),
+            rationale: "The total is wrong.".into(),
+            path: Some(path.into()),
+            line: Some(3),
+            provenance: "model_inference".into(),
+            reviewer_ids: vec![],
+            evidence_ids: vec![],
+            rule_attributions: vec![],
+            sample_agreement: None,
+            advisory: false,
+        };
+        let published = findings_for_publication(
+            &[
+                finding("raised", "payments/charge.rs"),
+                finding("kept", "docs/x.md"),
+            ],
+            &gate,
+        );
+        assert_eq!(published[0].severity, Severity::High);
+        assert!(published[0]
+            .rationale
+            .starts_with("Raised from info by a severity floor (paths payments/**)."));
+        assert!(thread_location(&published[0]).is_some());
+        assert_eq!(published[1].severity, Severity::Info);
+        assert_eq!(published[1].rationale, "The total is wrong.");
+        assert!(thread_location(&published[1]).is_none());
+    }
     use super::*;
     use vee_hosting::{FileChange, RepositoryRef};
 

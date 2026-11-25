@@ -76,8 +76,6 @@ impl Workspace {
             .map_err(anyhow::Error::msg)
     }
 
-    /// Repository configuration with the named policy profile and protected local
-    /// policy applied, exactly as reviews and gates evaluate it.
     /// The configuration a saved review ran with: its policy profile and any
     /// effort override reapplied to the current repository configuration.
     pub fn saved_review_config(&self, review: &ReviewResult) -> Result<RepositoryConfig> {
@@ -88,6 +86,8 @@ impl Workspace {
         Ok(config)
     }
 
+    /// Repository configuration with the named policy profile and protected local
+    /// policy applied, exactly as reviews and gates evaluate it.
     pub fn effective_config(&self, policy_profile: Option<&str>) -> Result<RepositoryConfig> {
         let mut config =
             crate::load_repository_config(&self.root).map_err(configuration_failure)?;

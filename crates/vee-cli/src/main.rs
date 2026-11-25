@@ -1586,8 +1586,10 @@ impl vee_http::WebhookEventHandler for HostingWebhookReviewer {
             .list_changed_files(pull_request, &remote.revision)
             .map_err(|error| error.to_string())?;
         let delivery_key = vee_core::digest(event.event_id.as_bytes());
+        let findings =
+            vee_application::publication::findings_for_publication(&review.findings, &review.gate);
         let threads = vee_application::publication::build_hosting_threads(
-            &review.findings,
+            &findings,
             pull_request,
             &changed,
             &review.snapshot_id,
