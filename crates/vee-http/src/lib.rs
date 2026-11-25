@@ -1488,6 +1488,7 @@ mod tests {
         let mut store = open_store(directory.path()).unwrap();
         let findings = (0..205)
             .map(|index| vee_core::Finding {
+                suggestion: None,
                 id: format!("FIND-{index:03}"),
                 fingerprint: format!("sha256:finding-{index:03}"),
                 category: "correctness".into(),
@@ -1635,6 +1636,7 @@ mod tests {
         .unwrap();
         let mut store = open_store(directory.path()).unwrap();
         let finding = vee_core::Finding {
+            suggestion: None,
             id: "FIND-001".into(),
             fingerprint: "sha256:finding".into(),
             category: "correctness".into(),
@@ -1963,6 +1965,7 @@ mod tests {
                 "block",
                 "{}",
                 &[vee_core::Finding {
+                    suggestion: None,
                     id: "finding-disposition".into(),
                     fingerprint: "fingerprint-disposition".into(),
                     category: "correctness".into(),
@@ -2142,6 +2145,7 @@ mod tests {
         git(&["add", "."]);
         git(&["commit", "-qm", "baseline"]);
         let finding = |id: &str, fingerprint: &str| vee_core::Finding {
+            suggestion: None,
             id: id.into(),
             fingerprint: fingerprint.into(),
             category: "correctness".into(),
@@ -2231,6 +2235,7 @@ mod tests {
         let change_set =
             vee_application::capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
         let finding = vee_core::Finding {
+            suggestion: None,
             id: "find_drawer".into(),
             fingerprint: "fingerprint-drawer".into(),
             category: "correctness".into(),

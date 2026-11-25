@@ -167,6 +167,7 @@ mod tests {
 
     fn finding(fingerprint: &str, path: &str, line: Option<u32>, severity: Severity) -> Finding {
         Finding {
+            suggestion: None,
             id: format!("find_{fingerprint}"),
             fingerprint: fingerprint.into(),
             category: "concurrency".into(),

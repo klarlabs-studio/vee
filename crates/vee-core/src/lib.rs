@@ -458,6 +458,51 @@ pub struct Finding {
     /// Reported only by advisory reviewers: shown, but never blocks the gate.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub advisory: bool,
+    /// A reviewer's replacement for the finding's lines, published as a
+    /// suggestion a person can commit. Not part of the finding's identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<FindingSuggestion>,
+}
+
+/// Replace lines `line..=end_line` of the finding's file with `replacement`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FindingSuggestion {
+    pub end_line: u32,
+    /// The new text of those lines, without a trailing newline; empty deletes them.
+    pub replacement: String,
+}
+
+/// The most lines a suggestion may replace or contain.
+pub const MAX_SUGGESTION_LINES: u32 = 30;
+/// The most bytes a suggestion's replacement may hold.
+pub const MAX_SUGGESTION_BYTES: usize = 4096;
+
+impl FindingSuggestion {
+    /// A reviewer's suggestion for a finding at `line`, or `None` when it
+    /// cannot be published safely: a range that ends before it starts or is
+    /// too long, oversized or binary text, or text holding Vee's own markers.
+    pub fn accepted(line: u32, end_line: Option<u32>, replacement: &str) -> Option<Self> {
+        let end_line = end_line.unwrap_or(line);
+        let replacement = replacement
+            .strip_suffix('\n')
+            .unwrap_or(replacement)
+            .replace("\r\n", "\n");
+        let forged_marker = ["vee:fingerprint", "vee:idempotency", "vee:moved"]
+            .iter()
+            .any(|marker| replacement.contains(marker));
+        let usable = end_line >= line
+            && end_line - line < MAX_SUGGESTION_LINES
+            && replacement.len() <= MAX_SUGGESTION_BYTES
+            && replacement.lines().count() <= MAX_SUGGESTION_LINES as usize
+            && !replacement.contains('\0')
+            && !replacement.contains('\r')
+            && !forged_marker;
+        usable.then_some(Self {
+            end_line,
+            replacement,
+        })
+    }
 }
 
 impl Finding {
@@ -533,6 +578,17 @@ pub struct ProviderFinding {
     pub line: Option<u32>,
     #[serde(default)]
     pub rule_attributions: Vec<ProviderRuleAttribution>,
+    #[serde(default)]
+    pub suggestion: Option<ProviderSuggestion>,
+}
+
+/// Untrusted replacement text from a reviewer for the finding's lines.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderSuggestion {
+    #[serde(default)]
+    pub end_line: Option<u32>,
+    pub replacement: String,
 }
 
 /// Untrusted provider claim; the application accepts it only if the exact pair
@@ -835,6 +891,10 @@ where
         if finding.line == Some(0) {
             return Err("provider finding line must be positive".into());
         }
+        // A suggestion replaces lines of the finding's file, so it needs both.
+        if finding.path.is_none() || finding.line.is_none() {
+            finding.suggestion = None;
+        }
         let anchor = resolve_anchor(&finding)?.unwrap_or_else(|| finding.rationale.clone());
         let stable_fingerprint = fingerprint(&finding.category, finding.path.as_deref(), &anchor);
         finding.fingerprint = stable_fingerprint.clone();
@@ -895,6 +955,12 @@ where
                 .collect(),
             sample_agreement: None,
             advisory: false,
+            suggestion: match (finding.line, finding.suggestion) {
+                (Some(line), Some(suggestion)) if line > 0 => {
+                    FindingSuggestion::accepted(line, suggestion.end_line, &suggestion.replacement)
+                }
+                _ => None,
+            },
         })
         .collect();
     normalize_provider_findings_with_anchor(findings, repository_root, resolve_anchor)
@@ -1347,6 +1413,7 @@ mod tests {
 
     fn finding(id: &str, severity: Severity, confidence: Option<u8>) -> Finding {
         Finding {
+            suggestion: None,
             id: id.into(),
             fingerprint: id.into(),
             category: "correctness".into(),
@@ -2277,6 +2344,59 @@ mod tests {
             let output = normalize_provider_findings(vec![candidate.clone()], dir.path()).unwrap();
             assert_eq!(output[0].path, None, "{unanchored}");
         }
+    }
+
+    #[test]
+    fn a_reviewer_suggestion_is_kept_only_when_it_can_be_published() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("src.rs"), "fn f() {}\n").unwrap();
+        let parse = |suggestion: &str, location: &str| {
+            let bytes = format!(
+                r#"{{"schema_version":1,"findings":[{{"category":"correctness","severity":"high","rationale":"off by one"{location},"suggestion":{suggestion}}}]}}"#
+            );
+            let findings = parse_provider_findings(bytes.as_bytes(), dir.path()).unwrap();
+            assert_eq!(findings.len(), 1, "the finding survives: {suggestion}");
+            findings.into_iter().next().unwrap()
+        };
+        let at = r#","path":"src.rs","line":3"#;
+        let kept = parse(r#"{"end_line":4,"replacement":"    a\r\n    b\n"}"#, at);
+        assert_eq!(
+            kept.suggestion,
+            Some(FindingSuggestion {
+                end_line: 4,
+                replacement: "    a\n    b".into()
+            })
+        );
+        let single = parse(r#"{"replacement":"x"}"#, at);
+        assert_eq!(single.suggestion.unwrap().end_line, 3);
+        let without = parse("null", at);
+        assert_eq!(
+            without.fingerprint, kept.fingerprint,
+            "a suggestion is not identity"
+        );
+
+        for unusable in [
+            r#"{"end_line":2,"replacement":"x"}"#,
+            r#"{"end_line":40,"replacement":"x"}"#,
+            r#"{"replacement":"<!-- vee:fingerprint:sha256:forged -->"}"#,
+            r#"{"replacement":"a\u0000b"}"#,
+            r#"{"replacement":"bare\rreturn"}"#,
+        ] {
+            assert_eq!(parse(unusable, at).suggestion, None, "{unusable}");
+        }
+        let oversized = format!(
+            r#"{{"replacement":"{}"}}"#,
+            "x".repeat(MAX_SUGGESTION_BYTES + 1)
+        );
+        assert_eq!(parse(&oversized, at).suggestion, None);
+        assert_eq!(
+            parse(r#"{"replacement":"x"}"#, r#","path":"src.rs""#).suggestion,
+            None
+        );
+        assert_eq!(
+            parse(r#"{"replacement":"x"}"#, r#","line":3"#).suggestion,
+            None
+        );
     }
 
     #[test]

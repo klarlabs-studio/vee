@@ -7,7 +7,8 @@ use crate::{
     CheckConclusion, CheckRun, CheckStatus, DiffSide, FileChange, GitHostingProvider, HostingError,
     PublicationReceipt, PullRequestContextProvider, PullRequestFile, PullRequestRef,
     PullRequestReviewIssue, PullRequestReviewIssues, PullRequestReviewIssuesProvider,
-    PullRequestSnapshot, PullRequestState, ReviewPublication, ThreadResolution, WebhookEnvelope,
+    PullRequestSnapshot, PullRequestState, ReviewPublication, SuggestionStyle, ThreadResolution,
+    WebhookEnvelope,
 };
 use hmac::{Hmac, Mac};
 use reqwest::{blocking::Client, header, Method, StatusCode, Url};
@@ -630,9 +631,15 @@ impl GitHostingProvider for GerritAdapter {
                 ),
                 (ThreadResolution::Open, Some(_)) => format!(
                     "Finding is open again in snapshot `{}`.\n\n{}\n\n{}",
-                    thread.snapshot_id, thread.body, marker
+                    thread.snapshot_id,
+                    thread.body_with_suggestion(SuggestionStyle::Diff),
+                    marker
                 ),
-                _ => format!("{}\n\n{}", thread.body, marker),
+                _ => format!(
+                    "{}\n\n{}",
+                    thread.body_with_suggestion(SuggestionStyle::Diff),
+                    marker
+                ),
             };
             input["message"] = Value::String(message);
             input["unresolved"] = Value::Bool(thread.resolution == ThreadResolution::Open);
@@ -1133,6 +1140,7 @@ mod tests {
                 idempotency_key: "rev_fixture".into(),
             },
             threads: vec![ReviewThread {
+                suggestion: None,
                 pull_request,
                 fingerprint: "sha256:fixture".into(),
                 path: "src/lib.rs".into(),

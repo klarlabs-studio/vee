@@ -288,7 +288,7 @@ impl GitHubAdapter {
         }
         let marker = format!("<!-- vee:fingerprint:{} -->", thread.fingerprint);
         let sanitized_body = thread
-            .body
+            .body_with_suggestion(SuggestionStyle::GitHub)
             .replace("<!-- vee:fingerprint:", "&lt;!-- vee:fingerprint:");
         let body = format!(
             "{}\n\n{}\n<!-- vee:idempotency:{} -->",
@@ -299,7 +299,8 @@ impl GitHubAdapter {
                 "review thread body exceeds GitHub's comment limit".into(),
             ));
         }
-        let mut existing_comment: Option<(u64, String, u64, String)> = None;
+        // (id, path, first line, last line, side) of Vee's comment for this finding.
+        let mut existing_comment: Option<(u64, String, u64, u64, String)> = None;
         let mut comment_pages_exhausted = true;
         for page in 1..=30 {
             let mut url = self.path(&thread.pull_request, "/comments")?;
@@ -341,12 +342,18 @@ impl GitHubAdapter {
                         .or_else(|| comment.get("original_line"))
                         .and_then(|value| value.as_u64())
                         .unwrap_or(0);
+                    let start_line = comment
+                        .get("start_line")
+                        .filter(|value| !value.is_null())
+                        .or_else(|| comment.get("original_start_line"))
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(line);
                     let side = comment
                         .get("side")
                         .and_then(|value| value.as_str())
                         .unwrap_or("RIGHT")
                         .to_owned();
-                    existing_comment = Some((id, path, line, side));
+                    existing_comment = Some((id, path, start_line, line, side));
                     break;
                 }
             }
@@ -369,9 +376,12 @@ impl GitHubAdapter {
         // no thread: the old one is marked as moved and resolved, and a new
         // comment opens at the new line.
         let reused = match existing_comment {
-            Some((id, old_path, old_line, old_side)) => {
-                let location_matches =
-                    old_path == thread.path && old_line == thread.line && old_side == side;
+            Some((id, old_path, old_start, old_end, old_side)) => {
+                // A suggestion replaces exactly the lines its comment covers,
+                // so a comment over other lines cannot carry it.
+                let range_matches = old_start == thread.line
+                    && (thread.suggestion.is_none() || old_end == thread.end_line());
+                let location_matches = old_path == thread.path && range_matches && old_side == side;
                 if location_matches {
                     Some((id, true))
                 } else if thread.resolution == ThreadResolution::Resolved {
@@ -389,12 +399,17 @@ impl GitHubAdapter {
             Some((id, true)) => self.update_comment_body(&thread.pull_request, id, &body)?,
             None => {
                 let url = self.path(&thread.pull_request, "/comments")?;
+                let mut comment = serde_json::json!({
+                    "body": body, "commit_id": snapshot.head_oid, "path": thread.path,
+                    "line": thread.end_line(), "side": side
+                });
+                if thread.end_line() > thread.line {
+                    comment["start_line"] = thread.line.into();
+                    comment["start_side"] = side.into();
+                }
                 let response = self
                     .request(Method::POST, url)?
-                    .json(&serde_json::json!({
-                        "body": body, "commit_id": snapshot.head_oid, "path": thread.path,
-                        "line": thread.line, "side": side
-                    }))
+                    .json(&comment)
                     .send()
                     .map_err(|error| {
                         HostingError::Transport(format!("creating review comment: {error}"))
@@ -1767,6 +1782,7 @@ mod tests {
                 idempotency_key: "review:sha256:snapshot".into(),
             },
             threads: vec![ReviewThread {
+                suggestion: None,
                 pull_request,
                 fingerprint: "sha256:f1".into(),
                 path: "src/lib.rs".into(),
@@ -1827,6 +1843,7 @@ mod tests {
                 idempotency_key: "review:sha256:snapshot".into(),
             },
             threads: vec![ReviewThread {
+                suggestion: None,
                 pull_request,
                 fingerprint: "sha256:f1".into(),
                 path: "src/lib.rs".into(),
@@ -1945,6 +1962,7 @@ mod tests {
                 idempotency_key: "review:sha256:snapshot".into(),
             },
             threads: vec![ReviewThread {
+                suggestion: None,
                 pull_request,
                 fingerprint: "sha256:f1".into(),
                 path: "src/lib.rs".into(),
@@ -2017,6 +2035,7 @@ mod tests {
                 idempotency_key: "review:sha256:snapshot".into(),
             },
             threads: vec![ReviewThread {
+                suggestion: None,
                 pull_request,
                 fingerprint: "sha256:f1".into(),
                 path: "src/lib.rs".into(),
@@ -2087,6 +2106,7 @@ mod tests {
                 idempotency_key: "review:sha256:snapshot".into(),
             },
             threads: vec![ReviewThread {
+                suggestion: None,
                 pull_request,
                 fingerprint: "sha256:f1".into(),
                 path: "src/lib.rs".into(),
@@ -2157,6 +2177,7 @@ mod tests {
                 idempotency_key: "review:sha256:snapshot".into(),
             },
             threads: vec![ReviewThread {
+                suggestion: None,
                 pull_request: pull_request.clone(),
                 fingerprint: "sha256:f1".into(),
                 path: "src/lib.rs".into(),
@@ -2255,6 +2276,7 @@ mod tests {
                 idempotency_key: "review:sha256:snapshot".into(),
             },
             threads: vec![ReviewThread {
+                suggestion: None,
                 pull_request: pull_request.clone(),
                 fingerprint: "sha256:f1".into(),
                 path: "src/lib.rs".into(),
@@ -2347,6 +2369,7 @@ mod tests {
                 idempotency_key: "check-key".into(),
             },
             threads: vec![ReviewThread {
+                suggestion: None,
                 pull_request,
                 fingerprint: "sha256:f1".into(),
                 path: "src/lib.rs".into(),
@@ -2425,6 +2448,7 @@ mod tests {
                 idempotency_key: "review:sha256:snapshot".into(),
             },
             threads: vec![ReviewThread {
+                suggestion: None,
                 pull_request,
                 fingerprint: "sha256:f1".into(),
                 path: "src/new.rs".into(),
@@ -2449,6 +2473,127 @@ mod tests {
             9,
             "stale location should not patch or recreate comment"
         );
+    }
+
+    /// Publish one open thread at `src/a.rs` line 3 whose suggestion replaces
+    /// lines 3 and 4, with Vee's existing comment for it listed as `existing`
+    /// and the rest of the host's answers as `after_listing`.
+    fn publish_suggestion(existing: &str, after_listing: Vec<FixtureResponse>) -> Vec<String> {
+        let pr = || {
+            (
+                200,
+                vec![("ETag".into(), "\"rev-1\"".into())],
+                r#"{"number":9,"title":"Change","body":null,"state":"open","merged":false,"base":{"sha":"base123"},"head":{"sha":"head456"}}"#.to_owned(),
+            )
+        };
+        let mut responses = vec![
+            pr(),
+            (200, vec![], r#"{"check_runs":[]}"#.into()),
+            (201, vec![], r#"{"id":321}"#.into()),
+            stable_pr_response(),
+            (200, vec![], format!("[{existing}]")),
+        ];
+        responses.extend(after_listing);
+        responses.push(pr());
+        let (base, server) = fixture_server(responses);
+        let adapter = GitHubAdapter::new(
+            GitHubConfig::new(&base, "test-token".into(), "webhook-secret".into())
+                .unwrap()
+                .with_actor_login("vee[bot]"),
+        )
+        .unwrap();
+        let pull_request = reference("127.0.0.1");
+        adapter
+            .publish_review(ReviewPublication {
+                pull_request: pull_request.clone(),
+                expected_revision: "\"rev-1\":base123:head456".into(),
+                check: CheckRun {
+                    pull_request: pull_request.clone(),
+                    external_id: "review-3".into(),
+                    name: "Vee assurance".into(),
+                    status: CheckStatus::Completed,
+                    conclusion: Some(CheckConclusion::Failure),
+                    title: "Review blocked".into(),
+                    summary: "One finding".into(),
+                    snapshot_id: "sha256:snapshot".into(),
+                    idempotency_key: "review:sha256:snapshot".into(),
+                },
+                threads: vec![ReviewThread {
+                    suggestion: Some(ThreadSuggestion {
+                        end_line: 4,
+                        original: vec!["let a = 1;".into(), "let b = a;".into()],
+                        replacement: "let b = 1;".into(),
+                    }),
+                    pull_request,
+                    fingerprint: "sha256:f1".into(),
+                    path: "src/a.rs".into(),
+                    line: 3,
+                    side: DiffSide::New,
+                    body: "Wrong value".into(),
+                    resolution: ThreadResolution::Open,
+                    snapshot_id: "sha256:snapshot".into(),
+                    idempotency_key: "thread:sha256:f1".into(),
+                }],
+            })
+            .unwrap();
+        server.join().unwrap()
+    }
+
+    fn open_thread(id: u64) -> FixtureResponse {
+        (
+            200,
+            vec![],
+            format!(
+                r#"{{"data":{{"repository":{{"pullRequest":{{"reviewThreads":{{"nodes":[{{"id":"PRRT_{id}","isResolved":false,"comments":{{"nodes":[{{"databaseId":{id},"body":"x","author":{{"login":"vee[bot]"}}}}]}}}}],"pageInfo":{{"hasNextPage":false,"endCursor":"c"}}}}}}}}}}}}"#
+            ),
+        )
+    }
+
+    #[test]
+    fn a_github_suggestion_is_posted_on_a_comment_spanning_the_lines_it_replaces() {
+        // Vee's earlier comment covers only line 3, so it cannot carry a
+        // suggestion for lines 3-4: it is retired and a spanning one opens.
+        let requests = publish_suggestion(
+            r#"{"id":501,"path":"src/a.rs","line":3,"start_line":null,"side":"RIGHT","body":"old <!-- vee:fingerprint:sha256:f1 -->","user":{"login":"vee[bot]"}}"#,
+            vec![
+                (200, vec![], r#"{"id":501}"#.into()),
+                open_thread(501),
+                (
+                    200,
+                    vec![],
+                    r#"{"data":{"resolveReviewThread":{"thread":{"id":"PRRT_501","isResolved":true}}}}"#.into(),
+                ),
+                (201, vec![], r#"{"id":777}"#.into()),
+                open_thread(777),
+            ],
+        );
+        assert!(requests[5].starts_with("PATCH /api/v3/repos/octo/repo/pulls/comments/501"));
+        let created = &requests[8];
+        assert!(
+            created.starts_with("POST /api/v3/repos/octo/repo/pulls/9/comments"),
+            "{created}"
+        );
+        for expected in [
+            r#""start_line":3"#,
+            r#""line":4"#,
+            r#""start_side":"RIGHT""#,
+            r#"```suggestion\nlet b = 1;\n```"#,
+        ] {
+            assert!(created.contains(expected), "{expected} in {created}");
+        }
+    }
+
+    #[test]
+    fn a_github_comment_already_spanning_the_suggestion_is_updated_in_place() {
+        let requests = publish_suggestion(
+            r#"{"id":501,"path":"src/a.rs","line":4,"start_line":3,"side":"RIGHT","body":"old <!-- vee:fingerprint:sha256:f1 -->","user":{"login":"vee[bot]"}}"#,
+            vec![(200, vec![], r#"{"id":501}"#.into()), open_thread(501)],
+        );
+        assert!(requests[5].starts_with("PATCH /api/v3/repos/octo/repo/pulls/comments/501"));
+        assert!(requests[5].contains("```suggestion"), "{}", requests[5]);
+        assert!(!requests
+            .iter()
+            .any(|request| request.starts_with("POST /api/v3/repos/octo/repo/pulls/9/comments")));
     }
 
     #[test]
@@ -2512,6 +2657,7 @@ mod tests {
                 idempotency_key: "review:sha256:snapshot".into(),
             },
             threads: vec![ReviewThread {
+                suggestion: None,
                 pull_request,
                 fingerprint: "sha256:f1".into(),
                 path: "src/new.rs".into(),

@@ -6,7 +6,8 @@
 use crate::{
     CheckConclusion, CheckStatus, DiffSide, FileChange, GitHostingProvider, HostingError,
     PublicationReceipt, PullRequestContextProvider, PullRequestFile, PullRequestRef,
-    PullRequestSnapshot, PullRequestState, ReviewPublication, ThreadResolution, WebhookEnvelope,
+    PullRequestSnapshot, PullRequestState, ReviewPublication, SuggestionStyle, ThreadResolution,
+    WebhookEnvelope,
 };
 use hmac::{Hmac, Mac};
 use reqwest::{blocking::Client, header, Method, StatusCode, Url};
@@ -725,7 +726,11 @@ impl GitHostingProvider for BitbucketAdapter {
             if prior.is_none() && thread.resolution == ThreadResolution::Resolved {
                 continue;
             }
-            let raw = format!("{}\n\n{}", thread.body, marker);
+            let raw = format!(
+                "{}\n\n{}",
+                thread.body_with_suggestion(SuggestionStyle::Diff),
+                marker
+            );
             let inline = match thread.side {
                 DiffSide::New => serde_json::json!({"path": thread.path, "to": thread.line}),
                 DiffSide::Old => serde_json::json!({"path": thread.path, "from": thread.line}),
@@ -1366,6 +1371,7 @@ mod tests {
             threads: ["sha256:missing", "sha256:existing"]
                 .into_iter()
                 .map(|fingerprint| crate::ReviewThread {
+                    suggestion: None,
                     pull_request: pull_request.clone(),
                     fingerprint: fingerprint.into(),
                     path: "src/lib.rs".into(),
