@@ -26,6 +26,38 @@
         "null"
       ],
       "description": "First available candidate that needs no further input."
+    },
+    "model_suggestions": {
+      "type": "object",
+      "description": "Models worth choosing, by available candidate, best first. Candidates without suggestions use the model configured in their own CLI.",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["model", "note", "recommended"],
+          "properties": {
+            "model": { "type": "string", "minLength": 1 },
+            "note": { "type": "string" },
+            "recommended": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "effort_options": {
+      "type": "array",
+      "description": "Review effort levels, with what each costs and gives.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["effort", "runs", "note", "recommended"],
+        "properties": {
+          "effort": { "enum": ["low", "medium", "high"] },
+          "runs": { "type": "integer", "minimum": 1 },
+          "note": { "type": "string" },
+          "recommended": { "type": "boolean" }
+        }
+      }
     }
   },
   "$defs": {

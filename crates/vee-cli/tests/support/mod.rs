@@ -37,3 +37,25 @@ pub fn vee() -> Command {
         .env_remove("VEE_OFFLINE");
     command
 }
+
+/// [`vee`] with a user config that allows applying approved patches without
+/// a terminal, as an owner may set up for automation.
+#[allow(dead_code)]
+pub fn vee_applying_without_terminal() -> Command {
+    static DIRECTORY: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let config = DIRECTORY
+        .get_or_init(|| {
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::write(
+                directory.path().join("config.yaml"),
+                "version: 1\npatches: { allow_noninteractive_apply: true }\n",
+            )
+            .unwrap();
+            directory
+        })
+        .path()
+        .join("config.yaml");
+    let mut command = vee();
+    command.env("VEE_CONFIG", config);
+    command
+}
