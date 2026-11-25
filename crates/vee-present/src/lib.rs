@@ -12,5 +12,6 @@ pub mod view;
 mod views;
 
 pub use views::review::review_report;
+pub use views::BEST_RESULTS_GUIDE;
 
 pub use view::{summary, Action, Block, Cell, Span, Style, ToView, Tone, ToolCall, View};

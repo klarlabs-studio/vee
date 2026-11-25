@@ -1791,6 +1791,12 @@ pub(crate) fn query_typescript_references(
             let Some(text) = source.get(changed_path.as_str()) else {
                 continue;
             };
+            // Outside a tsconfig or jsconfig project the server sees only the
+            // open file and what it imports, so it would miss references from
+            // other files; those files keep the labelled heuristic edges.
+            if !in_typescript_project(&root, changed_path) {
+                continue;
+            }
             let absolute = root.join(changed_path);
             if !absolute.starts_with(&root) {
                 failures = true;
@@ -1896,6 +1902,10 @@ pub(crate) fn query_typescript_references(
                         saw_declaration = true;
                         continue;
                     }
+                    // A changed file is not impact of itself.
+                    if relative == **changed_path {
+                        continue;
+                    }
                     edges.push(ImpactEdge {
                         source_path: (*changed_path).clone(),
                         affected_path: relative.clone(),
@@ -1936,6 +1946,20 @@ pub(crate) fn query_typescript_references(
     })();
     terminate_typescript_server(&mut child);
     outcome
+}
+
+/// Whether `relative` lies under a `tsconfig.json` or `jsconfig.json` within
+/// `root`, so the TypeScript server loads the whole project around it.
+fn in_typescript_project(root: &Path, relative: &str) -> bool {
+    let mut directory = Path::new(relative).parent();
+    while let Some(current) = directory {
+        let absolute = root.join(current);
+        if absolute.join("tsconfig.json").is_file() || absolute.join("jsconfig.json").is_file() {
+            return true;
+        }
+        directory = current.parent();
+    }
+    false
 }
 
 #[cfg(unix)]
@@ -2283,6 +2307,10 @@ pub(crate) fn query_gopls_references(
                     };
                     if relative == **changed_path && evidence_line == line {
                         saw_declaration = true;
+                        continue;
+                    }
+                    // A changed file is not impact of itself.
+                    if relative == **changed_path {
                         continue;
                     }
                     edges.push(ImpactEdge {

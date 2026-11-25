@@ -3,9 +3,12 @@ pub mod acceptance;
 pub mod analytics;
 mod approval;
 pub mod attestation;
+pub mod ci;
 mod config;
+mod context_budget;
 pub mod coverage;
 pub mod evidence_bundle;
+pub mod exploration;
 pub mod failure;
 pub mod finding_task;
 mod focused_review;
@@ -107,7 +110,8 @@ pub fn verify_and_claim_webhook_delivery<P: vee_hosting::GitHostingProvider + ?S
 }
 #[cfg(test)]
 const MAX_CONTEXT_FILE_BYTES: usize = 128 * 1024;
-const REVIEW_CACHE_CONTRACT_VERSION: u32 = 1;
+// 2: reviewer instructions moved from the CLI payload into the prompt.
+const REVIEW_CACHE_CONTRACT_VERSION: u32 = 2;
 
 pub fn current_unix_time() -> Result<i64, String> {
     let duration = std::time::SystemTime::now()
