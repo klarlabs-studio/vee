@@ -3074,6 +3074,9 @@ pub struct RepositoryConfig {
     pub approval: ApprovalConfig,
     #[serde(skip)]
     pub active_policy_profile: Option<String>,
+    /// The effort a single review applied to every reviewer, if any.
+    #[serde(skip)]
+    pub active_review_effort: Option<ReviewEffort>,
     /// Digest-pinned policy packs merged into this configuration at load time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub packs: Vec<PackReference>,
@@ -3580,6 +3583,7 @@ impl RepositoryConfig {
     /// Apply one effort level to every reviewer for a single review, replacing
     /// configured `effort`, `samples` and `sample_quorum` (quorum returns to a majority).
     pub fn override_review_effort(&mut self, effort: ReviewEffort) {
+        self.active_review_effort = Some(effort);
         for reviewer in self.reviewers.values_mut() {
             reviewer.effort = Some(effort);
             reviewer.samples = None;

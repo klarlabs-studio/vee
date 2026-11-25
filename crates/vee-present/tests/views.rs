@@ -89,6 +89,7 @@ fn review(findings: Vec<Finding>, blocking: Vec<String>, complete: bool) -> Revi
         reviewer_context: vec![],
         unreviewed_paths: vec!["core/lib.rs".into()],
         policy_profile: None,
+        review_effort: None,
         work_item: None,
         work_item_token_env: None,
     }

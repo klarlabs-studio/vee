@@ -35,6 +35,10 @@ pub struct ReviewResult {
     pub unreviewed_paths: Vec<String>,
     #[serde(default)]
     pub policy_profile: Option<String>,
+    /// The effort `--effort` applied to every reviewer for this review. A gate
+    /// check reapplies it, so the recorded configuration is reproduced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_effort: Option<vee_core::ReviewEffort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item: Option<vee_hosting::WorkItemSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1382,6 +1386,7 @@ pub fn run_review_with_provider_and_selection_context(
         reviewer_context,
         unreviewed_paths,
         policy_profile: config.active_policy_profile.clone(),
+        review_effort: config.active_review_effort,
         work_item,
         work_item_token_env,
     };

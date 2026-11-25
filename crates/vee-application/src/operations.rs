@@ -78,6 +78,16 @@ impl Workspace {
 
     /// Repository configuration with the named policy profile and protected local
     /// policy applied, exactly as reviews and gates evaluate it.
+    /// The configuration a saved review ran with: its policy profile and any
+    /// effort override reapplied to the current repository configuration.
+    pub fn saved_review_config(&self, review: &ReviewResult) -> Result<RepositoryConfig> {
+        let mut config = self.effective_config(review.policy_profile.as_deref())?;
+        if let Some(effort) = review.review_effort {
+            config.override_review_effort(effort);
+        }
+        Ok(config)
+    }
+
     pub fn effective_config(&self, policy_profile: Option<&str>) -> Result<RepositoryConfig> {
         let mut config =
             crate::load_repository_config(&self.root).map_err(configuration_failure)?;
@@ -849,7 +859,7 @@ pub fn current_review_config(
     review: &ReviewResult,
     token_env_override: Option<&str>,
 ) -> Result<CurrentReviewConfig> {
-    let config = workspace.effective_config(review.policy_profile.as_deref())?;
+    let config = workspace.saved_review_config(&review)?;
     let current_work_item = match review.work_item.as_ref() {
         None => None,
         Some(_) if config.offline => {
@@ -1346,7 +1356,7 @@ pub fn acceptance_validate(
 ) -> Result<crate::acceptance::AcceptanceValidation> {
     let store = workspace.store()?;
     let review = workspace.saved_review(&*store, review_id)?;
-    let config = workspace.effective_config(review.policy_profile.as_deref())?;
+    let config = workspace.saved_review_config(&review)?;
     let metadata = std::fs::symlink_metadata(mapping)
         .map_err(|error| configuration_failure(format!("cannot read mapping file: {error}")))?;
     if !metadata.file_type().is_file() || metadata.len() > MAX_ACCEPTANCE_MAPPING_BYTES {

@@ -281,6 +281,7 @@ fn legacy_review_without_policy_findings_falls_back_to_display_findings() {
         reviewer_context: vec![],
         unreviewed_paths: Vec::new(),
         policy_profile: None,
+        review_effort: None,
         work_item: None,
         work_item_token_env: None,
     };

@@ -10726,6 +10726,22 @@ fn review_effort_flag_sets_the_runs_per_reviewer_and_is_recorded_in_the_config_d
         "the effort used is part of the recorded configuration"
     );
     assert_eq!(medium["reviewer_outcomes"][0]["status"], "completed");
+    assert_eq!(medium["review_effort"], "medium");
+
+    // A later gate check reproduces the review's configuration, effort included,
+    // so the review is not reported stale.
+    let review_id = medium["review_id"].as_str().unwrap();
+    let checked = vee()
+        .args(["gate", "check", review_id, "--output", "json"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let decision: serde_json::Value = serde_json::from_slice(&checked.stdout)
+        .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&checked.stderr)));
+    assert!(
+        !decision.to_string().contains("stale"),
+        "gate check after --effort: {decision}"
+    );
 
     let rejected = vee()
         .args(["review", "--working-tree", "--effort", "max"])

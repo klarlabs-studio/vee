@@ -1618,6 +1618,7 @@ mod tests {
             reviewer_context: Vec::new(),
             unreviewed_paths: Vec::new(),
             policy_profile: None,
+            review_effort: None,
             work_item: None,
             work_item_token_env: None,
         };
@@ -1968,6 +1969,7 @@ mod tests {
             reviewer_context: Vec::new(),
             unreviewed_paths: Vec::new(),
             policy_profile: None,
+            review_effort: None,
             work_item: None,
             work_item_token_env: None,
         };
@@ -2143,6 +2145,7 @@ mod tests {
             reviewer_context: Vec::new(),
             unreviewed_paths: Vec::new(),
             policy_profile: None,
+            review_effort: None,
             work_item: None,
             work_item_token_env: None,
         };
@@ -2241,6 +2244,7 @@ mod tests {
             reviewer_context: Vec::new(),
             unreviewed_paths: Vec::new(),
             policy_profile: None,
+            review_effort: None,
             work_item: None,
             work_item_token_env: None,
         };
