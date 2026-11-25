@@ -1,0 +1,8 @@
+target
+.git
+.github
+.vee
+web/node_modules
+**/node_modules
+Dockerfile
+.dockerignore

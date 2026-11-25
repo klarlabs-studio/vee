@@ -14,6 +14,8 @@ mod records;
 mod repos;
 pub mod review;
 mod setup;
+
+pub use setup::BEST_RESULTS_GUIDE;
 mod tests_gen;
 pub(crate) mod verification;
 pub(crate) mod work;

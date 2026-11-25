@@ -395,6 +395,19 @@
           "max_input_tokens": { "type": "integer", "minimum": 1024, "maximum": 131072 },
           "estimated_input_tokens": { "type": "integer", "minimum": 0 },
           "input_budget_satisfied": { "type": "boolean" },
+          "exploration": {
+            "type": "object",
+            "description": "What the reviewer read through Vee's read-only snapshot tools (ADR 0017). Absent when exploration is off.",
+            "required": ["status", "tool_calls", "read_bytes", "budget_exhausted"],
+            "properties": {
+              "status": { "enum": ["used", "unused", "cached", "unsupported"] },
+              "tool_calls": { "type": "integer", "minimum": 0 },
+              "read_bytes": { "type": "integer", "minimum": 0 },
+              "budget_exhausted": { "type": "boolean" },
+              "files": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+            },
+            "additionalProperties": false
+          },
           "files": {
             "type": "array",
             "items": {
@@ -421,6 +434,10 @@
         "string",
         "null"
       ]
+    },
+    "review_effort": {
+      "enum": ["low", "medium", "high"],
+      "description": "The effort `vee review --effort` applied to every reviewer; a gate check reapplies it."
     },
     "work_item": {
       "$ref": "work-item-v1.schema.json"

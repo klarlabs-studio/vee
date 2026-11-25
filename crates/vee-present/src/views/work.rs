@@ -54,6 +54,9 @@ impl ToView for FindingTask {
             Some(source) => view.extend(source_view(source)),
             None => view.paragraph(Cell::muted("No source context available.")),
         };
+        if let Some(hunk) = &self.diff_hunk {
+            view = view.section("Change").extend(hunk_view(hunk));
+        }
         if let Some(note) = &self.context_note {
             view = view.note(Tone::Info, Cell::plain(note));
         }
@@ -105,6 +108,35 @@ fn source_view(source: &SourceContext) -> View {
             source.path, source.start_line, source.end_line
         )))
         .table(&["Line", "Source"], rows)
+}
+
+/// A diff hunk as `+`/`-`/` ` rows with the snapshot (or base) line number.
+fn hunk_view(hunk: &vee_application::DiffHunk) -> View {
+    let rows = hunk
+        .lines
+        .iter()
+        .map(|line| {
+            // The +/- marker carries the meaning without color.
+            let marker = match line.kind.as_str() {
+                "added" => "+",
+                "removed" => "-",
+                _ => " ",
+            };
+            let number = line.line.or(line.base_line).map(|n| n.to_string());
+            vec![
+                Cell::muted(number.unwrap_or_default()),
+                Cell::code(format!("{marker} {}", line.text)),
+            ]
+        })
+        .collect();
+    let view = View::new()
+        .paragraph(Cell::code(format!("{} {}", hunk.path, hunk.header)))
+        .table(&["Line", "Change"], rows);
+    if hunk.truncated {
+        view.paragraph(Cell::muted("The hunk was cut to its first 80 lines."))
+    } else {
+        view
+    }
 }
 
 fn impact_view(task: &FindingTask) -> View {

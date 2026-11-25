@@ -63,6 +63,18 @@ pub fn bounded_text_diff(
     current: Option<&[u8]>,
     max_output_bytes: usize,
 ) -> Result<Option<String>, String> {
+    text_diff(baseline, current, max_output_bytes, 40)
+}
+
+/// A unified diff with `context` lines around each change, starting at the
+/// first hunk header; `None` when the output exceeds `max_output_bytes` or the
+/// files are not textual.
+pub fn text_diff(
+    baseline: Option<&[u8]>,
+    current: Option<&[u8]>,
+    max_output_bytes: usize,
+    context: usize,
+) -> Result<Option<String>, String> {
     use std::io::{Read, Write};
     use std::process::{Command, Stdio};
 
@@ -87,7 +99,7 @@ pub fn bounded_text_diff(
             "--no-index",
             "--no-ext-diff",
             "--no-color",
-            "--unified=40",
+            &format!("--unified={context}"),
             "--",
         ])
         .arg(old_file.path())
@@ -237,3 +249,87 @@ mod changed_line_range_tests {
 #[cfg(test)]
 #[path = "tests/source.rs"]
 mod tests;
+
+/// One hunk of a unified diff, as the reviewer saw the change.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiffHunk {
+    pub path: String,
+    /// The `@@ -a,b +c,d @@` header.
+    pub header: String,
+    pub lines: Vec<DiffLine>,
+    /// True when the hunk had more lines than are returned.
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiffLine {
+    /// `context`, `added`, or `removed`.
+    pub kind: String,
+    /// Line in the reviewed snapshot; absent for a removed line.
+    pub line: Option<u32>,
+    /// Line in the base; absent for an added line.
+    pub base_line: Option<u32>,
+    pub text: String,
+}
+
+/// Lines a hunk returns at most.
+const MAX_HUNK_LINES: usize = 80;
+
+/// The hunk of `diff` whose snapshot side covers `line`, from a unified diff
+/// such as [`text_diff`] returns. `None` when no hunk covers the line, which
+/// means the flagged line is unchanged context outside every hunk.
+pub fn hunk_at_line(path: &str, diff: &str, line: u32) -> Option<DiffHunk> {
+    fn range(spec: &str) -> Option<(u32, u32)> {
+        let (start, count) = spec.split_once(',').unwrap_or((spec, "1"));
+        Some((start.parse().ok()?, count.parse().ok()?))
+    }
+    let mut lines = diff.lines().peekable();
+    while let Some(header) = lines.next() {
+        let Some(rest) = header.strip_prefix("@@ -") else {
+            continue;
+        };
+        let mut parts = rest.split(' ');
+        let (base_start, _) = range(parts.next()?)?;
+        let (start, count) = range(parts.next()?.strip_prefix('+')?)?;
+        let covers = line >= start && line < start + count.max(1);
+        let mut hunk = DiffHunk {
+            path: path.to_owned(),
+            header: header.to_owned(),
+            lines: Vec::new(),
+            truncated: false,
+        };
+        let (mut current, mut base) = (start, base_start);
+        while let Some(body) = lines.next_if(|next| !next.starts_with("@@ ")) {
+            if !covers {
+                continue;
+            }
+            let (kind, text, line, base_line) = match body.chars().next() {
+                Some('+') => ("added", &body[1..], Some(current), None),
+                Some('-') => ("removed", &body[1..], None, Some(base)),
+                Some(' ') => ("context", &body[1..], Some(current), Some(base)),
+                // "\ No newline at end of file" and similar markers.
+                _ => continue,
+            };
+            if kind != "removed" {
+                current += 1;
+            }
+            if kind != "added" {
+                base += 1;
+            }
+            if hunk.lines.len() == MAX_HUNK_LINES {
+                hunk.truncated = true;
+                continue;
+            }
+            hunk.lines.push(DiffLine {
+                kind: kind.into(),
+                line,
+                base_line,
+                text: text.to_owned(),
+            });
+        }
+        if covers {
+            return Some(hunk);
+        }
+    }
+    None
+}

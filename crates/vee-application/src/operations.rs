@@ -76,6 +76,16 @@ impl Workspace {
             .map_err(anyhow::Error::msg)
     }
 
+    /// The configuration a saved review ran with: its policy profile and any
+    /// effort override reapplied to the current repository configuration.
+    pub fn saved_review_config(&self, review: &ReviewResult) -> Result<RepositoryConfig> {
+        let mut config = self.effective_config(review.policy_profile.as_deref())?;
+        if let Some(effort) = review.review_effort {
+            config.override_review_effort(effort);
+        }
+        Ok(config)
+    }
+
     /// Repository configuration with the named policy profile and protected local
     /// policy applied, exactly as reviews and gates evaluate it.
     pub fn effective_config(&self, policy_profile: Option<&str>) -> Result<RepositoryConfig> {
@@ -237,6 +247,8 @@ pub struct ReviewRequest<'a> {
     pub work_item: Option<&'a str>,
     /// Hosting settings for this review; unset values come from `.vee.yaml`.
     pub hosting: crate::work_items::HostingOverrides,
+    /// Receives live reviewer progress while providers run.
+    pub progress: Option<&'a dyn crate::ReviewProgressSink>,
 }
 
 /// Capture the requested scope, run the configured reviewers, and persist the review.
@@ -280,6 +292,7 @@ pub fn review(
             cancellation,
             work_item,
             work_item_token_env: Some(hosting.token_env),
+            progress: request.progress,
         },
     )
     .map_err(anyhow::Error::msg)
@@ -384,6 +397,12 @@ pub struct ReviewDetail {
     pub review: ReviewResult,
     pub findings: Vec<FindingRecord>,
     pub impact: crate::ImpactAssessment,
+    /// Change risk, available while the checkout matches the reviewed snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk: Option<crate::ChangeRisk>,
+    /// Whether the checkout still matches the reviewed snapshot; impact and
+    /// risk are only computed while it does.
+    pub snapshot_current: bool,
     /// The newest later complete review of the same scope and base, when one exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<Supersession>,
@@ -467,6 +486,14 @@ fn later_review_of_same_base(
 /// impact assessment recomputed from the current checkout when the checkout
 /// still matches the review's snapshot.
 pub fn review_detail(workspace: &Workspace, review_id: &str) -> Result<ReviewDetail> {
+    review_detail_and_currency(workspace, review_id).map(|(detail, _)| detail)
+}
+
+/// The review detail, and whether the checkout still matches its snapshot.
+fn review_detail_and_currency(
+    workspace: &Workspace,
+    review_id: &str,
+) -> Result<(ReviewDetail, bool)> {
     let store = workspace.store()?;
     let mut review = workspace.saved_review(&*store, review_id)?;
     if let Some(latest_gate) = store
@@ -486,24 +513,34 @@ pub fn review_detail(workspace: &Workspace, review_id: &str) -> Result<ReviewDet
     let findings = store
         .list_findings(None, None, Some(review_id))
         .map_err(anyhow::Error::msg)?;
-    let impact = current_impact(workspace.root(), &review);
+    let (impact, current) = current_impact(workspace.root(), &review);
+    // Risk reads the snapshot's files, so it needs the same live checkout.
+    let risk = current
+        .then(|| crate::assess_change_risk(workspace.root(), &review.change_set, &impact).ok())
+        .flatten();
     let superseded_by = later_review_of_same_base(workspace, &*store, &review)?;
-    Ok(ReviewDetail {
-        review,
-        findings,
-        impact,
-        superseded_by,
-    })
+    Ok((
+        ReviewDetail {
+            review,
+            findings,
+            impact,
+            risk,
+            snapshot_current: current,
+            superseded_by,
+        },
+        current,
+    ))
 }
 
 /// Impact for a saved review. Impact is computed from source, so it is only
 /// available while the checkout still matches the reviewed snapshot; otherwise
 /// the assessment is empty and says why.
-fn current_impact(root: &Path, review: &ReviewResult) -> crate::ImpactAssessment {
+/// The flag is true when the impact was computed from a checkout matching the snapshot.
+fn current_impact(root: &Path, review: &ReviewResult) -> (crate::ImpactAssessment, bool) {
     let limitation = match crate::capture_current_change_set(root, &review.change_set) {
         Ok(current) if current.digest == review.snapshot_id => {
             match crate::analyze_impact(root, &review.change_set) {
-                Ok(impact) => return impact,
+                Ok(impact) => return (impact, true),
                 Err(error) => {
                     format!("saved review is available, but impact analysis failed: {error}")
                 }
@@ -512,8 +549,8 @@ fn current_impact(root: &Path, review: &ReviewResult) -> crate::ImpactAssessment
         Ok(_) => "current checkout differs from saved review snapshot; impact is unavailable for this historical review".into(),
         Err(error) => format!("saved review is available, but impact could not be recomputed from the current checkout: {error}"),
     };
-    crate::ImpactAssessment {
-        schema_version: 3,
+    let unavailable = crate::ImpactAssessment {
+        schema_version: crate::impact::IMPACT_SCHEMA_VERSION,
         snapshot_id: review.snapshot_id.clone(),
         coverage_complete: false,
         analyzers: Vec::new(),
@@ -527,7 +564,8 @@ fn current_impact(root: &Path, review: &ReviewResult) -> crate::ImpactAssessment
         groups: Vec::new(),
         paths: Vec::new(),
         limitations: vec![limitation],
-    }
+    };
+    (unavailable, false)
 }
 
 /// `local-review-analytics-v10`
@@ -821,7 +859,7 @@ pub fn current_review_config(
     review: &ReviewResult,
     token_env_override: Option<&str>,
 ) -> Result<CurrentReviewConfig> {
-    let config = workspace.effective_config(review.policy_profile.as_deref())?;
+    let config = workspace.saved_review_config(review)?;
     let current_work_item = match review.work_item.as_ref() {
         None => None,
         Some(_) if config.offline => {
@@ -869,6 +907,40 @@ pub struct GateReevaluation {
     pub review: ReviewResult,
     pub current: vee_core::ChangeSet,
     pub decision: vee_core::GateDecision,
+}
+
+/// The gate for a saved review as of now (current snapshot, configuration,
+/// and verification runs), without recording a decision.
+fn current_gate(workspace: &Workspace, review: &ReviewResult) -> Result<vee_core::GateDecision> {
+    let store = workspace.store()?;
+    let current = crate::capture_current_change_set(workspace.root(), &review.change_set)
+        .map_err(anyhow::Error::msg)?;
+    let CurrentReviewConfig {
+        config,
+        digest: config_digest,
+        ..
+    } = current_review_config(workspace, &*store, review, None)?;
+    let verification_runs = store
+        .verifications_for_snapshot(&current.digest)
+        .map_err(anyhow::Error::msg)?;
+    crate::evaluate_gate(
+        &*store,
+        crate::GateEvaluation {
+            review_id: &review.review_id,
+            reviewed_snapshot_id: &review.snapshot_id,
+            current: &current,
+            repository_root: workspace.root(),
+            reviewed_config_digest: &review.effective_config_digest,
+            effective_config_digest: &config_digest,
+            config: &config,
+            findings: &review.findings,
+            policy_findings: review.policy_findings.as_deref(),
+            reviewer_outcomes: &review.reviewer_outcomes,
+            analysis_complete: review.analysis_complete,
+            verification_runs: &verification_runs,
+        },
+    )
+    .map_err(anyhow::Error::msg)
 }
 
 pub fn reevaluate_gate(
@@ -1100,6 +1172,158 @@ pub fn impact(workspace: &Workspace, target: ChangeTarget) -> Result<crate::Impa
     crate::analyze_impact(workspace.root(), &change_set).map_err(anyhow::Error::msg)
 }
 
+/// `approval-eligibility-v1`: whether a saved review's change may be approved
+/// without a human, with every guard stage and its reason.
+pub fn approval_eligibility(
+    workspace: &Workspace,
+    review_id: &str,
+) -> Result<crate::ApprovalEligibility> {
+    let config = crate::load_repository_config(workspace.root()).map_err(configuration_failure)?;
+    let (mut detail, current) = review_detail_and_currency(workspace, review_id)?;
+    if let Ok(gate) = current_gate(workspace, &detail.review) {
+        detail.review.gate = gate;
+    }
+    Ok(crate::evaluate_approval(
+        workspace.root(),
+        &config.approval,
+        &detail.review,
+        current,
+        detail.risk.as_ref(),
+    ))
+}
+
+/// `review-session-v1`: several saved reviews read together, each with its
+/// own gate, risk, open findings, and approval eligibility.
+pub fn review_session(
+    workspace: &Workspace,
+    references: &[String],
+    paths: RepositoryPaths,
+) -> Result<crate::ReviewSession> {
+    if references.is_empty() || references.len() > crate::MAX_SESSION_REVIEWS {
+        return Err(usage_failure(format!(
+            "a review session combines 1 to {} reviews",
+            crate::MAX_SESSION_REVIEWS
+        )));
+    }
+    // Resolve every reference before reading any review, so a bad path or a
+    // repeat fails the whole request.
+    let mut resolved = Vec::with_capacity(references.len());
+    let mut seen = std::collections::HashSet::new();
+    for reference in references {
+        let (repository, review_id) = match reference.rsplit_once(':') {
+            Some((repository, review_id)) => (Some(repository), review_id),
+            None => (None, reference.as_str()),
+        };
+        if review_id.is_empty() {
+            return Err(usage_failure(format!(
+                "review reference `{reference}` has no review ID"
+            )));
+        }
+        let root = match repository {
+            Some(path) => resolve_repository_path(workspace.root(), path, paths)?,
+            None => workspace.root().to_path_buf(),
+        };
+        // A repeated review would be counted twice in the session totals.
+        let identity = (
+            vee_core::paths::CanonicalPath::canonical(root.as_path())?,
+            review_id.to_owned(),
+        );
+        if !seen.insert(identity) {
+            return Err(usage_failure(format!(
+                "review {reference} is listed more than once"
+            )));
+        }
+        resolved.push((repository.map(str::to_owned), root, review_id.to_owned()));
+    }
+    let mut lines = Vec::with_capacity(resolved.len());
+    for (repository, root, review_id) in resolved {
+        // Each change is read from its own repository: its store, its
+        // configuration, and its approval guards.
+        let workspace = Workspace::new(root, workspace.stores.clone());
+        let workspace = &workspace;
+        let config =
+            crate::load_repository_config(workspace.root()).map_err(configuration_failure)?;
+        let (mut detail, current) = review_detail_and_currency(workspace, &review_id)?;
+        // Without the inputs to re-evaluate (for example a work item whose
+        // token is not set), the last recorded decision stands.
+        if let Ok(gate) = current_gate(workspace, &detail.review) {
+            detail.review.gate = gate;
+        }
+        let approval = crate::evaluate_approval(
+            workspace.root(),
+            &config.approval,
+            &detail.review,
+            current,
+            detail.risk.as_ref(),
+        );
+        let mut line = crate::session_review(
+            &detail.review,
+            &detail.findings,
+            detail.risk.as_ref(),
+            &approval,
+        );
+        line.repository = repository;
+        lines.push(line);
+    }
+    Ok(crate::review_session(lines))
+}
+
+/// How a transport may name another repository's checkout. Paths are always
+/// relative to this repository's root; MCP keeps them beneath it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepositoryPaths {
+    /// Any checkout the local user names, such as a sibling `../api`.
+    Relative,
+    /// Only checkouts beneath this repository's root, without `.` or `..`.
+    Confined,
+}
+
+/// Resolve a repository path to the root of a Git checkout.
+fn resolve_repository_path(root: &Path, path: &str, paths: RepositoryPaths) -> Result<PathBuf> {
+    match paths {
+        RepositoryPaths::Confined => confine_repository_path(root, path, "repository"),
+        RepositoryPaths::Relative => {
+            use vee_core::paths::CanonicalPath as _;
+            let relative = Path::new(path);
+            if path.is_empty() || relative.is_absolute() {
+                return Err(usage_failure(format!(
+                    "repository path `{path}` must be relative to this repository's root"
+                )));
+            }
+            let resolved = root.join(relative).canonical().map_err(|error| {
+                usage_failure(format!("cannot resolve repository path `{path}`: {error}"))
+            })?;
+            ensure_checkout_root(&resolved, path, "repository")?;
+            Ok(resolved)
+        }
+    }
+}
+
+/// Fails unless `resolved` is a directory at the root of a Git checkout.
+fn ensure_checkout_root(resolved: &Path, path: &str, kind: &str) -> Result<()> {
+    use vee_core::paths::CanonicalPath as _;
+    if !resolved.is_dir() {
+        return Err(usage_failure(format!(
+            "{kind} path `{path}` is not a directory"
+        )));
+    }
+    let git_root = vee_git::repository_root(resolved).map_err(anyhow::Error::msg)?;
+    if git_root.canonical()? != resolved {
+        return Err(usage_failure(format!(
+            "{kind} path `{path}` must name a Git checkout root"
+        )));
+    }
+    Ok(())
+}
+
+/// `change-risk-v1`: the change's risk tier with every measured factor.
+pub fn change_risk(workspace: &Workspace, target: ChangeTarget) -> Result<crate::ChangeRisk> {
+    let change_set = target.change_set(workspace)?;
+    let impact =
+        crate::analyze_impact(workspace.root(), &change_set).map_err(anyhow::Error::msg)?;
+    crate::assess_change_risk(workspace.root(), &change_set, &impact).map_err(anyhow::Error::msg)
+}
+
 /// Trace saved work-item criteria to the review's changes. Impact candidates are
 /// included only when the live source still matches the review; otherwise the report
 /// records why they are missing.
@@ -1132,7 +1356,7 @@ pub fn acceptance_validate(
 ) -> Result<crate::acceptance::AcceptanceValidation> {
     let store = workspace.store()?;
     let review = workspace.saved_review(&*store, review_id)?;
-    let config = workspace.effective_config(review.policy_profile.as_deref())?;
+    let config = workspace.saved_review_config(&review)?;
     let metadata = std::fs::symlink_metadata(mapping)
         .map_err(|error| configuration_failure(format!("cannot read mapping file: {error}")))?;
     if !metadata.file_type().is_file() || metadata.len() > MAX_ACCEPTANCE_MAPPING_BYTES {
@@ -1569,10 +1793,16 @@ pub fn doctor(workspace: &Workspace) -> Result<crate::setup::DoctorReport> {
 
 /// Create a reviewer setup from the detected backends, or configure this machine
 /// for a repository that already has one.
+/// This machine's configured provider and review effort, for guided setup.
+pub fn machine_setup() -> Result<crate::setup::MachineSetup> {
+    crate::setup::machine_setup(&user_config_location()?).map_err(configuration_failure)
+}
+
 pub fn init(
     workspace: &Workspace,
     candidate_id: Option<&str>,
     model: Option<&str>,
+    effort: Option<vee_core::ReviewEffort>,
 ) -> Result<crate::setup::InitReport> {
     let user_config = user_config_location()?;
     crate::setup::init(
@@ -1582,6 +1812,7 @@ pub fn init(
         crate::setup::InitRequest {
             candidate_id,
             model,
+            effort,
         },
     )
     .map_err(|error| match error {
@@ -2036,45 +2267,39 @@ pub fn confine_consumers(workspace: &Workspace, supplied: &[String]) -> Result<V
             "consumer_paths must contain between 1 and {MAX_CROSS_REPOSITORY_CONSUMERS} repository paths"
         )));
     }
-    use vee_core::paths::CanonicalPath as _;
-    let canonical = |path: &Path| path.canonical();
-    let root = canonical(workspace.root())?;
     supplied
         .iter()
-        .map(|path| {
-            let relative = Path::new(path);
-            if relative.is_absolute()
-                || relative.as_os_str().is_empty()
-                || relative
-                    .components()
-                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
-            {
-                return Err(usage_failure(format!(
-                    "consumer path `{path}` must be a relative path without `.` or `..` components"
-                )));
-            }
-            let resolved = canonical(&root.join(relative)).map_err(|error| {
-                usage_failure(format!("cannot resolve consumer path `{path}`: {error}"))
-            })?;
-            if !resolved.starts_with(&root) {
-                return Err(usage_failure(format!(
-                    "consumer path `{path}` escapes the configured repository root"
-                )));
-            }
-            if !resolved.is_dir() {
-                return Err(usage_failure(format!(
-                    "consumer path `{path}` is not a directory"
-                )));
-            }
-            let git_root = vee_git::repository_root(&resolved).map_err(anyhow::Error::msg)?;
-            if canonical(&git_root)? != resolved {
-                return Err(usage_failure(format!(
-                    "consumer path `{path}` must name a Git checkout root"
-                )));
-            }
-            Ok(resolved)
-        })
+        .map(|path| confine_repository_path(workspace.root(), path, "consumer"))
         .collect()
+}
+
+/// Resolve `path` beneath `root` to a Git checkout root, rejecting absolute
+/// paths, `.` and `..` components, and anything that leaves `root`.
+fn confine_repository_path(root: &Path, path: &str, kind: &str) -> Result<PathBuf> {
+    use vee_core::paths::CanonicalPath as _;
+    let root = root.canonical()?;
+    let relative = Path::new(path);
+    if relative.is_absolute()
+        || relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(usage_failure(format!(
+            "{kind} path `{path}` must be a relative path without `.` or `..` components"
+        )));
+    }
+    let resolved = root
+        .join(relative)
+        .canonical()
+        .map_err(|error| usage_failure(format!("cannot resolve {kind} path `{path}`: {error}")))?;
+    if !resolved.starts_with(&root) {
+        return Err(usage_failure(format!(
+            "{kind} path `{path}` escapes the configured repository root"
+        )));
+    }
+    ensure_checkout_root(&resolved, path, kind)?;
+    Ok(resolved)
 }
 
 /// What to capture in a cross-repository change package.
@@ -2153,4 +2378,39 @@ pub fn change_package(
 /// The direct package dependencies between explicitly selected local checkouts.
 pub fn repository_map(repositories: &[PathBuf]) -> Result<crate::repository_map::RepositoryMap> {
     crate::repository_map::build(repositories).map_err(anyhow::Error::msg)
+}
+
+#[cfg(test)]
+mod repository_path_tests {
+    use super::*;
+
+    #[test]
+    fn confined_repository_paths_stay_beneath_the_root_and_name_a_checkout() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("app");
+        let init = |path: &Path| {
+            std::fs::create_dir_all(path).unwrap();
+            assert!(std::process::Command::new("git")
+                .args(["init", "-q"])
+                .arg(path)
+                .status()
+                .unwrap()
+                .success());
+        };
+        init(&root);
+        init(&root.join("api"));
+        init(&directory.path().join("sibling"));
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+
+        let confined = |path: &str| resolve_repository_path(&root, path, RepositoryPaths::Confined);
+        assert!(confined("api").is_ok());
+        for rejected in ["../sibling", "./api", "/tmp", "docs", ""] {
+            assert!(confined(rejected).is_err(), "{rejected}");
+        }
+        // The CLI may name a sibling checkout, but still only a checkout root.
+        let relative = |path: &str| resolve_repository_path(&root, path, RepositoryPaths::Relative);
+        assert!(relative("../sibling").is_ok());
+        assert!(relative("docs").is_err());
+        assert!(relative("/tmp").is_err());
+    }
 }
