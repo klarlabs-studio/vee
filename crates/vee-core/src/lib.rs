@@ -2657,6 +2657,19 @@ policy_profiles:
     }
 
     #[test]
+    fn a_cli_provider_may_not_allowlist_pwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".vee.yaml");
+        std::fs::write(
+            &file,
+            "version: 1\nproviders:\n  p: { kind: cli, executable: tool, env_allowlist: [HOME, PWD] }\n",
+        )
+        .unwrap();
+        let error = RepositoryConfig::load(&file).unwrap_err();
+        assert!(error.contains("remove PWD"), "{error}");
+    }
+
+    #[test]
     fn hosting_defaults_validate_provider_endpoints_and_environment_names() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join(".vee.yaml");
@@ -4085,6 +4098,13 @@ impl RepositoryConfig {
             }
             resolve_environment_allowlist(&provider.env_allowlist, |_| None)
                 .map_err(|error| format!("provider {id}: {error}"))?;
+            // Vee sets PWD to the provider's own working directory; an
+            // allowlisted value would enter the digests but never reach it.
+            if provider.env_allowlist.iter().any(|name| name == "PWD") {
+                return Err(format!(
+                    "provider {id}: remove PWD from env_allowlist; Vee sets it to the provider's working directory"
+                ));
+            }
             if provider.kind == ProviderKind::Cli && provider.model.is_some() {
                 return Err(format!(
                     "provider {id} can only set model with a provider-specific adapter"
