@@ -1,0 +1,10 @@
+{
+  "name": "vee",
+  "version": "0.1.0",
+  "description": "Local, bring-your-own-model code review: evidence-backed findings, change impact and risk, and a deterministic, replayable merge gate.",
+  "author": { "name": "Klarlabs", "url": "https://github.com/klarlabs-studio" },
+  "homepage": "https://github.com/klarlabs-studio/vee",
+  "repository": "https://github.com/klarlabs-studio/vee",
+  "license": "MIT",
+  "keywords": ["code-review", "mcp", "quality-gate", "impact-analysis", "local-first"]
+}

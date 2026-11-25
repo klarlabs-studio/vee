@@ -20,6 +20,10 @@ pub struct FindingTask {
     pub snapshot_current: bool,
     pub finding: FindingRecord,
     pub source_context: Option<SourceContext>,
+    /// The diff hunk covering the flagged line, when the line is part of the
+    /// change; absent for unchanged lines, file-level findings, and files the
+    /// change did not touch.
+    pub diff_hunk: Option<crate::DiffHunk>,
     pub context_note: Option<String>,
     pub impact_paths: Vec<crate::ImpactEdge>,
     pub impact_coverage_complete: Option<bool>,
@@ -96,7 +100,7 @@ pub fn build_package(
         .collect::<Vec<_>>()
         .join("\0");
     Ok(FindingWorkPackage {
-        schema_version: 2,
+        schema_version: 3,
         package_id: format!("finding-package:{}", vee_core::digest(identity.as_bytes())),
         review_id: first.review_id.clone(),
         snapshot_id: first.snapshot_id.clone(),
@@ -178,6 +182,12 @@ pub fn build(
             "Finding occurrence history was capped to the latest 100 records.".into(),
         );
     }
+    let diff_hunk = diff_hunk(
+        root,
+        &review.change_set,
+        record.finding.path.as_deref(),
+        record.finding.line,
+    );
     let (impact_paths, impact_coverage_complete, mut impact_note) =
         impact_context(root, &review.change_set, record.finding.path.as_deref());
     if let Some(note) = impact_note.take() {
@@ -219,7 +229,7 @@ pub fn build(
             .unwrap_or("")
     );
     Ok(FindingTask {
-        schema_version: 3,
+        schema_version: 4,
         task_id: format!(
             "finding-task:{}",
             vee_core::digest(task_identity.as_bytes())
@@ -229,6 +239,7 @@ pub fn build(
         snapshot_current: current,
         finding: record,
         source_context,
+        diff_hunk,
         context_note,
         impact_paths,
         impact_coverage_complete,
@@ -310,16 +321,26 @@ fn impact_context(
             let mut paths: Vec<_> = assessment
                 .paths
                 .into_iter()
+                // Finding tasks carry code references with a source line;
+                // history-only co-change leads stay in the impact report.
+                .filter(|edge| edge.co_change.is_none())
                 .filter(|edge| edge.source_path == path || edge.affected_path == path)
                 .take(MAX_IMPACT_PATHS + 1)
                 .collect();
             let capped = paths.len() > MAX_IMPACT_PATHS;
             paths.truncate(MAX_IMPACT_PATHS);
-            let mut limitations = assessment.limitations;
-            if capped {
-                limitations.push("Related impact paths were capped at 50.".into());
+            // The analyzers' general limitations belong to the impact report;
+            // repeating them in every task buried the notes about this finding.
+            let mut notes = Vec::new();
+            if !assessment.coverage_complete {
+                notes.push(
+                    "Impact coverage is incomplete for this snapshot; `vee impact` lists why.",
+                );
             }
-            let note = (!limitations.is_empty()).then(|| limitations.join(" "));
+            if capped {
+                notes.push("Related impact paths were capped at 50.");
+            }
+            let note = (!notes.is_empty()).then(|| notes.join(" "));
             (paths, Some(assessment.coverage_complete), note)
         }
         Err(error) => (
@@ -489,6 +510,37 @@ fn source_context(
         }),
         context_notes(kept_copy, line.is_none()),
     )
+}
+
+/// The hunk of the change that covers a finding's line, diffed between the
+/// snapshot's base and its reviewed source with three lines of context.
+fn diff_hunk(
+    root: &Path,
+    change_set: &vee_core::ChangeSet,
+    path: Option<&str>,
+    line: Option<u32>,
+) -> Option<crate::DiffHunk> {
+    let (path, line) = (path?, line?);
+    if !change_set.files.iter().any(|file| file.path == path) {
+        return None;
+    }
+    let relative = Path::new(path);
+    let current = vee_git::read_snapshot_tree_file(root, change_set, relative)
+        .ok()
+        .flatten()
+        .or_else(|| kept_snapshot_source(root, change_set, relative));
+    let base = vee_git::read_snapshot_base_file(root, change_set, relative)
+        .ok()
+        .flatten();
+    let diff = crate::text_diff(
+        base.as_deref(),
+        current.as_deref(),
+        MAX_CONTEXT_BYTES * 8,
+        3,
+    )
+    .ok()
+    .flatten()?;
+    crate::hunk_at_line(path, &diff, line)
 }
 
 fn context_notes(kept_copy: bool, file_level: bool) -> Option<String> {
