@@ -1,0 +1,113 @@
+{
+  "benchmark": "local_review_plumbing",
+  "environment": {
+    "os": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "python": "3.15.2",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)"
+  },
+  "limitations": [
+    "Measures local CLI, Git, storage, and fake-provider process overhead only.",
+    "Does not measure AI quality, network latency, token use, or provider cost.",
+    "Compare results only on equivalent hardware and tool versions."
+  ],
+  "matrix": [
+    {
+      "changed_files": 5,
+      "repo_files": 100
+    },
+    {
+      "changed_files": 25,
+      "repo_files": 1000
+    },
+    {
+      "changed_files": 100,
+      "repo_files": 5000
+    }
+  ],
+  "provider_mode": "deterministic_local_fake_no_network",
+  "schema_version": 1,
+  "strata": {
+    "1000_repo_files_25_changed": {
+      "repository": {
+        "changed_files_observed": 25,
+        "changed_files_requested": 25,
+        "changed_lines_estimated": 2500,
+        "lines_per_changed_file": 100,
+        "tracked_files": 1003
+      },
+      "runs": {
+        "latency_seconds": {
+          "max": 3.1184615830061375,
+          "median": 2.7183985420051613,
+          "min": 2.6271870830023545,
+          "p95_nearest_rank": 3.1184615830061375,
+          "samples": [
+            2.6271870830023545,
+            2.797654458001489,
+            2.7183985420051613,
+            2.6348499590021675,
+            3.1184615830061375
+          ]
+        },
+        "measured": 5,
+        "warmups": 1
+      }
+    },
+    "100_repo_files_5_changed": {
+      "repository": {
+        "changed_files_observed": 5,
+        "changed_files_requested": 5,
+        "changed_lines_estimated": 500,
+        "lines_per_changed_file": 100,
+        "tracked_files": 103
+      },
+      "runs": {
+        "latency_seconds": {
+          "max": 0.5348492499979329,
+          "median": 0.49608795899985125,
+          "min": 0.45801929099980043,
+          "p95_nearest_rank": 0.5348492499979329,
+          "samples": [
+            0.49608795899985125,
+            0.5348492499979329,
+            0.5223955830006162,
+            0.47066783299669623,
+            0.45801929099980043
+          ]
+        },
+        "measured": 5,
+        "warmups": 1
+      }
+    },
+    "5000_repo_files_100_changed": {
+      "repository": {
+        "changed_files_observed": 100,
+        "changed_files_requested": 100,
+        "changed_lines_estimated": 10000,
+        "lines_per_changed_file": 100,
+        "tracked_files": 5003
+      },
+      "runs": {
+        "latency_seconds": {
+          "max": 13.770932500003255,
+          "median": 10.862064291002753,
+          "min": 9.802636000000348,
+          "p95_nearest_rank": 13.770932500003255,
+          "samples": [
+            9.802636000000348,
+            10.862064291002753,
+            12.219799666003382,
+            13.770932500003255,
+            10.555537583000842
+          ]
+        },
+        "measured": 5,
+        "warmups": 1
+      }
+    }
+  },
+  "vee": {
+    "binary_sha256": "516be8929e114092b1e6258ecb5b8982dd7c2e29cc9228bb487a1acaf4f18d9b",
+    "version": "vee 0.1.0"
+  }
+}

@@ -4,7 +4,7 @@ All notable changes to Vee are recorded here. Vee follows
 [Semantic Versioning](https://semver.org/); before 1.0, minor versions may
 change configuration and output contracts.
 
-## 0.1.0 — unreleased
+## 0.1.0 — 2026-11-25
 
 First release. Install a release binary with the shell or PowerShell
 installer attached to the release, use the `ghcr.io/klarlabs-studio/vee`
