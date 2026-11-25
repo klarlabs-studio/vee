@@ -739,7 +739,27 @@ fn ensure_publishable(root: &Path, reviewed: &crate::ReviewResult) -> Result<()>
 /// The remote pull request must be open and at exactly the reviewed commits.
 /// Returns the reviewed base and head, captured from local Git, which are the
 /// values that reach `git` as arguments.
+fn reviewed_base_matches(
+    root: &Path,
+    reviewed_base: Option<&str>,
+    base_oid: &str,
+    head_oid: &str,
+) -> bool {
+    match reviewed_base {
+        None => false,
+        Some(reviewed) => {
+            reviewed == base_oid
+                || vee_git::merge_base_of(root, base_oid, head_oid).as_deref() == Some(reviewed)
+        }
+    }
+}
+
+/// The review must cover the pull request's head, from the PR's base. A host
+/// may report the base branch's tip (GitHub) rather than the merge base Vee
+/// reviews from; the review still matches when its base is the local merge
+/// base of that tip and the head.
 fn ensure_reviewed_commits(
+    root: &Path,
     reviewed: &crate::ReviewResult,
     state: vee_hosting::PullRequestState,
     base_oid: &str,
@@ -754,7 +774,7 @@ fn ensure_reviewed_commits(
         "reviewed head does not match the current pull request head; rerun Vee against the PR head"
     );
     anyhow::ensure!(
-        reviewed.change_set.base_oid.as_deref() == Some(base_oid),
+        reviewed_base_matches(root, reviewed.change_set.base_oid.as_deref(), base_oid, head_oid),
         "reviewed base does not match the current pull request base; rerun Vee against the current PR diff"
     );
     Ok((
@@ -820,8 +840,13 @@ fn publish_to_azure_devops(
     let remote =
         vee_hosting::PullRequestContextProvider::get_pull_request_context(&provider, pull_request)
             .map_err(anyhow::Error::msg)?;
-    let (base, head) =
-        ensure_reviewed_commits(reviewed, remote.state, &remote.base_oid, &remote.head_oid)?;
+    let (base, head) = ensure_reviewed_commits(
+        root,
+        reviewed,
+        remote.state,
+        &remote.base_oid,
+        &remote.head_oid,
+    )?;
     let mut threads = Vec::new();
     for finding in &reviewed.findings {
         let Some((path, line)) = crate::publication::thread_location(finding) else {
@@ -977,8 +1002,13 @@ fn publish_to_provider(
     let remote = provider
         .get_pull_request(pull_request)
         .map_err(anyhow::Error::msg)?;
-    let (base, head) =
-        ensure_reviewed_commits(reviewed, remote.state, &remote.base_oid, &remote.head_oid)?;
+    let (base, head) = ensure_reviewed_commits(
+        root,
+        reviewed,
+        remote.state,
+        &remote.base_oid,
+        &remote.head_oid,
+    )?;
     let changed = provider
         .list_changed_files(pull_request, &remote.revision)
         .map_err(anyhow::Error::msg)?;
@@ -1058,5 +1088,59 @@ fn published_review(reviewed: &crate::ReviewResult) -> crate::publication::Publi
         review_id: &reviewed.review_id,
         snapshot_id: &reviewed.snapshot_id,
         findings: &reviewed.findings,
+    }
+}
+
+#[cfg(test)]
+mod reviewed_commit_tests {
+    use super::*;
+
+    fn git(root: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args([
+                "-c",
+                "user.email=vee@example.invalid",
+                "-c",
+                "user.name=Vee",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    #[test]
+    fn a_review_from_the_merge_base_matches_a_pr_whose_base_branch_moved_on() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "base"]);
+        let fork_point = git(root, &["rev-parse", "HEAD"]);
+        git(root, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(root.join("b.txt"), "b\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "feature"]);
+        let head = git(root, &["rev-parse", "HEAD"]);
+        git(root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("c.txt"), "c\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "main moved"]);
+        let base_tip = git(root, &["rev-parse", "HEAD"]);
+
+        let matches =
+            |reviewed: &str| reviewed_base_matches(root, Some(reviewed), &base_tip, &head);
+        assert!(matches(&fork_point), "the merge base matches");
+        assert!(matches(&base_tip), "the reported base matches");
+        assert!(!matches(&head), "another commit does not");
+        assert!(!reviewed_base_matches(root, None, &base_tip, &head));
     }
 }
