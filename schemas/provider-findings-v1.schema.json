@@ -13,9 +13,9 @@
         "required": ["category", "severity", "rationale"],
         "properties": {
           "category": {"type": "string", "minLength": 1},
-          "severity": {"enum": ["critical", "high", "medium", "low", "info"]},
+          "severity": {"enum": ["critical", "high", "medium", "low", "info"], "description": "The consequence of the defect, not confidence or fix size: critical for a security breach, data loss or corruption; high for a wrong result, crash or broken contract on a normal path; medium for one that needs a specific but realistic input, state or timing; low only for a minor effect such as a misleading message. A defect that causes wrong behavior is at least medium."},
           "confidence": {"type": ["integer", "null"], "minimum": 0, "maximum": 100},
-          "rationale": {"type": "string", "minLength": 1},
+          "rationale": {"type": "string", "minLength": 1, "description": "One defect. The first sentence states what goes wrong and when, naming the responsible code; at most two further sentences give the triggering input or state and the consequence."},
           "path": {"type": ["string", "null"]},
           "line": {"type": ["integer", "null"], "minimum": 1},
           "rule_attributions": {

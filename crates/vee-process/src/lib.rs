@@ -499,6 +499,10 @@ pub fn execute_provider_reporting_exit(
         .env_clear()
         .envs(platform_environment())
         .envs(request.environment.iter().cloned())
+        // A shell would set PWD to the directory it starts a program in.
+        // Without it, Claude Code ignores the MCP tools it is given, so set
+        // it to the real working directory, after anything a request passes.
+        .env("PWD", isolated_directory.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -763,6 +767,7 @@ mod tests {
             max_output_tokens: None,
             environment: vec![("VEE_TEST_ALLOWED".into(), "present".into())],
             sample: None,
+            exploration: None,
         };
         let _result = execute_provider(&ok).unwrap();
         assert!(!working_dir.path().join("provider-relative-file").exists());
@@ -779,10 +784,47 @@ mod tests {
             environment: vec![],
             timeout_seconds: 2,
             sample: None,
+            exploration: None,
         };
         assert!(execute_provider(&too_small)
             .unwrap_err()
             .contains("output exceeded"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_children_see_their_working_directory_in_pwd() {
+        // Reviewer CLIs read the working directory from PWD; a cleared
+        // environment must still carry it, matching the real directory.
+        let request = ProviderRequest {
+            kind: ProviderKind::Cli,
+            executable: "/bin/sh".into(),
+            args: vec!["-c".into(), r#"printf '%s\n' "$PWD"; /bin/pwd -P"#.into()],
+            model: None,
+            working_directory: ".".into(),
+            stdin: vec![],
+            timeout_seconds: 5,
+            output_limit_bytes: 4096,
+            context_window_tokens: None,
+            max_output_tokens: None,
+            environment: vec![("PWD".into(), "/not/the/working/directory".into())],
+            sample: None,
+            exploration: None,
+        };
+        let result = execute_provider(&request).unwrap();
+        let output = String::from_utf8(result.stdout).unwrap();
+        let mut lines = output.lines();
+        let (pwd, physical) = (lines.next().unwrap(), lines.next().unwrap());
+        // The directory is gone once the provider exits, so compare its
+        // unique name rather than canonical paths.
+        let name = |path: &str| {
+            std::path::Path::new(path)
+                .file_name()
+                .map(|name| name.to_owned())
+        };
+        assert_ne!(pwd, "/not/the/working/directory", "{output}");
+        assert!(name(pwd).is_some(), "{output}");
+        assert_eq!(name(pwd), name(physical), "{output}");
     }
 
     #[cfg(unix)]
@@ -811,6 +853,7 @@ mod tests {
             max_output_tokens: None,
             environment: vec![],
             sample: None,
+            exploration: None,
         })
         .unwrap();
 
@@ -846,6 +889,7 @@ mod tests {
             max_output_tokens: None,
             environment: vec![("API_TOKEN".into(), "secret-value".into())],
             sample: None,
+            exploration: None,
         })
         .unwrap_err();
 
@@ -876,6 +920,7 @@ mod tests {
             max_output_tokens: None,
             environment: vec![],
             sample: None,
+            exploration: None,
         };
         let error = execute_provider_cancellable(&request, Some(&cancellation)).unwrap_err();
         cancel_thread.join().unwrap();
@@ -906,6 +951,7 @@ mod tests {
             max_output_tokens: None,
             environment: vec![],
             sample: None,
+            exploration: None,
         };
         assert!(execute_provider(&request)
             .unwrap_err()
@@ -947,6 +993,7 @@ mod tests {
             max_output_tokens: None,
             environment: vec![],
             sample: None,
+            exploration: None,
         };
         assert!(execute_provider_cancellable(&request, Some(&cancellation))
             .unwrap_err()
