@@ -108,6 +108,16 @@ build provenance.
   the provider's public service or to a host named with `--host`,
   `--api-base` or `VEE_HOSTING_HOSTS`, never to one set only in `.vee.yaml`.
 
+### Pull requests in CI
+
+- `vee ci run` reviews the pull request a GitHub Actions or GitLab CI job
+  runs for, publishes the check and finding threads, and exits with the gate
+  ([ADR 0019](docs/adr/0019-reviews-on-pull-requests-run-in-the-teams-ci.md)).
+- A GitHub Action (`klarlabs-studio/vee`) and a GitLab CI template that
+  install a pinned release and run `vee ci run`.
+- `vee init --ci github|gitlab` writes a pipeline that uses them, pinned to
+  this release, with an API-key provider ([guide](docs/guides/pull-requests.md)).
+
 ### CLI and MCP output
 
 - The CLI and the MCP server run the same operations and show the same view
