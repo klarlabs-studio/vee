@@ -600,7 +600,7 @@ fn impact_reports_evidenced_rust_and_go_references_with_uncertainty() {
     let impact = analyze_impact(root, &change_set).unwrap();
 
     assert_eq!(impact.snapshot_id, change_set.digest);
-    assert_eq!(impact.schema_version, 3);
+    assert_eq!(impact.schema_version, 4);
     assert!(impact.changed_symbols.contains(&"changed_api".to_string()));
     assert!(impact.changed_symbols.contains(&"ChangedAPI".to_string()));
     assert!(impact
@@ -1068,7 +1068,7 @@ fn go_impact_uses_semantic_references_when_gopls_is_available() {
 
     let impact = analyze_impact(root, &change_set).unwrap();
 
-    assert_eq!(impact.schema_version, 3);
+    assert_eq!(impact.schema_version, 4);
     let analyzer = impact
         .analyzers
         .iter()
@@ -1698,4 +1698,111 @@ fn vue_script_blocks_are_impact_candidates_with_original_line_numbers() {
         "template markup is not script code: {:#?}",
         impact.paths
     );
+}
+
+/// Files that repeatedly changed together with a changed file are impact
+/// leads even without a code reference (configuration, schemas, docs).
+/// Bulk commits are skipped, since they tangle unrelated changes, and so are
+/// hub files that change with nearly everything.
+#[test]
+fn files_that_repeatedly_change_together_are_co_change_edges() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    let write = |path: &str, contents: String| {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    };
+    // CHANGELOG.md changes in nearly every commit: a hub, not coupling.
+    for round in 0..3 {
+        write(
+            "src/other.rs",
+            format!("pub fn other() -> u8 {{ {round} }}\n"),
+        );
+        write("CHANGELOG.md", format!("other {round}\n"));
+        git(&["add", "."]);
+        git(&["commit", "-qm", "unrelated change"]);
+    }
+    for round in 0..3 {
+        write(
+            "src/lib.rs",
+            format!("pub fn version() -> u8 {{ {round} }}\n"),
+        );
+        write("schemas/api.json", format!("{{\"version\": {round}}}\n"));
+        write("CHANGELOG.md", format!("paired {round}\n"));
+        // Documentation that always changes with the code is not coupling.
+        write("docs/api.md", format!("version {round}\n"));
+        if round == 0 {
+            write("README.md", "docs\n".into());
+        }
+        git(&["add", "."]);
+        git(&["commit", "-qm", "paired change"]);
+    }
+    // One bulk commit touching everything must not count as pairing.
+    for index in 0..40 {
+        write(&format!("bulk/file{index}.txt"), "x\n".into());
+    }
+    write("src/lib.rs", "pub fn version() -> u8 { 9 }\n".into());
+    write("README.md", "bulk docs\n".into());
+    git(&["add", "."]);
+    git(&["commit", "-qm", "bulk"]);
+    write("src/lib.rs", "pub fn version() -> u8 { 10 }\n".into());
+    let change_set = capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
+
+    let impact = analyze_impact(root, &change_set).unwrap();
+
+    let history: Vec<_> = impact
+        .paths
+        .iter()
+        .filter(|edge| edge.relationship == "co_change")
+        .collect();
+    assert_eq!(history.len(), 1, "{:#?}", impact.paths);
+    let edge = history[0];
+    assert_eq!(edge.source_path, "src/lib.rs");
+    assert_eq!(edge.affected_path, "schemas/api.json");
+    assert_eq!(edge.certainty, "historical");
+    assert_eq!(
+        edge.co_change,
+        Some(CoChange {
+            together: 3,
+            source_commits: 3
+        })
+    );
+    assert!(impact
+        .analyzers
+        .iter()
+        .any(|analyzer| analyzer.id == "git-co-change" && analyzer.status == "used"));
+    assert_eq!(impact.schema_version, 4);
+}
+
+#[test]
+fn documentation_paths_are_prose_not_build_manifests() {
+    for path in [
+        "README.md",
+        "docs/guide.html",
+        "web/docs/intro.rst",
+        "api/NOTES.adoc",
+    ] {
+        assert!(is_documentation_path(path), "{path}");
+    }
+    for path in [
+        "CMakeLists.txt",
+        "requirements.txt",
+        "src/lib.rs",
+        "schemas/api.json",
+    ] {
+        assert!(!is_documentation_path(path), "{path}");
+    }
 }

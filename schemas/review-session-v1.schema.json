@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vee.klarlabs.de/schemas/review-session-v1.schema.json",
+  "title": "Vee Review Session v1",
+  "description": "Several saved reviews read together. Each change keeps its own gate; the verdict passes only when every change passed on a current snapshot, and blocks when any change blocked.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "verdict",
+    "reviews",
+    "open_findings",
+    "approval_eligible"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "verdict": {
+      "enum": [
+        "pass",
+        "block",
+        "incomplete"
+      ]
+    },
+    "open_findings": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "approval_eligible": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "reviews": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "review_id",
+          "scope",
+          "snapshot_id",
+          "gate",
+          "snapshot_current",
+          "risk_tier",
+          "open_findings",
+          "approval_eligible",
+          "reasons"
+        ],
+        "properties": {
+          "repository": {
+            "description": "The checkout the review was read from, as named in the request; absent for the repository the session was requested in.",
+            "type": "string",
+            "minLength": 1
+          },
+          "review_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scope": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "type": "string"
+          },
+          "gate": {
+            "enum": [
+              "pass",
+              "block",
+              "incomplete"
+            ]
+          },
+          "snapshot_current": {
+            "type": "boolean"
+          },
+          "risk_tier": {
+            "enum": [
+              "low",
+              "elevated",
+              "high",
+              null
+            ]
+          },
+          "open_findings": {
+            "type": "object",
+            "propertyNames": {
+              "enum": [
+                "critical",
+                "high",
+                "medium",
+                "low",
+                "info"
+              ]
+            },
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "approval_eligible": {
+            "type": "boolean"
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

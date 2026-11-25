@@ -10,7 +10,115 @@ pub struct ImpactEdge {
     pub relationship: String,
     pub symbol: String,
     pub certainty: String,
+    /// Line of the reference in `affected_path`; 0 for a `co_change` edge,
+    /// which has no line.
     pub evidence_line: u32,
+    /// For a `co_change` edge, how often the two files changed together.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub co_change: Option<CoChange>,
+}
+
+/// History evidence for a `co_change` edge: of the `source_commits` commits
+/// that changed the source file, `together` also changed the affected file.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoChange {
+    pub together: u32,
+    pub source_commits: u32,
+}
+
+/// Commits of history mined for co-change, newest first before the base.
+const CO_CHANGE_HISTORY_COMMITS: usize = 1_000;
+/// Commits touching more files than this are bulk or tangled changes
+/// (formatting, renames, vendoring) and say nothing about coupling.
+const CO_CHANGE_MAX_COMMIT_FILES: usize = 30;
+/// A pair must have changed together at least this often (the support
+/// Zimmermann et al. 2005 use when precision matters; two shared commits in
+/// a short history is close to chance)...
+const CO_CHANGE_MIN_SUPPORT: u32 = 3;
+/// ...and in at least this share (percent) of the source file's commits.
+const CO_CHANGE_MIN_CONFIDENCE_PERCENT: u32 = 30;
+/// ...and that share must be at least this many times (lift) the affected
+/// file's base rate of change, so hub files that change with nearly every
+/// commit (changelogs, central registries) are not reported as coupling.
+const CO_CHANGE_MIN_LIFT: u32 = 2;
+/// Strongest co-change edges kept per changed file.
+const CO_CHANGE_MAX_EDGES_PER_FILE: usize = 5;
+
+/// Files that historically changed together with each changed file, mined
+/// from first-parent history before the change's base, so the result is
+/// fixed for a snapshot. Edges are a second, independent signal to code
+/// references: co-change finds coupling that has no reference (schemas,
+/// configuration, docs), and union with references beats either alone.
+pub(crate) fn co_change_edges(
+    commits: &[Vec<String>],
+    changed: &std::collections::BTreeSet<String>,
+    eligible: &dyn Fn(&str) -> bool,
+) -> Vec<ImpactEdge> {
+    let commits: Vec<&Vec<String>> = commits
+        .iter()
+        .filter(|paths| !paths.is_empty() && paths.len() <= CO_CHANGE_MAX_COMMIT_FILES)
+        .collect();
+    let total = commits.len() as u64;
+    let mut changes = std::collections::HashMap::<&str, u64>::new();
+    for paths in &commits {
+        for path in paths.iter() {
+            *changes.entry(path.as_str()).or_default() += 1;
+        }
+    }
+    let mut edges = Vec::new();
+    for source in changed.iter().filter(|path| !is_documentation_path(path)) {
+        let mut source_commits = 0u32;
+        let mut together = std::collections::BTreeMap::<&str, u32>::new();
+        for paths in &commits {
+            if !paths.iter().any(|path| path == source) {
+                continue;
+            }
+            source_commits += 1;
+            for path in paths.iter() {
+                if path != source
+                    && !changed.contains(path)
+                    && !is_documentation_path(path)
+                    && eligible(path)
+                {
+                    *together.entry(path.as_str()).or_default() += 1;
+                }
+            }
+        }
+        let mut candidates: Vec<(&str, u32)> = together
+            .into_iter()
+            .filter(|(path, count)| {
+                // Lift: count / source_commits >= MIN_LIFT * changes(path) / total.
+                let base_rate = changes.get(path).copied().unwrap_or_default();
+                *count >= CO_CHANGE_MIN_SUPPORT
+                    && count * 100 >= source_commits * CO_CHANGE_MIN_CONFIDENCE_PERCENT
+                    && u64::from(*count) * total
+                        >= u64::from(CO_CHANGE_MIN_LIFT) * u64::from(source_commits) * base_rate
+            })
+            .collect();
+        // Strongest first: the denominator is shared, so more shared commits
+        // means higher confidence; ties break by path.
+        candidates.sort_by(|(left_path, left), (right_path, right)| {
+            right.cmp(left).then(left_path.cmp(right_path))
+        });
+        edges.extend(
+            candidates
+                .into_iter()
+                .take(CO_CHANGE_MAX_EDGES_PER_FILE)
+                .map(|(path, count)| ImpactEdge {
+                    source_path: source.clone(),
+                    affected_path: path.to_owned(),
+                    relationship: "co_change".into(),
+                    symbol: String::new(),
+                    certainty: "historical".into(),
+                    evidence_line: 0,
+                    co_change: Some(CoChange {
+                        together: count,
+                        source_commits,
+                    }),
+                }),
+        );
+    }
+    edges
 }
 
 /// Rank an impact edge for the bounded reviewer context; lower sorts first.
@@ -24,7 +132,7 @@ pub(crate) fn impact_context_edge_priority(edge: &ImpactEdge) -> (u8, u8, u8) {
         "syntactic_symbol_reference" => 1,
         "textual_symbol_reference" => 2,
         "likely_test_reference" => 3,
-        "inferred_import" => 4,
+        "inferred_import" | "co_change" => 4,
         "shared_local_dependency" => 5,
         _ => 6,
     };
@@ -46,6 +154,9 @@ pub struct ImpactGroup {
     pub member_paths: Vec<String>,
     pub certainty: String,
 }
+
+/// Version of the impact assessment document (`impact-assessment-v4`).
+pub const IMPACT_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImpactAssessment {
@@ -146,7 +257,7 @@ pub fn analyze_impact(root: &Path, change_set: &ChangeSet) -> Result<ImpactAsses
 
 /// The repository review filter, or `None` when the configuration cannot be
 /// read (an unconfigured repository is analyzed unfiltered).
-fn impact_review_filter(root: &Path) -> Option<vee_core::ReviewConfig> {
+pub(crate) fn impact_review_filter(root: &Path) -> Option<vee_core::ReviewConfig> {
     crate::load_repository_config(root)
         .ok()
         .map(|config| config.review)
@@ -254,6 +365,7 @@ pub(crate) fn analyze_impact_with_typescript_server(
         .cloned()
         .collect();
     let mut candidates = vee_git::tracked_paths(root)?;
+    let candidates_all = candidates.clone();
     candidates.extend(
         change_set
             .files
@@ -589,6 +701,7 @@ pub(crate) fn analyze_impact_with_typescript_server(
                                 symbol,
                                 certainty: "inferred_syntax".into(),
                                 evidence_line: line,
+                                co_change: None,
                             });
                         }
                     }
@@ -614,6 +727,7 @@ pub(crate) fn analyze_impact_with_typescript_server(
                                         symbol: symbol.clone(),
                                         certainty: "inferred_heuristic".into(),
                                         evidence_line: (line_index + 1) as u32,
+                                        co_change: None,
                                     });
                                 }
                             }
@@ -656,6 +770,7 @@ pub(crate) fn analyze_impact_with_typescript_server(
                                 symbol: symbol.clone(),
                                 certainty: "inferred_heuristic".into(),
                                 evidence_line: (line_index + 1) as u32,
+                                co_change: None,
                             });
                         }
                     }
@@ -686,6 +801,7 @@ pub(crate) fn analyze_impact_with_typescript_server(
                                 symbol: symbol.clone(),
                                 certainty: "inferred_heuristic".into(),
                                 evidence_line: (line_index + 1) as u32,
+                                co_change: None,
                             });
                         }
                     }
@@ -711,6 +827,7 @@ pub(crate) fn analyze_impact_with_typescript_server(
                                 symbol: symbol.clone(),
                                 certainty: "inferred_heuristic".into(),
                                 evidence_line: (line_index + 1) as u32,
+                                co_change: None,
                             });
                         }
                     }
@@ -739,11 +856,37 @@ pub(crate) fn analyze_impact_with_typescript_server(
                             symbol: symbol.clone(),
                             certainty: "inferred_heuristic".into(),
                             evidence_line: (line_index + 1) as u32,
+                            co_change: None,
                         });
                     }
                 }
             }
         }
+    }
+    let history_revision = change_set
+        .base_oid
+        .as_deref()
+        .or(change_set.head_oid.as_deref());
+    let tracked: std::collections::HashSet<String> = candidates_all
+        .iter()
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .collect();
+    let history = history_revision
+        .map(|revision| vee_git::commit_paths(root, revision, CO_CHANGE_HISTORY_COMMITS));
+    analyzers.push(ImpactAnalyzer {
+        id: "git-co-change".into(),
+        version: None,
+        status: match &history {
+            Some(Ok(_)) => "used",
+            Some(Err(_)) => "failed",
+            None => "unavailable",
+        }
+        .into(),
+    });
+    if let Some(Ok(commits)) = &history {
+        paths.extend(co_change_edges(commits, &changed, &|path| {
+            tracked.contains(path) && not_excluded(path)
+        }));
     }
     paths.sort_by(|a, b| {
         (&a.source_path, &a.affected_path, a.evidence_line, &a.symbol).cmp(&(
@@ -792,6 +935,7 @@ pub(crate) fn analyze_impact_with_typescript_server(
         "Rust references are syntax-derived identifier paths, not type-resolved; aliases and dynamic dispatch may be missed.".into(),
         "Package membership is inferred from Rust Cargo.toml ancestry or Go package declarations.".into(),
         "Generated code, reflection, cross-service calls, and runtime behavior are not modeled.".into(),
+        format!("Co-change edges come from the {CO_CHANGE_HISTORY_COMMITS} most recent first-parent commits before the base, skip commits touching more than {CO_CHANGE_MAX_COMMIT_FILES} files, and need {CO_CHANGE_MIN_SUPPORT}+ shared commits in at least {CO_CHANGE_MIN_CONFIDENCE_PERCENT}% of the changed file's commits and {CO_CHANGE_MIN_LIFT}x the other file's base rate of change; they show coupling, not a code dependency."),
         "Vue components contribute their script blocks and, when PascalCase, their file name; template-only usages are not scanned.".into(),
         "TypeScript and JavaScript references use tsserver project resolution when the reviewed snapshot matches the live workspace; otherwise lexical heuristics may miss aliases, overloads, dynamic imports, template expressions, and runtime dispatch.".into(),
         "Python references are lexical heuristics; imports, aliases, decorators, dynamic dispatch, and runtime behavior are not resolved.".into(),
@@ -817,7 +961,7 @@ pub(crate) fn analyze_impact_with_typescript_server(
         limitations.push("Impact scanning is bounded to 10,000 source files and 32 MiB of decoded source content per assessment.".into());
     }
     Ok(ImpactAssessment {
-        schema_version: 3,
+        schema_version: IMPACT_SCHEMA_VERSION,
         snapshot_id: change_set.digest.clone(),
         coverage_complete,
         analyzers,
@@ -830,7 +974,7 @@ pub(crate) fn analyze_impact_with_typescript_server(
 }
 
 /// Whether impact analysis extracts declared symbols from files at `path`.
-fn declares_symbols(path: &str) -> bool {
+pub(crate) fn declares_symbols(path: &str) -> bool {
     is_vue_path(path)
         || path.ends_with(".rs")
         || path.ends_with(".go")
@@ -1107,6 +1251,7 @@ pub(crate) fn go_local_dependency_edges(
                     symbol: format!("{module_path}/{package_dir}"),
                     certainty: "inferred_import".into(),
                     evidence_line: *evidence_line,
+                    co_change: None,
                 });
                 if edges.len() >= MAX_EDGES {
                     return edges;
@@ -1646,6 +1791,12 @@ pub(crate) fn query_typescript_references(
             let Some(text) = source.get(changed_path.as_str()) else {
                 continue;
             };
+            // Outside a tsconfig or jsconfig project the server sees only the
+            // open file and what it imports, so it would miss references from
+            // other files; those files keep the labelled heuristic edges.
+            if !in_typescript_project(&root, changed_path) {
+                continue;
+            }
             let absolute = root.join(changed_path);
             if !absolute.starts_with(&root) {
                 failures = true;
@@ -1751,6 +1902,10 @@ pub(crate) fn query_typescript_references(
                         saw_declaration = true;
                         continue;
                     }
+                    // A changed file is not impact of itself.
+                    if relative == **changed_path {
+                        continue;
+                    }
                     edges.push(ImpactEdge {
                         source_path: (*changed_path).clone(),
                         affected_path: relative.clone(),
@@ -1763,6 +1918,7 @@ pub(crate) fn query_typescript_references(
                         symbol: symbol.clone(),
                         certainty: "resolved_semantic".into(),
                         evidence_line: reference_line,
+                        co_change: None,
                     });
                 }
                 if saw_declaration {
@@ -1790,6 +1946,20 @@ pub(crate) fn query_typescript_references(
     })();
     terminate_typescript_server(&mut child);
     outcome
+}
+
+/// Whether `relative` lies under a `tsconfig.json` or `jsconfig.json` within
+/// `root`, so the TypeScript server loads the whole project around it.
+fn in_typescript_project(root: &Path, relative: &str) -> bool {
+    let mut directory = Path::new(relative).parent();
+    while let Some(current) = directory {
+        let absolute = root.join(current);
+        if absolute.join("tsconfig.json").is_file() || absolute.join("jsconfig.json").is_file() {
+            return true;
+        }
+        directory = current.parent();
+    }
+    false
 }
 
 #[cfg(unix)]
@@ -2139,6 +2309,10 @@ pub(crate) fn query_gopls_references(
                         saw_declaration = true;
                         continue;
                     }
+                    // A changed file is not impact of itself.
+                    if relative == **changed_path {
+                        continue;
+                    }
                     edges.push(ImpactEdge {
                         source_path: (*changed_path).clone(),
                         affected_path: relative.clone(),
@@ -2151,6 +2325,7 @@ pub(crate) fn query_gopls_references(
                         symbol: symbol.clone(),
                         certainty: "resolved_semantic".into(),
                         evidence_line,
+                        co_change: None,
                     });
                 }
                 if saw_declaration && !query_failed && !symbol_limited {
@@ -3196,6 +3371,20 @@ pub(crate) fn is_test_context_attribute(attributes: &[syn::Attribute]) -> bool {
         })
 }
 
+/// Prose documentation: Markdown, reStructuredText, and AsciiDoc files, and
+/// anything under a `docs/` directory. Plain `.txt` is not included, since it
+/// also names build and dependency manifests (`CMakeLists.txt`,
+/// `requirements.txt`) that do couple to code. Documentation is updated alongside features, so it says
+/// nothing about code coupling or code diffusion.
+pub(crate) fn is_documentation_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.starts_with("docs/")
+        || lower.contains("/docs/")
+        || [".md", ".mdx", ".markdown", ".rst", ".adoc"]
+            .iter()
+            .any(|extension| lower.ends_with(extension))
+}
+
 pub(crate) fn is_vue_path(path: &str) -> bool {
     path.ends_with(".vue")
 }
@@ -3487,6 +3676,7 @@ pub(crate) fn analyze_python_references(
                     symbol: edge.symbol,
                     certainty: "inferred_syntax".into(),
                     evidence_line: edge.evidence_line,
+                    co_change: None,
                 })
                 .collect();
             PythonImpactAnalysis {

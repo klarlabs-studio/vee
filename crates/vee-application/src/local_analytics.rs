@@ -294,7 +294,7 @@ pub fn build(root: &Path, store: &dyn Repositories) -> Result<LocalAnalytics, St
                 total.2 += 1;
                 daily.2 += 1;
             }
-            if outcome.status == "failed" {
+            if matches!(outcome.status.as_str(), "failed" | "rate_limited") {
                 *provider_failures
                     .entry(outcome.provider_id.clone())
                     .or_default() += 1;
