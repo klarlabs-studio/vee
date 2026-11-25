@@ -273,7 +273,10 @@ fn init_ci_writes_a_pipeline_once_and_names_its_secrets() {
     assert_eq!(report["path"], ".github/workflows/vee.yml");
     assert_eq!(report["secrets"], serde_json::json!(["ANTHROPIC_API_KEY"]));
     let workflow = std::fs::read_to_string(root.join(".github/workflows/vee.yml")).unwrap();
-    assert!(workflow.contains("vee ci run"));
+    assert!(workflow.contains(&format!(
+        "uses: klarlabs-studio/vee@v{}",
+        env!("CARGO_PKG_VERSION")
+    )));
     // An existing pipeline is never overwritten.
     assert!(!init().status.success());
 
