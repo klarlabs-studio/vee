@@ -173,10 +173,10 @@
         },
         "executable": {
           "type": "string",
-          "minLength": 1
+          "description": "Program to run for CLI providers; empty for HTTP providers."
         },
         "endpoint": {
-          "type": "string",
+          "type": ["string", "null"],
           "format": "uri",
           "minLength": 1
         },

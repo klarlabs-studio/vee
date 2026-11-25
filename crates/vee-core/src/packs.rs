@@ -311,7 +311,7 @@ pub fn apply_packs(config: &mut RepositoryConfig, root: &Path) -> Result<(), Str
             pack_profiles.insert(id, profile);
         }
         if let Some(policy) = &pack.manifest.policy {
-            config.policy = strictest(&config.policy, policy);
+            config.add_pack_policy(policy);
         }
         for rule in pack.manifest.rules {
             if !config

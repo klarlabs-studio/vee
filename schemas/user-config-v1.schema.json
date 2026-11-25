@@ -20,23 +20,120 @@
           "description": "Effort for reviewers whose repository configuration sets neither effort nor samples: low runs once, medium three times, high five times, keeping findings the runs agree on."
         }
       }
+    },
+    "patches": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow_noninteractive_apply": {
+          "type": "boolean",
+          "description": "Apply an approved patch without a person confirming it at a terminal. Off by default, so an agent that may only propose patches cannot apply them."
+        }
+      }
     }
   },
   "$defs": {
     "provider": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind"],
+      "required": [
+        "kind"
+      ],
       "properties": {
-        "kind": { "enum": ["cli", "codex_cli", "gemini_cli", "claude_cli", "antigravity_cli", "openai_compatible"] },
-        "egress": { "enum": ["local", "network"] },
-        "executable": { "type": "string", "minLength": 1 },
-        "endpoint": { "type": "string", "format": "uri", "minLength": 1 },
-        "args": { "type": "array", "items": { "type": "string" } },
-        "version_args": { "type": "array", "items": { "type": "string" } },
-        "model": { "type": ["string", "null"] },
-        "env_allowlist": { "type": "array", "items": { "type": "string" } },
-        "timeout_seconds": { "type": "integer", "minimum": 1 }
+        "kind": {
+          "enum": [
+            "cli",
+            "codex_cli",
+            "gemini_cli",
+            "antigravity_cli",
+            "claude_cli",
+            "openai_compatible",
+            "ollama_native"
+          ]
+        },
+        "egress": {
+          "enum": [
+            "local",
+            "network"
+          ]
+        },
+        "executable": {
+          "type": "string",
+          "description": "Program to run for CLI providers; empty for HTTP providers."
+        },
+        "endpoint": {
+          "type": ["string", "null"],
+          "format": "uri",
+          "minLength": 1
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "version_args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_input_tokens": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 131072,
+          "description": "Approximate provider input token budget; impact context is reduced before execution while changed source is preserved."
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131072,
+          "description": "ollama_native only; maximum generated tokens, default 2048. The input and output budgets must fit in context_window_tokens."
+        },
+        "context_window_tokens": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 131072,
+          "description": "Required for ollama_native; sent as Ollama's native options.num_ctx."
+        },
+        "env_allowlist": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pricing": {
+          "type": "object",
+          "description": "Optional user-maintained model token prices used for informational cost estimates only.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "input_usd_per_million",
+              "output_usd_per_million"
+            ],
+            "properties": {
+              "input_usd_per_million": {
+                "type": "number",
+                "minimum": 0
+              },
+              "output_usd_per_million": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          }
+        }
       }
     }
   }

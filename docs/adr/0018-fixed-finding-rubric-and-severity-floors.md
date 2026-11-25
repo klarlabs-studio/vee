@@ -67,14 +67,20 @@ policy:
   globs (when `paths` is set) and any of its categories (when `categories` is
   set). A floor must set at least one of them. A path floor never applies to
   a finding without a path.
-- **Effect.** When the gate evaluates a finding, it uses the higher of the
-  reported severity and every matching floor's minimum. This holds for the
+- **Effect.** A finding's effective severity is the higher of the reported
+  severity and every matching floor's minimum. A finding blocks when any
+  severity from the reported one up to the effective one is a blocking
+  severity. Raising a severity therefore never moves a finding out of a
+  blocking list with gaps, such as `[high]` alone. This holds for the
   repository policy and for reviewer policies.
 - **Reported severity is kept.** The review record keeps what the reviewer
   reported. When a raised severity makes a finding block, the gate decision
-  says so, naming the finding, both severities and the floor.
+  says so, naming the finding, both severities and the floor. A published
+  pull request thread shows the effective severity and says which floor
+  raised it, so a raised `info` finding is posted too.
 - **Tighten-only.** Floors from a protected local policy and from packs are
-  added to the repository's floors. A floor can only raise severity, so
+  added to the repository's floors. A pack's policy, floors included, also
+  applies to any selected policy profile. A floor can only raise severity, so
   adding floors never relaxes a policy.
 - **Replay.** An empty floor list is not serialized, so existing policy
   digests and recorded decisions are unchanged.

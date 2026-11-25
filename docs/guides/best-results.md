@@ -3,8 +3,9 @@
 Vee reviews on the AI backend you already have. Three choices decide most of
 the quality you get: the model, the review effort, and what the reviewers are
 told to look for. `vee init` asks for the first two in a terminal and records
-them for this machine. Run it again to change them, or pass `--provider`,
-`--model` and `--effort`.
+them for this machine. To change them later, run `vee init --provider <id>
+--model <model>`, which replaces this machine's provider, or
+`vee init --effort <level>`.
 
 ## What we measured
 

@@ -201,6 +201,7 @@ pub fn pull_request_issues(
             "unsupported hosting provider `{provider_id}`"
         )));
     }
+    let named_by_user = flags.host.is_some() || flags.api_base.is_some();
     let host = resolve_hosting_setting(flags.host, hosting.host, "github.com");
     let api_base = resolve_hosting_setting(flags.api_base, hosting.api_base, "");
     let token_env = resolve_hosting_setting(flags.token_env, hosting.token_env, "GH_TOKEN");
@@ -209,6 +210,13 @@ pub fn pull_request_issues(
     let token = read_token(token_env)?;
     let host = crate::work_items::effective_work_item_host(&provider_id, &host)?;
     let api_base = crate::work_items::work_item_api_base(&provider_id, &host, &api_base)?;
+    crate::work_items::ensure_credential_destination(
+        &provider_id,
+        &host,
+        &api_base,
+        named_by_user,
+        &crate::work_items::trusted_hosts_from_env(),
+    )?;
     let reference = vee_hosting::PullRequestRef {
         repository: vee_hosting::RepositoryRef {
             host,
@@ -258,6 +266,7 @@ pub fn pull_request_context(
         ));
     }
     let provider_id = resolve_hosting_setting(flags.provider, hosting.provider, "azure-devops");
+    let named_by_user = flags.host.is_some() || flags.api_base.is_some();
     let host = resolve_hosting_setting(flags.host, hosting.host, "github.com");
     let api_base = resolve_hosting_setting(flags.api_base, hosting.api_base, "");
     let token_env =
@@ -273,6 +282,13 @@ pub fn pull_request_context(
     let token = read_token(token_env)?;
     let host = crate::work_items::effective_work_item_host(&provider_id, &host)?;
     let api_base = crate::work_items::work_item_api_base(&provider_id, &host, &api_base)?;
+    crate::work_items::ensure_credential_destination(
+        &provider_id,
+        &host,
+        &api_base,
+        named_by_user,
+        &crate::work_items::trusted_hosts_from_env(),
+    )?;
     let reference = vee_hosting::PullRequestRef {
         repository: vee_hosting::RepositoryRef {
             host,
@@ -322,6 +338,7 @@ pub fn issue_context(
         ));
     }
     let provider = resolve_hosting_setting(flags.provider, hosting.provider, "github");
+    let named_by_user = flags.host.is_some() || flags.api_base.is_some();
     let host = resolve_hosting_setting(flags.host, hosting.host, "github.com");
     let api_base = resolve_hosting_setting(flags.api_base, hosting.api_base, "");
     let token_env = resolve_hosting_setting(flags.token_env, hosting.token_env, "");
@@ -338,6 +355,13 @@ pub fn issue_context(
     let token = read_token(token_env)?;
     let host = crate::work_items::effective_work_item_host(&provider, &host)?;
     let api_base = crate::work_items::work_item_api_base(&provider, &host, &api_base)?;
+    crate::work_items::ensure_credential_destination(
+        &provider,
+        &host,
+        &api_base,
+        named_by_user,
+        &crate::work_items::trusted_hosts_from_env(),
+    )?;
     let reference = vee_hosting::WorkItemRef {
         repository: vee_hosting::RepositoryRef {
             host,
@@ -456,6 +480,13 @@ pub fn refresh_linked_pull_requests(
         let token = read_token(&token_env)?;
         let host = crate::work_items::effective_work_item_host(&provider_id, &host)?;
         let api_base = crate::work_items::work_item_api_base(&provider_id, &host, &api_base)?;
+        crate::work_items::ensure_credential_destination(
+            &provider_id,
+            &host,
+            &api_base,
+            false,
+            &crate::work_items::trusted_hosts_from_env(),
+        )?;
         let username = hosting.username.unwrap_or_default();
         let adapter = pull_request_context_provider(
             &provider_id,
@@ -501,6 +532,9 @@ pub struct PublishRequest<'a> {
     pub flags: PublishFlags,
     /// Also publish the approval verdict as a separate "Vee approval" check.
     pub approval: bool,
+    /// Vee's threads read back from the pull request; those whose finding is
+    /// no longer reported are resolved (see `PublishedReview`).
+    pub pull_request_threads: Vec<crate::publication::PullRequestThread>,
 }
 
 /// Settings resolved from flags, the repository's `hosting` block and defaults.
@@ -512,6 +546,7 @@ struct PublishSettings {
     username: String,
     webhook_secret_env: String,
     actor_login: String,
+    pull_request_threads: Vec<crate::publication::PullRequestThread>,
 }
 
 const DEFAULT_WEBHOOK_SECRET_ENV: &str = "VEE_GITHUB_WEBHOOK_SECRET";
@@ -555,6 +590,7 @@ pub fn publish_review(
     );
     let flags = request.flags;
     let provider_id = resolve_hosting_setting(flags.hosting.provider, hosting.provider, "github");
+    let named_by_user = flags.hosting.host.is_some() || flags.hosting.api_base.is_some();
     let host = resolve_hosting_setting(flags.hosting.host, hosting.host, "github.com");
     let api_base = resolve_hosting_setting(flags.hosting.api_base, hosting.api_base, "");
     let token_env = resolve_hosting_setting(flags.hosting.token_env, hosting.token_env, "");
@@ -577,6 +613,8 @@ pub fn publish_review(
     let reevaluated = crate::operations::reevaluate_gate(workspace, request.review_id, None)?;
     let mut reviewed = reevaluated.review;
     reviewed.gate = reevaluated.decision;
+    reviewed.findings =
+        crate::publication::findings_for_publication(&reviewed.findings, &reviewed.gate);
     ensure_publishable(root, &reviewed)?;
     // Evaluated before anything is written, so a failure publishes nothing.
     let approval = if request.approval {
@@ -596,6 +634,13 @@ pub fn publish_review(
     let token = read_token(&token_env)?;
     let host = crate::work_items::effective_work_item_host(&provider_id, &host)?;
     let api_base = crate::work_items::work_item_api_base(&provider_id, &host, &api_base)?;
+    crate::work_items::ensure_credential_destination(
+        &provider_id,
+        &host,
+        &api_base,
+        named_by_user,
+        &crate::work_items::trusted_hosts_from_env(),
+    )?;
     let settings = PublishSettings {
         provider_id,
         host,
@@ -604,6 +649,7 @@ pub fn publish_review(
         username,
         webhook_secret_env,
         actor_login,
+        pull_request_threads: request.pull_request_threads,
     };
     let pull_request = vee_hosting::PullRequestRef {
         repository: vee_hosting::RepositoryRef {
@@ -698,7 +744,27 @@ fn ensure_publishable(root: &Path, reviewed: &crate::ReviewResult) -> Result<()>
 /// The remote pull request must be open and at exactly the reviewed commits.
 /// Returns the reviewed base and head, captured from local Git, which are the
 /// values that reach `git` as arguments.
+fn reviewed_base_matches(
+    root: &Path,
+    reviewed_base: Option<&str>,
+    base_oid: &str,
+    head_oid: &str,
+) -> bool {
+    match reviewed_base {
+        None => false,
+        Some(reviewed) => {
+            reviewed == base_oid
+                || vee_git::merge_base_of(root, base_oid, head_oid).as_deref() == Some(reviewed)
+        }
+    }
+}
+
+/// The review must cover the pull request's head, from the PR's base. A host
+/// may report the base branch's tip (GitHub) rather than the merge base Vee
+/// reviews from; the review still matches when its base is the local merge
+/// base of that tip and the head.
 fn ensure_reviewed_commits(
+    root: &Path,
     reviewed: &crate::ReviewResult,
     state: vee_hosting::PullRequestState,
     base_oid: &str,
@@ -713,7 +779,7 @@ fn ensure_reviewed_commits(
         "reviewed head does not match the current pull request head; rerun Vee against the PR head"
     );
     anyhow::ensure!(
-        reviewed.change_set.base_oid.as_deref() == Some(base_oid),
+        reviewed_base_matches(root, reviewed.change_set.base_oid.as_deref(), base_oid, head_oid),
         "reviewed base does not match the current pull request base; rerun Vee against the current PR diff"
     );
     Ok((
@@ -779,8 +845,13 @@ fn publish_to_azure_devops(
     let remote =
         vee_hosting::PullRequestContextProvider::get_pull_request_context(&provider, pull_request)
             .map_err(anyhow::Error::msg)?;
-    let (base, head) =
-        ensure_reviewed_commits(reviewed, remote.state, &remote.base_oid, &remote.head_oid)?;
+    let (base, head) = ensure_reviewed_commits(
+        root,
+        reviewed,
+        remote.state,
+        &remote.base_oid,
+        &remote.head_oid,
+    )?;
     let mut threads = Vec::new();
     for finding in &reviewed.findings {
         let Some((path, line)) = crate::publication::thread_location(finding) else {
@@ -816,7 +887,7 @@ fn publish_to_azure_devops(
         store,
         &settings.provider_id,
         pull_request,
-        &published_review(reviewed),
+        &published_review(reviewed, settings),
         threads,
         |threads| {
             let thread_ids = if threads.is_empty() {
@@ -936,8 +1007,13 @@ fn publish_to_provider(
     let remote = provider
         .get_pull_request(pull_request)
         .map_err(anyhow::Error::msg)?;
-    let (base, head) =
-        ensure_reviewed_commits(reviewed, remote.state, &remote.base_oid, &remote.head_oid)?;
+    let (base, head) = ensure_reviewed_commits(
+        root,
+        reviewed,
+        remote.state,
+        &remote.base_oid,
+        &remote.head_oid,
+    )?;
     let changed = provider
         .list_changed_files(pull_request, &remote.revision)
         .map_err(anyhow::Error::msg)?;
@@ -991,7 +1067,7 @@ fn publish_to_provider(
         store,
         &settings.provider_id,
         pull_request,
-        &published_review(reviewed),
+        &published_review(reviewed, settings),
         threads,
         |threads| {
             provider
@@ -1012,10 +1088,68 @@ fn publish_to_provider(
     ))
 }
 
-fn published_review(reviewed: &crate::ReviewResult) -> crate::publication::PublishedReview<'_> {
+fn published_review<'a>(
+    reviewed: &'a crate::ReviewResult,
+    settings: &'a PublishSettings,
+) -> crate::publication::PublishedReview<'a> {
     crate::publication::PublishedReview {
         review_id: &reviewed.review_id,
         snapshot_id: &reviewed.snapshot_id,
         findings: &reviewed.findings,
+        pull_request_threads: &settings.pull_request_threads,
+    }
+}
+
+#[cfg(test)]
+mod reviewed_commit_tests {
+    use super::*;
+
+    fn git(root: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args([
+                "-c",
+                "user.email=vee@example.invalid",
+                "-c",
+                "user.name=Vee",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    #[test]
+    fn a_review_from_the_merge_base_matches_a_pr_whose_base_branch_moved_on() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "base"]);
+        let fork_point = git(root, &["rev-parse", "HEAD"]);
+        git(root, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(root.join("b.txt"), "b\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "feature"]);
+        let head = git(root, &["rev-parse", "HEAD"]);
+        git(root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("c.txt"), "c\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "main moved"]);
+        let base_tip = git(root, &["rev-parse", "HEAD"]);
+
+        let matches =
+            |reviewed: &str| reviewed_base_matches(root, Some(reviewed), &base_tip, &head);
+        assert!(matches(&fork_point), "the merge base matches");
+        assert!(matches(&base_tip), "the reported base matches");
+        assert!(!matches(&head), "another commit does not");
+        assert!(!reviewed_base_matches(root, None, &base_tip, &head));
     }
 }

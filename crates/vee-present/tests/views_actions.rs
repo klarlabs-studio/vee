@@ -210,6 +210,7 @@ fn passing_review() -> ReviewResult {
         reviewer_context: vec![],
         unreviewed_paths: vec![],
         policy_profile: None,
+        review_effort: None,
         work_item: None,
         work_item_token_env: None,
     }
