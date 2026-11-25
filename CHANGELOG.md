@@ -113,8 +113,10 @@ build provenance.
 - `vee ci run` reviews the pull request a GitHub Actions or GitLab CI job
   runs for, publishes the check and finding threads, and exits with the gate
   ([ADR 0019](docs/adr/0019-reviews-on-pull-requests-run-in-the-teams-ci.md)).
-- `vee init --ci github|gitlab` writes the pipeline, pinned to this release,
-  with an API-key provider ([guide](docs/guides/pull-requests.md)).
+- A GitHub Action (`klarlabs-studio/vee`) and a GitLab CI template that
+  install a pinned release and run `vee ci run`.
+- `vee init --ci github|gitlab` writes a pipeline that uses them, pinned to
+  this release, with an API-key provider ([guide](docs/guides/pull-requests.md)).
 
 ### CLI and MCP output
 

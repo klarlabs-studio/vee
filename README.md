@@ -45,7 +45,7 @@ The installers put `vee` in `~/.local/bin` (set `VEE_INSTALL_DIR` to change it) 
 
 ## Reviews on pull requests
 
-`vee init --ci github --provider anthropic-api --model <model>` writes a GitHub workflow that reviews every pull request on your runner with your model key and publishes a check and finding threads; `--ci gitlab` writes a pipeline file for merge requests. In CI, `vee ci run` detects the pull request, reviews it from its base, publishes the result, and exits with the gate (0 pass, 1 block, 2 incomplete). JSON output follows [schemas/ci-run-v1.schema.json](schemas/ci-run-v1.schema.json). See [the pull request guide](docs/guides/pull-requests.md) and [ADR 0019](docs/adr/0019-reviews-on-pull-requests-run-in-the-teams-ci.md).
+`vee init --ci github --provider anthropic-api --model <model>` writes a GitHub workflow that uses the Vee action (`klarlabs-studio/vee`, [action.yml](action.yml)) to review every pull request on your runner with your model key and publishes a check and finding threads; `--ci gitlab` writes a pipeline file that includes the [GitLab template](integrations/gitlab/vee.gitlab-ci.yml) for merge requests. In CI, `vee ci run` detects the pull request, reviews it from its base, publishes the result, and exits with the gate (0 pass, 1 block, 2 incomplete). JSON output follows [schemas/ci-run-v1.schema.json](schemas/ci-run-v1.schema.json). See [the pull request guide](docs/guides/pull-requests.md) and [ADR 0019](docs/adr/0019-reviews-on-pull-requests-run-in-the-teams-ci.md).
 
 ## Build
 

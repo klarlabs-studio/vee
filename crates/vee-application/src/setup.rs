@@ -319,17 +319,12 @@ jobs:
           # and needs the history back to the base.
           ref: ${{{{ github.event.pull_request.head.sha }}}}
           fetch-depth: 0
-      - name: Install Vee {version}
-        run: |
-          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/klarlabs-studio/vee/releases/download/v{version}/vee-installer.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: Review
-        env:
-          {key}: ${{{{ secrets.{key} }}}}
-          GH_TOKEN: ${{{{ github.token }}}}
-        run: |
-          vee init --provider {candidate_id} --model "{model}" --effort {effort} --no-input
-          vee ci run
+      - uses: klarlabs-studio/vee@v{version}
+        with:
+          provider: {candidate_id}
+          model: "{model}"
+          effort: {effort}
+          api-key: ${{{{ secrets.{key} }}}}
 "#
             ),
         },
@@ -344,18 +339,13 @@ jobs:
 #     - local: .gitlab/vee.gitlab-ci.yml
 # Define these masked CI/CD variables: {key}; GL_TOKEN, a project access
 # token with the api scope; VEE_ACTOR_LOGIN, that token's bot username.
-vee-review:
-  image:
-    name: ghcr.io/klarlabs-studio/vee:{version}
-    entrypoint: [""]
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-  variables:
-    # Vee needs the history back to the merge request's base.
-    GIT_DEPTH: "0"
-  script:
-    - vee init --provider {candidate_id} --model "{model}" --effort {effort} --no-input
-    - vee ci run --actor-login "$VEE_ACTOR_LOGIN"
+include:
+  - remote: https://raw.githubusercontent.com/klarlabs-studio/vee/v{version}/integrations/gitlab/vee.gitlab-ci.yml
+variables:
+  VEE_VERSION: v{version}
+  VEE_PROVIDER: {candidate_id}
+  VEE_MODEL: "{model}"
+  VEE_EFFORT: {effort}
 "#
             ),
         },
@@ -1380,6 +1370,30 @@ mod tests {
     }
 
     #[test]
+    fn the_github_action_and_gitlab_template_take_what_init_writes() {
+        let read = |path: &str| -> serde_yaml::Value {
+            let path = format!("{}/../../{path}", env!("CARGO_MANIFEST_DIR"));
+            serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+        };
+        let action = read("action.yml");
+        for input in ["provider", "model", "effort", "api-key"] {
+            assert!(!action["inputs"][input].is_null(), "action input {input}");
+        }
+        assert_eq!(action["runs"]["using"], "composite");
+        let template = read("integrations/gitlab/vee.gitlab-ci.yml");
+        for variable in ["VEE_VERSION", "VEE_PROVIDER", "VEE_MODEL", "VEE_EFFORT"] {
+            assert!(
+                !template["variables"][variable].is_null(),
+                "template variable {variable}"
+            );
+        }
+        assert_eq!(
+            template["vee-review"]["image"]["name"],
+            "ghcr.io/klarlabs-studio/vee:${VEE_VERSION}"
+        );
+    }
+
+    #[test]
     fn ci_workflows_pin_this_version_and_use_an_api_key() {
         let github = ci_workflow(
             CiTarget::Github,
@@ -1390,6 +1404,7 @@ mod tests {
         .unwrap();
         assert_eq!(github.path, ".github/workflows/vee.yml");
         assert_eq!(github.secrets, ["ANTHROPIC_API_KEY"]);
+        let version = env!("CARGO_PKG_VERSION");
         let parsed: serde_yaml::Value = serde_yaml::from_str(&github.content).unwrap();
         let steps = &parsed["jobs"]["vee"]["steps"];
         assert_eq!(
@@ -1397,16 +1412,15 @@ mod tests {
             "${{ github.event.pull_request.head.sha }}"
         );
         assert_eq!(steps[0]["with"]["fetch-depth"], 0);
-        assert!(github.content.contains(&format!(
-            "releases/download/v{}/",
-            env!("CARGO_PKG_VERSION")
-        )));
-        assert!(github
-            .content
-            .contains("ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}"));
-        assert!(github
-            .content
-            .contains("--model \"claude-sonnet-5-5\" --effort medium"));
+        assert_eq!(
+            steps[1]["uses"],
+            format!("klarlabs-studio/vee@v{version}").as_str()
+        );
+        assert_eq!(steps[1]["with"]["model"], "claude-sonnet-5-5");
+        assert_eq!(
+            steps[1]["with"]["api-key"],
+            "${{ secrets.ANTHROPIC_API_KEY }}"
+        );
         assert_eq!(parsed["permissions"]["checks"], "write");
 
         let gitlab = ci_workflow(
@@ -1417,11 +1431,16 @@ mod tests {
         )
         .unwrap();
         let parsed: serde_yaml::Value = serde_yaml::from_str(&gitlab.content).unwrap();
-        assert_eq!(parsed["vee-review"]["variables"]["GIT_DEPTH"], "0");
-        assert!(gitlab.content.contains(&format!(
-            "ghcr.io/klarlabs-studio/vee:{}",
-            env!("CARGO_PKG_VERSION")
-        )));
+        assert_eq!(
+            parsed["variables"]["VEE_VERSION"],
+            format!("v{version}").as_str()
+        );
+        assert!(parsed["include"][0]["remote"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!(
+                "/v{version}/integrations/gitlab/vee.gitlab-ci.yml"
+            )));
         assert!(gitlab.secrets.contains(&"GL_TOKEN".to_string()));
 
         let cli = ci_workflow(CiTarget::Github, "claude", "m", ReviewEffort::Low).unwrap_err();

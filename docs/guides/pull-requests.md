@@ -22,10 +22,32 @@ Vee, and your code goes only to the model you choose
 3. Commit `.github/workflows/vee.yml`. The next pull request gets a "Vee"
    check, and a thread on each finding on a changed line.
 
-The workflow checks out the pull request's head with full history, installs
-the Vee release that wrote it, and runs `vee ci run` with the workflow's own
-`GITHUB_TOKEN`. Pull requests from forks are skipped, because GitHub gives
-them no secrets.
+The workflow checks out the pull request's head with full history and uses
+the Vee action at the release that wrote it. The action installs that
+release, checking its checksum, sets up the provider and runs `vee ci run`
+with the workflow's own `GITHUB_TOKEN`. Pull requests from forks are skipped,
+because GitHub gives them no secrets.
+
+To add Vee to an existing workflow instead, check out the head with full
+history and add the action:
+
+```yaml
+- uses: actions/checkout@v4
+  with:
+    ref: ${{ github.event.pull_request.head.sha }}
+    fetch-depth: 0
+- uses: klarlabs-studio/vee@v0.1.0
+  with:
+    provider: anthropic-api        # or openai-api, gemini-api
+    model: <model>
+    effort: medium                 # low, medium or high
+    api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+    # approval: true               # also publish the approval verdict
+```
+
+The job needs `checks: write` and `pull-requests: write` permissions. The
+action's outputs are `gate` (`pass`, `block` or `incomplete`) and
+`review-id`; it runs on Linux and macOS runners.
 
 ## GitLab
 
@@ -47,7 +69,11 @@ them no secrets.
    - `GL_TOKEN`, a project access token with the `api` scope;
    - `VEE_ACTOR_LOGIN`, the username of that token's bot.
 
-The job runs in merge request pipelines, in the Vee container image, with
+The written file includes Vee's template,
+`integrations/gitlab/vee.gitlab-ci.yml`, at the release that wrote it, and
+sets its variables (`VEE_VERSION`, `VEE_PROVIDER`, `VEE_MODEL`, `VEE_EFFORT`,
+and `VEE_APPROVAL` to also publish the approval verdict). The job runs in
+merge request pipelines, in the Vee container image of that release, with
 full history, and publishes a commit status and discussions.
 
 ## What `vee ci run` does
