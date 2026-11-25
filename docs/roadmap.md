@@ -28,7 +28,7 @@ sends nothing anywhere" has to be one block of YAML.
 - [x] A multi-stage, non-root container image, built from the release binaries
 - [ ] Release binaries signed with a maintainer key, beyond build provenance
 - [ ] A GitHub Action and a GitLab CI template that run `vee review --gate`, then `vee hosting publish --approval`
-- [ ] A non-interactive CI preset in `vee init` that reads the CI environment
+- [x] `vee ci run`, which reads the CI environment, and `vee init --ci github|gitlab`, which writes the pipeline ([ADR 0019](adr/0019-reviews-on-pull-requests-run-in-the-teams-ci.md))
 - [ ] A first run of [the GitHub hosted acceptance runbook](acceptance/github-hosted.md)
 
 ### 2. Approval and risk visible on the pull request (S)
