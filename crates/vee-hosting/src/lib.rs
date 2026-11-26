@@ -13,6 +13,7 @@ pub mod conversation;
 pub mod gerrit;
 pub mod github;
 pub mod gitlab;
+pub mod trackers;
 pub use conversation::{
     Approval, ConversationComment, ConversationKind, PullRequestConversationProvider,
     PullRequestOrigin, PullRequestReview, PullRequestSummary, Reaction, ReplyTarget,
