@@ -53,6 +53,10 @@ The installers put `vee` in `~/.local/bin` (set `VEE_INSTALL_DIR` to change it) 
 
 `vee init --ci github --provider anthropic-api --model <model>` writes a GitHub workflow that uses the Vee action (`klarlabs-studio/vee`, [action.yml](action.yml)) to review every pull request on your runner with your model key and publishes a check and finding threads; `--ci gitlab` writes a pipeline file that includes the [GitLab template](integrations/gitlab/vee.gitlab-ci.yml) for merge requests. In CI, `vee ci run` detects the pull request, reviews it from its base, publishes the result, and exits with the gate (0 pass, 1 block, 2 incomplete). JSON output follows [schemas/ci-run-v1.schema.json](schemas/ci-run-v1.schema.json). On GitHub, people with write access can also comment `@vee review`, `status`, `explain`, `dismiss` or `waive` on a pull request ([ADR 0020](docs/adr/0020-commands-in-pull-request-comments.md)). See [the pull request guide](docs/guides/pull-requests.md) and [ADR 0019](docs/adr/0019-reviews-on-pull-requests-run-in-the-teams-ci.md).
 
+## Reviews while you work
+
+The Claude Code plugin reviews an agent's changes before the agent finishes its turn, and keeps the agent working on blocking findings (`VEE_AGENT_REVIEW=off` turns this off). `vee hooks install` adds an optional `pre-push` hook that stops a push the gate blocks. Both act only in repositories with a `.vee.yaml`. See [using Vee day to day](docs/guides/daily-use.md) and [ADR 0021](docs/adr/0021-reviews-at-hand-off-points.md).
+
 ## Build
 
 Building the complete workspace requires Rust 1.89 or later (stable) and a Git executable. The checked-in `web/dist` bundle is embedded in the CLI at compile time; Node.js 22 and npm are needed only to rebuild the UI or run browser tests. Install Vee from a source checkout with:
@@ -403,7 +407,7 @@ Every tool declares a title and MCP safety annotations so clients can auto-appro
 
 ### Plugins for Claude Code and Codex
 
-`plugins/vee/` packages Vee's MCP server and its six skills as one plugin for both agents. The plugin starts `vee mcp serve --transport stdio`, so install the `vee` binary on `PATH` first.
+`plugins/vee/` packages Vee's MCP server and its six skills as one plugin for both agents. The plugin starts `vee mcp serve --transport stdio`, so install the `vee` binary on `PATH` first. For Claude Code, the plugin also has `SessionStart` and `Stop` hooks that review the agent's changes before it finishes ([daily use](docs/guides/daily-use.md)).
 
 - **Claude Code:** `/plugin marketplace add klarlabs-studio/vee`, then `/plugin install vee@vee`. The skills run as `/vee:<skill>`, and the tools appear as `mcp__plugin_vee_vee__<tool>`.
 - **Codex:** the repository marketplace at `.agents/plugins/marketplace.json` lists the plugin under Developer Tools. Its root `plugin.json` and `mcp.json` follow the portable Agent Plugins 1.0 format.

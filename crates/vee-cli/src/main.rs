@@ -377,6 +377,12 @@ enum Command {
         #[command(subcommand)]
         command: CiCommand,
     },
+    /// Review at hand-off points: a Git pre-push hook, and the hooks the
+    /// agent plugins run before a coding agent finishes.
+    Hooks {
+        #[command(subcommand)]
+        command: HooksCommand,
+    },
     /// Publish a saved local review to a Git hosting pull request.
     Hosting {
         #[command(subcommand)]
@@ -954,6 +960,53 @@ enum ReviewsCommand {
 enum CiTargetArg {
     Github,
     Gitlab,
+}
+
+#[derive(Subcommand)]
+enum HooksCommand {
+    /// Install a pre-push hook that reviews the commits each push sends and
+    /// stops the push when the gate blocks (`git push --no-verify` skips it).
+    Install {
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
+    /// Remove Vee's pre-push hook; another tool's hook is left alone.
+    Uninstall {
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
+    /// Show whether Vee's pre-push hook is installed.
+    Status {
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
+    /// Run a hook. Git and the agent plugins call these; they read the
+    /// hook's input from stdin.
+    Run {
+        #[command(subcommand)]
+        hook: HookRun,
+    },
+}
+
+#[derive(Subcommand)]
+enum HookRun {
+    /// Git's pre-push hook: review each pushed ref; exit 1 when a review blocks.
+    #[command(name = "pre-push")]
+    PrePush {
+        /// The remote's name, as Git passes it.
+        remote: String,
+        /// The remote's URL, as Git passes it.
+        url: Option<String>,
+    },
+    /// An agent's session start: remember `HEAD`, so the Stop hook also
+    /// reviews the commits the agent makes.
+    AgentSessionStart,
+    /// An agent's Stop: review its changes and, when the gate blocks, keep
+    /// it working with the findings. Set VEE_AGENT_REVIEW=off to turn it off.
+    AgentStop,
 }
 
 #[derive(Subcommand)]
@@ -1787,6 +1840,99 @@ fn change_target(
 
 /// Print one machine-readable document for `--output json`: compact JSON and a newline.
 /// The same document is returned by the matching MCP tool.
+fn run_hooks(command: HooksCommand) -> Result<u8> {
+    use vee_application::hooks;
+    let (status, output) = match command {
+        HooksCommand::Install { output } => {
+            let workspace = operations::Workspace::discover(crate::local_stores())?;
+            (hooks::install_git_hook(workspace.root())?, output)
+        }
+        HooksCommand::Uninstall { output } => {
+            let workspace = operations::Workspace::discover(crate::local_stores())?;
+            (hooks::uninstall_git_hook(workspace.root())?, output)
+        }
+        HooksCommand::Status { output } => {
+            let workspace = operations::Workspace::discover(crate::local_stores())?;
+            (hooks::git_hook_status(workspace.root())?, output)
+        }
+        HooksCommand::Run { hook } => return run_hook(hook),
+    };
+    match output {
+        Output::Json => emit_json(&status)?,
+        Output::Text => print_view(&status)?,
+    }
+    Ok(0)
+}
+
+fn run_hook(hook: HookRun) -> Result<u8> {
+    use std::io::Read;
+    use vee_application::hooks;
+    let mut input = Vec::new();
+    std::io::stdin()
+        .take((1 << 20) + 1)
+        .read_to_end(&mut input)?;
+    match hook {
+        HookRun::PrePush { remote, url: _ } => {
+            let workspace = operations::Workspace::discover(crate::local_stores())?;
+            let updates = hooks::parse_push_updates(&String::from_utf8_lossy(&input))?;
+            let outcome = hooks::pre_push(&workspace, &remote, &updates)?;
+            for skipped in &outcome.skipped {
+                eprintln!("vee: not reviewed: {skipped}");
+            }
+            for review in &outcome.reviews {
+                eprintln!(
+                    "vee: {} ({}): {} (review {})",
+                    review.remote_ref,
+                    review.range,
+                    gate_word(review.gate),
+                    review.review_id
+                );
+                for reason in &review.reasons {
+                    eprintln!("vee:   {reason}");
+                }
+            }
+            if outcome.blocks() {
+                eprintln!(
+                    "vee: push stopped. See `vee findings list --review <id>`; \
+                     `git push --no-verify` pushes without the review."
+                );
+                return Ok(1);
+            }
+            Ok(0)
+        }
+        // Agent hooks never fail the agent's hook call: problems are messages.
+        HookRun::AgentSessionStart => {
+            let started = hooks::parse_agent_hook_input(&input)
+                .and_then(|input| hooks::agent_session_start(&input));
+            if let Err(error) = started {
+                eprintln!("vee: {error:#}");
+            }
+            Ok(0)
+        }
+        HookRun::AgentStop => {
+            let response = match hooks::parse_agent_hook_input(&input) {
+                Ok(input) => hooks::agent_stop(&input, crate::local_stores()),
+                Err(error) => hooks::AgentHookResponse {
+                    system_message: Some(format!("Vee could not review: {error:#}")),
+                    ..Default::default()
+                },
+            };
+            if !response.is_empty() {
+                emit_json(&response)?;
+            }
+            Ok(0)
+        }
+    }
+}
+
+fn gate_word(status: GateStatus) -> &'static str {
+    match status {
+        GateStatus::Pass => "passed",
+        GateStatus::Block => "blocked",
+        GateStatus::Incomplete => "incomplete, not gated",
+    }
+}
+
 fn emit_json(document: &impl serde::Serialize) -> Result<()> {
     let mut stdout = std::io::stdout().lock();
     serde_json::to_writer(&mut stdout, document)?;
@@ -3034,6 +3180,7 @@ fn run() -> Result<u8> {
                 Ok(0)
             }
         },
+        Command::Hooks { command } => run_hooks(command),
         Command::Ci {
             command:
                 CiCommand::Run {

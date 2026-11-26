@@ -1091,6 +1091,10 @@ pub(crate) fn execute_claude_cli(
     let mut args = vec![
         "--restricted".into(),
         "--no-session-persistence".into(),
+        // The review session loads the user's plugins, and a plugin's Stop hook
+        // may itself run `vee` (`vee hooks run agent-stop`): no hooks run here.
+        "--settings".into(),
+        CLAUDE_REVIEW_SETTINGS.into(),
         "--permission-mode".into(),
         "plan".into(),
         "--tools".into(),
@@ -1181,6 +1185,10 @@ pub(crate) fn claude_exploration_args(exploration: &vee_core::ExplorationLaunch)
         allowed,
     ]
 }
+
+/// Settings for Claude Code review sessions: hooks are off, so a reviewer
+/// session never starts another review.
+pub(crate) const CLAUDE_REVIEW_SETTINGS: &str = r#"{"disableAllHooks":true}"#;
 
 /// Largest prompt Vee passes as a single command-line argument. Linux rejects
 /// any argument over 128 KiB (`MAX_ARG_STRLEN`); this leaves room for the rest.

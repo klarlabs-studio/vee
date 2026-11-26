@@ -503,6 +503,11 @@ fn claude_cli_adapter_uses_restricted_schema_validated_json_contract() {
     assert!(args
         .windows(2)
         .any(|pair| pair == ["--output-format", "json"]));
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == ["--settings", r#"{"disableAllHooks":true}"#]),
+        "a review session must not run the user's hooks, which may start another review"
+    );
     assert!(args
         .windows(2)
         .any(|pair| pair == ["--model", "test-model"]));

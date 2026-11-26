@@ -6,6 +6,21 @@ change configuration and output contracts.
 
 ## Unreleased
 
+### Reviews while you work
+
+- The Claude Code plugin reviews an agent's changes when it finishes a turn:
+  its commits since the session started and its uncommitted changes. A
+  blocking gate keeps the agent working with the findings, for at most three
+  rounds per session; an incomplete review is only reported.
+  `VEE_AGENT_REVIEW=off` turns it off
+  ([ADR 0021](docs/adr/0021-reviews-at-hand-off-points.md)).
+- `vee hooks install`, `uninstall` and `status` manage an optional Git
+  `pre-push` hook that reviews the commits a push sends and stops the push
+  when the gate blocks. It honours `core.hooksPath` and never replaces
+  another tool's hook.
+- Claude Code review sessions run with hooks turned off, so a reviewer never
+  starts another review.
+
 ### Pull requests
 
 - Incremental review after a push on GitHub: Vee's summary comment records

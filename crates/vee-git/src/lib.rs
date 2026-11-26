@@ -103,6 +103,52 @@ pub fn merge_base_of(path: &Path, left: &str, right: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// The commit `HEAD` points at, or `None` on an unborn branch.
+pub fn head_oid(path: &Path) -> Option<String> {
+    commit_oid(path, "HEAD")
+}
+
+/// The full ID of the commit `revision` names, or `None` when it names no
+/// commit available locally.
+pub fn commit_oid(path: &Path, revision: &str) -> Option<String> {
+    validate_revision(revision).ok()?;
+    let output = git(
+        path,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &format!("{revision}^{{commit}}"),
+        ],
+    )
+    .ok()?;
+    String::from_utf8(output)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Where Git runs the named hook from, honouring `core.hooksPath` and linked
+/// worktrees.
+pub fn hook_path(path: &Path, name: &str) -> Result<PathBuf, String> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_lowercase() || character == '-')
+    {
+        return Err(format!("{name:?} is not a Git hook name"));
+    }
+    let output = git(path, &["rev-parse", "--git-path", &format!("hooks/{name}")])?;
+    let relative = String::from_utf8(output).map_err(|error| error.to_string())?;
+    let relative = Path::new(relative.trim_end_matches(['\r', '\n']));
+    Ok(if relative.is_absolute() {
+        relative.to_path_buf()
+    } else {
+        path.join(relative)
+    })
+}
+
 /// One commit in first-parent history: its author's email and the paths it changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HistoryCommit {

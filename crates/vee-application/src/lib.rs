@@ -13,6 +13,7 @@ pub mod failure;
 pub mod finding_task;
 mod focused_review;
 mod gate;
+pub mod hooks;
 pub mod hosting;
 mod impact;
 pub mod imported_history;

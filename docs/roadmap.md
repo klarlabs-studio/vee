@@ -31,6 +31,17 @@ sends nothing anywhere" has to be one block of YAML.
 - [x] `vee ci run`, which reads the CI environment, and `vee init --ci github|gitlab`, which writes the pipeline ([ADR 0019](adr/0019-reviews-on-pull-requests-run-in-the-teams-ci.md))
 - [ ] A first run of [the GitHub hosted acceptance runbook](acceptance/github-hosted.md)
 
+### 1a. Reviews while the work happens (S)
+
+Findings on the pull request arrive after the agent's session has ended.
+Reviews at the hand-off points find them while the agent or the author
+still has the context.
+
+- [x] An agent Stop hook in the Claude Code plugin that keeps the agent working on blocking findings ([ADR 0021](adr/0021-reviews-at-hand-off-points.md))
+- [x] An optional `pre-push` hook (`vee hooks install`)
+- [ ] The same Stop hook for Codex, once its hook contract is confirmed
+- [ ] Review once, reuse in CI: a signed local review of the exact head that CI verifies instead of reviewing again
+
 ### 2. Approval and risk visible on the pull request (S)
 
 The gate decision is published as a check, but the approval verdict and the
