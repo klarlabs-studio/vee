@@ -3714,6 +3714,18 @@ pub struct PolicyConfig {
     /// existing configuration and policy digests are unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub severity_floors: Vec<SeverityFloor>,
+    /// `false`: a change reviewed under this policy always needs a person's
+    /// approval, whatever `approval` allows. Omitted, the approval guards
+    /// decide. Packs can turn it off but never back on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automatic_approval: Option<bool>,
+}
+
+impl PolicyConfig {
+    /// Whether this policy lets Vee approve a change without a person.
+    pub fn allows_automatic_approval(&self) -> bool {
+        self.automatic_approval != Some(false)
+    }
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -3728,6 +3740,7 @@ pub struct AcceptancePolicyConfig {
 impl Default for PolicyConfig {
     fn default() -> Self {
         Self {
+            automatic_approval: None,
             required_reviewers: vec![],
             required_verifications: vec![],
             block_severities: default_severities(),

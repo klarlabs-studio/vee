@@ -43,6 +43,7 @@ fn stage(id: &str, passed: bool, detail: impl Into<String>) -> ApprovalStage {
 pub fn evaluate_approval(
     root: &Path,
     guards: &vee_core::ApprovalConfig,
+    policy: &vee_core::PolicyConfig,
     review: &ReviewResult,
     current: bool,
     risk: Option<&ChangeRisk>,
@@ -94,6 +95,20 @@ pub fn evaluate_approval(
 
     stages.push(authors_stage(root, guards, &review.change_set));
     stages.push(owners_stage(root, guards, &review.change_set));
+    stages.push(if policy.allows_automatic_approval() {
+        stage("policy", true, "The policy allows approval without a person.")
+    } else {
+        stage(
+            "policy",
+            false,
+            match review.policy_profile.as_deref() {
+                Some(profile) => format!(
+                    "Policy profile {profile} sets automatic_approval: false; a person must approve."
+                ),
+                None => "The policy sets automatic_approval: false; a person must approve.".to_owned(),
+            },
+        )
+    });
 
     let allowed = guards.max_risk();
     stages.push(match risk {

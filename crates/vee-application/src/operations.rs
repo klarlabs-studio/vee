@@ -1205,6 +1205,18 @@ pub fn impact(workspace: &Workspace, target: ChangeTarget) -> Result<crate::Impa
     crate::analyze_impact(workspace.root(), &change_set).map_err(anyhow::Error::msg)
 }
 
+/// The policy a saved review was gated under: the repository's, or its
+/// policy profile's.
+fn review_policy(
+    mut config: vee_core::RepositoryConfig,
+    review: &crate::ReviewResult,
+) -> Result<vee_core::PolicyConfig> {
+    config
+        .select_policy_profile(review.policy_profile.as_deref())
+        .map_err(configuration_failure)?;
+    Ok(config.policy)
+}
+
 /// `approval-eligibility-v1`: whether a saved review's change may be approved
 /// without a human, with every guard stage and its reason.
 pub fn approval_eligibility(
@@ -1216,9 +1228,11 @@ pub fn approval_eligibility(
     if let Ok(gate) = current_gate(workspace, &detail.review) {
         detail.review.gate = gate;
     }
+    let policy = review_policy(config.clone(), &detail.review)?;
     Ok(crate::evaluate_approval(
         workspace.root(),
         &config.approval,
+        &policy,
         &detail.review,
         current,
         detail.risk.as_ref(),
@@ -1282,9 +1296,11 @@ pub fn review_session(
         if let Ok(gate) = current_gate(workspace, &detail.review) {
             detail.review.gate = gate;
         }
+        let policy = review_policy(config.clone(), &detail.review)?;
         let approval = crate::evaluate_approval(
             workspace.root(),
             &config.approval,
+            &policy,
             &detail.review,
             current,
             detail.risk.as_ref(),
