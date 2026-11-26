@@ -612,6 +612,15 @@ fn summary_comment(
         .cloned()
 }
 
+/// The record in Vee's summary comment among `comments`.
+pub(crate) fn summary_record(
+    comments: &[vee_hosting::ConversationComment],
+    actor_login: &str,
+) -> Option<crate::incremental::ReviewRecord> {
+    summary_comment(comments, actor_login)
+        .and_then(|comment| crate::incremental::decode(&comment.body))
+}
+
 /// Post or update Vee's summary of `review`, with the record the next
 /// review builds on.
 fn publish_summary(
