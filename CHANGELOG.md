@@ -31,6 +31,12 @@ change configuration and output contracts.
   everything ([ADR 0022](docs/adr/0022-incremental-review-after-a-push.md)).
 - `vee ci run` posts one summary comment per pull request and edits it after
   each review.
+- `@vee fix` in a finding's thread asks the reviewer's model for a fix to the
+  finding's file. Vee reviews the fixed head and pushes the fix as one commit
+  only when the finding is gone and nothing new blocks, then replies with how
+  to revert it ([ADR 0023](docs/adr/0023-fixes-from-pull-request-comments.md)).
+  The workflow `vee init --ci github` writes gives the comment job
+  `contents: write`.
 
 ## 0.1.0 — 2026-11-25
 
