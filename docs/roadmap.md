@@ -96,6 +96,7 @@ What is missing is the loop.
 - [x] `@vee explain`, `dismiss <reason>`, `waive <days>d <reason>`, `review` and `status` on GitHub ([ADR 0020](adr/0020-commands-in-pull-request-comments.md))
 - [x] Waivers only for actors that code ownership permits, read from the base branch
 - [x] Comment text stays untrusted and maps only to these operations
+- [x] `@vee fix`: a reviewed fix pushed as one commit, with how to revert it ([ADR 0023](adr/0023-fixes-from-pull-request-comments.md))
 - [ ] Dismissals become finding feedback in `vee rules candidates`
 - [ ] Commands on GitLab, through a webhook that starts a pipeline
 

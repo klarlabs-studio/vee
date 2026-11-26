@@ -113,11 +113,12 @@ Write the command on its own line:
 | `@vee review` | Reviews the pull request's head again and publishes the result. |
 | `@vee status` | Replies with its findings on the pull request and the waivers and dismissals in effect. |
 | `@vee explain` | Replies in the finding's thread with an explanation from the configured model. |
+| `@vee fix` | Asks the configured model for a fix to the finding's file, reviews the result, and pushes it as one commit only if the finding is gone and nothing new blocks ([ADR 0023](../adr/0023-fixes-from-pull-request-comments.md)). |
 | `@vee dismiss <reason>` | Records the finding as a false positive and resolves its thread. A finding that blocks keeps blocking. |
 | `@vee waive <days>d <reason>` | Waives the finding on the current head, for 1 to 90 days, and reviews again so the check shows the new verdict. |
 | `@vee help` | Lists the commands. |
 
-Write `explain`, `dismiss` and `waive` as a reply in the finding's thread, or
+Write `explain`, `fix`, `dismiss` and `waive` as a reply in the finding's thread, or
 name the finding anywhere: `@vee waive find_0123456789ab 7d accepted for the
 hotfix`.
 
@@ -130,7 +131,7 @@ What Vee checks:
   owners, give the action a `github-token` that can read the organization's
   teams; the workflow's own token cannot, so Vee treats team owners as
   unconfirmed and refuses.
-- **No forks for `review`, `explain` and `waive`.** These load the
+- **No forks for `review`, `explain`, `fix` and `waive`.** These load the
   repository's configuration, which names programs Vee runs, so Vee refuses
   them on pull requests from forks. It fetches the head itself, after these
   checks.

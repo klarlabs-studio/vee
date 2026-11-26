@@ -9,7 +9,7 @@ so a change that passes in one place passes in the next.
 | A coding agent finishes its turn | The Claude Code plugin's Stop hook | The agent gets the blocking findings and keeps working |
 | You push | `vee hooks install` (optional) | The push stops; `git push --no-verify` skips the review |
 | A pull request opens or changes | `vee init --ci github` or `--ci gitlab` | The check fails and findings appear as threads |
-| You act on a finding in the pull request | `@vee explain`, `dismiss`, `waive`, `review` | Vee replies in the thread; a waiver can pass the gate |
+| You act on a finding in the pull request | `@vee explain`, `fix`, `dismiss`, `waive`, `review` | Vee replies in the thread; a reviewed fix is pushed as one commit; a waiver can pass the gate |
 
 The pull request check is the gate that counts. The two local points find
 problems earlier, while the agent or the author still has the context.

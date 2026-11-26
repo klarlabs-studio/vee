@@ -182,8 +182,29 @@ pub fn run(
     pull_request: CiPullRequest,
     options: CiRunOptions,
 ) -> Result<CiRun> {
+    let reviewed = review(workspace, &pull_request, &options)?;
+    publish(workspace, pull_request, &options, reviewed)
+}
+
+/// A review of a pull request's head, not yet published.
+pub(crate) struct Reviewed {
+    pub(crate) review: crate::ReviewResult,
+    /// The record of the review before this one, from Vee's summary comment.
+    pub(crate) earlier: Option<crate::incremental::ReviewRecord>,
+    conversation: Option<Conversation>,
+    summary: Option<vee_hosting::ConversationComment>,
+    actor_login: Option<String>,
+}
+
+/// Review the checked-out head of `pull_request`, building on the last
+/// review's record unless `options.full`.
+pub(crate) fn review(
+    workspace: &Workspace,
+    pull_request: &CiPullRequest,
+    options: &CiRunOptions,
+) -> Result<Reviewed> {
     let root = workspace.root();
-    ensure_checkout_is_head(root, &pull_request)?;
+    ensure_checkout_is_head(root, pull_request)?;
     exclude_vee_runtime_files(root)?;
     let actor_login = options
         .actor_login
@@ -192,7 +213,7 @@ pub fn run(
     // The conversation holds commands and Vee's summary with its record of
     // the last review. Only GitHub reads it so far.
     let conversation = if pull_request.provider == "github" {
-        read_conversation(&pull_request, actor_login.as_deref().unwrap_or_default())
+        read_conversation(pull_request, actor_login.as_deref().unwrap_or_default())
             .map_err(|error| {
                 eprintln!(
                     "warning: the pull request's comments could not be read, so dismissals and waivers are not applied and the whole change is reviewed: {error:#}"
@@ -205,14 +226,15 @@ pub fn run(
     let summary = conversation.as_ref().and_then(|(_, comments)| {
         summary_comment(comments, actor_login.as_deref().unwrap_or_default())
     });
-    let carried = summary
+    let earlier = summary
         .as_ref()
         .and_then(|comment| crate::incremental::decode(&comment.body))
         .filter(|record| {
-            !options.full
-                && record.repository == pull_request.repository
-                && record.number == pull_request.number
-        })
+            record.repository == pull_request.repository && record.number == pull_request.number
+        });
+    let carried = earlier
+        .clone()
+        .filter(|_| !options.full)
         .map(|record| crate::incremental::CarriedReview { record });
     let review = crate::operations::review(
         workspace,
@@ -230,6 +252,31 @@ pub fn run(
         },
         None,
     )?;
+    Ok(Reviewed {
+        review,
+        earlier,
+        conversation,
+        summary,
+        actor_login,
+    })
+}
+
+/// Publish a review of `pull_request`'s head: the check, threads, the
+/// dismissals and waivers people gave, and Vee's summary.
+pub(crate) fn publish(
+    workspace: &Workspace,
+    pull_request: CiPullRequest,
+    options: &CiRunOptions,
+    reviewed: Reviewed,
+) -> Result<CiRun> {
+    let root = workspace.root();
+    let Reviewed {
+        review,
+        conversation,
+        summary,
+        actor_login,
+        ..
+    } = reviewed;
     let hosting_flags = crate::hosting::HostingFlags {
         provider: Some(pull_request.provider.clone()),
         host: Some(pull_request.host.clone()),

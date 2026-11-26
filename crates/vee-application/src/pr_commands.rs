@@ -28,6 +28,7 @@ pub const HELP: &str = "Vee commands, one per comment, on the first line that st
 - `@vee review`: review the pull request's head again.\n\
 - `@vee status`: list Vee's findings here and the waivers and dismissals in effect.\n\
 - `@vee explain [finding]`: explain a finding.\n\
+- `@vee fix [finding]`: ask the reviewer's model for a fix to a finding. Vee pushes it to the pull request's branch only if a new review no longer reports the finding and finds nothing new that blocks.\n\
 - `@vee dismiss [finding] <reason>`: record a finding as a false positive. It does not change the gate.\n\
 - `@vee waive [finding] <days>d <reason>`: waive a finding on the current head, for at most 90 days. Needs code ownership of its file.\n\n\
 In a finding's thread, the finding is implied. Elsewhere, name it by its ID, such as `find_0123456789ab`. Commands need write access to the repository.";
@@ -39,6 +40,9 @@ pub enum Command {
     Status,
     Help,
     Explain {
+        finding: Option<String>,
+    },
+    Fix {
         finding: Option<String>,
     },
     Dismiss {
@@ -59,6 +63,7 @@ impl Command {
             Self::Status => "status",
             Self::Help => "help",
             Self::Explain { .. } => "explain",
+            Self::Fix { .. } => "fix",
             Self::Dismiss { .. } => "dismiss",
             Self::Waive { .. } => "waive",
         }
@@ -67,6 +72,7 @@ impl Command {
     fn finding(&self) -> Option<&str> {
         match self {
             Self::Explain { finding }
+            | Self::Fix { finding }
             | Self::Dismiss { finding, .. }
             | Self::Waive { finding, .. } => finding.as_deref(),
             _ => None,
@@ -113,6 +119,7 @@ pub fn parse(body: &str) -> Parsed {
         "status" if finding.is_none() => Parsed::Command(Command::Status),
         "help" => Parsed::Command(Command::Help),
         "explain" => Parsed::Command(Command::Explain { finding }),
+        "fix" => Parsed::Command(Command::Fix { finding }),
         "dismiss" => {
             let reason = rest(tokens);
             if reason.is_empty() {
@@ -733,7 +740,7 @@ pub fn handle(
     let threads = finding_threads(&comments, &event.actor_login);
     let needs_head = matches!(
         command,
-        Command::Review | Command::Explain { .. } | Command::Waive { .. }
+        Command::Review | Command::Explain { .. } | Command::Fix { .. } | Command::Waive { .. }
     );
     if needs_head && origin.is_fork() {
         return refuse(
@@ -741,7 +748,7 @@ pub fn handle(
             &pull_request,
             &comment,
             &command,
-            "Vee does not run `review`, `explain` or `waive` on pull requests from forks, because they would load the fork's configuration with this repository's secrets.",
+            "Vee does not run `review`, `explain`, `fix` or `waive` on pull requests from forks, because they would load the fork's configuration with this repository's secrets.",
         );
     }
     if needs_head && !origin.open {
@@ -891,6 +898,42 @@ pub fn handle(
             done.reply_id = Some(reply_id);
             done.run = Some(run);
             Ok(done)
+        }
+        Command::Fix { .. } => {
+            let Some(thread) = found else {
+                return refuse(
+                    host,
+                    &pull_request,
+                    &comment,
+                    &command,
+                    &no_target(&command),
+                );
+            };
+            let Some(branch) = origin
+                .head_ref
+                .clone()
+                .filter(|branch| valid_branch(root, branch))
+            else {
+                return refuse(
+                    host,
+                    &pull_request,
+                    &comment,
+                    &command,
+                    "Vee cannot tell which branch to push the fix to.",
+                );
+            };
+            check_out_head(root, event.number, &origin.head_oid)?;
+            fix(FixRequest {
+                workspace,
+                host,
+                pull_request: &pull_request,
+                command: &command,
+                comment: &comment,
+                thread: &thread,
+                branch: &branch,
+                ci_pull_request,
+                run_options,
+            })
         }
         Command::Explain { .. } => {
             let Some(thread) = found else {
@@ -1067,11 +1110,10 @@ fn explain_schema() -> serde_json::Value {
     })
 }
 
-/// A model's explanation of `thread`'s finding, from the finding as Vee
-/// published it and the source around its line at the head.
-fn explain(workspace: &Workspace, thread: &FindingThread, head_oid: &str) -> Result<String> {
-    let config = workspace.effective_config(None)?;
-    let reviewer_id = config
+/// The reviewer whose model answers `explain` and `fix`: the first enabled
+/// reviewer that can block, else the first enabled one.
+pub(crate) fn task_reviewer(config: &crate::RepositoryConfig) -> Result<String> {
+    config
         .reviewers
         .iter()
         .find(|(_, reviewer)| reviewer.enabled && !reviewer.advisory)
@@ -1082,7 +1124,14 @@ fn explain(workspace: &Workspace, thread: &FindingThread, head_oid: &str) -> Res
                 .find(|(_, reviewer)| reviewer.enabled)
         })
         .map(|(id, _)| id.clone())
-        .ok_or_else(|| configuration_failure("no enabled reviewer can explain findings"))?;
+        .ok_or_else(|| configuration_failure("no enabled reviewer can answer"))
+}
+
+/// A model's explanation of `thread`'s finding, from the finding as Vee
+/// published it and the source around its line at the head.
+fn explain(workspace: &Workspace, thread: &FindingThread, head_oid: &str) -> Result<String> {
+    let config = workspace.effective_config(None)?;
+    let reviewer_id = task_reviewer(&config)?;
     let finding_text = thread
         .body
         .lines()
@@ -1161,6 +1210,249 @@ fn source_excerpt(root: &Path, path: &str, line: u64) -> Result<Option<serde_jso
     })))
 }
 
+/// Whether `branch` is a branch name Git accepts, so it cannot smuggle an
+/// option or another ref into `git push`.
+fn valid_branch(root: &Path, branch: &str) -> bool {
+    !branch.starts_with('-') && git(root, &["check-ref-format", "--branch", branch]).is_ok()
+}
+
+struct FixRequest<'a> {
+    workspace: &'a Workspace,
+    host: &'a dyn PullRequestConversationProvider,
+    pull_request: &'a PullRequestRef,
+    command: &'a Command,
+    comment: &'a ConversationComment,
+    thread: &'a FindingThread,
+    branch: &'a str,
+    ci_pull_request: CiPullRequest,
+    run_options: CiRunOptions,
+}
+
+/// How often Vee asks the host for the pull request's head after a push,
+/// two seconds apart.
+const HEAD_UPDATE_ATTEMPTS: u32 = 15;
+
+/// The account GitHub Actions commits as.
+const COMMIT_NAME: &str = "github-actions[bot]";
+const COMMIT_EMAIL: &str = "41898282+github-actions[bot]@users.noreply.github.com";
+
+/// Propose a fix, commit it, review the result, and push only a fix the
+/// review accepts (ADR 0023). Whatever is not pushed is undone in the
+/// checkout, and the reply in the finding's thread says why.
+fn fix(request: FixRequest<'_>) -> Result<CommandOutcome> {
+    let FixRequest {
+        workspace,
+        host,
+        pull_request,
+        command,
+        comment,
+        thread,
+        branch,
+        ci_pull_request,
+        run_options,
+    } = request;
+    let root = workspace.root();
+    let head = ci_pull_request.head_oid.clone();
+    let answer = |status: &str, text: String| -> Result<CommandOutcome> {
+        let target = ReplyTarget::Thread {
+            comment_id: thread.comment_id.clone(),
+        };
+        let reply_id = host
+            .reply(pull_request, &target, &text)
+            .map_err(|error| anyhow::anyhow!("replying: {error}"))?;
+        let mut done = outcome(Some(command), status, text);
+        done.reply_id = Some(reply_id);
+        Ok(done)
+    };
+    let undo = || git(root, &["checkout", "--quiet", "--force", "--detach", &head]);
+    let proposed = match crate::pr_fix::propose_and_apply(workspace, thread, &head) {
+        Ok(proposed) => proposed,
+        Err(error) => {
+            undo()?;
+            return answer(
+                "refused",
+                format!(
+                    "Vee could not fix `{}`: {}. Nothing was pushed.",
+                    thread.finding_id,
+                    neutralize(&format!("{error:#}"))
+                ),
+            );
+        }
+    };
+    let by = format!(
+        "the `{}` reviewer{}",
+        proposed.reviewer_id,
+        proposed
+            .model
+            .as_deref()
+            .map(|model| format!(" ({model})"))
+            .unwrap_or_default()
+    );
+    let summary = neutralize(&proposed.summary);
+    if proposed.content.is_none() {
+        return answer(
+            "refused",
+            format!(
+                "{} proposed no change for `{}`: {summary}\n\nNothing was pushed.",
+                capitalized_first(&by),
+                thread.finding_id
+            ),
+        );
+    }
+    let message = format!(
+        "fix: address Vee finding {}\n\n{}\n\nProposed by {by} at the request of {} and reviewed by Vee before it was pushed. Revert this commit to undo it.\n\nVee-Finding: {}",
+        thread.finding_id,
+        proposed.summary.trim(),
+        comment.author,
+        thread.fingerprint
+    );
+    git(root, &["add", "--", &proposed.path])?;
+    git(
+        root,
+        &[
+            "-c",
+            &format!("user.name={COMMIT_NAME}"),
+            "-c",
+            &format!("user.email={COMMIT_EMAIL}"),
+            "commit",
+            "--quiet",
+            "--no-verify",
+            "-m",
+            &message,
+        ],
+    )?;
+    let fixed = git(root, &["rev-parse", "HEAD"])?;
+    let mut fixed_pull_request = ci_pull_request;
+    fixed_pull_request.head_oid = fixed.clone();
+    let reviewed = match crate::ci::review(workspace, &fixed_pull_request, &run_options) {
+        Ok(reviewed) => reviewed,
+        Err(error) => {
+            undo()?;
+            return answer(
+                "refused",
+                format!(
+                    "Vee could not review its fix for `{}`: {}. Nothing was pushed.",
+                    thread.finding_id,
+                    neutralize(&format!("{error:#}"))
+                ),
+            );
+        }
+    };
+    if let Err(why) = fix_verdict(&reviewed, &thread.fingerprint) {
+        undo()?;
+        return answer(
+            "refused",
+            format!(
+                "{} proposed a fix for `{}`, but Vee did not push it: {why}\n\nThe fix: {summary}",
+                capitalized_first(&by),
+                thread.finding_id
+            ),
+        );
+    }
+    if let Err(error) = git(
+        root,
+        &[
+            "push",
+            "--quiet",
+            "origin",
+            &format!("HEAD:refs/heads/{branch}"),
+        ],
+    ) {
+        undo()?;
+        return answer(
+            "refused",
+            format!(
+                "Vee fixed `{}` and the review accepted it, but the push to `{branch}` failed: {}. The branch may be protected, have moved, or the workflow's token may lack `contents: write`.",
+                thread.finding_id,
+                neutralize(&format!("{error:#}"))
+            ),
+        );
+    }
+    // A push with the workflow's token starts no workflow, so Vee publishes
+    // the review of the new head itself, once the host shows that head.
+    let mut attempts = 0;
+    while host
+        .pull_request_origin(pull_request)
+        .map(|origin| origin.head_oid != fixed)
+        .unwrap_or(true)
+    {
+        attempts += 1;
+        if attempts >= HEAD_UPDATE_ATTEMPTS {
+            return answer(
+                "done",
+                format!(
+                    "Pushed `{}` to `{branch}`, proposed by {by}: {summary}\n\nVee reviewed the new head before pushing and the finding is gone, but the pull request did not show the new head in time to publish that review. Comment `@vee review` to publish it. To undo the fix, revert the commit: `git revert {fixed}`.",
+                    short(&fixed)
+                ),
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    let run = crate::ci::publish(workspace, fixed_pull_request, &run_options, reviewed)?;
+    let mut done = answer(
+        "done",
+        format!(
+            "Pushed `{}` to `{branch}`, proposed by {by}: {summary}\n\nVee reviewed the new head before pushing: the finding is gone, and the gate is **{}**. To undo it, revert the commit: `git revert {fixed}`.",
+            short(&fixed),
+            gate_word(run.gate)
+        ),
+    )?;
+    done.run = Some(run);
+    Ok(done)
+}
+
+/// Whether the review of a fix allows pushing it: the finding is gone, the
+/// review is complete, and nothing blocks that did not exist before.
+fn fix_verdict(reviewed: &crate::ci::Reviewed, fingerprint: &str) -> Result<(), String> {
+    let review = &reviewed.review;
+    if review.gate.status == vee_core::GateStatus::Incomplete {
+        return Err("the review of the fix is incomplete.".into());
+    }
+    if review
+        .findings
+        .iter()
+        .any(|finding| finding.fingerprint == fingerprint)
+    {
+        return Err("the review still reports the finding.".into());
+    }
+    let earlier: std::collections::BTreeSet<&str> = reviewed
+        .earlier
+        .iter()
+        .flat_map(|record| &record.findings)
+        .map(|finding| finding.fingerprint.as_str())
+        .collect();
+    let new_blockers: Vec<&str> = review
+        .gate
+        .blocking_findings
+        .iter()
+        .filter_map(|id| review.findings.iter().find(|finding| &finding.id == id))
+        .filter(|finding| !earlier.contains(finding.fingerprint.as_str()))
+        .map(|finding| finding.id.as_str())
+        .collect();
+    if !new_blockers.is_empty()
+        || (reviewed.earlier.is_none() && review.gate.status != vee_core::GateStatus::Pass)
+    {
+        return Err(format!(
+            "the review of the fix found new blocking findings ({}).",
+            if new_blockers.is_empty() {
+                "the earlier review's record is missing, so every blocking finding counts as new"
+                    .to_owned()
+            } else {
+                new_blockers.join(", ")
+            }
+        ));
+    }
+    Ok(())
+}
+
+fn capitalized_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1180,6 +1472,13 @@ mod tests {
         assert_eq!(
             command("@vee explain find_0123456789ab"),
             Command::Explain {
+                finding: Some("find_0123456789ab".into())
+            }
+        );
+        assert_eq!(command("@vee fix"), Command::Fix { finding: None });
+        assert_eq!(
+            command("@vee fix find_0123456789ab"),
+            Command::Fix {
                 finding: Some("find_0123456789ab".into())
             }
         );

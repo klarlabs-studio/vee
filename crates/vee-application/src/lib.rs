@@ -26,6 +26,7 @@ pub mod packs;
 pub mod patch_sandbox;
 pub mod pr_commands;
 pub mod pr_description;
+mod pr_fix;
 pub mod proposals;
 mod providers;
 pub mod publication;
