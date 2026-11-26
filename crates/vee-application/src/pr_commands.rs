@@ -1609,13 +1609,20 @@ mod tests {
             &self,
             _: &vee_hosting::RepositoryRef,
             _: usize,
-        ) -> Result<Vec<vee_hosting::ClosedPullRequest>, HostingError> {
+        ) -> Result<Vec<vee_hosting::PullRequestSummary>, HostingError> {
             Ok(Vec::new())
         }
         fn reviews(
             &self,
             _: &PullRequestRef,
         ) -> Result<Vec<vee_hosting::PullRequestReview>, HostingError> {
+            Ok(Vec::new())
+        }
+        fn recent_pull_requests(
+            &self,
+            _: &vee_hosting::RepositoryRef,
+            _: usize,
+        ) -> Result<Vec<vee_hosting::PullRequestSummary>, HostingError> {
             Ok(Vec::new())
         }
         fn approve(&self, _: &PullRequestRef, _: &str, _: &str) -> Result<String, HostingError> {
