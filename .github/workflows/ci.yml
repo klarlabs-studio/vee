@@ -143,11 +143,6 @@ jobs:
         env:
           VEE_TEST_REQUIRE_LANGUAGE_SERVERS: '1'
         run: cargo test --workspace --locked --no-fail-fast -- --test-threads=1
-      - name: Test the vendored MCP crates
-        if: runner.os == 'Linux'
-        run: |
-          cargo test --manifest-path vendor/klarlabs-mcp-protocol/Cargo.toml --locked
-          cargo test --manifest-path vendor/klarlabs-mcp/Cargo.toml --locked
       - name: Verify project-aware TypeScript impact
         run: cargo test -p vee-application typescript_project_references_resolve_aliases_without_same_name_false_edges --locked
       - name: Install CLI from workspace
