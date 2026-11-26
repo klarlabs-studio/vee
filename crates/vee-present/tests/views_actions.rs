@@ -43,6 +43,8 @@ fn init(repository_written: bool, provider_status: &str) -> InitReport {
         candidate_id: Some("ollama".into()),
         egress: "local".into(),
         effort: Some(vee_core::ReviewEffort::Medium),
+        security_scanners: vec![],
+        security_config: None,
         detection: DetectionReport {
             schema_version: 1,
             candidates: vec![],

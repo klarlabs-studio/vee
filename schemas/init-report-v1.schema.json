@@ -62,11 +62,57 @@
       ]
     },
     "effort": {
-      "enum": ["low", "medium", "high"],
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
       "description": "This machine's review effort after init, when one is set."
     },
     "detection": {
       "$ref": "provider-detection-v1.schema.json"
+    },
+    "security_scanners": {
+      "type": "array",
+      "description": "Security scanners found on this machine (ADR 0029).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "path",
+          "covers",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "covers": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "configured",
+              "unsupported"
+            ],
+            "description": "configured: Vee runs it as a gate analyzer; unsupported: found but not usable, see reason."
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "security_config": {
+      "type": "string",
+      "description": "For an existing repository: the verification and policy_profiles configuration to add to .vee.yaml to use the scanners."
     }
   }
 }

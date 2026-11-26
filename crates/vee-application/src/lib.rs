@@ -38,6 +38,7 @@ mod review_standards;
 mod risk;
 pub mod rule_candidates;
 pub mod sarif;
+pub mod security_presets;
 mod session;
 pub mod setup;
 pub mod signing;
