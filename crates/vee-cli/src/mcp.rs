@@ -892,6 +892,14 @@ pub fn serve_stdio() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Point the per-user configuration at an empty location, so a
+    /// developer's own providers cannot change what these tests see.
+    fn isolate_user_config() {
+        static DIRECTORY: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        let directory = DIRECTORY.get_or_init(|| tempfile::tempdir().unwrap());
+        std::env::set_var("VEE_CONFIG", directory.path().join("config.yaml"));
+    }
     use std::process::Command;
 
     #[test]
@@ -948,6 +956,7 @@ mod tests {
 
     #[test]
     fn mcp_review_rejects_network_provider_when_repository_is_offline() {
+        isolate_user_config();
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         let git = |args: &[&str]| {
