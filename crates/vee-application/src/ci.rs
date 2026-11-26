@@ -162,6 +162,8 @@ pub struct CiRunOptions {
     pub policy_profile: Option<String>,
     /// Overrides the account Vee publishes as.
     pub actor_login: Option<String>,
+    /// Review the whole change, ignoring the earlier review's record.
+    pub full: bool,
 }
 
 /// The outcome of `vee ci run`.
@@ -183,6 +185,35 @@ pub fn run(
     let root = workspace.root();
     ensure_checkout_is_head(root, &pull_request)?;
     exclude_vee_runtime_files(root)?;
+    let actor_login = options
+        .actor_login
+        .clone()
+        .or_else(|| pull_request.actor_login.clone());
+    // The conversation holds commands and Vee's summary with its record of
+    // the last review. Only GitHub reads it so far.
+    let conversation = if pull_request.provider == "github" {
+        read_conversation(&pull_request, actor_login.as_deref().unwrap_or_default())
+            .map_err(|error| {
+                eprintln!(
+                    "warning: the pull request's comments could not be read, so dismissals and waivers are not applied and the whole change is reviewed: {error:#}"
+                );
+            })
+            .ok()
+    } else {
+        None
+    };
+    let summary = conversation.as_ref().and_then(|(_, comments)| {
+        summary_comment(comments, actor_login.as_deref().unwrap_or_default())
+    });
+    let carried = summary
+        .as_ref()
+        .and_then(|comment| crate::incremental::decode(&comment.body))
+        .filter(|record| {
+            !options.full
+                && record.repository == pull_request.repository
+                && record.number == pull_request.number
+        })
+        .map(|record| crate::incremental::CarriedReview { record });
     let review = crate::operations::review(
         workspace,
         crate::operations::ReviewRequest {
@@ -195,6 +226,7 @@ pub fn run(
             work_item: None,
             hosting: Default::default(),
             progress: None,
+            carried,
         },
         None,
     )?;
@@ -205,10 +237,6 @@ pub fn run(
         token_env: Some(pull_request.token_env.clone()),
         username: None,
     };
-    let actor_login = options
-        .actor_login
-        .clone()
-        .or_else(|| pull_request.actor_login.clone());
     // CI keeps no ledger: Vee's earlier threads are read back from the pull
     // request, so threads of findings fixed since are resolved.
     let earlier = crate::hosting::pull_request_issues(
@@ -224,10 +252,12 @@ pub fn run(
         &earlier.report.issues,
         actor_login.as_deref().unwrap_or_default(),
     );
-    let decisions = if pull_request.provider == "github" {
-        decisions_on_pull_request(
+    let decisions = match &conversation {
+        Some((host, comments)) => decisions_on_pull_request(
             root,
             &pull_request,
+            &**host,
+            comments,
             actor_login.as_deref().unwrap_or_default(),
         )
         .unwrap_or_else(|error| {
@@ -236,9 +266,8 @@ pub fn run(
                 "warning: dismissals and waivers on the pull request are not applied: {error:#}"
             );
             Default::default()
-        })
-    } else {
-        Default::default()
+        }),
+        None => Default::default(),
     };
     apply_waivers(workspace, &review, &pull_request, &decisions)?;
     let publication = crate::hosting::publish_review(
@@ -257,37 +286,173 @@ pub fn run(
             dismissed_fingerprints: decisions.dismissed_fingerprints(),
         },
     )?;
+    let gate = publication.gate.unwrap_or(review.gate.status);
+    if let Some((host, _)) = &conversation {
+        if let Err(error) = publish_summary(
+            root,
+            host.as_ref(),
+            &pull_request,
+            &review,
+            gate,
+            summary.as_ref(),
+        ) {
+            // The next review is then a full one.
+            eprintln!("warning: Vee's summary comment was not updated: {error:#}");
+        }
+    }
     Ok(CiRun {
         schema_version: 1,
-        gate: publication.gate.unwrap_or(review.gate.status),
+        gate,
         review_id: review.review_id,
         pull_request,
         publication,
     })
 }
 
-/// The dismissals and waivers people gave in comments that still stand.
-fn decisions_on_pull_request(
-    root: &Path,
-    pull_request: &CiPullRequest,
-    actor_login: &str,
-) -> Result<crate::pr_commands::PullRequestDecisions> {
+type Conversation = (
+    Box<dyn vee_hosting::PullRequestConversationProvider>,
+    Vec<vee_hosting::ConversationComment>,
+);
+
+fn pull_request_ref(pull_request: &CiPullRequest) -> vee_hosting::PullRequestRef {
+    vee_hosting::PullRequestRef {
+        repository: vee_hosting::RepositoryRef {
+            host: pull_request.host.clone(),
+            full_name: pull_request.repository.clone(),
+        },
+        number: pull_request.number,
+    }
+}
+
+/// The pull request's comments, and the host to answer through.
+fn read_conversation(pull_request: &CiPullRequest, actor_login: &str) -> Result<Conversation> {
     let host = crate::hosting::conversation_provider(
         &pull_request.provider,
         &pull_request.api_base,
         &pull_request.token_env,
         actor_login,
     )?;
-    let reference = vee_hosting::PullRequestRef {
-        repository: vee_hosting::RepositoryRef {
-            host: pull_request.host.clone(),
-            full_name: pull_request.repository.clone(),
-        },
-        number: pull_request.number,
-    };
     let comments = host
-        .list_conversation(&reference)
+        .list_conversation(&pull_request_ref(pull_request))
         .map_err(|error| anyhow::anyhow!("reading the pull request's comments: {error}"))?;
+    Ok((host, comments))
+}
+
+/// Marks Vee's summary comment, which it edits on every review.
+const SUMMARY_MARKER: &str = "<!-- vee:summary -->";
+
+/// Vee's summary comment: the newest conversation comment by Vee's own
+/// account that carries the marker. Anyone else's copy is ignored.
+fn summary_comment(
+    comments: &[vee_hosting::ConversationComment],
+    actor_login: &str,
+) -> Option<vee_hosting::ConversationComment> {
+    comments
+        .iter()
+        .filter(|comment| {
+            comment.kind == vee_hosting::ConversationKind::Conversation
+                && !actor_login.is_empty()
+                && comment.author.eq_ignore_ascii_case(actor_login)
+                && comment.body.contains(SUMMARY_MARKER)
+        })
+        .max_by(|a, b| a.created_at.cmp(&b.created_at))
+        .cloned()
+}
+
+/// Post or update Vee's summary of `review`, with the record the next
+/// review builds on.
+fn publish_summary(
+    root: &Path,
+    host: &dyn vee_hosting::PullRequestConversationProvider,
+    pull_request: &CiPullRequest,
+    review: &crate::ReviewResult,
+    gate: vee_core::GateStatus,
+    existing: Option<&vee_hosting::ConversationComment>,
+) -> Result<()> {
+    let record = crate::incremental::ReviewRecord {
+        schema_version: 1,
+        repository: pull_request.repository.clone(),
+        number: pull_request.number,
+        head_oid: pull_request.head_oid.clone(),
+        review_id: review.review_id.clone(),
+        config_digest: review.effective_config_digest.clone(),
+        files: crate::incremental::reviewed_files(root, &review.change_set)
+            .map_err(anyhow::Error::msg)?,
+        findings: review
+            .policy_findings
+            .clone()
+            .unwrap_or_else(|| review.findings.clone()),
+    };
+    let body = summary_text(
+        review,
+        gate,
+        &pull_request.head_oid,
+        crate::incremental::encode(&record),
+    );
+    let reference = pull_request_ref(pull_request);
+    match existing {
+        Some(comment) => host
+            .edit_comment(&reference, &comment.id, &body)
+            .map_err(|error| anyhow::anyhow!("editing the summary: {error}")),
+        None => host
+            .reply(&reference, &vee_hosting::ReplyTarget::Conversation, &body)
+            .map(|_| ())
+            .map_err(|error| anyhow::anyhow!("posting the summary: {error}")),
+    }
+}
+
+fn summary_text(
+    review: &crate::ReviewResult,
+    gate: vee_core::GateStatus,
+    head_oid: &str,
+    record: Option<String>,
+) -> String {
+    let short = |oid: &str| oid.chars().take(7).collect::<String>();
+    let verdict = match gate {
+        vee_core::GateStatus::Pass => "passed",
+        vee_core::GateStatus::Block => "blocked",
+        vee_core::GateStatus::Incomplete => "incomplete",
+    };
+    let mut text = format!(
+        "**Vee** reviewed `{}`: **{verdict}**, with {} finding(s), {} blocking.",
+        short(head_oid),
+        review.findings.len(),
+        review.gate.blocking_findings.len()
+    );
+    if let Some(carried) = &review.carried {
+        let changed = review.change_set.files.len();
+        text.push_str(&format!(
+            "\n\nOnly the changes since `{}` were reviewed again: {} of {changed} changed file(s) were the same as then, and their {} finding(s) are carried over.",
+            short(&carried.from_head),
+            carried.paths.len(),
+            carried.findings
+        ));
+    }
+    text.push_str(
+        "\n\n<sub>Vee updates this comment after each review. Comment `@vee review` to review the whole change again.</sub>\n\n",
+    );
+    text.push_str(SUMMARY_MARKER);
+    match record {
+        Some(record) => {
+            text.push('\n');
+            text.push_str(&record);
+        }
+        None => text.push_str(
+            "\n<!-- vee: the review record is too large for a comment; the next review is a full one -->",
+        ),
+    }
+    text
+}
+
+/// The dismissals and waivers people gave in comments that still stand.
+fn decisions_on_pull_request(
+    root: &Path,
+    pull_request: &CiPullRequest,
+    host: &dyn vee_hosting::PullRequestConversationProvider,
+    comments: &[vee_hosting::ConversationComment],
+    actor_login: &str,
+) -> Result<crate::pr_commands::PullRequestDecisions> {
+    let reference = pull_request_ref(pull_request);
     let waived = comments.iter().any(|comment| {
         comment.body.contains("<!-- vee:ack:") && comment.body.contains("\"waive\"")
     });
@@ -296,8 +461,8 @@ fn decisions_on_pull_request(
     } else {
         None
     };
-    let mut authorizer = crate::pr_commands::Authorizer::new(&*host, &reference, codeowners);
-    crate::pr_commands::pull_request_decisions(&comments, actor_login, &mut authorizer)
+    let mut authorizer = crate::pr_commands::Authorizer::new(host, &reference, codeowners);
+    crate::pr_commands::pull_request_decisions(comments, actor_login, &mut authorizer)
 }
 
 /// Record the waivers given on this head, so the published gate applies them.

@@ -17,6 +17,7 @@ pub mod hooks;
 pub mod hosting;
 mod impact;
 pub mod imported_history;
+pub mod incremental;
 mod learning;
 pub mod local_analytics;
 pub mod operations;

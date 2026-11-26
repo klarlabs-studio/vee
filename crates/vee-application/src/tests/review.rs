@@ -266,6 +266,7 @@ fn legacy_review_without_policy_findings_falls_back_to_display_findings() {
         },
     );
     let review = ReviewResult {
+        carried: None,
         schema_version: 2,
         review_id: "rev_legacy".into(),
         snapshot_id: "snapshot".into(),
@@ -1282,6 +1283,7 @@ fn work_item_context_reaches_reviewers_and_binds_effective_configuration() {
             work_item: Some(item.clone()),
             work_item_token_env: Some("CUSTOM_HOSTING_TOKEN".into()),
             progress: None,
+            carried: None,
         },
     )
     .unwrap();
@@ -1689,6 +1691,7 @@ fn review_progress_reports_each_reviewer_run_as_it_finishes() {
             work_item: None,
             work_item_token_env: None,
             progress: Some(&*recorder),
+            carried: None,
         },
     )
     .unwrap();
@@ -1806,6 +1809,7 @@ fn a_provider_usage_limit_skips_its_remaining_runs() {
             work_item: None,
             work_item_token_env: None,
             progress: None,
+            carried: None,
         },
     )
     .unwrap();

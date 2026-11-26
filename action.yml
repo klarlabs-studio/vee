@@ -23,6 +23,12 @@ inputs:
   approval:
     description: Also publish whether the change may be approved without a person.
     default: "false"
+  full-review:
+    description: >-
+      Review the whole change on every push. By default, files whose change
+      the last review covered are not reviewed again, and their findings are
+      carried over.
+    default: "false"
   github-token:
     description: Token Vee publishes with; it needs checks and pull request write access.
     default: ${{ github.token }}
@@ -78,6 +84,7 @@ runs:
         VEE_MODEL: ${{ inputs.model }}
         VEE_EFFORT: ${{ inputs.effort }}
         VEE_APPROVAL: ${{ inputs.approval }}
+        VEE_FULL_REVIEW: ${{ inputs.full-review }}
         VEE_API_KEY: ${{ inputs.api-key }}
         GH_TOKEN: ${{ inputs.github-token }}
       run: |
@@ -97,6 +104,9 @@ runs:
         esac
         if [ "$VEE_APPROVAL" = "true" ]; then
           args+=(--approval)
+        fi
+        if [ "$VEE_FULL_REVIEW" = "true" ] && [ "${args[1]}" = "run" ]; then
+          args+=(--full)
         fi
         result="$RUNNER_TEMP/vee-ci-run.json"
         vee "${args[@]}" > "$result"

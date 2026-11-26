@@ -86,8 +86,18 @@ full history, and publishes a commit status and discussions.
 3. Reviews from the pull request's base with your `.vee.yaml` and policy.
 4. Publishes the check and threads. A finding that moves to another line
    gets a new thread; a fixed finding's thread is resolved.
-5. Exits 0 when the gate passes, 1 when it blocks and 2 when the review is
+5. Posts a summary comment, or edits the one it posted before.
+6. Exits 0 when the gate passes, 1 when it blocks and 2 when the review is
    incomplete, so the job's status is the gate.
+
+On GitHub, a later push is reviewed incrementally
+([ADR 0022](../adr/0022-incremental-review-after-a-push.md)). The summary
+comment records what the last review covered. A changed file whose change is
+the same as then is not sent to reviewers again, and its findings are
+carried over. The gate still covers the whole change. A changed `.vee.yaml`,
+reviewer instructions or provider version makes the next review a full one,
+as does `--full`, `full-review: true` in the Action, or an `@vee review`
+comment.
 
 Add `--approval` to also publish whether the change may be approved without
 a person ([ADR 0015](../adr/0015-layered-approval-eligibility.md)).

@@ -486,6 +486,7 @@ fn run_review(
             work_item: input.work_item.as_deref(),
             hosting: Default::default(),
             progress,
+            carried: None,
         },
         Some(cancellation),
     )

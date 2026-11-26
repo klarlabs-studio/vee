@@ -43,6 +43,9 @@ pub struct ReviewResult {
     pub work_item: Option<vee_hosting::WorkItemSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item_token_env: Option<String>,
+    /// What this review took from an earlier review of the same change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carried: Option<crate::incremental::CarriedSummary>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -218,6 +221,7 @@ pub fn run_review_with_provider_and_selection(
             work_item: None,
             work_item_token_env: None,
             progress: None,
+            carried: None,
         },
     )
 }
@@ -279,6 +283,7 @@ pub fn run_review_selecting_reviewers_with_work_item_and_token_env(
             work_item,
             work_item_token_env,
             progress: None,
+            carried: None,
         },
     )
 }
@@ -297,6 +302,7 @@ pub fn run_review_with_provider_and_selection_context(
         work_item,
         work_item_token_env,
         progress,
+        carried,
     } = options;
     let snapshot = change_set.digest.clone();
     if let Some(work_item) = work_item.as_ref() {
@@ -317,6 +323,21 @@ pub fn run_review_with_provider_and_selection_context(
         &base_config_digest,
         work_item.as_ref().map(|item| item.content_digest.as_str()),
     )?;
+    // Files whose change an earlier review of this pull request covered
+    // under the same configuration are not sent again (ADR 0022).
+    let carried = match carried {
+        Some(carried) => crate::incremental::carry(
+            &carried,
+            &crate::incremental::reviewed_files(root, &change_set)?,
+            &config_digest,
+            &selected_reviewers,
+        ),
+        None => None,
+    };
+    let (carried_paths, carried_findings, carried_summary) = match carried {
+        Some((paths, findings, summary)) => (paths, findings, Some(summary)),
+        None => (std::collections::BTreeSet::new(), Vec::new(), None),
+    };
     let reviewer_policies = configured_reviewer_policies(config);
     let policy_digest = digest(
         &serde_json::to_vec(&serde_json::json!({
@@ -468,6 +489,7 @@ pub fn run_review_with_provider_and_selection_context(
         for file in &change_set.files {
             if !review_path_is_included(&file.path, &config.review)
                 || !reviewer_path_is_included(&file.path, reviewer)
+                || carried_paths.contains(&file.path)
             {
                 continue;
             }
@@ -535,6 +557,28 @@ pub fn run_review_with_provider_and_selection_context(
                 cost: crate::context_budget::ContextCost { full, diff: None },
                 diff: None,
             });
+        }
+        // Every file this reviewer would see was reviewed before: its earlier
+        // findings stand, and there is nothing to ask it.
+        if changed.is_empty() && carried_summary.is_some() {
+            reviewer_context.push(reviewer_context_manifest(
+                reviewer_id,
+                &change_set,
+                &context_files,
+                &config.review,
+                reviewer,
+            ));
+            reviewer_outcomes[index] = Some(ReviewerOutcome {
+                reviewer_id: reviewer_id.to_string(),
+                provider_id: reviewer.provider.clone(),
+                provider_kind: provider.kind,
+                model: provider.model.clone(),
+                provider_version: provider_versions.get(&reviewer.provider).cloned().flatten(),
+                status: "carried".into(),
+                duration_ms: None,
+                usage: None,
+            });
+            continue;
         }
         let all_full_bytes = changed
             .iter()
@@ -627,6 +671,7 @@ pub fn run_review_with_provider_and_selection_context(
             .filter(|file| {
                 review_path_is_included(&file.path, &config.review)
                     && reviewer_path_is_included(&file.path, reviewer)
+                    && !carried_paths.contains(&file.path)
             })
             .map(|file| file.path.as_str())
             .collect::<std::collections::BTreeSet<_>>();
@@ -1138,6 +1183,15 @@ pub fn run_review_with_provider_and_selection_context(
     let mut policy_findings = findings_by_reviewer
         .into_iter()
         .flatten()
+        // New findings on carried files are dropped: the earlier review's
+        // findings on them stand.
+        .filter(|finding| {
+            finding
+                .path
+                .as_ref()
+                .is_none_or(|path| !carried_paths.contains(path))
+        })
+        .chain(carried_findings)
         .collect::<Vec<_>>();
     let mut findings = deduplicate_findings(policy_findings.clone());
     let mut reviewer_outcomes = reviewer_outcomes.into_iter().flatten().collect::<Vec<_>>();
@@ -1313,6 +1367,19 @@ pub fn run_review_with_provider_and_selection_context(
             manifest.exploration = Some(summary);
         }
     }
+    for manifest in &mut reviewer_context {
+        for file in &mut manifest.files {
+            if file.role == "changed_file" && carried_paths.contains(&file.path) {
+                file.status = CARRIED_STATUS.into();
+                file.reason = carried_summary.as_ref().map(|summary| {
+                    format!(
+                        "Reviewed at {} with the same base and head content; its findings are carried over.",
+                        summary.from_head
+                    )
+                });
+            }
+        }
+    }
     let unreviewed_paths = unreviewed_paths(&change_set, &config.review, &reviewer_context);
     if !unreviewed_paths.is_empty() && config.policy.on_unreviewed == "block" {
         complete = false;
@@ -1389,6 +1456,7 @@ pub fn run_review_with_provider_and_selection_context(
         review_effort: config.active_review_effort,
         work_item,
         work_item_token_env,
+        carried: carried_summary,
     };
     let payload = serde_json::to_string(&result).map_err(|error| error.to_string())?;
     let snapshot_manifest = snapshot_manifest_json(&result.change_set)?;
@@ -1462,6 +1530,9 @@ fn keep_snapshot_sources_of_findings(
     }
 }
 
+/// A changed file an earlier review of the same change covered.
+pub(crate) const CARRIED_STATUS: &str = "carried_from_earlier_review";
+
 pub(crate) fn unreviewed_paths(
     change_set: &ChangeSet,
     review: &vee_core::ReviewConfig,
@@ -1472,7 +1543,9 @@ pub(crate) fn unreviewed_paths(
         .flat_map(|manifest| &manifest.files)
         .filter(|file| {
             file.role == "changed_file"
-                && (file.status == "full_source" || file.status == "bounded_diff")
+                && (file.status == "full_source"
+                    || file.status == "bounded_diff"
+                    || file.status == CARRIED_STATUS)
         })
         .map(|file| file.path.as_str())
         .collect();

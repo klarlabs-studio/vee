@@ -249,6 +249,8 @@ pub struct ReviewRequest<'a> {
     pub hosting: crate::work_items::HostingOverrides,
     /// Receives live reviewer progress while providers run.
     pub progress: Option<&'a dyn crate::ReviewProgressSink>,
+    /// An earlier review of the same change to build on (ADR 0022).
+    pub carried: Option<crate::incremental::CarriedReview>,
 }
 
 /// Capture the requested scope, run the configured reviewers, and persist the review.
@@ -293,6 +295,7 @@ pub fn review(
             work_item,
             work_item_token_env: Some(hosting.token_env),
             progress: request.progress,
+            carried: request.carried,
         },
     )
     .map_err(anyhow::Error::msg)

@@ -101,6 +101,9 @@ fn fake_github(
             } else if line.starts_with("GET ") && line.contains("/issues/9/comments?") {
                 // The conversation, where comment commands would be.
                 "[]".to_owned()
+            } else if line.starts_with("POST ") && line.contains("/issues/9/comments ") {
+                // Vee's summary comment.
+                r#"{"id":880}"#.to_owned()
             } else if line.starts_with("GET ") && line.contains("/collaborators/") {
                 r#"{"permission":"read","role_name":"read"}"#.to_owned()
             } else if line.starts_with("PATCH ") && line.contains("/pulls/comments/501 ") {

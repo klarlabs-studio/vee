@@ -56,9 +56,11 @@ risk tier are only visible locally or in that check's text.
 Each push is reviewed as a whole change again. Reviewers want only what
 changed since the last review, with earlier findings carried over.
 
-- [ ] Review the range from the last reviewed head to the new head, with the whole change as context
-- [ ] Carry forward findings on unchanged lines without asking the model again
-- [ ] Resolve threads whose finding the new code fixed, and keep the gate over the whole change
+- [x] Review only the files whose change differs from the last review, with the whole snapshot readable through Vee's tools ([ADR 0022](adr/0022-incremental-review-after-a-push.md))
+- [x] Carry forward findings on unchanged files without asking the model again
+- [x] Resolve threads whose finding the new code fixed, and keep the gate over the whole change
+- [ ] Carry findings on unchanged lines within a file that changed
+- [ ] The review record on GitLab merge requests
 
 ### 4. Observe mode for approvals (S–M)
 

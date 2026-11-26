@@ -193,6 +193,7 @@ fn try_agent_stop(
             work_item: None,
             hosting: Default::default(),
             progress: None,
+            carried: None,
         },
         None,
     );
@@ -498,6 +499,7 @@ pub fn pre_push(workspace: &Workspace, remote: &str, updates: &[PushUpdate]) -> 
                 work_item: None,
                 hosting: Default::default(),
                 progress: None,
+                carried: None,
             },
             None,
         );

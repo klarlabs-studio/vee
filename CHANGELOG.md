@@ -21,6 +21,17 @@ change configuration and output contracts.
 - Claude Code review sessions run with hooks turned off, so a reviewer never
   starts another review.
 
+### Pull requests
+
+- Incremental review after a push on GitHub: Vee's summary comment records
+  what each review covered, and the next review sends reviewers only the
+  changed files whose change differs. The earlier findings on the others are
+  carried over, and the gate still covers the whole change. `vee ci run
+  --full`, the Action's `full-review` input and `@vee review` review
+  everything ([ADR 0022](docs/adr/0022-incremental-review-after-a-push.md)).
+- `vee ci run` posts one summary comment per pull request and edits it after
+  each review.
+
 ## 0.1.0 — 2026-11-25
 
 First release. Install a release binary with the shell or PowerShell

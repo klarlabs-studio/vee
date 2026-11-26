@@ -1434,6 +1434,30 @@ impl PullRequestConversationProvider for GitHubAdapter {
             .ok_or_else(|| HostingError::InvalidResponse("GitHub reply has no ID".into()))
     }
 
+    fn edit_comment(
+        &self,
+        pull_request: &PullRequestRef,
+        comment_id: &str,
+        body: &str,
+    ) -> Result<(), HostingError> {
+        if body.len() > 65_535 {
+            return Err(HostingError::InvalidResponse(
+                "comment exceeds GitHub's comment limit".into(),
+            ));
+        }
+        let url = self.repository_path(
+            pull_request,
+            &format!("/issues/comments/{}", numeric_id(comment_id)?),
+        )?;
+        let response = self
+            .request(Method::PATCH, url)?
+            .json(&serde_json::json!({ "body": body }))
+            .send()
+            .map_err(|error| HostingError::Transport(format!("editing a comment: {error}")))?;
+        self.send(response)?;
+        Ok(())
+    }
+
     fn set_thread_resolved(
         &self,
         pull_request: &PullRequestRef,

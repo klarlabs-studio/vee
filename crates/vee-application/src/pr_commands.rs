@@ -779,6 +779,8 @@ pub fn handle(
         }
         Command::Review => {
             check_out_head(root, event.number, &origin.head_oid)?;
+            // Asking for a review asks for the whole change.
+            run_options.full = true;
             let run = crate::ci::run(workspace, ci_pull_request, run_options)?;
             let text = format!(
                 "Reviewed `{}`: the gate is **{}**. See the Vee check for details.",
@@ -1285,6 +1287,9 @@ mod tests {
                 .unwrap()
                 .push((target.clone(), body.to_owned()));
             Ok("900".into())
+        }
+        fn edit_comment(&self, _: &PullRequestRef, _: &str, _: &str) -> Result<(), HostingError> {
+            Ok(())
         }
         fn set_thread_resolved(
             &self,

@@ -394,6 +394,18 @@
       },
       "uniqueItems": true
     },
+    "carried": {
+      "type": "object",
+      "description": "What this review took from an earlier review of the same pull request (ADR 0022): changed files whose base and head content were the same as then were not sent to reviewers again, and the earlier findings on them are carried over.",
+      "required": ["from_head", "from_review", "paths", "findings"],
+      "properties": {
+        "from_head": { "type": "string", "minLength": 1 },
+        "from_review": { "type": "string", "minLength": 1 },
+        "paths": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "findings": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
     "unreviewed_paths": {
       "type": "array",
       "description": "Changed paths inside the repository review filter that no reviewer received as source or diff.",
@@ -435,7 +447,7 @@
                 "path": { "type": "string", "minLength": 1 },
                 "role": { "type": "string", "minLength": 1 },
                 "status": {
-                  "enum": ["full_source", "bounded_diff", "metadata_only", "excluded_by_review_filter", "excluded_by_reviewer_filter", "omitted_by_context_limit"]
+                  "enum": ["full_source", "bounded_diff", "metadata_only", "excluded_by_review_filter", "excluded_by_reviewer_filter", "omitted_by_context_limit", "carried_from_earlier_review"]
                 },
                 "reason": { "type": "string" },
                 "artifact_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }

@@ -403,6 +403,8 @@ pub struct ReviewRunOptions<'a> {
     pub work_item_token_env: Option<String>,
     /// Receives live reviewer progress while providers run.
     pub progress: Option<&'a dyn crate::ReviewProgressSink>,
+    /// An earlier review of the same change to build on (ADR 0022).
+    pub carried: Option<crate::incremental::CarriedReview>,
 }
 
 #[derive(Clone)]

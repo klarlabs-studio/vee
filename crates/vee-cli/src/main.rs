@@ -1027,6 +1027,11 @@ enum CiCommand {
         /// Account Vee publishes as, when the CI system does not determine it.
         #[arg(long)]
         actor_login: Option<String>,
+        /// Review the whole change. Otherwise, on GitHub, files whose change
+        /// the last review covered are not sent to reviewers again and their
+        /// findings are carried over.
+        #[arg(long)]
+        full: bool,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
@@ -2426,6 +2431,7 @@ fn run() -> Result<u8> {
                     progress: terminal_progress
                         .as_ref()
                         .map(|sink| sink as &dyn vee_application::ReviewProgressSink),
+                    carried: None,
                 },
                 None,
             );
@@ -3182,6 +3188,7 @@ fn run() -> Result<u8> {
                     effort,
                     policy_profile,
                     actor_login,
+                    full,
                     output,
                 },
         } => {
@@ -3196,6 +3203,7 @@ fn run() -> Result<u8> {
                     effort: effort.map(Into::into),
                     policy_profile,
                     actor_login,
+                    full,
                 },
             )?;
             match output {
@@ -3244,6 +3252,7 @@ fn run() -> Result<u8> {
                         effort: effort.map(Into::into),
                         policy_profile,
                         actor_login: None,
+                        full: false,
                     },
                     actor_login,
                 },
