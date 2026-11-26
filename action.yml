@@ -40,6 +40,12 @@ inputs:
       the last review covered are not reviewed again, and their findings are
       carried over.
     default: "false"
+  policy-profile:
+    description: >-
+      Policy profile from .vee.yaml to gate with, such as `security` or
+      `regulated`. Install the scanners its required verification profiles
+      run on the runner before this step.
+    default: ""
   github-token:
     description: Token Vee publishes with; it needs checks and pull request write access.
     default: ${{ github.token }}
@@ -96,6 +102,7 @@ runs:
         VEE_EFFORT: ${{ inputs.effort }}
         VEE_APPROVAL: ${{ inputs.approval }}
         VEE_FULL_REVIEW: ${{ inputs.full-review }}
+        VEE_POLICY_PROFILE: ${{ inputs.policy-profile }}
         VEE_LABELS: ${{ inputs.labels }}
         VEE_APPROVE: ${{ inputs.approve }}
         VEE_API_KEY: ${{ inputs.api-key }}
@@ -120,6 +127,9 @@ runs:
         fi
         if [ "$VEE_FULL_REVIEW" = "true" ] && [ "${args[1]}" = "run" ]; then
           args+=(--full)
+        fi
+        if [ -n "$VEE_POLICY_PROFILE" ]; then
+          args+=(--policy-profile "$VEE_POLICY_PROFILE")
         fi
         if [ "$VEE_LABELS" = "true" ]; then
           args+=(--labels)

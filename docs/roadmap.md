@@ -118,9 +118,15 @@ What is missing is the loop.
 
 ### 9. Security presets and a regulated policy pack (S)
 
-- [ ] `vee init` detects gitleaks, semgrep, osv-scanner and trivy, and scaffolds trusted verification profiles and a `security` policy profile
-- [ ] A "regulated" policy pack: required analyzers, severity floors for protected paths, and automatic approval off
-- [ ] Analyzers stay external; Vee does not ship a scanner
+- [x] `vee init` detects gitleaks, semgrep, osv-scanner and trivy, and scaffolds trusted verification profiles and a `security` policy profile
+- [x] A "regulated" policy pack: required analyzers, severity floors for protected paths, and automatic approval off
+- [x] Analyzers stay external; Vee does not ship a scanner
+
+`vee init` sets up nox, gitleaks, semgrep and trivy; osv-scanner is detected but
+not used, since its SARIF gives no line for a result. The regulated setup is
+a `regulated` policy profile, which `vee packs export` shares across
+repositories. `vee ci run` runs the scanners a policy requires
+([ADR 0029](adr/0029-security-scanner-presets.md)).
 
 ### 10. Configurable standards sources (S)
 

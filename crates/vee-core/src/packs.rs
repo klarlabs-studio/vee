@@ -393,6 +393,9 @@ pub fn strictest(repository: &PolicyConfig, pack: &PolicyConfig) -> PolicyConfig
     if pack.on_unreviewed == "block" {
         merged.on_unreviewed = "block".into();
     }
+    if !pack.allows_automatic_approval() {
+        merged.automatic_approval = Some(false);
+    }
     merged.acceptance.require_passing_verification |= pack.acceptance.require_passing_verification;
     merged.acceptance.required_verification_profiles = union(
         &repository.acceptance.required_verification_profiles,
@@ -465,5 +468,15 @@ mod tests {
         for bad in ["", "/etc/passwd", "../a.md", "a/../../b"] {
             assert!(safe_relative(bad).is_none(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_pack_can_turn_automatic_approval_off_but_not_on() {
+        let off = policy("automatic_approval: false\n");
+        let on = policy("automatic_approval: true\n");
+        let unset = policy("{}\n");
+        assert!(!strictest(&unset, &off).allows_automatic_approval());
+        assert!(!strictest(&off, &on).allows_automatic_approval());
+        assert!(strictest(&unset, &on).allows_automatic_approval());
     }
 }

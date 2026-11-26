@@ -83,11 +83,14 @@ full history, and publishes a commit status and discussions.
 
 1. Reads the pull request from the CI environment.
 2. Refuses to run unless the checkout is the pull request's head.
-3. Reviews from the pull request's base with your `.vee.yaml` and policy.
-4. Publishes the check and threads. A finding that moves to another line
+3. Runs the verification profiles the policy requires, such as security
+   scanners, on the change. Install those tools on the runner first; a
+   profile that cannot run leaves the review incomplete.
+4. Reviews from the pull request's base with your `.vee.yaml` and policy.
+5. Publishes the check and threads. A finding that moves to another line
    gets a new thread; a fixed finding's thread is resolved.
-5. Posts a summary comment, or edits the one it posted before.
-6. Exits 0 when the gate passes, 1 when it blocks and 2 when the review is
+6. Posts a summary comment, or edits the one it posted before.
+7. Exits 0 when the gate passes, 1 when it blocks and 2 when the review is
    incomplete, so the job's status is the gate.
 
 On GitHub, a later push is reviewed incrementally
@@ -101,6 +104,12 @@ comment.
 
 Add `--approval` to also publish whether the change may be approved without
 a person ([ADR 0015](../adr/0015-layered-approval-eligibility.md)).
+
+Add `--policy-profile NAME` (Action input `policy-profile`) to gate with a
+policy profile, such as the `security` and `regulated` profiles `vee init`
+writes when it finds security scanners
+([ADR 0029](../adr/0029-security-scanner-presets.md)). Under a policy with
+`automatic_approval: false`, every change needs a person's approval.
 
 On GitHub, two more flags put Vee's verdict where the host's own tools use
 it ([ADR 0024](../adr/0024-approval-and-risk-on-the-pull-request.md)). Both

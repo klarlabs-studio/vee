@@ -516,6 +516,10 @@
         "acceptance": {
           "$ref": "#/$defs/acceptance_policy"
         },
+        "automatic_approval": {
+          "type": "boolean",
+          "description": "false: a change reviewed under this policy always needs a person's approval, whatever `approval` allows. Packs can turn it off but never back on."
+        },
         "severity_floors": {
           "type": "array",
           "maxItems": 64,

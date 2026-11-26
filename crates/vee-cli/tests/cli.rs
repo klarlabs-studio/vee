@@ -11308,7 +11308,7 @@ fn gate_approval_layers_snapshot_path_author_risk_and_gate_guards() {
         .collect();
     assert_eq!(
         order,
-        ["snapshot", "paths", "authors", "owners", "risk", "gate"]
+        ["snapshot", "paths", "authors", "owners", "policy", "risk", "gate"]
     );
 
     fs::write(

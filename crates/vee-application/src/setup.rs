@@ -734,16 +734,33 @@ pub struct InitReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReviewEffort>,
     pub detection: DetectionReport,
+    /// Security scanners found on this machine (ADR 0029).
+    #[serde(default)]
+    pub security_scanners: Vec<crate::security_presets::SecurityScanner>,
+    /// For an existing repository: the configuration to add to use them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_config: Option<String>,
 }
 
-fn repository_config_yaml() -> String {
+fn repository_config_yaml(scanners: &[crate::security_presets::SecurityScanner]) -> String {
+    let verification = crate::security_presets::verification_yaml(scanners);
+    let verification = if verification.is_empty() {
+        "verification: {}\n".to_owned()
+    } else {
+        format!("verification:\n{verification}")
+    };
+    let profiles = format!(
+        "policy_profiles:\n{}",
+        crate::security_presets::policy_profiles_yaml(scanners, DEFAULT_REVIEWER_ID)
+    );
     format!(
         "version: 1\n\
 # Reviewers reference provider IDs. `{DEFAULT_PROVIDER_ID}` is defined per machine in the\n\
 # user config (see `vee doctor`), so each developer can use their own AI backend.\n\
 reviewers:\n  {DEFAULT_REVIEWER_ID}:\n    provider: {DEFAULT_PROVIDER_ID}\n    instructions_file: {REVIEWER_INSTRUCTIONS_PATH}\n  # Design and maintainability findings, shown but never blocking. Opt in with `enabled: true`.\n  {ARCHITECTURE_REVIEWER_ID}:\n    provider: {DEFAULT_PROVIDER_ID}\n    instructions_file: {ARCHITECTURE_INSTRUCTIONS_PATH}\n    advisory: true\n    enabled: false\n  # Whether the change does what its work item asks, and nothing more; runs with `vee review --work-item`. Opt in with `enabled: true`.\n  {TASK_ALIGNMENT_REVIEWER_ID}:\n    provider: {DEFAULT_PROVIDER_ID}\n    instructions_file: {TASK_ALIGNMENT_INSTRUCTIONS_PATH}\n    advisory: true\n    enabled: false\n\
-verification: {{}}\n\
-policy:\n  required_reviewers: [{DEFAULT_REVIEWER_ID}]\n  required_verifications: []\n  block_severities: [critical, high]\n  minimum_confidence: 80\n  on_incomplete: block\n"
+{verification}\
+policy:\n  required_reviewers: [{DEFAULT_REVIEWER_ID}]\n  required_verifications: []\n  block_severities: [critical, high]\n  minimum_confidence: 80\n  on_incomplete: block\n\
+{profiles}"
     )
 }
 
@@ -848,6 +865,7 @@ pub fn init(
     let repository_config = root.join(".vee.yaml");
     let repository_exists = repository_config.exists();
     let detection = detect(probe);
+    let security_scanners = crate::security_presets::detect(probe);
     let mut user = read_user_providers(user_config).map_err(InitError::Configuration)?;
     let providers_key = serde_yaml::Value::from("providers");
     let existing_default = user
@@ -957,8 +975,11 @@ pub fn init(
             .map_err(InitError::Configuration)?;
     }
     if !repository_exists {
-        write_atomically(&repository_config, &repository_config_yaml())
-            .map_err(InitError::Configuration)?;
+        write_atomically(
+            &repository_config,
+            &repository_config_yaml(&security_scanners),
+        )
+        .map_err(InitError::Configuration)?;
     }
     Ok(InitReport {
         schema_version: 1,
@@ -977,6 +998,10 @@ pub fn init(
         egress,
         effort,
         detection,
+        security_config: repository_exists
+            .then(|| crate::security_presets::snippet(&security_scanners, DEFAULT_REVIEWER_ID))
+            .flatten(),
+        security_scanners,
     })
 }
 

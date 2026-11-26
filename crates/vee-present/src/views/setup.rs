@@ -201,16 +201,63 @@ impl ToView for InitReport {
                     },
                 ),
                 ("User config".into(), Cell::code(&self.user_config)),
+                ("Security scanners".into(), security_scanners_cell(self)),
             ])
             .paragraph(Cell::muted(format!(
                 "How to get the best results: {BEST_RESULTS_GUIDE}"
             )))
+            .extend(match &self.security_config {
+                Some(snippet) => snippet.lines().fold(
+                    View::new().section("Security scanners for .vee.yaml"),
+                    |view, line| view.paragraph(Cell::code(line)),
+                ),
+                None => View::new(),
+            })
             .next_action("vee doctor", "check_setup", serde_json::json!({}))
             .next_action(
                 "vee review",
                 "review_changes",
                 serde_json::json!({"scope": "working_tree"}),
             )
+    }
+}
+
+fn security_scanners_cell(report: &InitReport) -> Cell {
+    if report.security_scanners.is_empty() {
+        return Cell::muted("none found (nox, gitleaks, semgrep and trivy are supported)");
+    }
+    let mut cell = Cell::plain("");
+    for (index, scanner) in report.security_scanners.iter().enumerate() {
+        if index > 0 {
+            cell = cell.then(Span::new(", ", Style::Plain));
+        }
+        cell = cell.then(Span::new(scanner.id.clone(), Style::Code));
+        if !scanner.configurable() {
+            cell = cell.then(Span::new(
+                format!(
+                    "not used: {}",
+                    scanner.reason.as_deref().unwrap_or("unsupported")
+                ),
+                Style::Muted,
+            ));
+        }
+    }
+    let usable = report
+        .security_scanners
+        .iter()
+        .any(|scanner| scanner.configurable());
+    if usable && report.repository_config_status == "written" {
+        cell.then(Span::new(
+            "set up; select with --policy-profile security or regulated",
+            Style::Muted,
+        ))
+    } else if report.security_config.is_some() {
+        cell.then(Span::new(
+            "add the configuration below to .vee.yaml to use them",
+            Style::Muted,
+        ))
+    } else {
+        cell
     }
 }
 

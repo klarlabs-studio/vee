@@ -6,6 +6,19 @@ change configuration and output contracts.
 
 ## Unreleased
 
+### Security scanner presets
+
+- `vee init` finds nox, gitleaks, semgrep and trivy on the machine and writes
+  SARIF verification profiles for them, with `security` and `regulated`
+  policy profiles that require them. In an existing repository it prints the
+  configuration to add. osv-scanner is detected but not used: its SARIF has
+  no result lines.
+- `policy.automatic_approval: false` makes every change under that policy
+  need a person; approval eligibility gains a `policy` stage. Packs can turn
+  it off but never back on. The `regulated` profile sets it.
+- `vee ci run` runs the verification profiles the policy requires before it
+  reviews (ADR 0029).
+
 ### Repository standards in every review
 
 - Reviewers now receive the repository's standards with every review:
