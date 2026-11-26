@@ -42,6 +42,8 @@ def main() -> int:
     runner = pathlib.Path(__file__).resolve().parents[1] / "historical-review-benchmark.py"
     with tempfile.TemporaryDirectory(prefix="vee-historical-acceptance-") as temporary:
         root = pathlib.Path(temporary)
+        # The developer's own provider configuration must not change results.
+        os.environ["VEE_CONFIG"] = str(root / "no-user-config.yaml")
         repo = root / "subject"
         repo.mkdir()
         external_config = root / "outside-config"
@@ -306,7 +308,7 @@ def main() -> int:
         case = report["cases"][0]
         assert result.returncode == 2
         assert report["case_count"] == 7
-        assert report["completed_cases"] == 2
+        assert report["completed_cases"] == 2, json.dumps([{k: c.get(k) for k in ("case_id", "state", "incomplete_reason", "error", "reviewer_failures")} for c in report["cases"]], indent=1)
         assert report["incomplete_cases"] == 1
         assert report["out_of_scope_cases"] == 4
         assert report["matched_labels"] == 1 and report["missed_labels"] == 1

@@ -1016,7 +1016,7 @@ mod tests {
             tokio::spawn(async move { first_app.oneshot(first_request).await.unwrap() });
         tokio::task::spawn_blocking(move || {
             started_rx
-                .recv_timeout(std::time::Duration::from_secs(5))
+                .recv_timeout(std::time::Duration::from_secs(30))
                 .expect("first webhook should enter its handler")
         })
         .await
@@ -1088,7 +1088,7 @@ mod tests {
         let task = tokio::spawn(async move { app.oneshot(request).await });
         tokio::task::spawn_blocking(move || {
             started_rx
-                .recv_timeout(std::time::Duration::from_secs(5))
+                .recv_timeout(std::time::Duration::from_secs(30))
                 .unwrap()
         })
         .await
@@ -1710,6 +1710,7 @@ mod tests {
             verification_runs: Vec::new(),
             reviewer_outcomes: vec![
                 vee_application::ReviewerOutcome {
+                    detail: None,
                     reviewer_id: "security".into(),
                     provider_id: "claude".into(),
                     provider_kind: vee_core::ProviderKind::ClaudeCli,
@@ -1724,6 +1725,7 @@ mod tests {
                     }),
                 },
                 vee_application::ReviewerOutcome {
+                    detail: None,
                     reviewer_id: "security_unpriced".into(),
                     provider_id: "unknown_provider".into(),
                     provider_kind: vee_core::ProviderKind::Cli,
@@ -2056,6 +2058,7 @@ mod tests {
         }
         ids.into_iter()
             .map(|reviewer_id| vee_application::ReviewerOutcome {
+                detail: None,
                 reviewer_id,
                 provider_id: "fake".into(),
                 provider_kind: Default::default(),

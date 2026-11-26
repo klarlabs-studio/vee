@@ -38,6 +38,10 @@ pub fn user_config_location() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("VEE_CONFIG") {
         return Some(PathBuf::from(path));
     }
+    // This crate's own tests never read the developer's configuration.
+    if cfg!(test) {
+        return None;
+    }
     #[cfg(windows)]
     let base = std::env::var_os("APPDATA").map(PathBuf::from);
     #[cfg(not(windows))]

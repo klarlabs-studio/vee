@@ -70,6 +70,19 @@ change configuration and output contracts.
   approvals in enforce mode
   ([ADR 0026](docs/adr/0026-owner-guards-and-a-daily-limit-for-approvals.md)).
 
+### Fixes
+
+- A failed reviewer's outcome now says why (`detail`, shortened). For the
+  Claude Code CLI, that is the reason from its error result, not only its
+  exit status.
+- The historical benchmark reports a case where no reviewer completed as
+  `no_reviewer_completed`, with each reviewer's failure, rather than as a
+  context-coverage gap.
+- Go and TypeScript language-server queries wait up to 15 seconds each,
+  within the 45-second total, so a cold or busy machine does not lose
+  semantic references.
+- Tests no longer read the developer's own Vee configuration.
+
 ## 0.1.0 — 2026-11-25
 
 First release. Install a release binary with the shell or PowerShell

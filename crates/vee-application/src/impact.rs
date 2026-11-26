@@ -1658,7 +1658,9 @@ pub(crate) fn query_typescript_references(
     const MAX_REFERENCE_QUERIES: usize = 32;
     const MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
     const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
-    const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    // A language server's first answer includes loading the project, which
+    // takes seconds on a cold or busy machine; the total still bounds it.
+    const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
     let root = root.canonical().map_err(|error| error.to_string())?;
     let mut command = if executable
@@ -1996,7 +1998,9 @@ pub(crate) fn query_gopls_references(
     const MAX_REFERENCE_QUERIES: usize = 32;
     const MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
     const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
-    const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    // A language server's first answer includes loading the project, which
+    // takes seconds on a cold or busy machine; the total still bounds it.
+    const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
     let root = root.canonical().map_err(|error| error.to_string())?;
     let root_uri = url::Url::from_directory_path(&root)
