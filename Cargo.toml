@@ -1,7 +1,5 @@
 [workspace]
 resolver = "2"
-# The vendored crates keep their own lockfiles and are tested on their own.
-exclude = ["vendor/klarlabs-mcp", "vendor/klarlabs-mcp-protocol"]
 members = ["crates/vee-core", "crates/vee-store-sqlite", "crates/vee-process", "crates/vee-application", "crates/vee-git", "crates/vee-hosting", "crates/vee-http", "crates/vee-present", "crates/vee-cli"]
 
 [workspace.package]
@@ -9,7 +7,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/klarlabs-studio/vee"
-# The vendored MCP crates need 1.89.
+# klarlabs-mcp needs 1.89.
 rust-version = "1.89"
 
 [workspace.dependencies]
@@ -35,7 +33,7 @@ globset = "0.4"
 semver = "1"
 schemars = "=1.2.3"
 jsonschema = "=0.59.0"
-klarlabs-mcp = { version = "=0.1.0", default-features = false, features = ["stdio"] }
+klarlabs-mcp = { version = "=0.2.0", default-features = false, features = ["stdio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "io-std", "net"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 reqwest = { version = "=0.13.5", default-features = false, features = ["blocking", "json", "rustls"] }
@@ -44,12 +42,6 @@ syn = { version = "2", features = ["full", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
 url = "=2.5.9"
-
-[patch.crates-io]
-# Keep the published klarlabs-mcp API while enabling its legacy initialize
-# lifecycle for clients that have not adopted MCP's 2026 discovery lifecycle.
-klarlabs-mcp = { path = "vendor/klarlabs-mcp" }
-klarlabs-mcp-protocol = { path = "vendor/klarlabs-mcp-protocol" }
 
 # The profile that 'dist' will build with
 [profile.dist]

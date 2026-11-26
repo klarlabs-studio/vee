@@ -1179,7 +1179,9 @@ dependencies = [
 
 [[package]]
 name = "klarlabs-mcp"
-version = "0.1.0"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0b12f8a45056699e5739419f08fcf9336096b5b6e67635d40ea06809534f107"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -1198,7 +1200,9 @@ dependencies = [
 
 [[package]]
 name = "klarlabs-mcp-protocol"
-version = "0.1.0"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af5ff2bb083e35fa0a529bdcb290872608ce8753d12d8923c76df293f81ddcd8"
 dependencies = [
  "chrono",
  "futures",

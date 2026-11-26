@@ -2,60 +2,6 @@
   "schema_version": "1.0.0",
   "entries": [
     {
-      "fingerprint": "05a1f8af5bdade621c6792363db5fd018ad3890346552c3c0dca6ff70b9b9bf3",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: TLS keys generated for the vendored MCP library mTLS tests (vendor/klarlabs-mcp/tests/fixtures/tls); they protect nothing.",
-      "owner": "vee-maintainers",
-      "created_at": "2026-11-17T20:53:07.899495Z"
-    },
-    {
-      "fingerprint": "1f3f2d627da261233250f1c37efe6de0d5995483e381260261e7a06acea66a3b",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: TLS keys generated for the vendored MCP library mTLS tests (vendor/klarlabs-mcp/tests/fixtures/tls); they protect nothing.",
-      "owner": "vee-maintainers",
-      "created_at": "2026-11-17T20:53:07.899496Z"
-    },
-    {
-      "fingerprint": "21cdfc1c8f52cd824f28b9feef30bdb6026bd6732a683dfc0b130b9b4a2b10da",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: TLS keys generated for the vendored MCP library mTLS tests (vendor/klarlabs-mcp/tests/fixtures/tls); they protect nothing.",
-      "owner": "vee-maintainers",
-      "created_at": "2026-11-17T20:53:07.899498Z"
-    },
-    {
-      "fingerprint": "8396de3f17807253cbe328ad5c7d12e3cb43e34b1ef72b929d1d28daa5d7affb",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: TLS keys generated for the vendored MCP library mTLS tests (vendor/klarlabs-mcp/tests/fixtures/tls); they protect nothing.",
-      "owner": "vee-maintainers",
-      "created_at": "2026-11-17T20:53:07.899498Z"
-    },
-    {
-      "fingerprint": "9577225908e43f61e3dfd0a88b0f58629a06872f1cf0703b2b560e9b1cbb2a9c",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: TLS keys generated for the vendored MCP library mTLS tests (vendor/klarlabs-mcp/tests/fixtures/tls); they protect nothing.",
-      "owner": "vee-maintainers",
-      "created_at": "2026-11-17T20:53:07.899499Z"
-    },
-    {
-      "fingerprint": "9f08aace72d37d5f8cb404618e2a8592220f877886fab7a5a26a50d20d30dff3",
-      "rule_id": "",
-      "file_path": "",
-      "severity": "",
-      "reason": "False positive: TLS keys generated for the vendored MCP library mTLS tests (vendor/klarlabs-mcp/tests/fixtures/tls); they protect nothing.",
-      "owner": "vee-maintainers",
-      "created_at": "2026-11-17T20:53:07.8995Z"
-    },
-    {
       "fingerprint": "1612e6e8fab878af64f2cb5ef4891a0fab048c32dba59832bee739eb281b7532",
       "rule_id": "",
       "file_path": "",
@@ -225,60 +171,6 @@
       "reason": "Accepted: developer and acceptance scripts whose argv is the invoking operator's own input; subprocess calls use argument lists, not a shell.",
       "owner": "vee-maintainers",
       "created_at": "2026-11-17T20:53:07.951791Z"
-    },
-    {
-      "fingerprint": "c59458f0aaa0393b016972b8070747da105541555ab91f029294fa343349a0d4",
-      "rule_id": "TAINT-002",
-      "file_path": "vendor/klarlabs-mcp/examples/client_probe.rs",
-      "severity": "medium",
-      "reason": "Accepted: vendored MCP library dev tooling (examples/client_probe.rs, tests/conformance.py, tests/network_interop.py) executes the program named on its own command line by design; the operator who runs it supplies that argv. Not shipped in Vee.",
-      "owner": "vee-maintainers",
-      "created_at": "2026-11-18T10:58:40.505026Z"
-    },
-    {
-      "fingerprint": "c59458f0aaa0393b016972b8070747da105541555ab91f029294fa343349a0d4",
-      "rule_id": "TAINT-002",
-      "file_path": "vendor/klarlabs-mcp/examples/client_probe.rs",
-      "severity": "medium",
-      "reason": "Accepted: vendored MCP library dev tooling (examples/client_probe.rs, tests/conformance.py, tests/network_interop.py) executes the program named on its own command line by design; the operator who runs it supplies that argv. Not shipped in Vee.",
-      "owner": "vee-maintainers",
-      "created_at": "2026-11-18T10:58:40.505026Z"
-    },
-    {
-      "fingerprint": "b7c7b5a5f09b46cef5b07f3eeb00229cbbe334cb3c225422dae8c4ec0bc89e9c",
-      "rule_id": "TAINT-002",
-      "file_path": "vendor/klarlabs-mcp/tests/conformance.py",
-      "severity": "medium",
-      "reason": "Accepted: vendored MCP library dev tooling (examples/client_probe.rs, tests/conformance.py, tests/network_interop.py) executes the program named on its own command line by design; the operator who runs it supplies that argv. Not shipped in Vee.",
-      "owner": "vee-maintainers",
-      "created_at": "2026-11-18T10:58:40.505026Z"
-    },
-    {
-      "fingerprint": "83e5c7b578ef6c04bbcd347e790e9b5f985c269fe50d07c601bb2831d97a7c37",
-      "rule_id": "TAINT-002",
-      "file_path": "vendor/klarlabs-mcp/tests/conformance.py",
-      "severity": "medium",
-      "reason": "Accepted: vendored MCP library dev tooling (examples/client_probe.rs, tests/conformance.py, tests/network_interop.py) executes the program named on its own command line by design; the operator who runs it supplies that argv. Not shipped in Vee.",
-      "owner": "vee-maintainers",
-      "created_at": "2026-11-18T10:58:40.505026Z"
-    },
-    {
-      "fingerprint": "83e5c7b578ef6c04bbcd347e790e9b5f985c269fe50d07c601bb2831d97a7c37",
-      "rule_id": "TAINT-002",
-      "file_path": "vendor/klarlabs-mcp/tests/conformance.py",
-      "severity": "medium",
-      "reason": "Accepted: vendored MCP library dev tooling (examples/client_probe.rs, tests/conformance.py, tests/network_interop.py) executes the program named on its own command line by design; the operator who runs it supplies that argv. Not shipped in Vee.",
-      "owner": "vee-maintainers",
-      "created_at": "2026-11-18T10:58:40.505026Z"
-    },
-    {
-      "fingerprint": "ecfdc99482e19a8274a71bd7b52fe1863059d02deba2fbcaee2bc5786563a818",
-      "rule_id": "TAINT-002",
-      "file_path": "vendor/klarlabs-mcp/tests/network_interop.py",
-      "severity": "medium",
-      "reason": "Accepted: vendored MCP library dev tooling (examples/client_probe.rs, tests/conformance.py, tests/network_interop.py) executes the program named on its own command line by design; the operator who runs it supplies that argv. Not shipped in Vee.",
-      "owner": "vee-maintainers",
-      "created_at": "2026-11-18T10:58:40.505026Z"
     },
     {
       "fingerprint": "8155e83403b3eb9b3c4d9de2811da1f1a0cfcb1f637704e8c7d00b49df3078b2",
