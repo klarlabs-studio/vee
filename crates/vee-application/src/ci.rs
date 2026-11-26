@@ -639,6 +639,7 @@ fn publish_summary(
         head_oid: pull_request.head_oid.clone(),
         review_id: review.review_id.clone(),
         config_digest: review.effective_config_digest.clone(),
+        standards_digest: review.standards_digest.clone(),
         files: crate::incremental::reviewed_files(root, &review.change_set)
             .map_err(anyhow::Error::msg)?,
         findings: review

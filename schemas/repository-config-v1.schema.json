@@ -50,6 +50,27 @@
           "minimum": 1,
           "maximum": 16777216
         },
+        "max_standards_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576,
+          "default": 49152,
+          "description": "Bytes of repository standards (REVIEW.md, AGENTS.md, editor rules and `standards`), read from the change's base, sent to reviewers; 0 sends none (ADR 0028)."
+        },
+        "standards": {
+          "type": "array",
+          "maxItems": 64,
+          "description": "More standards documents for reviewers, read from the change's base.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path"],
+            "properties": {
+              "path": { "type": "string", "minLength": 1, "maxLength": 512, "description": "Repository-relative path of the document." },
+              "paths": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 512 }, "description": "Globs of changed paths the document applies to; omitted, it applies to every change." }
+            }
+          }
+        },
         "exploration": {
           "type": "object",
           "description": "Read-only reviewer access to the review snapshot through Vee-served tools (ADR 0017).",

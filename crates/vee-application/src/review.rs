@@ -46,6 +46,10 @@ pub struct ReviewResult {
     /// What this review took from an earlier review of the same change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub carried: Option<crate::incremental::CarriedSummary>,
+    /// Digest of the repository standards reviewers received (ADR 0028);
+    /// absent when they received none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standards_digest: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -323,13 +327,18 @@ pub fn run_review_with_provider_and_selection_context(
         &base_config_digest,
         work_item.as_ref().map(|item| item.content_digest.as_str()),
     )?;
+    // The repository's own standards, from the change's base (ADR 0028).
+    let (review_standards, omitted_standards) =
+        crate::review_standards::standards_for_review(root, &change_set, &config.review)?;
+    let standards_digest = crate::review_standards::standards_digest(&review_standards);
     // Files whose change an earlier review of this pull request covered
-    // under the same configuration are not sent again (ADR 0022).
+    // under the same configuration and standards are not sent again (ADR 0022).
     let carried = match carried {
         Some(carried) => crate::incremental::carry(
             &carried,
             &crate::incremental::reviewed_files(root, &change_set)?,
             &config_digest,
+            standards_digest.as_deref(),
             &selected_reviewers,
         ),
         None => None,
@@ -800,6 +809,15 @@ pub fn run_review_with_provider_and_selection_context(
             "context_files":context_files,
             "work_item_context":work_item_context,
         });
+        if !review_standards.is_empty() {
+            request_payload["repository_standards"] = review_standards
+                .iter()
+                .map(crate::review_standards::ReviewStandard::to_json)
+                .collect();
+            request_payload["repository_standards_note"] =
+                serde_json::json!(crate::review_standards::STANDARDS_NOTE);
+            request_payload["omitted_repository_standards"] = serde_json::json!(omitted_standards);
+        }
         let focused = reviewer.strategy == vee_core::ReviewStrategy::Focused;
         if focused {
             request_payload["review_strategy"] = serde_json::json!("focused");
@@ -1368,6 +1386,22 @@ pub fn run_review_with_provider_and_selection_context(
         }
     }
     for manifest in &mut reviewer_context {
+        manifest
+            .files
+            .extend(review_standards.iter().map(|standard| {
+                ReviewerContextFile {
+                    path: standard.path.clone(),
+                    role: "repository_standard".into(),
+                    status: if standard.truncated {
+                        "truncated_source"
+                    } else {
+                        "full_source"
+                    }
+                    .into(),
+                    reason: Some(standard.scope.clone()),
+                    artifact_digest: Some(standard.content_digest.clone()),
+                }
+            }));
         for file in &mut manifest.files {
             if file.role == "changed_file" && carried_paths.contains(&file.path) {
                 file.status = CARRIED_STATUS.into();
@@ -1457,6 +1491,7 @@ pub fn run_review_with_provider_and_selection_context(
         work_item,
         work_item_token_env,
         carried: carried_summary,
+        standards_digest,
     };
     let payload = serde_json::to_string(&result).map_err(|error| error.to_string())?;
     let snapshot_manifest = snapshot_manifest_json(&result.change_set)?;

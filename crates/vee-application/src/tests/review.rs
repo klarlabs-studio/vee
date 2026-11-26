@@ -266,6 +266,7 @@ fn legacy_review_without_policy_findings_falls_back_to_display_findings() {
         },
     );
     let review = ReviewResult {
+        standards_digest: None,
         carried: None,
         schema_version: 2,
         review_id: "rev_legacy".into(),

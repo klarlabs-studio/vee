@@ -38,6 +38,10 @@ pub struct ReviewRecord {
     /// The review's effective configuration. A record made under another
     /// configuration carries nothing.
     pub config_digest: String,
+    /// The repository standards the review used (ADR 0028). A record made
+    /// with other standards carries nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standards_digest: Option<String>,
     pub files: BTreeMap<String, ReviewedFile>,
     /// Each reviewer's findings, before findings of several reviewers at one
     /// location are merged.
@@ -132,10 +136,12 @@ pub(crate) fn carry(
     carried: &CarriedReview,
     current: &BTreeMap<String, ReviewedFile>,
     config_digest: &str,
+    standards_digest: Option<&str>,
     selected_reviewers: &[String],
 ) -> Option<(BTreeSet<String>, Vec<Finding>, CarriedSummary)> {
     let record = &carried.record;
     if record.config_digest != config_digest
+        || record.standards_digest.as_deref() != standards_digest
         || record
             .findings
             .iter()
@@ -235,6 +241,7 @@ mod tests {
                 head_oid: "h1".into(),
                 review_id: "r1".into(),
                 config_digest: "c".into(),
+                standards_digest: None,
                 files: BTreeMap::from([
                     ("a.rs".into(), file("a0", "a1")),
                     ("b.rs".into(), file("b0", "b1")),
@@ -257,7 +264,7 @@ mod tests {
             ("c.rs".into(), file("c0", "c1")),
         ]);
         let (paths, findings, summary) =
-            carry(&earlier, &current, "c", &["correctness".into()]).unwrap();
+            carry(&earlier, &current, "c", None, &["correctness".into()]).unwrap();
         assert_eq!(paths, BTreeSet::from(["a.rs".to_owned()]));
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].path.as_deref(), Some("a.rs"));
@@ -265,17 +272,20 @@ mod tests {
 
         // A rebase that changes a file's base is a different change.
         let rebased = BTreeMap::from([("a.rs".into(), file("a9", "a1"))]);
-        assert!(carry(&earlier, &rebased, "c", &["correctness".into()]).is_none());
+        assert!(carry(&earlier, &rebased, "c", None, &["correctness".into()]).is_none());
     }
 
     #[test]
     fn nothing_is_carried_across_configurations_or_with_an_unlocated_finding() {
         let current = BTreeMap::from([("a.rs".into(), file("a0", "a1"))]);
-        assert!(carry(&record(vec![]), &current, "other", &[]).is_none());
+        assert!(carry(&record(vec![]), &current, "other", None, &[]).is_none());
+        // Other repository standards, as after merging a REVIEW.md change.
+        assert!(carry(&record(vec![]), &current, "c", Some("sha256:new"), &[]).is_none());
         assert!(carry(
             &record(vec![finding(None, "correctness")]),
             &current,
             "c",
+            None,
             &["correctness".into()]
         )
         .is_none());
@@ -284,6 +294,7 @@ mod tests {
             &record(vec![finding(Some("a.rs"), "security")]),
             &current,
             "c",
+            None,
             &["correctness".into()],
         )
         .unwrap();

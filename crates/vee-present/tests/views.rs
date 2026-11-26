@@ -52,6 +52,7 @@ fn review(findings: Vec<Finding>, blocking: Vec<String>, complete: bool) -> Revi
     }
     gate.blocking_findings = blocking;
     ReviewResult {
+        standards_digest: None,
         carried: None,
         schema_version: 2,
         review_id: "rev_1".into(),

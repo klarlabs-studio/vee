@@ -127,9 +127,10 @@ What is missing is the loop.
 Reviewers read a fixed set of agent instruction files, such as `AGENTS.md`
 and `CLAUDE.md`. Teams keep standards elsewhere too.
 
-- [ ] Read `REVIEW.md`, `.cursorrules` and `.cursor/rules/`, and paths listed in `.vee.yaml`
-- [ ] Scope a source to paths, as the existing sources are scoped by directory
-- [ ] Keep provenance for each standard, as today
+- [x] Read `REVIEW.md`, `.cursorrules` and `.cursor/rules/`, and paths listed in `.vee.yaml`
+- [x] Scope a source to paths, as the existing sources are scoped by directory
+- [x] Keep provenance for each standard, as today
+- [x] Send the standards to reviewers in every review, from the change's base ([ADR 0028](adr/0028-repository-standards-in-every-review.md))
 
 ### 11. Jira and Linear work items (S–M each)
 

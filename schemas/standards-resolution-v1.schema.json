@@ -16,7 +16,7 @@
         "required": ["path", "kind", "precedence", "scope", "content_digest", "integrity", "content", "truncated"],
         "properties": {
           "path": { "type": "string" },
-          "kind": { "type": "string", "enum": ["agent_instructions", "protected_policy", "reviewer_instructions", "editor_rule", "remote_standard"] },
+          "kind": { "type": "string", "enum": ["agent_instructions", "review_instructions", "configured_standard", "protected_policy", "reviewer_instructions", "editor_rule", "remote_standard"] },
           "precedence": { "type": "integer", "minimum": 0, "maximum": 100 },
           "scope": { "type": "string" },
           "content_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },

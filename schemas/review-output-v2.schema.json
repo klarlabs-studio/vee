@@ -394,6 +394,11 @@
       },
       "uniqueItems": true
     },
+    "standards_digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$",
+      "description": "Digest of the repository standards reviewers received, read from the change's base (ADR 0028); absent when none were sent."
+    },
     "carried": {
       "type": "object",
       "description": "What this review took from an earlier review of the same pull request (ADR 0022): changed files whose base and head content were the same as then were not sent to reviewers again, and the earlier findings on them are carried over.",
@@ -447,7 +452,7 @@
                 "path": { "type": "string", "minLength": 1 },
                 "role": { "type": "string", "minLength": 1 },
                 "status": {
-                  "enum": ["full_source", "bounded_diff", "metadata_only", "excluded_by_review_filter", "excluded_by_reviewer_filter", "omitted_by_context_limit", "carried_from_earlier_review"]
+                  "enum": ["full_source", "truncated_source", "bounded_diff", "metadata_only", "excluded_by_review_filter", "excluded_by_reviewer_filter", "omitted_by_context_limit", "carried_from_earlier_review"]
                 },
                 "reason": { "type": "string" },
                 "artifact_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }

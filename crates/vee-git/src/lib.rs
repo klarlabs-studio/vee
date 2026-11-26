@@ -333,6 +333,40 @@ pub fn read_tree_file(
     }
 }
 
+/// The paths of the files directly in `directory` at `treeish`, sorted, or
+/// none when the directory does not exist there.
+pub fn list_tree_directory(
+    root: &Path,
+    treeish: &str,
+    directory: &Path,
+) -> Result<Vec<String>, String> {
+    validate_revision(treeish)?;
+    validate_relative_path(directory)?;
+    let spec = format!("{}/", directory.to_string_lossy().trim_end_matches('/'));
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-tree", "-z", "--full-tree", treeish, "--", spec.as_str()])
+        .output()
+        .map_err(git_spawn_error)?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    let mut paths: Vec<String> = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter_map(|record| {
+            let record = std::str::from_utf8(record).ok()?;
+            let (meta, path) = record.split_once('\t')?;
+            // Regular files only: no trees, symlinks or submodules.
+            (meta.split_whitespace().nth(1) == Some("blob") && !meta.starts_with("120000"))
+                .then(|| path.to_owned())
+        })
+        .collect();
+    paths.sort();
+    Ok(paths)
+}
+
 /// Read a file from a commit or commit-range snapshot's endpoint tree.
 pub fn read_snapshot_tree_file(
     root: &Path,
