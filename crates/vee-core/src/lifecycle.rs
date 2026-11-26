@@ -86,6 +86,9 @@ pub enum RuleApprovalStatus {
     Revoked,
     Superseded,
     Expired,
+    /// Withheld from reviewers because people kept rejecting its findings;
+    /// a person can restore it (ADR 0031).
+    Suspended,
 }
 
 impl RuleApprovalStatus {
@@ -95,6 +98,7 @@ impl RuleApprovalStatus {
             Self::Revoked => "revoked",
             Self::Superseded => "superseded",
             Self::Expired => "expired",
+            Self::Suspended => "suspended",
         }
     }
 }
@@ -113,9 +117,20 @@ impl RuleApproval {
             .is_some_and(|expiry| expiry <= now_unix)
         {
             RuleApprovalStatus::Expired
+        } else if self.suspended() {
+            RuleApprovalStatus::Suspended
         } else {
             RuleApprovalStatus::Active
         }
+    }
+
+    /// Whether the last suspension event suspended it.
+    pub fn suspended(&self) -> bool {
+        self.events
+            .iter()
+            .rev()
+            .find(|event| matches!(event.event.as_str(), "suspended" | "restored"))
+            .is_some_and(|event| event.event == "suspended")
     }
 
     pub fn is_active(&self) -> bool {

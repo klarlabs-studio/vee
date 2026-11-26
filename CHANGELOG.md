@@ -6,6 +6,21 @@ change configuration and output contracts.
 
 ## Unreleased
 
+### Learning from pull request feedback
+
+- `vee rules candidates --pull-requests OWNER/REPO` reads closed pull
+  requests on GitHub or GitLab. Dismissals, findings no longer reported at
+  merge, and thumbs-up or thumbs-down on Vee's threads become weak labels.
+  Rule candidates from them (`weak_candidates`) carry each signal's
+  provenance, need five distinct findings, need a person's approval, and
+  never affect the gate.
+- A rule whose findings people keep rejecting is suspended automatically,
+  with an audit event; `vee rules restore` puts it back. The rule approval
+  schemas gain the `suspended` status and the `suspended` and `restored`
+  events (storage schema 14).
+- `vee rules export [--write REVIEW.md]` renders the active rules as a
+  Markdown section that agents and editors read too (ADR 0031).
+
 ### GitLab parity
 
 - On GitLab merge requests, `vee ci run` now keeps Vee's summary note with

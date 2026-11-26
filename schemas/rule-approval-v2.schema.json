@@ -106,7 +106,8 @@
         "active",
         "revoked",
         "superseded",
-        "expired"
+        "expired",
+        "suspended"
       ]
     },
     "events": {
@@ -128,7 +129,9 @@
             "enum": [
               "activated",
               "revoked",
-              "superseded"
+              "superseded",
+              "suspended",
+              "restored"
             ]
           },
           "actor": {

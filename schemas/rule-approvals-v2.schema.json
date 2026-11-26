@@ -27,7 +27,7 @@
         "supersedes_approval_id": { "type": ["string", "null"] },
         "expires_at_unix": { "type": ["integer", "null"] },
         "created_at": { "type": "string" },
-        "status": { "enum": ["active", "revoked", "superseded", "expired"] },
+        "status": { "enum": ["active", "revoked", "superseded", "expired", "suspended"] },
         "events": {
           "type": "array",
           "items": {
@@ -35,7 +35,7 @@
             "required": ["event_id", "event", "actor", "reason", "created_at"],
             "properties": {
               "event_id": { "type": "string" },
-              "event": { "enum": ["activated", "revoked", "superseded"] },
+              "event": { "enum": ["activated", "revoked", "superseded", "suspended", "restored"] },
               "actor": { "type": "string" },
               "reason": { "type": "string" },
               "created_at": { "type": "string" }

@@ -37,7 +37,7 @@ fn validate_snapshot_manifest(snapshot_id: &str, manifest_json: &str) -> Result<
     Ok(())
 }
 
-const STORAGE_SCHEMA_VERSION: u32 = 13;
+const STORAGE_SCHEMA_VERSION: u32 = 14;
 
 fn migrate_storage(connection: &mut rusqlite::Connection) -> Result<(), String> {
     use rusqlite::TransactionBehavior;
@@ -463,6 +463,31 @@ fn migrate_storage(connection: &mut rusqlite::Connection) -> Result<(), String> 
             }
         }
         tx.pragma_update(None, "user_version", 13u32)
+            .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+    }
+    if version < 14 {
+        // Noisy rules are suspended and restored (ADR 0031).
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        tx.execute_batch(
+            "ALTER TABLE rule_approval_events RENAME TO rule_approval_events_v13;
+            CREATE TABLE rule_approval_events (
+                event_id TEXT PRIMARY KEY,
+                approval_id TEXT NOT NULL REFERENCES rule_approvals(approval_id),
+                event TEXT NOT NULL CHECK(event IN ('activated','revoked','superseded','suspended','restored')),
+                actor TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO rule_approval_events(event_id,approval_id,event,actor,reason,created_at)
+                SELECT event_id,approval_id,event,actor,reason,created_at FROM rule_approval_events_v13;
+            DROP TABLE rule_approval_events_v13;
+            CREATE INDEX IF NOT EXISTS idx_rule_approval_events_approval ON rule_approval_events(approval_id,created_at,event_id);",
+        )
+        .map_err(|error| error.to_string())?;
+        tx.pragma_update(None, "user_version", 14u32)
             .map_err(|error| error.to_string())?;
         tx.commit().map_err(|error| error.to_string())?;
     }
@@ -1433,6 +1458,56 @@ impl RuleApprovalRepository for ReviewStore {
             .as_bytes(),
         );
         tx.execute("INSERT INTO rule_approval_events(event_id,approval_id,event,actor,reason,created_at) VALUES (?1,?2,'revoked',?3,?4,?5)", rusqlite::params![event_id, approval_id, actor.as_str(), reason.as_str(), created_at]).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    fn set_rule_approval_suspended(
+        &mut self,
+        approval_id: &str,
+        suspended: bool,
+        actor: &ActorName,
+        reason: &Reason,
+    ) -> Result<(), String> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let terminal: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM rule_approval_events WHERE approval_id=?1 AND event IN ('revoked','superseded'))", [approval_id], |row| row.get(0)).map_err(|e| e.to_string())?;
+        let exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM rule_approvals WHERE approval_id=?1)",
+                [approval_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !exists || terminal {
+            return Err(format!("active rule approval {approval_id} was not found"));
+        }
+        let last: Option<String> = tx
+            .query_row("SELECT event FROM rule_approval_events WHERE approval_id=?1 AND event IN ('suspended','restored') ORDER BY rowid DESC LIMIT 1", [approval_id], |row| row.get(0))
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let currently_suspended = last.as_deref() == Some("suspended");
+        if currently_suspended == suspended {
+            return Err(format!(
+                "rule approval {approval_id} is already {}",
+                if suspended { "suspended" } else { "in effect" }
+            ));
+        }
+        let event = if suspended { "suspended" } else { "restored" };
+        let created_at: String = tx
+            .query_row("SELECT CURRENT_TIMESTAMP", [], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        let event_id = digest(
+            format!(
+                "{approval_id}\0{event}\0{}\0{}\0{}",
+                actor.as_str(),
+                reason.as_str(),
+                created_at
+            )
+            .as_bytes(),
+        );
+        tx.execute("INSERT INTO rule_approval_events(event_id,approval_id,event,actor,reason,created_at) VALUES (?1,?2,?3,?4,?5,?6)", rusqlite::params![event_id, approval_id, event, actor.as_str(), reason.as_str(), created_at]).map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())
     }
 
