@@ -724,6 +724,17 @@ def assess_case(args: argparse.Namespace, case: dict[str, Any], repo: Path, labe
             item["incomplete_reason"] = "reviewer_context_manifest_unavailable"
             item["error"] = "Vee output does not include per-reviewer context provenance"
             return item
+        if not completed_reviewers:
+            # Distinguish a provider failure (often transient: a usage limit
+            # or an outage) from a context-coverage gap.
+            item["state"] = "incomplete"
+            item["incomplete_reason"] = "no_reviewer_completed"
+            item["reviewer_failures"] = [
+                {"reviewer_id": outcome.get("reviewer_id"), "status": outcome.get("status"), "detail": outcome.get("detail")}
+                for outcome in outcomes if isinstance(outcome, dict)
+            ]
+            item["error"] = "no reviewer returned findings; see reviewer_failures"
+            return item
         uncovered_labels = [entry for entry in label_coverage if not entry["full_source_reviewer_ids"]]
         if uncovered_labels:
             item["state"] = "incomplete"

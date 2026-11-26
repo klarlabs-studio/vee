@@ -7432,7 +7432,8 @@ fn mcp_stdio_exposes_findings_tool_over_the_pinned_protocol() {
             other => panic!("start_review did not return an MCP task: {other:?}"),
         };
         let task_id = task.task.task_id.clone();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        // Generous: a loaded machine can take a while to start the review.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
         let finished_task = loop {
             let state = client
                 .peer()

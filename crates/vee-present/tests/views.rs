@@ -67,6 +67,7 @@ fn review(findings: Vec<Finding>, blocking: Vec<String>, complete: bool) -> Revi
         evidence: vec![],
         verification_runs: vec![],
         reviewer_outcomes: vec![ReviewerOutcome {
+            detail: None,
             reviewer_id: "correctness".into(),
             provider_id: "local".into(),
             provider_kind: vee_core::ProviderKind::OllamaNative,

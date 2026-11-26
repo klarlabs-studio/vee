@@ -1130,16 +1130,17 @@ pub(crate) fn execute_claude_cli(
         sample: None,
         exploration: None,
     };
-    let mut result = execute_checked(&claude_request, cancellation)?;
-    let envelope: serde_json::Value = serde_json::from_slice(&result.stdout)
-        .map_err(|error| format!("parsing Claude JSON output: {error}"))?;
-    if envelope
-        .get("is_error")
-        .and_then(serde_json::Value::as_bool)
-        == Some(true)
-    {
-        return Err("Claude CLI returned an error result".into());
+    let mut result = vee_process::execute_provider_reporting_exit(&claude_request, cancellation)?;
+    // On failure the CLI still prints its JSON envelope, whose `result` says
+    // why; keep that rather than only the exit status.
+    let envelope: Option<serde_json::Value> = serde_json::from_slice(&result.stdout).ok();
+    if let Some(reason) = envelope.as_ref().and_then(claude_error_reason) {
+        return Err(format!("Claude CLI returned an error: {reason}"));
     }
+    if result.exit_code != Some(0) {
+        return Err(exit_failure(result, &claude_request.environment));
+    }
+    let envelope = envelope.ok_or_else(|| "parsing Claude JSON output: not JSON".to_string())?;
     let structured = envelope
         .get("structured_output")
         .ok_or_else(|| "Claude CLI JSON output has no structured_output".to_string())?;
@@ -1184,6 +1185,33 @@ pub(crate) fn claude_exploration_args(exploration: &vee_core::ExplorationLaunch)
         "--allowedTools".into(),
         allowed,
     ]
+}
+
+/// The reason in a Claude CLI error envelope, or `None` when it reports success.
+pub(crate) fn claude_error_reason(envelope: &serde_json::Value) -> Option<String> {
+    if envelope
+        .get("is_error")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        return None;
+    }
+    let text = |key: &str| envelope.get(key).and_then(serde_json::Value::as_str);
+    Some(
+        [text("subtype"), text("result")]
+            .into_iter()
+            .flatten()
+            .filter(|part| !part.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join(": "),
+    )
+    .map(|reason| {
+        if reason.is_empty() {
+            "no reason given".to_owned()
+        } else {
+            reason
+        }
+    })
 }
 
 /// Settings for Claude Code review sessions: hooks are off, so a reviewer

@@ -202,6 +202,11 @@
             "minimum": 0,
             "description": "Measured wall-clock provider adapter time; null when cached or not invoked."
           },
+          "detail": {
+            "type": "string",
+            "maxLength": 1000,
+            "description": "Why the reviewer did not return findings, shortened, when it failed."
+          },
           "usage": {
             "type": ["object", "null"],
             "additionalProperties": false,
