@@ -18,6 +18,16 @@ pub const RECORD_MARKER: &str = "<!-- vee:record:";
 /// out, and the next review is a full one.
 const MAX_RECORD_CHARS: usize = 60_000;
 
+/// Context lines around each hunk. A later edit this close to a hunk changes
+/// it, so the hunk is reviewed again.
+const HUNK_CONTEXT: usize = 3;
+/// A file whose diff is larger than this has no hunks recorded.
+const MAX_HUNK_DIFF_BYTES: usize = 1 << 20;
+/// Hex digits of a hunk's digest kept in the record. Hunks are only matched
+/// within one file whose base is unchanged, so a short digest suffices and
+/// keeps the record small.
+const HUNK_DIGEST_CHARS: usize = 16;
+
 /// The content of one changed file on both sides of the change.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewedFile {
@@ -25,6 +35,152 @@ pub struct ReviewedFile {
     pub base: Option<String>,
     /// Digest of the file at the head, or `None` when the change deletes it.
     pub head: Option<String>,
+    /// The change's hunks, when the file exists on both sides (ADR 0036).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hunks: Vec<ReviewedHunk>,
+}
+
+impl ReviewedFile {
+    fn same_content(&self, other: &Self) -> bool {
+        self.base == other.base && self.head == other.head
+    }
+}
+
+/// One hunk of a file's change, with three lines of context.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewedHunk {
+    /// Digest of the hunk's rows, without their line numbers.
+    pub digest: String,
+    /// The first head line the hunk spans.
+    pub start: u32,
+    /// The head lines it spans; 0 when it only deletes.
+    pub lines: u32,
+}
+
+impl ReviewedHunk {
+    fn contains(&self, line: u32) -> bool {
+        line >= self.start && line - self.start < self.lines
+    }
+}
+
+/// The hunks of the change from `base` to `head`; none when either side is
+/// missing, the diff is not textual, or it is too large.
+pub(crate) fn change_hunks(
+    base: Option<&[u8]>,
+    head: Option<&[u8]>,
+) -> Result<Vec<ReviewedHunk>, String> {
+    if base.is_none() || head.is_none() || base == head {
+        return Ok(Vec::new());
+    }
+    Ok(
+        crate::text_diff(base, head, MAX_HUNK_DIFF_BYTES, HUNK_CONTEXT)?
+            .map(|diff| parse_hunks(&diff))
+            .unwrap_or_default(),
+    )
+}
+
+fn parse_hunks(diff: &str) -> Vec<ReviewedHunk> {
+    fn finish((start, lines, rows): (u32, u32, String)) -> ReviewedHunk {
+        let digest = digest(rows.as_bytes());
+        let hex = digest.trim_start_matches("sha256:");
+        ReviewedHunk {
+            digest: hex[..HUNK_DIGEST_CHARS.min(hex.len())].to_owned(),
+            start,
+            lines,
+        }
+    }
+    let mut hunks = Vec::new();
+    let mut current: Option<(u32, u32, String)> = None;
+    for row in diff.lines() {
+        if let Some(header) = row.strip_prefix("@@ ") {
+            hunks.extend(current.take().map(finish));
+            let Some((start, lines)) = head_range(header) else {
+                return Vec::new();
+            };
+            current = Some((start, lines, String::new()));
+        } else if let Some((_, _, rows)) = current.as_mut() {
+            rows.push_str(row);
+            rows.push('\n');
+        }
+    }
+    hunks.extend(current.map(finish));
+    hunks
+}
+
+/// The head range of a hunk header such as `-3,4 +5,6 @@ fn name`.
+fn head_range(header: &str) -> Option<(u32, u32)> {
+    let range = header
+        .split_once(" @@")?
+        .0
+        .split_whitespace()
+        .find_map(|range| range.strip_prefix('+'))?;
+    let (start, lines) = match range.split_once(',') {
+        Some((start, lines)) => (start.parse().ok()?, lines.parse().ok()?),
+        None => (range.parse().ok()?, 1),
+    };
+    Some((start, lines))
+}
+
+/// The earlier and current hunks that are the same, each digest appearing
+/// once on both sides.
+fn matching_hunks<'a>(
+    earlier: &'a [ReviewedHunk],
+    current: &'a [ReviewedHunk],
+) -> Vec<(&'a ReviewedHunk, &'a ReviewedHunk)> {
+    let unique = |hunks: &'a [ReviewedHunk]| {
+        let mut counts = BTreeMap::<&str, Vec<&'a ReviewedHunk>>::new();
+        for hunk in hunks.iter().filter(|hunk| hunk.lines > 0) {
+            counts.entry(hunk.digest.as_str()).or_default().push(hunk);
+        }
+        counts
+            .into_iter()
+            .filter_map(|(digest, hunks)| (hunks.len() == 1).then(|| (digest, hunks[0])))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let current = unique(current);
+    unique(earlier)
+        .into_iter()
+        .filter_map(|(digest, earlier)| current.get(digest).map(|current| (earlier, *current)))
+        .collect()
+}
+
+/// `finding` moved from an earlier hunk to the same hunk at the head, or
+/// `None` when it is not inside one of `matches`.
+fn shifted(finding: &Finding, matches: &[(&ReviewedHunk, &ReviewedHunk)]) -> Option<Finding> {
+    let line = finding.line?;
+    let (earlier, current) = matches.iter().find(|(earlier, _)| earlier.contains(line))?;
+    let moved = |line: u32| line - earlier.start + current.start;
+    let mut finding = finding.clone();
+    finding.line = Some(moved(line));
+    finding.suggestion = finding.suggestion.take().and_then(|mut suggestion| {
+        earlier.contains(suggestion.end_line).then(|| {
+            suggestion.end_line = moved(suggestion.end_line);
+            suggestion
+        })
+    });
+    Some(finding)
+}
+
+/// Whether `line` lies inside one of the inclusive `ranges`.
+pub(crate) fn in_ranges(ranges: &[(u32, u32)], line: u32) -> bool {
+    ranges
+        .iter()
+        .any(|(start, end)| (*start..=*end).contains(&line))
+}
+
+/// `changed` without the ranges that lie inside a carried range.
+pub(crate) fn uncarried_ranges(
+    changed: Vec<(u64, u64)>,
+    carried: &[(u32, u32)],
+) -> Vec<(u64, u64)> {
+    changed
+        .into_iter()
+        .filter(|(start, end)| {
+            !carried
+                .iter()
+                .any(|(from, to)| u64::from(*from) <= *start && *end <= u64::from(*to))
+        })
+        .collect()
 }
 
 /// What one review of a pull request covered.
@@ -105,8 +261,24 @@ pub struct CarriedSummary {
     /// Changed files not sent to reviewers again, their change being the
     /// same as in the earlier review.
     pub paths: Vec<String>,
+    /// Files reviewed again whose unchanged hunks kept their findings
+    /// (ADR 0036).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub partial_paths: Vec<String>,
     /// Findings carried on those files.
     pub findings: usize,
+}
+
+/// What a new review takes from an earlier one.
+#[derive(Clone, Debug)]
+pub(crate) struct Carry {
+    /// Changed files not sent to reviewers again.
+    pub paths: BTreeSet<String>,
+    /// Files sent again, with the inclusive head line ranges of the hunks
+    /// that are the same as before.
+    pub lines: BTreeMap<String, Vec<(u32, u32)>>,
+    pub findings: Vec<Finding>,
+    pub summary: CarriedSummary,
 }
 
 /// Each changed file's base and head content.
@@ -126,23 +298,31 @@ pub fn reviewed_files(
                 ReviewedFile {
                     base: base.as_deref().map(digest),
                     head: head.as_deref().map(digest),
+                    hunks: change_hunks(base.as_deref(), head.as_deref())?,
                 },
             ))
         })
         .collect()
 }
 
-/// What a new review takes from an earlier one: the changed files whose
-/// change is the same, and the earlier findings on them. `None` when nothing
-/// can be carried: another configuration, no file the same, or an earlier
-/// finding without a location, which could concern any file.
+/// What a new review takes from an earlier one:
+///
+/// - the changed files whose change is the same, and the earlier findings on
+///   them;
+/// - in files whose base is the same but whose head changed, the hunks that
+///   are the same, and the earlier findings inside them, moved with the hunk
+///   (ADR 0036).
+///
+/// `None` when nothing can be carried: another configuration, nothing the
+/// same, or an earlier finding without a location, which could concern any
+/// file.
 pub(crate) fn carry(
     carried: &CarriedReview,
     current: &BTreeMap<String, ReviewedFile>,
     config_digest: &str,
     standards_digest: Option<&str>,
     selected_reviewers: &[String],
-) -> Option<(BTreeSet<String>, Vec<Finding>, CarriedSummary)> {
+) -> Option<Carry> {
     let record = &carried.record;
     if record.config_digest != config_digest
         || record.standards_digest.as_deref() != standards_digest
@@ -153,12 +333,22 @@ pub(crate) fn carry(
     {
         return None;
     }
-    let paths: BTreeSet<String> = current
-        .iter()
-        .filter(|(path, file)| record.files.get(*path) == Some(file))
-        .map(|(path, _)| path.clone())
-        .collect();
-    if paths.is_empty() {
+    let mut paths = BTreeSet::new();
+    let mut partial = BTreeMap::new();
+    for (path, file) in current {
+        let Some(earlier) = record.files.get(path) else {
+            continue;
+        };
+        if earlier.same_content(file) {
+            paths.insert(path.clone());
+        } else if earlier.base.is_some() && earlier.base == file.base {
+            let matches = matching_hunks(&earlier.hunks, &file.hunks);
+            if !matches.is_empty() {
+                partial.insert(path.clone(), matches);
+            }
+        }
+    }
+    if paths.is_empty() && partial.is_empty() {
         return None;
     }
     let findings: Vec<Finding> = record
@@ -166,29 +356,58 @@ pub(crate) fn carry(
         .iter()
         .filter(|finding| {
             finding
-                .path
-                .as_ref()
-                .is_some_and(|path| paths.contains(path))
-        })
-        .filter(|finding| {
-            finding
                 .reviewer_ids
                 .iter()
                 .any(|reviewer| selected_reviewers.contains(reviewer))
         })
-        .cloned()
+        .filter_map(|finding| {
+            let path = finding.path.as_ref()?;
+            if paths.contains(path) {
+                return Some(finding.clone());
+            }
+            shifted(finding, partial.get(path)?)
+        })
+        .collect();
+    let lines = partial
+        .iter()
+        .map(|(path, matches)| {
+            let ranges = matches
+                .iter()
+                .map(|(_, current)| (current.start, current.start + current.lines - 1))
+                .collect();
+            (path.clone(), ranges)
+        })
         .collect();
     let summary = CarriedSummary {
         from_head: record.head_oid.clone(),
         from_review: record.review_id.clone(),
         paths: paths.iter().cloned().collect(),
+        partial_paths: partial.keys().cloned().collect(),
         findings: findings.len(),
     };
-    Some((paths, findings, summary))
+    Some(Carry {
+        paths,
+        lines,
+        findings,
+        summary,
+    })
 }
 
 /// The record as a hidden marker, or `None` when it is too large for a comment.
+///
+/// When the hunks make it too large, they are left out: the next review then
+/// carries whole files only.
 pub fn encode(record: &ReviewRecord) -> Option<String> {
+    encode_exactly(record).or_else(|| {
+        let mut smaller = record.clone();
+        for file in smaller.files.values_mut() {
+            file.hunks.clear();
+        }
+        encode_exactly(&smaller)
+    })
+}
+
+fn encode_exactly(record: &ReviewRecord) -> Option<String> {
     let json = serde_json::to_vec(record).ok()?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(json);
     (encoded.len() <= MAX_RECORD_CHARS).then(|| format!("{RECORD_MARKER}{encoded} -->"))
@@ -233,6 +452,7 @@ mod tests {
         ReviewedFile {
             base: Some(base.into()),
             head: Some(head.into()),
+            hunks: vec![],
         }
     }
 
@@ -267,8 +487,12 @@ mod tests {
             ("b.rs".into(), file("b0", "b2")),
             ("c.rs".into(), file("c0", "c1")),
         ]);
-        let (paths, findings, summary) =
-            carry(&earlier, &current, "c", None, &["correctness".into()]).unwrap();
+        let Carry {
+            paths,
+            findings,
+            summary,
+            ..
+        } = carry(&earlier, &current, "c", None, &["correctness".into()]).unwrap();
         assert_eq!(paths, BTreeSet::from(["a.rs".to_owned()]));
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].path.as_deref(), Some("a.rs"));
@@ -277,6 +501,88 @@ mod tests {
         // A rebase that changes a file's base is a different change.
         let rebased = BTreeMap::from([("a.rs".into(), file("a9", "a1"))]);
         assert!(carry(&earlier, &rebased, "c", None, &["correctness".into()]).is_none());
+    }
+
+    fn lines(count: usize, changed: &[(usize, &str)], inserted: Option<usize>) -> Vec<u8> {
+        let mut rows: Vec<String> = (1..=count).map(|line| format!("line {line}")).collect();
+        for (line, text) in changed {
+            rows[line - 1] = (*text).to_owned();
+        }
+        if let Some(after) = inserted {
+            rows.insert(after, "inserted".into());
+        }
+        (rows.join("\n") + "\n").into_bytes()
+    }
+
+    fn at(path: &str, line: u32) -> Finding {
+        let mut finding = finding(Some(path), "correctness");
+        finding.id = format!("f-{line}");
+        finding.line = Some(line);
+        finding
+    }
+
+    #[test]
+    fn hunk_headers_give_the_head_lines() {
+        assert_eq!(head_range("-3,4 +5,6 @@ fn name"), Some((5, 6)));
+        assert_eq!(head_range("-3 +7 @@"), Some((7, 1)));
+        assert_eq!(head_range("-3,2 +2,0 @@"), Some((2, 0)));
+        assert_eq!(head_range("garbage"), None);
+        assert!(change_hunks(None, Some(b"new\n")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn unchanged_hunks_of_a_changed_file_keep_their_findings_where_they_moved() {
+        let base = lines(60, &[], None);
+        let first = lines(60, &[(5, "first edit"), (40, "kept edit")], None);
+        // The next push edits line 5 again and inserts a line above the
+        // other hunk, moving it down by one.
+        let second = lines(60, &[(5, "second edit"), (40, "kept edit")], Some(10));
+        let earlier_hunks = change_hunks(Some(&base), Some(&first)).unwrap();
+        let current_hunks = change_hunks(Some(&base), Some(&second)).unwrap();
+        assert_eq!(earlier_hunks.len(), 2);
+        let mut earlier = record(vec![at("a.rs", 5), at("a.rs", 40)]);
+        earlier.record.files = BTreeMap::from([(
+            "a.rs".into(),
+            ReviewedFile {
+                base: Some("a0".into()),
+                head: Some("a1".into()),
+                hunks: earlier_hunks,
+            },
+        )]);
+        earlier.record.findings[1].suggestion = Some(vee_core::FindingSuggestion {
+            end_line: 40,
+            replacement: "fixed".into(),
+        });
+        let current = BTreeMap::from([(
+            "a.rs".into(),
+            ReviewedFile {
+                base: Some("a0".into()),
+                head: Some("a2".into()),
+                hunks: current_hunks,
+            },
+        )]);
+        let carry = carry(&earlier, &current, "c", None, &["correctness".into()]).unwrap();
+        assert!(carry.paths.is_empty());
+        assert_eq!(carry.lines["a.rs"], vec![(38, 44)]);
+        assert_eq!(carry.findings.len(), 1);
+        assert_eq!(carry.findings[0].line, Some(41));
+        assert_eq!(carry.findings[0].suggestion.as_ref().unwrap().end_line, 41);
+        assert_eq!(carry.summary.partial_paths, vec!["a.rs".to_owned()]);
+
+        // After a rebase the base differs, and no hunk is carried.
+        let mut rebased = current.clone();
+        rebased.get_mut("a.rs").unwrap().base = Some("a9".into());
+        assert!(super::carry(&earlier, &rebased, "c", None, &["correctness".into()]).is_none());
+    }
+
+    #[test]
+    fn carried_ranges_are_not_pointed_out_again() {
+        assert_eq!(
+            uncarried_ranges(vec![(5, 5), (40, 40), (43, 50)], &[(38, 44)]),
+            vec![(5, 5), (43, 50)]
+        );
+        assert!(in_ranges(&[(38, 44)], 44));
+        assert!(!in_ranges(&[(38, 44)], 45));
     }
 
     #[test]
@@ -294,7 +600,7 @@ mod tests {
         )
         .is_none());
         // A reviewer no longer selected keeps none of its findings.
-        let (_, findings, _) = carry(
+        let Carry { findings, .. } = carry(
             &record(vec![finding(Some("a.rs"), "security")]),
             &current,
             "c",
@@ -344,5 +650,17 @@ mod tests {
             })
             .collect();
         assert_eq!(encode(&large), None);
+
+        // Hunks that do not fit are left out before the record is.
+        let mut hunked = record(vec![]).record;
+        hunked.files.get_mut("a.rs").unwrap().hunks = (0..3000)
+            .map(|index| ReviewedHunk {
+                digest: format!("{index:016x}"),
+                start: index,
+                lines: 7,
+            })
+            .collect();
+        let decoded = decode(&encode(&hunked).unwrap()).unwrap();
+        assert!(decoded.files.values().all(|file| file.hunks.is_empty()));
     }
 }

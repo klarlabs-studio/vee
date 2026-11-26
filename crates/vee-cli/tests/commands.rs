@@ -715,6 +715,196 @@ fn a_push_reviews_only_the_files_it_changed_and_keeps_earlier_findings() {
     server.join().unwrap();
 }
 
+/// In a file a push changed again, the hunks that are the same keep their
+/// findings where they moved, and reviewers are pointed only at the rest
+/// (ADR 0036).
+#[test]
+fn a_push_keeps_findings_on_the_unchanged_parts_of_a_changed_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let outside = tempfile::tempdir().unwrap();
+    let log = outside.path().join("requests");
+    std::fs::create_dir_all(&log).unwrap();
+    let quiet = outside.path().join("quiet");
+    let provider = outside.path().join("provider");
+    // Reports BUG_B on line 30 until `quiet` exists, so a finding seen after
+    // that was carried, not found again.
+    std::fs::write(
+        &provider,
+        format!(
+            "#!/bin/sh\ninput=$(cat)\nprintf '%s' \"$input\" > \"{log}/$(date +%s%N)-$$\"\nif [ -f '{quiet}' ]; then printf '%s' '{{\"schema_version\":1,\"findings\":[]}}'; exit 0; fi\ncase \"$input\" in\n  *BUG_B*) printf '%s' '{{\"schema_version\":1,\"findings\":[{{\"category\":\"correctness\",\"severity\":\"high\",\"confidence\":90,\"rationale\":\"b() drops the result.\",\"path\":\"src/a.rs\",\"line\":30}}]}}' ;;\n  *) printf '%s' '{{\"schema_version\":1,\"findings\":[]}}' ;;\nesac\n",
+            log = log.display(),
+            quiet = quiet.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let source = |edits: &[(usize, &str)], inserted: bool| {
+        let mut rows: Vec<String> = (1..=40)
+            .map(|line| format!("let line_{line} = {line};"))
+            .collect();
+        for (line, text) in edits {
+            rows[line - 1] = (*text).to_owned();
+        }
+        if inserted {
+            rows.insert(10, "let inserted = 0;".into());
+        }
+        rows.join("\n") + "\n"
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/a.rs"), source(&[], false)).unwrap();
+    std::fs::write(root.join("reviewer.md"), "Review the change.\n").unwrap();
+    std::fs::write(
+        root.join(".vee.yaml"),
+        format!(
+            "version: 1\noffline: false\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\n",
+            provider.display()
+        ),
+    )
+    .unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "base"]);
+    let base = git(root, &["rev-parse", "HEAD"]);
+    git(root, &["checkout", "-q", "-b", "feature"]);
+    let commit = |text: String| {
+        std::fs::write(root.join("src/a.rs"), text).unwrap();
+        git(root, &["commit", "-qam", "push"]);
+        git(root, &["rev-parse", "HEAD"])
+    };
+    let first_head = commit(source(
+        &[(5, "let first = 1;"), (30, "let b = BUG_B;")],
+        false,
+    ));
+
+    let state = Arc::new(Mutex::new(State::default()));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let server = serve(
+        listener,
+        stop.clone(),
+        state.clone(),
+        base.clone(),
+        first_head.clone(),
+    );
+    // Each run's exit code and the context file reviewers received.
+    let run_ci = |head: &str| {
+        state.lock().unwrap().head = Some(head.to_owned());
+        for entry in std::fs::read_dir(&log).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        let event = outside.path().join("event.json");
+        std::fs::write(
+            &event,
+            serde_json::json!({"pull_request": {"number": 9, "base": {"sha": base}, "head": {"sha": head}}}).to_string(),
+        )
+        .unwrap();
+        let output = vee()
+            .args(["ci", "run"])
+            .env("GITHUB_ACTIONS", "true")
+            .env("GITHUB_EVENT_NAME", "pull_request")
+            .env("GITHUB_EVENT_PATH", &event)
+            .env("GITHUB_REPOSITORY", "team/repo")
+            .env("GITHUB_SERVER_URL", "http://127.0.0.1")
+            .env("GITHUB_API_URL", format!("http://{address}"))
+            .env("GH_TOKEN", "fixture-token")
+            .current_dir(root)
+            .output()
+            .unwrap();
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(&log).unwrap() {
+            let request: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
+            files.extend(
+                request["context_files"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|file| file["path"] == "src/a.rs")
+                    .cloned(),
+            );
+        }
+        (output, files)
+    };
+    let summary = || {
+        let state = state.lock().unwrap();
+        state
+            .conversation
+            .iter()
+            .map(|c| c["body"].as_str().unwrap().to_owned())
+            .find(|body| body.contains("<!-- vee:summary -->"))
+            .unwrap()
+    };
+
+    // 1. The first review blocks on line 30.
+    let (output, files) = run_ci(&first_head);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(files.len(), 1);
+    assert!(files[0].get("carried_line_ranges").is_none());
+
+    // 2. A push edits line 5 again and inserts a line above line 30. The file
+    //    is sent again, the hunk around the old line 30 (now 31) is marked as
+    //    carried, and its finding still blocks though nothing reports it.
+    std::fs::write(&quiet, "").unwrap();
+    let second_head = commit(source(
+        &[(5, "let second = 2;"), (30, "let b = BUG_B;")],
+        true,
+    ));
+    let (output, files) = run_ci(&second_head);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(files.len(), 1);
+    assert_eq!(
+        files[0]["carried_line_ranges"],
+        serde_json::json!([[28, 34]])
+    );
+    let changed = files[0]["changed_line_ranges"].as_array().unwrap();
+    assert!(
+        changed
+            .iter()
+            .all(|range| range[0].as_u64().unwrap() > 34 || range[1].as_u64().unwrap() < 28),
+        "{changed:?}"
+    );
+    assert!(!changed.is_empty());
+    let text = summary();
+    assert!(
+        text.contains("kept the parts that did not change"),
+        "{text}"
+    );
+
+    // 3. A push that changes the carried hunk reviews it again, and the
+    //    hunk around line 5, now the same, is carried in turn. Nothing reports
+    //    the bug now, so the review passes.
+    let third_head = commit(source(
+        &[(5, "let second = 2;"), (30, "let b = fixed();")],
+        true,
+    ));
+    let (output, files) = run_ci(&third_head);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let carried = files[0]["carried_line_ranges"].as_array().unwrap();
+    assert_eq!(carried.len(), 1);
+    assert!(carried[0][1].as_u64().unwrap() < 28, "{carried:?}");
+
+    stop.store(true, Ordering::SeqCst);
+    server.join().unwrap();
+}
+
 /// `@vee fix` pushes a fix only when a new review no longer reports the
 /// finding and nothing new blocks (ADR 0023).
 #[test]

@@ -412,6 +412,11 @@
         "from_head": { "type": "string", "minLength": 1 },
         "from_review": { "type": "string", "minLength": 1 },
         "paths": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "partial_paths": {
+          "type": "array",
+          "description": "Changed files sent to reviewers again whose base was the same and some of whose hunks were unchanged: the earlier findings inside those hunks are carried over, moved with the hunk (ADR 0036).",
+          "items": { "type": "string", "minLength": 1 }
+        },
         "findings": { "type": "integer", "minimum": 0 }
       },
       "additionalProperties": false
