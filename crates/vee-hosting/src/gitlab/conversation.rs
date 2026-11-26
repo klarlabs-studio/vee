@@ -259,6 +259,19 @@ impl GitLabAdapter {
                 merged: state == "merged",
                 head_oid: head.to_owned(),
                 updated_at: text(&request, "/updated_at").map(str::to_owned),
+                title: text(&request, "/title").unwrap_or_default().to_owned(),
+                description: crate::conversation::bounded_text(
+                    text(&request, "/description").unwrap_or_default(),
+                    crate::conversation::MAX_SUMMARY_DESCRIPTION_BYTES,
+                ),
+                merge_commit: (state == "merged").then(|| {
+                    text(&request, "/squash_commit_sha")
+                        .or_else(|| text(&request, "/merge_commit_sha"))
+                        // A fast-forward merge puts the head itself on the
+                        // target branch.
+                        .unwrap_or(head)
+                        .to_owned()
+                }),
             });
             if summaries.len() >= limit {
                 break;
