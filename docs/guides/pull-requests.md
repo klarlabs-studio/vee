@@ -126,6 +126,19 @@ comment.
 Add `--approval` to also publish whether the change may be approved without
 a person ([ADR 0015](../adr/0015-layered-approval-eligibility.md)).
 
+Add `--describe` (Action input `describe`, GitLab `VEE_DESCRIBE`) to add a
+walkthrough to Vee's summary comment
+([ADR 0032](../adr/0032-pull-request-walkthrough.md)):
+- the change's risk tier and the factors that raised it;
+- a Mermaid graph from impact analysis of what the changed files reach.
+  Solid edges were measured by parsing or a language server; dotted edges
+  are heuristic, from name matches, packages or history;
+- a description drafted by the first reviewer's model, folded away and
+  marked as unverified. This is one more model call per review.
+
+The walkthrough never affects the gate. When the summary would exceed the
+host's comment limit, the description is dropped first, then the graph.
+
 Add `--policy-profile NAME` (Action input `policy-profile`) to gate with a
 policy profile, such as the `security` and `regulated` profiles `vee init`
 writes when it finds security scanners

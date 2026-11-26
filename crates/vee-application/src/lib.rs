@@ -51,6 +51,7 @@ pub mod test_proposals;
 pub mod test_recommendations;
 mod verification;
 pub mod verification_diagnosis;
+pub mod walkthrough;
 pub mod work_items;
 
 pub use approval::*;

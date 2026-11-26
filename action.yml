@@ -40,6 +40,12 @@ inputs:
       the last review covered are not reviewed again, and their findings are
       carried over.
     default: "false"
+  describe:
+    description: >-
+      Add a walkthrough to Vee's summary comment: the risk tier, a graph of
+      what the change reaches, and a drafted description (one more model
+      call). It never affects the gate.
+    default: "false"
   policy-profile:
     description: >-
       Policy profile from .vee.yaml to gate with, such as `security` or
@@ -103,6 +109,7 @@ runs:
         VEE_APPROVAL: ${{ inputs.approval }}
         VEE_FULL_REVIEW: ${{ inputs.full-review }}
         VEE_POLICY_PROFILE: ${{ inputs.policy-profile }}
+        VEE_DESCRIBE: ${{ inputs.describe }}
         VEE_LABELS: ${{ inputs.labels }}
         VEE_APPROVE: ${{ inputs.approve }}
         VEE_API_KEY: ${{ inputs.api-key }}
@@ -127,6 +134,9 @@ runs:
         fi
         if [ "$VEE_FULL_REVIEW" = "true" ] && [ "${args[1]}" = "run" ]; then
           args+=(--full)
+        fi
+        if [ "$VEE_DESCRIBE" = "true" ]; then
+          args+=(--describe)
         fi
         if [ -n "$VEE_POLICY_PROFILE" ]; then
           args+=(--policy-profile "$VEE_POLICY_PROFILE")
