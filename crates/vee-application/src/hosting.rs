@@ -107,28 +107,59 @@ pub fn pull_request_context_provider(
     })
 }
 
-/// The conversation on a pull request, for comment commands (ADR 0020).
-/// Only GitHub is supported so far.
+/// The conversation on a pull request or merge request, for comment
+/// commands, Vee's summary and its approvals (ADRs 0020 and 0030).
 pub fn conversation_provider(
     provider_id: &str,
     api_base: &str,
     token_env: &str,
     actor_login: &str,
 ) -> Result<Box<dyn vee_hosting::PullRequestConversationProvider>> {
-    anyhow::ensure!(
-        provider_id == "github",
-        usage_failure(format!(
-            "comment commands are supported on GitHub, not `{provider_id}`"
-        ))
-    );
-    Ok(Box::new(
-        vee_hosting::github::GitHubAdapter::new(
-            vee_hosting::github::GitHubConfig::new(api_base, read_token(token_env)?, String::new())
+    Ok(match provider_id {
+        "github" => Box::new(
+            vee_hosting::github::GitHubAdapter::new(
+                vee_hosting::github::GitHubConfig::new(
+                    api_base,
+                    read_token(token_env)?,
+                    String::new(),
+                )
                 .map_err(configuration_failure)?
                 .with_actor_login(actor_login),
-        )
-        .map_err(configuration_failure)?,
-    ))
+            )
+            .map_err(configuration_failure)?,
+        ),
+        "gitlab" => Box::new(gitlab_adapter(api_base, token_env, actor_login)?),
+        other => {
+            return Err(usage_failure(format!(
+                "comment commands are supported on GitHub and GitLab, not `{other}`"
+            )))
+        }
+    })
+}
+
+fn gitlab_adapter(
+    api_base: &str,
+    token_env: &str,
+    actor_login: &str,
+) -> Result<vee_hosting::gitlab::GitLabAdapter> {
+    vee_hosting::gitlab::GitLabAdapter::new(
+        vee_hosting::gitlab::GitLabConfig::new(api_base, read_token(token_env)?)
+            .map_err(configuration_failure)?
+            .with_actor_login(actor_login.to_owned()),
+    )
+    .map_err(configuration_failure)
+}
+
+/// The account the token acts as, where the host can say: on GitLab, the
+/// token's user. `None` elsewhere.
+pub fn token_login(provider_id: &str, api_base: &str, token_env: &str) -> Result<Option<String>> {
+    match provider_id {
+        "gitlab" => gitlab_adapter(api_base, token_env, "")?
+            .current_login()
+            .map(Some)
+            .map_err(|error| anyhow::anyhow!("reading the token's GitLab user: {error}")),
+        _ => Ok(None),
+    }
 }
 
 fn review_issues_provider(
