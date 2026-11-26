@@ -1435,6 +1435,135 @@ impl PullRequestConversationProvider for GitHubAdapter {
             .ok_or_else(|| HostingError::InvalidResponse("GitHub reply has no ID".into()))
     }
 
+    fn set_labels(
+        &self,
+        pull_request: &PullRequestRef,
+        prefix: &str,
+        wanted: &[String],
+    ) -> Result<(), HostingError> {
+        if !crate::conversation::valid_label(prefix)
+            || wanted
+                .iter()
+                .any(|label| !crate::conversation::valid_label(label) || !label.starts_with(prefix))
+        {
+            return Err(HostingError::InvalidResponse(
+                "Vee label names are lowercase letters, digits, ':' and '-'".into(),
+            ));
+        }
+        let issue = format!("/issues/{}/labels", pull_request.number);
+        let mut url = self.repository_path(pull_request, &issue)?;
+        url.query_pairs_mut().append_pair("per_page", "100");
+        let current: Vec<String> = self
+            .get_json(url)?
+            .as_array()
+            .ok_or_else(|| HostingError::InvalidResponse("GitHub labels are not a list".into()))?
+            .iter()
+            .filter_map(|label| label.get("name").and_then(serde_json::Value::as_str))
+            .map(str::to_owned)
+            .collect();
+        for stale in current
+            .iter()
+            .filter(|label| label.starts_with(prefix) && !wanted.contains(label))
+        {
+            if !crate::conversation::valid_label(stale) {
+                continue;
+            }
+            let url = self.repository_path(pull_request, &format!("{issue}/{stale}"))?;
+            let response = self
+                .request(Method::DELETE, url)?
+                .send()
+                .map_err(|error| HostingError::Transport(format!("removing a label: {error}")))?;
+            match self.send(response) {
+                Ok(_) | Err(HostingError::NotFound) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let missing: Vec<&String> = wanted
+            .iter()
+            .filter(|label| !current.contains(label))
+            .collect();
+        if !missing.is_empty() {
+            let url = self.repository_path(pull_request, &issue)?;
+            let response = self
+                .request(Method::POST, url)?
+                .json(&serde_json::json!({ "labels": missing }))
+                .send()
+                .map_err(|error| HostingError::Transport(format!("adding labels: {error}")))?;
+            self.send(response)?;
+        }
+        Ok(())
+    }
+
+    fn approvals(
+        &self,
+        pull_request: &PullRequestRef,
+        login: &str,
+    ) -> Result<Vec<Approval>, HostingError> {
+        let mut reviews = Vec::new();
+        self.comment_pages(
+            pull_request,
+            &format!("/pulls/{}/reviews", pull_request.number),
+            &mut reviews,
+        )?;
+        Ok(reviews
+            .iter()
+            .filter(|review| {
+                review.get("state").and_then(serde_json::Value::as_str) == Some("APPROVED")
+                    && review
+                        .pointer("/user/login")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|author| {
+                            !login.is_empty() && author.eq_ignore_ascii_case(login)
+                        })
+            })
+            .filter_map(|review| {
+                Some(Approval {
+                    id: review.get("id")?.as_u64()?.to_string(),
+                    commit_id: review.get("commit_id")?.as_str()?.to_owned(),
+                })
+            })
+            .collect())
+    }
+
+    fn approve(
+        &self,
+        pull_request: &PullRequestRef,
+        commit_id: &str,
+        body: &str,
+    ) -> Result<String, HostingError> {
+        let url = self.path(pull_request, "/reviews")?;
+        let response = self
+            .request(Method::POST, url)?
+            .json(&serde_json::json!({ "commit_id": commit_id, "body": body, "event": "APPROVE" }))
+            .send()
+            .map_err(|error| HostingError::Transport(format!("approving: {error}")))?;
+        let created: serde_json::Value = Self::json(self.send(response)?)?;
+        created
+            .get("id")
+            .and_then(serde_json::Value::as_u64)
+            .map(|id| id.to_string())
+            .ok_or_else(|| HostingError::InvalidResponse("GitHub review has no ID".into()))
+    }
+
+    fn dismiss_approval(
+        &self,
+        pull_request: &PullRequestRef,
+        review_id: &str,
+        message: &str,
+    ) -> Result<(), HostingError> {
+        let url = self.path(
+            pull_request,
+            &format!("/reviews/{}/dismissals", numeric_id(review_id)?),
+        )?;
+        let response = self
+            .request(Method::PUT, url)?
+            .json(&serde_json::json!({ "message": message, "event": "DISMISS" }))
+            .send()
+            .map_err(|error| HostingError::Transport(format!("dismissing a review: {error}")))?;
+        self.send(response)?;
+        Ok(())
+    }
+
     fn edit_comment(
         &self,
         pull_request: &PullRequestRef,

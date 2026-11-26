@@ -27,6 +27,15 @@
     },
     "review_id": { "type": "string", "minLength": 1 },
     "gate": { "enum": ["pass", "block", "incomplete"] },
+    "labels": {
+      "type": "array",
+      "description": "The `vee:` labels the pull request carries after this run, with `--labels`.",
+      "items": { "type": "string", "pattern": "^vee:[a-z0-9:-]+$" }
+    },
+    "approval_review_id": {
+      "type": "string",
+      "description": "The approving review Vee gave on this head, with `--approve`, when the change is eligible."
+    },
     "publication": {
       "type": "object",
       "required": ["schema_version", "review_id", "snapshot_id", "provider_check_id", "thread_ids", "revision"],

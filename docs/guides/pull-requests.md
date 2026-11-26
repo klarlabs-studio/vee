@@ -102,6 +102,18 @@ comment.
 Add `--approval` to also publish whether the change may be approved without
 a person ([ADR 0015](../adr/0015-layered-approval-eligibility.md)).
 
+On GitHub, two more flags put Vee's verdict where the host's own tools use
+it ([ADR 0024](../adr/0024-approval-and-risk-on-the-pull-request.md)). Both
+have matching Action inputs, `labels` and `approve`.
+
+- `--labels` keeps a `vee:gate:pass|block|incomplete` label and a
+  `vee:risk:low|elevated|high` label on the pull request.
+- `--approve` approves the head when the change is eligible for approval
+  without a person. It withdraws Vee's approval when a push or a later
+  review makes it stale. For this to work, allow GitHub Actions to approve
+  pull requests in the repository's Actions settings; branch protection
+  decides whether the approval counts.
+
 ## Commands in comments
 
 On GitHub, people with write access can talk to Vee in a pull request's

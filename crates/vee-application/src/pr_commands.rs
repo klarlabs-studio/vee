@@ -1590,6 +1590,32 @@ mod tests {
         fn edit_comment(&self, _: &PullRequestRef, _: &str, _: &str) -> Result<(), HostingError> {
             Ok(())
         }
+        fn set_labels(
+            &self,
+            _: &PullRequestRef,
+            _: &str,
+            _: &[String],
+        ) -> Result<(), HostingError> {
+            Ok(())
+        }
+        fn approvals(
+            &self,
+            _: &PullRequestRef,
+            _: &str,
+        ) -> Result<Vec<vee_hosting::Approval>, HostingError> {
+            Ok(Vec::new())
+        }
+        fn approve(&self, _: &PullRequestRef, _: &str, _: &str) -> Result<String, HostingError> {
+            Ok("1".into())
+        }
+        fn dismiss_approval(
+            &self,
+            _: &PullRequestRef,
+            _: &str,
+            _: &str,
+        ) -> Result<(), HostingError> {
+            Ok(())
+        }
         fn set_thread_resolved(
             &self,
             _: &PullRequestRef,
