@@ -85,6 +85,10 @@ struct State {
     edits: usize,
     /// A bare repository whose `feature` branch is the pull request's head.
     origin: Option<std::path::PathBuf>,
+    /// The pull request's labels.
+    labels: Vec<String>,
+    /// Reviews on the pull request: approvals and their state.
+    reviews: Vec<serde_json::Value>,
 }
 
 impl State {
@@ -222,6 +226,47 @@ fn respond(state: &Mutex<State>, line: &str, body: &str, base: &str, head: &str)
                 comment["body"] = request["body"].clone();
             }
             json(serde_json::json!({"id": id}))
+        }
+        ("GET", "/repos/team/repo/issues/9/labels") => json(serde_json::json!(state
+            .labels
+            .iter()
+            .map(|name| serde_json::json!({ "name": name }))
+            .collect::<Vec<_>>())),
+        ("POST", "/repos/team/repo/issues/9/labels") => {
+            for label in request["labels"].as_array().unwrap() {
+                state.labels.push(label.as_str().unwrap().to_owned());
+            }
+            json(serde_json::json!([]))
+        }
+        ("DELETE", route) if route.starts_with("/repos/team/repo/issues/9/labels/") => {
+            let name = route.rsplit('/').next().unwrap().to_owned();
+            state.labels.retain(|label| *label != name);
+            json(serde_json::json!([]))
+        }
+        ("GET", "/repos/team/repo/pulls/9/reviews") => {
+            let page_one = path.contains("page=1") || !path.contains("page=");
+            json(if page_one {
+                state.reviews.clone().into()
+            } else {
+                serde_json::json!([])
+            })
+        }
+        ("POST", "/repos/team/repo/pulls/9/reviews") => {
+            state.next_id += 1;
+            let id = 9000 + state.next_id;
+            state.reviews.push(serde_json::json!({
+                "id": id, "state": "APPROVED", "commit_id": request["commit_id"],
+                "body": request["body"], "user": {"login": BOT, "type": "Bot"},
+            }));
+            json(serde_json::json!({ "id": id }))
+        }
+        ("PUT", route) if route.starts_with("/repos/team/repo/pulls/9/reviews/") => {
+            let id: u64 = route.split('/').nth(7).unwrap().parse().unwrap();
+            for review in state.reviews.iter_mut().filter(|review| review["id"] == id) {
+                review["state"] = "DISMISSED".into();
+                review["dismissal"] = request["message"].clone();
+            }
+            json(serde_json::json!({ "id": id }))
         }
         ("GET", "/repos/team/repo/collaborators/alice/permission") => {
             json(serde_json::json!({"permission": "write", "role_name": "write"}))
@@ -818,6 +863,129 @@ fn a_fix_is_pushed_only_when_the_review_accepts_it() {
         state.lock().unwrap().checks.last().map(String::as_str),
         Some("success")
     );
+
+    stop.store(true, Ordering::SeqCst);
+    server.join().unwrap();
+}
+
+/// `--labels` and `--approve` keep the pull request's labels and Vee's
+/// approval in step with the latest review (ADR 0024).
+#[test]
+fn labels_and_approval_follow_the_latest_review() {
+    use std::os::unix::fs::PermissionsExt;
+    let outside = tempfile::tempdir().unwrap();
+    let provider = outside.path().join("provider");
+    std::fs::write(
+        &provider,
+        "#!/bin/sh\ninput=$(cat)\ncase \"$input\" in\n  *BUG*) printf '%s' '{\"schema_version\":1,\"findings\":[{\"category\":\"correctness\",\"severity\":\"high\",\"confidence\":90,\"rationale\":\"BUG drops the result.\",\"path\":\"src/lib.rs\",\"line\":1}]}' ;;\n  *) printf '%s' '{\"schema_version\":1,\"findings\":[]}' ;;\nesac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn initial() {}\n").unwrap();
+    std::fs::write(root.join("reviewer.md"), "Review the change.\n").unwrap();
+    std::fs::write(
+        root.join(".vee.yaml"),
+        format!(
+            "version: 1\noffline: false\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\napproval:\n  max_risk: elevated\n",
+            provider.display()
+        ),
+    )
+    .unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "base"]);
+    let base = git(root, &["rev-parse", "HEAD"]);
+    git(root, &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(root.join("src/lib.rs"), "pub fn changed() {}\n").unwrap();
+    git(root, &["commit", "-qam", "change"]);
+    let first = git(root, &["rev-parse", "HEAD"]);
+
+    let state = Arc::new(Mutex::new(State::default()));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let server = serve(
+        listener,
+        stop.clone(),
+        state.clone(),
+        base.clone(),
+        first.clone(),
+    );
+    let run_ci = |head: &str| {
+        state.lock().unwrap().head = Some(head.to_owned());
+        let event = outside.path().join("event.json");
+        std::fs::write(
+            &event,
+            serde_json::json!({"pull_request": {"number": 9, "base": {"sha": base}, "head": {"sha": head}}}).to_string(),
+        )
+        .unwrap();
+        let output = vee()
+            .args(["ci", "run", "--labels", "--approve", "--output", "json"])
+            .env("GITHUB_ACTIONS", "true")
+            .env("GITHUB_EVENT_NAME", "pull_request")
+            .env("GITHUB_EVENT_PATH", &event)
+            .env("GITHUB_REPOSITORY", "team/repo")
+            .env("GITHUB_SERVER_URL", "http://127.0.0.1")
+            .env("GITHUB_API_URL", format!("http://{address}"))
+            .env("GH_TOKEN", "fixture-token")
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.code().is_some_and(|code| code <= 1),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let labels = || {
+        let mut labels = state.lock().unwrap().labels.clone();
+        labels.sort();
+        labels
+    };
+
+    // 1. A small, passing change: labelled and approved on its head.
+    let run = run_ci(&first);
+    assert_eq!(run["gate"], "pass", "{run:#}");
+    assert_eq!(labels(), ["vee:gate:pass", "vee:risk:elevated"]);
+    assert_eq!(
+        run["labels"],
+        serde_json::json!(["vee:gate:pass", "vee:risk:elevated"])
+    );
+    {
+        let state = state.lock().unwrap();
+        assert_eq!(state.reviews.len(), 1);
+        assert_eq!(state.reviews[0]["commit_id"], first.as_str());
+        assert_eq!(
+            run["approval_review_id"],
+            state.reviews[0]["id"].to_string()
+        );
+    }
+    // Reviewing the same head again keeps the one approval.
+    run_ci(&first);
+    assert_eq!(state.lock().unwrap().reviews.len(), 1);
+
+    // 2. A push that blocks: the label follows, the approval is withdrawn,
+    //    and none is given.
+    std::fs::write(root.join("src/lib.rs"), "pub fn changed() { BUG }\n").unwrap();
+    git(root, &["commit", "-qam", "regress"]);
+    let second = git(root, &["rev-parse", "HEAD"]);
+    let run = run_ci(&second);
+    assert_eq!(run["gate"], "block");
+    assert!(
+        labels().contains(&"vee:gate:block".to_owned()),
+        "{:?}",
+        labels()
+    );
+    assert!(!labels().contains(&"vee:gate:pass".to_owned()));
+    assert_eq!(run.get("approval_review_id"), None);
+    let state_now = state.lock().unwrap();
+    assert_eq!(state_now.reviews.len(), 1);
+    assert_eq!(state_now.reviews[0]["state"], "DISMISSED");
+    drop(state_now);
 
     stop.store(true, Ordering::SeqCst);
     server.join().unwrap();

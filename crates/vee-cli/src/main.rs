@@ -1032,6 +1032,13 @@ enum CiCommand {
         /// findings are carried over.
         #[arg(long)]
         full: bool,
+        /// Keep `vee:gate:*` and `vee:risk:*` labels on the pull request (GitHub).
+        #[arg(long)]
+        labels: bool,
+        /// Approve the pull request when the change is eligible for approval
+        /// without a person, and withdraw Vee's approvals that no longer hold (GitHub).
+        #[arg(long)]
+        approve: bool,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
@@ -1052,6 +1059,13 @@ enum CiCommand {
         /// Account Vee posts as.
         #[arg(long)]
         actor_login: Option<String>,
+        /// Keep `vee:gate:*` and `vee:risk:*` labels on the pull request (GitHub).
+        #[arg(long)]
+        labels: bool,
+        /// Approve the pull request when the change is eligible for approval
+        /// without a person, and withdraw Vee's approvals that no longer hold (GitHub).
+        #[arg(long)]
+        approve: bool,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
@@ -3189,6 +3203,8 @@ fn run() -> Result<u8> {
                     policy_profile,
                     actor_login,
                     full,
+                    labels,
+                    approve,
                     output,
                 },
         } => {
@@ -3204,6 +3220,8 @@ fn run() -> Result<u8> {
                     policy_profile,
                     actor_login,
                     full,
+                    labels,
+                    approve,
                 },
             )?;
             match output {
@@ -3223,6 +3241,8 @@ fn run() -> Result<u8> {
                     effort,
                     policy_profile,
                     actor_login,
+                    labels,
+                    approve,
                     output,
                 },
         } => {
@@ -3253,6 +3273,8 @@ fn run() -> Result<u8> {
                         policy_profile,
                         actor_login: None,
                         full: false,
+                        labels,
+                        approve,
                     },
                     actor_login,
                 },

@@ -164,6 +164,11 @@ pub struct CiRunOptions {
     pub actor_login: Option<String>,
     /// Review the whole change, ignoring the earlier review's record.
     pub full: bool,
+    /// Keep `vee:gate:*` and `vee:risk:*` labels on the pull request.
+    pub labels: bool,
+    /// Approve the pull request when the change is eligible, and withdraw
+    /// Vee's approvals that no longer hold (ADR 0024).
+    pub approve: bool,
 }
 
 /// The outcome of `vee ci run`.
@@ -174,6 +179,10 @@ pub struct CiRun {
     pub review_id: String,
     pub gate: vee_core::GateStatus,
     pub publication: crate::hosting::ReviewPublication,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_review_id: Option<String>,
 }
 
 /// Review the pull request CI runs for and publish the result to it.
@@ -326,7 +335,7 @@ pub(crate) fn publish(
             flags: crate::hosting::PublishFlags {
                 hosting: hosting_flags,
                 webhook_secret_env: None,
-                actor_login,
+                actor_login: actor_login.clone(),
             },
             approval: options.approval,
             pull_request_threads,
@@ -347,13 +356,127 @@ pub(crate) fn publish(
             eprintln!("warning: Vee's summary comment was not updated: {error:#}");
         }
     }
+    let mut labels = Vec::new();
+    let mut approval_review_id = None;
+    if let Some((host, _)) = &conversation {
+        let reference = pull_request_ref(&pull_request);
+        if options.labels {
+            match apply_labels(
+                workspace,
+                host.as_ref(),
+                &reference,
+                &review.review_id,
+                gate,
+            ) {
+                Ok(applied) => labels = applied,
+                Err(error) => eprintln!("warning: Vee's labels were not updated: {error:#}"),
+            }
+        }
+        if options.approve {
+            match apply_approval(
+                workspace,
+                host.as_ref(),
+                &reference,
+                &review.review_id,
+                &pull_request.head_oid,
+                actor_login.as_deref().unwrap_or_default(),
+            ) {
+                Ok(approved) => approval_review_id = approved,
+                Err(error) => eprintln!("warning: Vee's approval was not updated: {error:#}"),
+            }
+        }
+    } else if options.labels || options.approve {
+        eprintln!(
+            "warning: labels and approvals are published on GitHub only; {} gets the check",
+            pull_request.provider
+        );
+    }
     Ok(CiRun {
         schema_version: 1,
         gate,
         review_id: review.review_id,
         pull_request,
         publication,
+        labels,
+        approval_review_id,
     })
+}
+
+/// Labels name the gate and the risk tier, so teams can filter and route
+/// pull requests by them.
+const GATE_LABEL: &str = "vee:gate:";
+const RISK_LABEL: &str = "vee:risk:";
+
+fn apply_labels(
+    workspace: &Workspace,
+    host: &dyn vee_hosting::PullRequestConversationProvider,
+    reference: &vee_hosting::PullRequestRef,
+    review_id: &str,
+    gate: vee_core::GateStatus,
+) -> Result<Vec<String>> {
+    let gate = format!(
+        "{GATE_LABEL}{}",
+        match gate {
+            vee_core::GateStatus::Pass => "pass",
+            vee_core::GateStatus::Block => "block",
+            vee_core::GateStatus::Incomplete => "incomplete",
+        }
+    );
+    let risk = crate::operations::review_detail(workspace, review_id)?
+        .risk
+        .map(|risk| format!("{RISK_LABEL}{}", risk.tier.as_str()));
+    let host_error = |error: vee_hosting::HostingError| anyhow::anyhow!("{error}");
+    host.set_labels(reference, GATE_LABEL, std::slice::from_ref(&gate))
+        .map_err(host_error)?;
+    let risk: Vec<String> = risk.into_iter().collect();
+    host.set_labels(reference, RISK_LABEL, &risk)
+        .map_err(host_error)?;
+    Ok(std::iter::once(gate).chain(risk).collect())
+}
+
+/// Approve `head_oid` when the change is eligible, and withdraw Vee's
+/// approvals of other heads, or of this one when it is not eligible.
+fn apply_approval(
+    workspace: &Workspace,
+    host: &dyn vee_hosting::PullRequestConversationProvider,
+    reference: &vee_hosting::PullRequestRef,
+    review_id: &str,
+    head_oid: &str,
+    actor_login: &str,
+) -> Result<Option<String>> {
+    let eligibility = crate::operations::approval_eligibility(workspace, review_id)?;
+    let host_error = |error: vee_hosting::HostingError| anyhow::anyhow!("{error}");
+    let standing = host.approvals(reference, actor_login).map_err(host_error)?;
+    let mut current = None;
+    for approval in standing {
+        if eligibility.eligible && approval.commit_id == head_oid {
+            current = Some(approval.id);
+            continue;
+        }
+        let why = if approval.commit_id == head_oid {
+            "Vee withdrew its approval: the change no longer qualifies for approval without a person."
+        } else {
+            "Vee withdrew its approval: the pull request changed since Vee approved it."
+        };
+        host.dismiss_approval(reference, &approval.id, why)
+            .map_err(host_error)?;
+    }
+    if !eligibility.eligible || current.is_some() {
+        return Ok(current);
+    }
+    let stages = eligibility
+        .stages
+        .iter()
+        .map(|stage| format!("- {}: {}", stage.id, stage.detail))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = format!(
+        "Vee approves this change without a person: every approval stage passed for `{}` (review `{review_id}`).\n\n{stages}\n\nA new push withdraws this approval until Vee reviews again.",
+        head_oid.chars().take(12).collect::<String>()
+    );
+    host.approve(reference, head_oid, &body)
+        .map(Some)
+        .map_err(host_error)
 }
 
 type Conversation = (

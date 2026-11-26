@@ -23,6 +23,16 @@ inputs:
   approval:
     description: Also publish whether the change may be approved without a person.
     default: "false"
+  labels:
+    description: Keep `vee:gate:*` and `vee:risk:*` labels on the pull request.
+    default: "false"
+  approve:
+    description: >-
+      Approve the pull request when the change is eligible for approval
+      without a person, and withdraw Vee's approval when a push or a new
+      review makes it stale. The repository must allow GitHub Actions to
+      approve pull requests.
+    default: "false"
   full-review:
     description: >-
       Review the whole change on every push. By default, files whose change
@@ -85,6 +95,8 @@ runs:
         VEE_EFFORT: ${{ inputs.effort }}
         VEE_APPROVAL: ${{ inputs.approval }}
         VEE_FULL_REVIEW: ${{ inputs.full-review }}
+        VEE_LABELS: ${{ inputs.labels }}
+        VEE_APPROVE: ${{ inputs.approve }}
         VEE_API_KEY: ${{ inputs.api-key }}
         GH_TOKEN: ${{ inputs.github-token }}
       run: |
@@ -107,6 +119,12 @@ runs:
         fi
         if [ "$VEE_FULL_REVIEW" = "true" ] && [ "${args[1]}" = "run" ]; then
           args+=(--full)
+        fi
+        if [ "$VEE_LABELS" = "true" ]; then
+          args+=(--labels)
+        fi
+        if [ "$VEE_APPROVE" = "true" ]; then
+          args+=(--approve)
         fi
         result="$RUNNER_TEMP/vee-ci-run.json"
         vee "${args[@]}" > "$result"
