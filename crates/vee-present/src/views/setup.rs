@@ -222,3 +222,20 @@ fn effort_label(effort: vee_core::ReviewEffort) -> String {
     };
     format!("{name} ({runs} per reviewer)")
 }
+
+impl ToView for vee_application::hooks::GitHook {
+    fn to_view(&self) -> View {
+        use vee_application::hooks::HookState;
+        let badge = match self.state {
+            HookState::Installed => Cell::badge(Tone::Success, "installed"),
+            HookState::Missing => Cell::badge(Tone::Neutral, "not installed"),
+            HookState::Other => Cell::badge(Tone::Warning, "another tool's hook"),
+        };
+        View::new()
+            .title(format!("Git {} hook", self.hook), Some(badge))
+            .fields(vec![
+                ("Result".into(), Cell::plain(&self.message)),
+                ("Path".into(), Cell::plain(self.path.display().to_string())),
+            ])
+    }
+}
