@@ -54,7 +54,7 @@ eligible, and the override rate is the remainder. Both state their
 denominator: pull requests with an eligible head. The report lists its
 limitations:
 
-- reverts are not detected;
+- reverts are not detected (since detected: ADR 0037);
 - a later change counts as an override even when it answered something
   unrelated;
 - only pull requests reviewed with `--approve` count.

@@ -6,6 +6,15 @@ change configuration and output contracts.
 
 ## Unreleased
 
+### Reverted merges in the approval report
+
+- `vee ci approvals` counts a pull request merged at a head Vee called
+  eligible and reverted later as `reverted_after_eligible`, an override
+  rather than agreement. Reverts are found in merged revert pull requests
+  (`Reverts owner/repo#N`, `This reverts merge request !N`) and, in a clone,
+  in `This reverts commit` messages on the checked-out branch. Cases name
+  the reverting pull request or commit (ADR 0037).
+
 ### Findings carried on unchanged hunks
 
 - In a file a push changed, hunks whose content is the same as at the last

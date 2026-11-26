@@ -241,9 +241,16 @@ It reads the latest 100 closed pull requests and counts those with a head
 Vee called eligible:
 
 - merged at that head (agreement);
+- merged at that head and reverted later;
 - changed afterwards;
 - sent back by a person;
 - closed without merging.
+
+Reverts are found in merged revert pull requests, the kind the hosts'
+Revert buttons open, and in `git revert` commits on the checked-out branch
+when you run it in a clone. Use a full clone (`fetch-depth: 0`) in CI so
+the history is there
+([ADR 0037](../adr/0037-detecting-reverted-merges.md)).
 
 ## Commands in comments
 

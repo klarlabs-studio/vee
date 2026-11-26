@@ -71,7 +71,7 @@ would have approved.
 
 - [x] `approval.mode: observe | enforce` ([ADR 0025](adr/0025-observe-mode-for-approvals.md))
 - [x] Record each would-have-approved verdict next to the outcome: merged unchanged, changes requested, or closed (`vee ci approvals`)
-- [ ] Detect merges that were reverted
+- [x] Detect merges that were reverted ([ADR 0037](adr/0037-detecting-reverted-merges.md))
 - [x] Agreement and override rates, with their denominator (`vee ci approvals`)
 - [x] Rate limits on automatic approvals: `approval.max_per_day` ([ADR 0026](adr/0026-owner-guards-and-a-daily-limit-for-approvals.md))
 - [ ] Close the remaining items of [ADR 0015](adr/0015-layered-approval-eligibility.md)
