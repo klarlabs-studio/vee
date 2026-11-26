@@ -6,6 +6,18 @@ change configuration and output contracts.
 
 ## Unreleased
 
+### GitLab parity
+
+- On GitLab merge requests, `vee ci run` now keeps Vee's summary note with
+  its review record, so later pushes are reviewed incrementally, and
+  supports `--labels` and `--approve` (approve and unapprove, with the
+  approval's history read from system notes).
+- `@vee` commands work on GitLab through a Comments webhook that triggers a
+  pipeline. Vee reads the comment back from the API instead of trusting the
+  payload, and `@vee fix` pushes with `GL_TOKEN`.
+- Vee posts as the token's user; `VEE_ACTOR_LOGIN` is no longer needed.
+- `vee ci approvals --provider gitlab` reports on GitLab projects (ADR 0030).
+
 ### Security scanner presets
 
 - `vee init` finds nox, gitleaks, semgrep and trivy on the machine and writes

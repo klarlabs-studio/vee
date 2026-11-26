@@ -523,6 +523,8 @@ fn git(root: &Path, args: &[&str]) -> Result<String> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CommentEvent {
     pub system: CiSystem,
+    /// Hosting provider ID: `github` or `gitlab`.
+    pub provider: String,
     pub host: String,
     pub api_base: String,
     pub repository: String,
@@ -549,9 +551,12 @@ impl CommentEvent {
 /// comments on pull requests count; `None` means there is nothing to do.
 pub fn detect_comment(env: &dyn Fn(&str) -> Option<String>) -> Result<Option<CommentEvent>> {
     let set = |name: &str| env(name).filter(|value| !value.trim().is_empty());
+    if set("GITLAB_CI").as_deref() == Some("true") {
+        return detect_gitlab_comment(&set);
+    }
     if set("GITHUB_ACTIONS").as_deref() != Some("true") {
         return Err(usage_failure(
-            "`vee ci command` runs in GitHub Actions for comment events; GitLab does not start pipelines for comments",
+            "`vee ci command` runs in GitHub Actions for comment events, or in a GitLab pipeline a comment webhook triggers",
         ));
     }
     let event_name = set("GITHUB_EVENT_NAME").unwrap_or_default();
@@ -624,6 +629,7 @@ pub fn detect_comment(env: &dyn Fn(&str) -> Option<String>) -> Result<Option<Com
         })?;
     Ok(Some(CommentEvent {
         system: CiSystem::GithubActions,
+        provider: "github".into(),
         host,
         api_base: if api_base.ends_with('/') {
             api_base
@@ -640,6 +646,81 @@ pub fn detect_comment(env: &dyn Fn(&str) -> Option<String>) -> Result<Option<Com
         },
         actor_login: "github-actions[bot]".into(),
         comment,
+    }))
+}
+
+/// A merge request comment from a GitLab pipeline that a comment webhook
+/// triggered: the webhook's payload is in the file `TRIGGER_PAYLOAD` names.
+/// Anyone with the trigger token can start such a pipeline, so only the
+/// comment's IDs are taken from it; `handle` reads the comment itself from
+/// GitLab (ADR 0030).
+fn detect_gitlab_comment(set: &dyn Fn(&str) -> Option<String>) -> Result<Option<CommentEvent>> {
+    if set("CI_PIPELINE_SOURCE").as_deref() != Some("trigger") {
+        return Err(usage_failure(
+            "`vee ci command` handles merge request comments in a pipeline that a comment webhook triggers (`CI_PIPELINE_SOURCE` is `trigger`)",
+        ));
+    }
+    let path = set("TRIGGER_PAYLOAD").ok_or_else(|| {
+        configuration_failure(
+            "TRIGGER_PAYLOAD is not set; point a Comments webhook at the pipeline trigger URL",
+        )
+    })?;
+    let event: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).with_context(|| format!("reading {path}"))?)
+            .with_context(|| format!("parsing {path}"))?;
+    let text = |pointer: &str| event.pointer(pointer).and_then(serde_json::Value::as_str);
+    if text("/object_kind") != Some("note")
+        || text("/object_attributes/noteable_type") != Some("MergeRequest")
+        || text("/object_attributes/action").is_some_and(|action| action != "create")
+    {
+        return Ok(None);
+    }
+    let note = event
+        .pointer("/object_attributes/id")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| configuration_failure("the note has no ID"))?;
+    let discussion = text("/object_attributes/discussion_id")
+        .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+        .ok_or_else(|| configuration_failure("the note has no discussion ID"))?;
+    let number = event
+        .pointer("/merge_request/iid")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| configuration_failure("the payload has no merge request"))?;
+    let server =
+        set("CI_SERVER_URL").ok_or_else(|| configuration_failure("CI_SERVER_URL is not set"))?;
+    let host = url::Url::parse(&server)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .ok_or_else(|| configuration_failure(format!("CI_SERVER_URL is not a URL: {server}")))?;
+    let api_base =
+        set("CI_API_V4_URL").ok_or_else(|| configuration_failure("CI_API_V4_URL is not set"))?;
+    Ok(Some(CommentEvent {
+        system: CiSystem::GitlabCi,
+        provider: "gitlab".into(),
+        host,
+        api_base: if api_base.ends_with('/') {
+            api_base
+        } else {
+            format!("{api_base}/")
+        },
+        // The project the pipeline runs in; the payload's project is not trusted.
+        repository: set("CI_PROJECT_PATH")
+            .ok_or_else(|| configuration_failure("CI_PROJECT_PATH is not set"))?,
+        number,
+        token_env: "GL_TOKEN".into(),
+        actor_login: set("VEE_ACTOR_LOGIN").unwrap_or_default(),
+        // Replaced by the comment as GitLab reports it.
+        comment: ConversationComment {
+            id: format!("{discussion}:{note}"),
+            kind: ConversationKind::Conversation,
+            author: String::new(),
+            author_is_bot: false,
+            body: String::new(),
+            created_at: String::new(),
+            in_reply_to: None,
+            path: None,
+            line: None,
+        },
     }))
 }
 
@@ -696,6 +777,26 @@ pub fn handle(
 ) -> Result<CommandOutcome> {
     if let Some(actor) = options.actor_login.clone() {
         event.actor_login = actor;
+    }
+    // A GitLab payload is not trusted: the comment, its author and its text
+    // are what GitLab reports for its ID.
+    if event.provider == "gitlab" {
+        let listed = host
+            .list_conversation(&event.pull_request())
+            .map_err(|error| anyhow::anyhow!("reading the merge request's comments: {error}"))?;
+        match listed
+            .into_iter()
+            .find(|comment| comment.id == event.comment.id)
+        {
+            Some(comment) => event.comment = comment,
+            None => {
+                return Ok(outcome(
+                    None,
+                    "ignored",
+                    "the comment is not on the merge request",
+                ))
+            }
+        }
     }
     let comment = event.comment.clone();
     if comment.author_is_bot || is_actor(&comment, &event.actor_login) {
@@ -778,7 +879,7 @@ pub fn handle(
     let found = target(&command, &comment, &threads).cloned();
     let ci_pull_request = CiPullRequest {
         system: event.system,
-        provider: "github".into(),
+        provider: event.provider.clone(),
         host: event.host.clone(),
         api_base: event.api_base.clone(),
         repository: event.repository.clone(),
@@ -800,7 +901,7 @@ pub fn handle(
             Ok(done)
         }
         Command::Review => {
-            check_out_head(root, event.number, &origin.head_oid)?;
+            check_out_head(root, &event.provider, event.number, &origin.head_oid)?;
             // Asking for a review asks for the whole change.
             run_options.full = true;
             let run = crate::ci::run(workspace, ci_pull_request, run_options)?;
@@ -899,7 +1000,7 @@ pub fn handle(
                     &text,
                 )
                 .map_err(|error| anyhow::anyhow!("replying: {error}"))?;
-            check_out_head(root, event.number, &origin.head_oid)?;
+            check_out_head(root, &event.provider, event.number, &origin.head_oid)?;
             let run = crate::ci::run(workspace, ci_pull_request, run_options)?;
             let mut done = outcome(
                 Some(&command),
@@ -937,7 +1038,7 @@ pub fn handle(
                     "Vee cannot tell which branch to push the fix to.",
                 );
             };
-            check_out_head(root, event.number, &origin.head_oid)?;
+            check_out_head(root, &event.provider, event.number, &origin.head_oid)?;
             fix(FixRequest {
                 workspace,
                 host,
@@ -998,7 +1099,7 @@ pub fn handle(
                     "Vee has no open findings on this pull request to fix.",
                 );
             }
-            check_out_head(root, event.number, &origin.head_oid)?;
+            check_out_head(root, &event.provider, event.number, &origin.head_oid)?;
             let reply_to = match comment.kind {
                 ConversationKind::Review => ReplyTarget::Thread {
                     comment_id: comment
@@ -1031,7 +1132,7 @@ pub fn handle(
                     &no_target(&command),
                 );
             };
-            check_out_head(root, event.number, &origin.head_oid)?;
+            check_out_head(root, &event.provider, event.number, &origin.head_oid)?;
             let explanation = explain(workspace, &thread, &origin.head_oid)?;
             let target = ReplyTarget::Thread {
                 comment_id: thread.comment_id.clone(),
@@ -1149,7 +1250,12 @@ fn status_text(threads: &[FindingThread], decisions: &PullRequestDecisions) -> S
 }
 
 /// Fetch and check out the pull request's head, refusing anything else.
-fn check_out_head(root: &Path, number: u64, head_oid: &str) -> Result<()> {
+fn check_out_head(root: &Path, provider: &str, number: u64, head_oid: &str) -> Result<()> {
+    let head_ref = if provider == "gitlab" {
+        format!("refs/merge-requests/{number}/head")
+    } else {
+        format!("refs/pull/{number}/head")
+    };
     vee_git::validate_revision(head_oid).map_err(configuration_failure)?;
     if git(root, &["rev-parse", "HEAD"]).ok().as_deref() == Some(head_oid) {
         return Ok(());
@@ -1161,7 +1267,7 @@ fn check_out_head(root: &Path, number: u64, head_oid: &str) -> Result<()> {
             "--no-tags",
             "--quiet",
             "origin",
-            &format!("+refs/pull/{number}/head:refs/remotes/origin/vee-pull-{number}"),
+            &format!("+{head_ref}:refs/remotes/origin/vee-pull-{number}"),
         ],
     )
     .context("fetching the pull request's head")?;
@@ -1328,6 +1434,21 @@ const HEAD_UPDATE_ATTEMPTS: u32 = 15;
 const COMMIT_NAME: &str = "github-actions[bot]";
 const COMMIT_EMAIL: &str = "41898282+github-actions[bot]@users.noreply.github.com";
 
+/// Who Vee's fix commits are by: GitHub Actions' bot, or on GitLab the
+/// token's user at the instance's no-reply domain.
+fn commit_identity(pull_request: &CiPullRequest) -> (String, String) {
+    match (
+        pull_request.provider.as_str(),
+        pull_request.actor_login.as_deref(),
+    ) {
+        ("gitlab", Some(login)) if !login.is_empty() => {
+            let host = pull_request.host.split(':').next().unwrap_or_default();
+            (login.to_owned(), format!("{login}@noreply.{host}"))
+        }
+        _ => (COMMIT_NAME.to_owned(), COMMIT_EMAIL.to_owned()),
+    }
+}
+
 /// A fix the review accepted, committed on top of the fixes before it.
 struct AcceptedFix {
     finding_id: String,
@@ -1347,6 +1468,7 @@ fn attempt_fix(
     pull_request: &CiPullRequest,
     run_options: &CiRunOptions,
 ) -> Result<AcceptedFix, String> {
+    let (commit_name, commit_email) = commit_identity(pull_request);
     let root = workspace.root();
     let undo = || {
         git(root, &["checkout", "--quiet", "--force", "--detach", tip])
@@ -1393,9 +1515,9 @@ fn attempt_fix(
             root,
             &[
                 "-c",
-                &format!("user.name={COMMIT_NAME}"),
+                &format!("user.name={commit_name}"),
                 "-c",
-                &format!("user.email={COMMIT_EMAIL}"),
+                &format!("user.email={commit_email}"),
                 "commit",
                 "--quiet",
                 "--no-verify",
@@ -1672,6 +1794,56 @@ mod tests {
         ] {
             assert!(matches!(parse(invalid), Parsed::Invalid(_)), "{invalid}");
         }
+    }
+
+    #[test]
+    fn gitlab_comments_come_from_a_triggered_pipeline_and_keep_only_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let payload = directory.path().join("payload.json");
+        let write = |value: serde_json::Value| std::fs::write(&payload, value.to_string()).unwrap();
+        let path = payload.to_string_lossy().into_owned();
+        let env = |source: &'static str| {
+            let path = path.clone();
+            move |name: &str| match name {
+                "GITLAB_CI" => Some("true".to_owned()),
+                "CI_PIPELINE_SOURCE" => Some(source.to_owned()),
+                "TRIGGER_PAYLOAD" => Some(path.clone()),
+                "CI_SERVER_URL" => Some("https://gitlab.example.com".to_owned()),
+                "CI_API_V4_URL" => Some("https://gitlab.example.com/api/v4".to_owned()),
+                "CI_PROJECT_PATH" => Some("group/app".to_owned()),
+                _ => None,
+            }
+        };
+        write(serde_json::json!({
+            "object_kind": "note",
+            "user": {"username": "forged-admin"},
+            "project": {"path_with_namespace": "other/project"},
+            "merge_request": {"iid": 7},
+            "object_attributes": {"id": 31, "discussion_id": "abc123", "noteable_type": "MergeRequest", "note": "@vee fix all", "action": "create"}
+        }));
+        let event = detect_comment(&env("trigger")).unwrap().unwrap();
+        assert_eq!(event.provider, "gitlab");
+        assert_eq!(event.number, 7);
+        assert_eq!(event.repository, "group/app");
+        assert_eq!(event.api_base, "https://gitlab.example.com/api/v4/");
+        assert_eq!(event.comment.id, "abc123:31");
+        // Nothing the payload claims about the author or text is kept.
+        assert!(event.comment.author.is_empty() && event.comment.body.is_empty());
+
+        // Other pipelines and other notes are not commands.
+        assert!(detect_comment(&env("merge_request_event")).is_err());
+        write(serde_json::json!({
+            "object_kind": "note",
+            "merge_request": {"iid": 7},
+            "object_attributes": {"id": 31, "discussion_id": "abc123", "noteable_type": "Issue"}
+        }));
+        assert!(detect_comment(&env("trigger")).unwrap().is_none());
+        write(serde_json::json!({
+            "object_kind": "note",
+            "merge_request": {"iid": 7},
+            "object_attributes": {"id": 31, "discussion_id": "../x", "noteable_type": "MergeRequest"}
+        }));
+        assert!(detect_comment(&env("trigger")).is_err());
     }
 
     #[test]

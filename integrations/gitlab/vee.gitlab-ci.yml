@@ -1,5 +1,6 @@
 # Vee reviews each merge request on your runner, with your model key, and
-# publishes a commit status and discussions. The job's result is the gate.
+# publishes a commit status, discussions and a summary note. The job's
+# result is the gate.
 #
 # Include it from .gitlab-ci.yml, pinned to a release:
 #
@@ -11,8 +12,14 @@
 #     VEE_MODEL: <model>
 #
 # Define masked CI/CD variables: the provider's key (ANTHROPIC_API_KEY,
-# OPENAI_API_KEY or GEMINI_API_KEY); GL_TOKEN, a project access token with the
-# api scope; and VEE_ACTOR_LOGIN, that token's bot username.
+# OPENAI_API_KEY or GEMINI_API_KEY) and GL_TOKEN, a project access token with
+# the api and write_repository scopes. Vee posts as that token's user.
+#
+# For `@vee` commands in merge request comments, create a pipeline trigger
+# token and a project webhook for Comments events whose URL is
+#   https://<gitlab>/api/v4/projects/<project id>/ref/<default branch>/trigger/pipeline?token=<trigger token>
+# GitLab hands the comment to the pipeline in TRIGGER_PAYLOAD; Vee reads the
+# comment itself back from the API before acting on it.
 
 variables:
   VEE_VERSION: latest
@@ -20,6 +27,26 @@ variables:
   VEE_MODEL: ""
   VEE_EFFORT: medium
   VEE_APPROVAL: "false"
+  # Keep vee:gate:* and vee:risk:* labels on the merge request.
+  VEE_LABELS: "false"
+  # Decide on approval without a person; Vee approves only with
+  # approval.mode: enforce in .vee.yaml.
+  VEE_APPROVE: "false"
+  # A policy profile from .vee.yaml, such as security or regulated.
+  VEE_POLICY_PROFILE: ""
+
+.vee-setup: &vee-setup
+  - |
+    set -eu
+    if [ -z "$VEE_MODEL" ]; then echo "Set VEE_MODEL to the model Vee reviews with." >&2; exit 2; fi
+    vee init --provider "$VEE_PROVIDER" --model "$VEE_MODEL" --effort "$VEE_EFFORT" --no-input
+    # The job's script lines share one shell, so later lines see VEE_ARGS.
+    VEE_ARGS="--output json"
+    if [ "$VEE_APPROVAL" = "true" ]; then VEE_ARGS="$VEE_ARGS --approval"; fi
+    if [ "$VEE_LABELS" = "true" ]; then VEE_ARGS="$VEE_ARGS --labels"; fi
+    if [ "$VEE_APPROVE" = "true" ]; then VEE_ARGS="$VEE_ARGS --approve"; fi
+    if [ -n "$VEE_POLICY_PROFILE" ]; then VEE_ARGS="$VEE_ARGS --policy-profile $VEE_POLICY_PROFILE"; fi
+    if [ -n "${VEE_ACTOR_LOGIN:-}" ]; then VEE_ARGS="$VEE_ARGS --actor-login $VEE_ACTOR_LOGIN"; fi
 
 vee-review:
   image:
@@ -31,12 +58,19 @@ vee-review:
     # Vee needs the history back to the merge request's base.
     GIT_DEPTH: "0"
   script:
-    - |
-      set -eu
-      if [ -z "$VEE_MODEL" ]; then echo "Set VEE_MODEL to the model Vee reviews with." >&2; exit 2; fi
-      vee init --provider "$VEE_PROVIDER" --model "$VEE_MODEL" --effort "$VEE_EFFORT" --no-input
-      if [ "$VEE_APPROVAL" = "true" ]; then
-        vee ci run --approval --actor-login "$VEE_ACTOR_LOGIN"
-      else
-        vee ci run --actor-login "$VEE_ACTOR_LOGIN"
-      fi
+    - *vee-setup
+    - vee ci run $VEE_ARGS
+
+vee-command:
+  image:
+    name: ghcr.io/klarlabs-studio/vee:${VEE_VERSION}
+    entrypoint: [""]
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "trigger" && $TRIGGER_PAYLOAD
+  variables:
+    GIT_DEPTH: "0"
+  script:
+    - *vee-setup
+    # `@vee fix` pushes to the merge request's branch with GL_TOKEN.
+    - git remote set-url --push origin "https://oauth2:${GL_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+    - vee ci command $VEE_ARGS

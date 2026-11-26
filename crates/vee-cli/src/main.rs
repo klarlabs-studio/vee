@@ -1032,11 +1032,11 @@ enum CiCommand {
         /// findings are carried over.
         #[arg(long)]
         full: bool,
-        /// Keep `vee:gate:*` and `vee:risk:*` labels on the pull request (GitHub).
+        /// Keep `vee:gate:*` and `vee:risk:*` labels on the pull request (GitHub, GitLab).
         #[arg(long)]
         labels: bool,
         /// Approve the pull request when the change is eligible for approval
-        /// without a person, and withdraw Vee's approvals that no longer hold (GitHub).
+        /// without a person, and withdraw Vee's approvals that no longer hold (GitHub, GitLab).
         #[arg(long)]
         approve: bool,
         /// Output format.
@@ -1046,26 +1046,30 @@ enum CiCommand {
     /// Compare Vee's approval verdicts on recently closed GitHub pull requests
     /// with what people did: merged as eligible, changed, sent back or closed.
     Approvals {
-        /// The repository, as OWNER/REPO.
+        /// The repository, as OWNER/REPO (on GitLab, the project path).
         #[arg(long, value_name = "OWNER/REPO")]
         repository: String,
+        /// Hosting provider: `github` or `gitlab`.
+        #[arg(long, default_value = "github", value_parser = ["github", "gitlab"])]
+        provider: String,
         /// Closed pull requests to read, newest first.
         #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=1000))]
         limit: u16,
-        /// GitHub API base URL.
+        /// API base URL, for example https://gitlab.example.com/api/v4/.
         #[arg(long, default_value = "https://api.github.com/")]
         api_base: String,
-        /// Environment variable holding the GitHub token.
+        /// Environment variable holding the hosting token.
         #[arg(long, default_value = "GH_TOKEN")]
         token_env: String,
-        /// The account Vee published as.
+        /// The account Vee published as; on GitLab, the token's user when omitted.
         #[arg(long, default_value = "github-actions[bot]")]
         actor_login: String,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
-    /// Handle the pull request comment that started a GitHub Actions job:
+    /// Handle the pull request comment that started a GitHub Actions job, or
+    /// the merge request comment a GitLab Comments webhook triggered a pipeline for:
     /// `@vee review`, `status`, `explain`, `dismiss`, `waive` or `help`.
     /// Exits 0 when the comment was handled or held no command.
     Command {
@@ -1081,11 +1085,11 @@ enum CiCommand {
         /// Account Vee posts as.
         #[arg(long)]
         actor_login: Option<String>,
-        /// Keep `vee:gate:*` and `vee:risk:*` labels on the pull request (GitHub).
+        /// Keep `vee:gate:*` and `vee:risk:*` labels on the pull request (GitHub, GitLab).
         #[arg(long)]
         labels: bool,
         /// Approve the pull request when the change is eligible for approval
-        /// without a person, and withdraw Vee's approvals that no longer hold (GitHub).
+        /// without a person, and withdraw Vee's approvals that no longer hold (GitHub, GitLab).
         #[arg(long)]
         approve: bool,
         /// Output format.
@@ -3221,6 +3225,7 @@ fn run() -> Result<u8> {
             command:
                 CiCommand::Approvals {
                     repository,
+                    provider: provider_id,
                     limit,
                     api_base,
                     token_env,
@@ -3240,8 +3245,14 @@ fn run() -> Result<u8> {
                 Some(host) => host.to_owned(),
                 None => anyhow::bail!("--api-base has no host: {api_base}"),
             };
+            let actor_login = if provider_id == "gitlab" && actor_login == "github-actions[bot]" {
+                vee_application::hosting::token_login(&provider_id, &api_base, &token_env)?
+                    .unwrap_or_default()
+            } else {
+                actor_login
+            };
             let provider = vee_application::hosting::conversation_provider(
-                "github",
+                &provider_id,
                 &api_base,
                 &token_env,
                 &actor_login,
@@ -3317,11 +3328,21 @@ fn run() -> Result<u8> {
             else {
                 return Ok(0);
             };
-            let actor = actor_login
+            let mut actor = actor_login
                 .clone()
                 .unwrap_or_else(|| event.actor_login.clone());
+            if actor.is_empty() {
+                // GitLab: the token's user is Vee.
+                actor = vee_application::hosting::token_login(
+                    &event.provider,
+                    &event.api_base,
+                    &event.token_env,
+                )?
+                .unwrap_or_default();
+            }
+            let actor_login = actor_login.or_else(|| Some(actor.clone()));
             let host = vee_application::hosting::conversation_provider(
-                "github",
+                &event.provider,
                 &event.api_base,
                 &event.token_env,
                 &actor,

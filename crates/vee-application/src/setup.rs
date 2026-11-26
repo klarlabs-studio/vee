@@ -368,15 +368,17 @@ jobs:
         },
         CiTarget::Gitlab => CiWorkflow {
             path: ".gitlab/vee.gitlab-ci.yml".into(),
-            secrets: vec![key.into(), "GL_TOKEN".into(), "VEE_ACTOR_LOGIN".into()],
+            secrets: vec![key.into(), "GL_TOKEN".into()],
             content: format!(
                 r#"# Vee reviews each merge request on this project's runner, with this
-# project's model key, and publishes a commit status and discussions.
-# Written by `vee init --ci gitlab`. Include it from .gitlab-ci.yml:
+# project's model key, and publishes a commit status, discussions and a
+# summary note. Written by `vee init --ci gitlab`. Include it from
+# .gitlab-ci.yml:
 #   include:
 #     - local: .gitlab/vee.gitlab-ci.yml
 # Define these masked CI/CD variables: {key}; GL_TOKEN, a project access
-# token with the api scope; VEE_ACTOR_LOGIN, that token's bot username.
+# token with the api and write_repository scopes. Vee posts as its user.
+# For `@vee` commands in comments, see the template's header.
 include:
   - remote: https://raw.githubusercontent.com/klarlabs-studio/vee/v{version}/integrations/gitlab/vee.gitlab-ci.yml
 variables:
@@ -1476,6 +1478,16 @@ mod tests {
         assert_eq!(
             template["vee-review"]["image"]["name"],
             "ghcr.io/klarlabs-studio/vee:${VEE_VERSION}"
+        );
+        // Comments reach Vee through a pipeline a webhook triggers.
+        assert_eq!(
+            template["vee-command"]["rules"][0]["if"],
+            "$CI_PIPELINE_SOURCE == \"trigger\" && $TRIGGER_PAYLOAD"
+        );
+        let command_script = serde_yaml::to_string(&template["vee-command"]["script"]).unwrap();
+        assert!(
+            command_script.contains("vee ci command"),
+            "{command_script}"
         );
     }
 

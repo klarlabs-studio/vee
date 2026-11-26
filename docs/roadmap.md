@@ -48,7 +48,8 @@ The gate decision is published as a check, but the approval verdict and the
 risk tier are only visible locally or in that check's text.
 
 - [x] Publish an eligible approval as an approving review on GitHub ([ADR 0024](adr/0024-approval-and-risk-on-the-pull-request.md))
-- [ ] The same on GitLab and Bitbucket (an approval), Azure DevOps (a vote) and Gerrit (a label vote)
+- [x] The same on GitLab: labels, and an approval given and withdrawn ([ADR 0030](adr/0030-gitlab-parity.md))
+- [ ] The same on Bitbucket (an approval), Azure DevOps (a vote) and Gerrit (a label vote)
 - [x] Risk-tier and gate labels on GitHub pull requests, so teams can filter and route by them
 - [x] Withdraw both when a new push makes the review stale
 
@@ -61,7 +62,7 @@ changed since the last review, with earlier findings carried over.
 - [x] Carry forward findings on unchanged files without asking the model again
 - [x] Resolve threads whose finding the new code fixed, and keep the gate over the whole change
 - [ ] Carry findings on unchanged lines within a file that changed
-- [ ] The review record on GitLab merge requests
+- [x] The review record on GitLab merge requests
 
 ### 4. Observe mode for approvals (S–M)
 
@@ -101,7 +102,7 @@ What is missing is the loop.
 - [x] Comment text stays untrusted and maps only to these operations
 - [x] `@vee fix`: a reviewed fix pushed as one commit, with how to revert it ([ADR 0023](adr/0023-fixes-from-pull-request-comments.md))
 - [ ] Dismissals become finding feedback in `vee rules candidates`
-- [ ] Commands on GitLab, through a webhook that starts a pipeline
+- [x] Commands on GitLab, through a webhook that starts a pipeline
 
 ### 7. Learn from PR feedback automatically (S–M)
 
