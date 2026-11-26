@@ -14,8 +14,8 @@ pub mod gerrit;
 pub mod github;
 pub mod gitlab;
 pub use conversation::{
-    ConversationComment, ConversationKind, PullRequestConversationProvider, PullRequestOrigin,
-    ReplyTarget, RepositoryPermission,
+    Approval, ConversationComment, ConversationKind, PullRequestConversationProvider,
+    PullRequestOrigin, ReplyTarget, RepositoryPermission,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

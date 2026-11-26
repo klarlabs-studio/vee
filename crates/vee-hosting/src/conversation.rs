@@ -49,6 +49,24 @@ impl RepositoryPermission {
     }
 }
 
+/// An approving review that still stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Approval {
+    pub id: String,
+    /// The commit the approval was given on.
+    pub commit_id: String,
+}
+
+/// Whether `label` is a label name Vee writes: lowercase letters, digits,
+/// `:` and `-`, at most 50 characters.
+pub fn valid_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= 50
+        && label
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b":-".contains(&byte))
+}
+
 /// Where the pull request's commits come from.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PullRequestOrigin {
@@ -113,6 +131,34 @@ pub trait PullRequestConversationProvider: Send + Sync {
         target: &ReplyTarget,
         body: &str,
     ) -> Result<String, HostingError>;
+    /// Make the pull request's labels that start with `prefix` exactly
+    /// `wanted`, leaving every other label alone.
+    fn set_labels(
+        &self,
+        pull_request: &PullRequestRef,
+        prefix: &str,
+        wanted: &[String],
+    ) -> Result<(), HostingError>;
+    /// The approving reviews `login` gave on the pull request that still stand.
+    fn approvals(
+        &self,
+        pull_request: &PullRequestRef,
+        login: &str,
+    ) -> Result<Vec<Approval>, HostingError>;
+    /// Approve the pull request at `commit_id`, and return the review's ID.
+    fn approve(
+        &self,
+        pull_request: &PullRequestRef,
+        commit_id: &str,
+        body: &str,
+    ) -> Result<String, HostingError>;
+    /// Withdraw an approving review.
+    fn dismiss_approval(
+        &self,
+        pull_request: &PullRequestRef,
+        review_id: &str,
+        message: &str,
+    ) -> Result<(), HostingError>;
     /// Replace the body of a comment in the main conversation.
     fn edit_comment(
         &self,
