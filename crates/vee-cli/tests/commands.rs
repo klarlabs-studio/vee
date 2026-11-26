@@ -83,6 +83,8 @@ struct State {
     head: Option<String>,
     /// Requests to edit a conversation comment.
     edits: usize,
+    /// A bare repository whose `feature` branch is the pull request's head.
+    origin: Option<std::path::PathBuf>,
 }
 
 impl State {
@@ -145,13 +147,18 @@ fn respond(state: &Mutex<State>, line: &str, body: &str, base: &str, head: &str)
     let (method, target) = line.split_once(' ').unwrap();
     let path = target.split(' ').next().unwrap();
     let route = path.split('?').next().unwrap();
-    let pushed = state.head.clone();
+    let pushed = state.head.clone().or_else(|| {
+        state
+            .origin
+            .as_ref()
+            .map(|origin| git(origin, &["rev-parse", "refs/heads/feature"]))
+    });
     let head = pushed.as_deref().unwrap_or(head);
     match (method, route) {
         ("GET", "/repos/team/repo/pulls/9") => json(serde_json::json!({
             "number": 9, "title": "Change", "body": null, "state": "open", "merged": false,
             "base": {"sha": base, "repo": {"full_name": "team/repo"}},
-            "head": {"sha": head, "repo": {"full_name": "team/repo"}},
+            "head": {"sha": head, "ref": "feature", "repo": {"full_name": "team/repo"}},
         })),
         ("GET", "/repos/team/repo/pulls/9/files") => json(serde_json::json!([{
             "filename": "src/lib.rs", "status": "modified", "previous_filename": null,
@@ -640,6 +647,177 @@ fn a_push_reviews_only_the_files_it_changed_and_keeps_earlier_findings() {
     }
     let (_, sent) = run_ci(&third_head, &[]);
     assert_eq!(sent, ["src/a.rs", "src/b.rs"].map(String::from).into());
+
+    stop.store(true, Ordering::SeqCst);
+    server.join().unwrap();
+}
+
+/// `@vee fix` pushes a fix only when a new review no longer reports the
+/// finding and nothing new blocks (ADR 0023).
+#[test]
+fn a_fix_is_pushed_only_when_the_review_accepts_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let outside = tempfile::tempdir().unwrap();
+    let good_fix = outside.path().join("good-fix");
+    let provider = outside.path().join("provider");
+    // The fix task gets edits; a review blocks while the file says BUG.
+    std::fs::write(
+        &provider,
+        format!(
+            "#!/bin/sh\ninput=$(cat)\ncase \"$input\" in\n  *'Fix the supplied code review finding'*)\n    if [ -f '{good}' ]; then old=BUG; new='fixed()'; else old=changed; new=renamed; fi\n    printf '{{\"schema_version\":1,\"summary\":\"Use the result.\",\"edits\":[{{\"old\":\"%s\",\"new\":\"%s\"}}]}}' \"$old\" \"$new\" ;;\n  *BUG*) printf '%s' '{{\"schema_version\":1,\"findings\":[{{\"category\":\"correctness\",\"severity\":\"high\",\"confidence\":90,\"rationale\":\"BUG drops the result.\",\"path\":\"src/lib.rs\",\"line\":1}}]}}' ;;\n  *) printf '%s' '{{\"schema_version\":1,\"findings\":[]}}' ;;\nesac\n",
+            good = good_fix.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let origin = outside.path().join("origin.git");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "--bare", "-b", "main"]);
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn initial() {}\n").unwrap();
+    std::fs::write(root.join("reviewer.md"), "Review the change.\n").unwrap();
+    std::fs::write(
+        root.join(".vee.yaml"),
+        format!(
+            "version: 1\noffline: false\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\n",
+            provider.display()
+        ),
+    )
+    .unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "base"]);
+    let base = git(root, &["rev-parse", "HEAD"]);
+    git(root, &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(root.join("src/lib.rs"), "pub fn changed() { BUG }\n").unwrap();
+    git(root, &["commit", "-qam", "change"]);
+    let head = git(root, &["rev-parse", "HEAD"]);
+    git(root, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(
+        root,
+        &[
+            "push",
+            "-q",
+            "origin",
+            "main",
+            "feature",
+            "feature:refs/pull/9/head",
+        ],
+    );
+
+    let state = Arc::new(Mutex::new(State {
+        origin: Some(origin.clone()),
+        ..State::default()
+    }));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let server = serve(
+        listener,
+        stop.clone(),
+        state.clone(),
+        base.clone(),
+        head.clone(),
+    );
+    let github =
+        |command: &mut std::process::Command, event_name: &str, event: &serde_json::Value| {
+            let path = outside.path().join(format!("{event_name}.json"));
+            std::fs::write(&path, event.to_string()).unwrap();
+            command
+                .env("GITHUB_ACTIONS", "true")
+                .env("GITHUB_EVENT_NAME", event_name)
+                .env("GITHUB_EVENT_PATH", &path)
+                .env("GITHUB_REPOSITORY", "team/repo")
+                .env("GITHUB_SERVER_URL", "http://127.0.0.1")
+                .env("GITHUB_API_URL", format!("http://{address}"))
+                .env("GH_TOKEN", "fixture-token")
+                .current_dir(root);
+        };
+    let mut command = vee();
+    command.args(["ci", "run", "--output", "json"]);
+    github(
+        &mut command,
+        "pull_request",
+        &serde_json::json!({"pull_request": {"number": 9, "base": {"sha": base}, "head": {"sha": head}}}),
+    );
+    assert_eq!(command.output().unwrap().status.code(), Some(1));
+    let thread_id = state.lock().unwrap().review[0]["id"].as_u64().unwrap();
+
+    let ask_for_fix = || {
+        git(root, &["checkout", "-q", "--force", "main"]);
+        let command_id = state.lock().unwrap().add(
+            true,
+            "alice",
+            serde_json::json!({"body": "@vee fix", "in_reply_to_id": thread_id, "path": "src/lib.rs", "line": 1}),
+        );
+        let event = {
+            let state = state.lock().unwrap();
+            let comment = state
+                .review
+                .iter()
+                .find(|c| c["id"] == command_id)
+                .unwrap()
+                .clone();
+            serde_json::json!({"action": "created", "comment": comment, "pull_request": {"number": 9}})
+        };
+        let mut command = vee();
+        command.args(["ci", "command", "--output", "json"]);
+        github(&mut command, "pull_request_review_comment", &event);
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "stdout={}\nstderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+
+    // 1. A fix that leaves the finding in place is not pushed.
+    let refused = ask_for_fix();
+    assert_eq!(refused["outcome"], "refused", "{refused:#}");
+    // Renaming the function moves the finding's anchor, so the review reports
+    // it as a new blocking finding.
+    assert!(
+        refused["message"]
+            .as_str()
+            .unwrap()
+            .contains("Vee did not push it"),
+        "{refused:#}"
+    );
+    assert_eq!(
+        git(&origin, &["rev-parse", "feature"]),
+        head,
+        "nothing was pushed"
+    );
+
+    // 2. A fix the review accepts is pushed as one commit, and its review published.
+    std::fs::write(&good_fix, "").unwrap();
+    let done = ask_for_fix();
+    assert_eq!(done["outcome"], "done", "{done:#}");
+    let pushed = git(&origin, &["rev-parse", "feature"]);
+    assert_ne!(pushed, head);
+    assert_eq!(
+        git(&origin, &["rev-parse", &format!("{pushed}^")]),
+        head,
+        "one commit on top of the head"
+    );
+    assert_eq!(
+        git(&origin, &["show", &format!("{pushed}:src/lib.rs")]),
+        "pub fn changed() { fixed() }"
+    );
+    let message = git(&origin, &["log", "-1", "--format=%B", &pushed]);
+    assert!(message.contains("Vee-Finding: sha256:"), "{message}");
+    assert!(message.contains("alice"), "{message}");
+    assert_eq!(done["run"]["gate"], "pass", "{done:#}");
+    let reply = done["message"].as_str().unwrap();
+    assert!(reply.contains(&format!("git revert {pushed}")), "{reply}");
+    assert_eq!(
+        state.lock().unwrap().checks.last().map(String::as_str),
+        Some("success")
+    );
 
     stop.store(true, Ordering::SeqCst);
     server.join().unwrap();

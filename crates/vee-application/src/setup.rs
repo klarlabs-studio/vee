@@ -344,6 +344,13 @@ jobs:
     concurrency:
       group: vee-command-${{{{ github.event.issue.number || github.event.pull_request.number }}}}
       cancel-in-progress: false
+    # `@vee fix` pushes a reviewed fix to the pull request's branch; the other
+    # commands write only comments and checks.
+    permissions:
+      contents: write
+      checks: write
+      pull-requests: write
+      issues: write
     steps:
       - uses: actions/checkout@v4
         with:

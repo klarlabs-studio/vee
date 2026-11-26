@@ -10,7 +10,7 @@
     "schema_version": { "const": 1 },
     "command": {
       "description": "The command, or null when the comment held none or could not be read.",
-      "enum": ["review", "status", "help", "explain", "dismiss", "waive", null]
+      "enum": ["review", "status", "help", "explain", "fix", "dismiss", "waive", null]
     },
     "outcome": {
       "description": "ignored: no command, or written by a bot. invalid: the command could not be read. refused: the author, the pull request or the finding did not allow it. done: Vee carried it out.",
