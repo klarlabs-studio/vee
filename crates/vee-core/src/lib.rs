@@ -3306,6 +3306,13 @@ pub struct ApprovalConfig {
     /// Highest change-risk tier still eligible: `low` (default) or `elevated`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_risk: Option<String>,
+    /// Changes to a file that `CODEOWNERS` on the base assigns to any of these
+    /// owners (`@org/team`, `@user` or an email) always need a human.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub never_owners: Vec<String>,
+    /// At most this many approvals by Vee in any 24 hours, in enforce mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_per_day: Option<u32>,
     /// `observe` (default): `vee ci run --approve` records what it would
     /// approve and approves nothing. `enforce`: it approves eligible changes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4086,9 +4093,17 @@ impl RepositoryConfig {
         ) {
             return Err("approval.mode must be 'observe' or 'enforce'".into());
         }
+        if config
+            .approval
+            .max_per_day
+            .is_some_and(|limit| !(1..=1000).contains(&limit))
+        {
+            return Err("approval.max_per_day must be 1 to 1000".into());
+        }
         for (field, patterns) in [
             ("approval.never_paths", &config.approval.never_paths),
             ("approval.never_authors", &config.approval.never_authors),
+            ("approval.never_owners", &config.approval.never_owners),
         ] {
             if patterns.len() > 256
                 || patterns.iter().any(|pattern| {

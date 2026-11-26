@@ -461,12 +461,14 @@ fn apply_approval(
     actor_login: &str,
 ) -> Result<(crate::incremental::ApprovalVerdict, Option<String>)> {
     let eligibility = crate::operations::approval_eligibility(workspace, review_id)?;
-    let enforce = workspace.effective_config(None)?.approval.enforces();
+    let guards = workspace.effective_config(None)?.approval;
+    let enforce = guards.enforces();
     let mut verdict = crate::incremental::ApprovalVerdict {
         head_oid: head_oid.to_owned(),
         review_id: review_id.to_owned(),
         eligible: eligibility.eligible,
         approved: false,
+        rate_limited: false,
         failed_stages: eligibility
             .stages
             .iter()
@@ -496,6 +498,14 @@ fn apply_approval(
         verdict.approved = current.is_some();
         return Ok((verdict, current));
     }
+    if let Some(limit) = guards.max_per_day {
+        let now = crate::current_unix_time().map_err(anyhow::Error::msg)?;
+        let given = approvals_in_last_day(host, &reference.repository, actor_login, now)?;
+        if given >= limit as usize {
+            verdict.rate_limited = true;
+            return Ok((verdict, None));
+        }
+    }
     let stages = eligibility
         .stages
         .iter()
@@ -511,6 +521,45 @@ fn apply_approval(
         .map_err(host_error)?;
     verdict.approved = true;
     Ok((verdict, Some(given)))
+}
+
+/// Approvals Vee gave in the 24 hours before `now`, read from the 100 most
+/// recently updated pull requests. Withdrawn approvals count: they were given.
+fn approvals_in_last_day(
+    host: &dyn vee_hosting::PullRequestConversationProvider,
+    repository: &vee_hosting::RepositoryRef,
+    actor_login: &str,
+    now: i64,
+) -> Result<usize> {
+    let since = now - 24 * 60 * 60;
+    let host_error = |error: vee_hosting::HostingError| anyhow::anyhow!("{error}");
+    let recent = |time: Option<&str>| {
+        time.and_then(crate::pr_commands::unix_time)
+            .is_some_and(|time| time >= since)
+    };
+    let mut given = 0;
+    for pull in host
+        .recent_pull_requests(repository, 100)
+        .map_err(host_error)?
+        .iter()
+        .filter(|pull| recent(pull.updated_at.as_deref()))
+    {
+        let reference = vee_hosting::PullRequestRef {
+            repository: repository.clone(),
+            number: pull.number,
+        };
+        given += host
+            .reviews(&reference)
+            .map_err(host_error)?
+            .iter()
+            .filter(|review| {
+                review.author.eq_ignore_ascii_case(actor_login)
+                    && matches!(review.state.as_str(), "APPROVED" | "DISMISSED")
+                    && recent(review.submitted_at.as_deref())
+            })
+            .count();
+    }
+    Ok(given)
 }
 
 type Conversation = (
@@ -642,6 +691,7 @@ fn summary_text(
     if let Some(verdict) = approval {
         text.push_str(&match (verdict.eligible, verdict.approved) {
             (true, true) => "\n\nVee approved this head: it is eligible for approval without a person.".to_owned(),
+            (true, false) if verdict.rate_limited => "\n\nThis head is eligible for approval without a person, but Vee reached `approval.max_per_day` and leaves it to a person.".to_owned(),
             (true, false) => "\n\nVee would approve this head without a person. It approves nothing while `approval.mode` is `observe`.".to_owned(),
             (false, _) => format!(
                 "\n\nThis head needs a person to approve it (failed: {}).",

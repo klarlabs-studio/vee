@@ -214,6 +214,7 @@ mod tests {
             review_id: "r".into(),
             eligible,
             approved: false,
+            rate_limited: false,
             failed_stages: vec![],
         }
     }

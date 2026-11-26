@@ -93,6 +93,7 @@ pub fn evaluate_approval(
     });
 
     stages.push(authors_stage(root, guards, &review.change_set));
+    stages.push(owners_stage(root, guards, &review.change_set));
 
     let allowed = guards.max_risk();
     stages.push(match risk {
@@ -152,6 +153,90 @@ pub fn evaluate_approval(
 
 /// Author guards apply to the commits in the change. Only the matching
 /// pattern is reported, never the author's name or email.
+/// Changed files owned, per `CODEOWNERS` on the base, by an owner whose
+/// changes always need a human. The base's file, not the change's, so a
+/// change cannot edit its own guard away.
+fn owners_stage(
+    root: &Path,
+    guards: &vee_core::ApprovalConfig,
+    change_set: &ChangeSet,
+) -> ApprovalStage {
+    if guards.never_owners.is_empty() {
+        return stage("owners", true, "No owner guards are configured.");
+    }
+    let Some(base) = change_set.base_oid.as_deref() else {
+        return stage(
+            "owners",
+            false,
+            "The change has no base, so CODEOWNERS cannot be read.",
+        );
+    };
+    let mut codeowners = None;
+    for path in [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"] {
+        match vee_git::read_tree_file(root, base, Path::new(path)) {
+            Ok(Some(bytes)) => {
+                let Ok(text) = String::from_utf8(bytes) else {
+                    return stage("owners", false, format!("{path} on the base is not UTF-8."));
+                };
+                codeowners = Some(text);
+                break;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return stage(
+                    "owners",
+                    false,
+                    format!("CODEOWNERS on the base could not be read: {error}"),
+                )
+            }
+        }
+    }
+    let Some(codeowners) = codeowners else {
+        return stage(
+            "owners",
+            true,
+            "The base has no CODEOWNERS, so no changed file has a guarded owner.",
+        );
+    };
+    let mut guarded = Vec::new();
+    for file in &change_set.files {
+        let owners = match crate::ownership::owners_in(&codeowners, &file.path) {
+            Ok(owners) => owners,
+            Err(error) => {
+                return stage(
+                    "owners",
+                    false,
+                    format!("CODEOWNERS on the base could not be read: {error}"),
+                )
+            }
+        };
+        if let Some(owner) = owners.iter().find(|owner| {
+            guards
+                .never_owners
+                .iter()
+                .any(|guard| guard.eq_ignore_ascii_case(owner))
+        }) {
+            guarded.push(format!("{} ({owner})", file.path));
+        }
+    }
+    if guarded.is_empty() {
+        stage(
+            "owners",
+            true,
+            "No changed file is owned by a guarded owner.",
+        )
+    } else {
+        stage(
+            "owners",
+            false,
+            format!(
+                "Changed files with a guarded owner: {}.",
+                guarded.join(", ")
+            ),
+        )
+    }
+}
+
 fn authors_stage(
     root: &Path,
     guards: &vee_core::ApprovalConfig,
