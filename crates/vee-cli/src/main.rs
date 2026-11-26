@@ -1043,6 +1043,28 @@ enum CiCommand {
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
+    /// Compare Vee's approval verdicts on recently closed GitHub pull requests
+    /// with what people did: merged as eligible, changed, sent back or closed.
+    Approvals {
+        /// The repository, as OWNER/REPO.
+        #[arg(long, value_name = "OWNER/REPO")]
+        repository: String,
+        /// Closed pull requests to read, newest first.
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=1000))]
+        limit: u16,
+        /// GitHub API base URL.
+        #[arg(long, default_value = "https://api.github.com/")]
+        api_base: String,
+        /// Environment variable holding the GitHub token.
+        #[arg(long, default_value = "GH_TOKEN")]
+        token_env: String,
+        /// The account Vee published as.
+        #[arg(long, default_value = "github-actions[bot]")]
+        actor_login: String,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
     /// Handle the pull request comment that started a GitHub Actions job:
     /// `@vee review`, `status`, `explain`, `dismiss`, `waive` or `help`.
     /// Exits 0 when the comment was handled or held no command.
@@ -3195,6 +3217,50 @@ fn run() -> Result<u8> {
             }
         },
         Command::Hooks { command } => run_hooks(command),
+        Command::Ci {
+            command:
+                CiCommand::Approvals {
+                    repository,
+                    limit,
+                    api_base,
+                    token_env,
+                    actor_login,
+                    output,
+                },
+        } => {
+            let api_base = if api_base.ends_with('/') {
+                api_base
+            } else {
+                format!("{api_base}/")
+            };
+            let api = url::Url::parse(&api_base)
+                .map_err(|_| anyhow::anyhow!("--api-base is not a URL: {api_base}"))?;
+            let host = match api.host_str() {
+                Some("api.github.com") => "github.com".to_owned(),
+                Some(host) => host.to_owned(),
+                None => anyhow::bail!("--api-base has no host: {api_base}"),
+            };
+            let provider = vee_application::hosting::conversation_provider(
+                "github",
+                &api_base,
+                &token_env,
+                &actor_login,
+            )?;
+            let report = vee_application::approval_report::report(
+                &*provider,
+                &vee_hosting::RepositoryRef {
+                    host,
+                    full_name: repository,
+                },
+                &actor_login,
+                usize::from(limit),
+            )?;
+            match output {
+                Output::Json => emit_json(&report)?,
+                Output::Text => print_view(&report)?,
+            }
+            Ok(0)
+        }
         Command::Ci {
             command:
                 CiCommand::Run {

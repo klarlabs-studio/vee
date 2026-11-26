@@ -281,10 +281,10 @@ pub(crate) fn publish(
     let root = workspace.root();
     let Reviewed {
         review,
+        earlier: earlier_record,
         conversation,
         summary,
         actor_login,
-        ..
     } = reviewed;
     let hosting_flags = crate::hosting::HostingFlags {
         provider: Some(pull_request.provider.clone()),
@@ -343,21 +343,9 @@ pub(crate) fn publish(
         },
     )?;
     let gate = publication.gate.unwrap_or(review.gate.status);
-    if let Some((host, _)) = &conversation {
-        if let Err(error) = publish_summary(
-            root,
-            host.as_ref(),
-            &pull_request,
-            &review,
-            gate,
-            summary.as_ref(),
-        ) {
-            // The next review is then a full one.
-            eprintln!("warning: Vee's summary comment was not updated: {error:#}");
-        }
-    }
     let mut labels = Vec::new();
     let mut approval_review_id = None;
+    let mut verdict = None;
     if let Some((host, _)) = &conversation {
         let reference = pull_request_ref(&pull_request);
         if options.labels {
@@ -381,9 +369,35 @@ pub(crate) fn publish(
                 &pull_request.head_oid,
                 actor_login.as_deref().unwrap_or_default(),
             ) {
-                Ok(approved) => approval_review_id = approved,
+                Ok((approved, given)) => {
+                    approval_review_id = given;
+                    verdict = Some(approved);
+                }
                 Err(error) => eprintln!("warning: Vee's approval was not updated: {error:#}"),
             }
+        }
+        let approvals = match verdict {
+            Some(verdict) => crate::incremental::append_verdict(
+                earlier_record
+                    .map(|record| record.approvals)
+                    .unwrap_or_default(),
+                verdict,
+            ),
+            None => earlier_record
+                .map(|record| record.approvals)
+                .unwrap_or_default(),
+        };
+        if let Err(error) = publish_summary(
+            root,
+            host.as_ref(),
+            &pull_request,
+            &review,
+            gate,
+            approvals,
+            summary.as_ref(),
+        ) {
+            // The next review is then a full one.
+            eprintln!("warning: Vee's summary comment was not updated: {error:#}");
         }
     } else if options.labels || options.approve {
         eprintln!(
@@ -434,8 +448,10 @@ fn apply_labels(
     Ok(std::iter::once(gate).chain(risk).collect())
 }
 
-/// Approve `head_oid` when the change is eligible, and withdraw Vee's
-/// approvals of other heads, or of this one when it is not eligible.
+/// Decide whether `head_oid` may be approved without a person. In
+/// `approval.mode: enforce`, approve it when it may, and withdraw Vee's
+/// approvals of other heads, or of this one when it may not. In observe
+/// mode, approve nothing and withdraw every approval Vee gave.
 fn apply_approval(
     workspace: &Workspace,
     host: &dyn vee_hosting::PullRequestConversationProvider,
@@ -443,17 +459,32 @@ fn apply_approval(
     review_id: &str,
     head_oid: &str,
     actor_login: &str,
-) -> Result<Option<String>> {
+) -> Result<(crate::incremental::ApprovalVerdict, Option<String>)> {
     let eligibility = crate::operations::approval_eligibility(workspace, review_id)?;
+    let enforce = workspace.effective_config(None)?.approval.enforces();
+    let mut verdict = crate::incremental::ApprovalVerdict {
+        head_oid: head_oid.to_owned(),
+        review_id: review_id.to_owned(),
+        eligible: eligibility.eligible,
+        approved: false,
+        failed_stages: eligibility
+            .stages
+            .iter()
+            .filter(|stage| !stage.passed)
+            .map(|stage| stage.id.clone())
+            .collect(),
+    };
     let host_error = |error: vee_hosting::HostingError| anyhow::anyhow!("{error}");
     let standing = host.approvals(reference, actor_login).map_err(host_error)?;
     let mut current = None;
     for approval in standing {
-        if eligibility.eligible && approval.commit_id == head_oid {
+        if enforce && eligibility.eligible && approval.commit_id == head_oid {
             current = Some(approval.id);
             continue;
         }
-        let why = if approval.commit_id == head_oid {
+        let why = if !enforce {
+            "Vee withdrew its approval: approval.mode is observe, so Vee approves nothing."
+        } else if approval.commit_id == head_oid {
             "Vee withdrew its approval: the change no longer qualifies for approval without a person."
         } else {
             "Vee withdrew its approval: the pull request changed since Vee approved it."
@@ -461,8 +492,9 @@ fn apply_approval(
         host.dismiss_approval(reference, &approval.id, why)
             .map_err(host_error)?;
     }
-    if !eligibility.eligible || current.is_some() {
-        return Ok(current);
+    if !enforce || !eligibility.eligible || current.is_some() {
+        verdict.approved = current.is_some();
+        return Ok((verdict, current));
     }
     let stages = eligibility
         .stages
@@ -474,9 +506,11 @@ fn apply_approval(
         "Vee approves this change without a person: every approval stage passed for `{}` (review `{review_id}`).\n\n{stages}\n\nA new push withdraws this approval until Vee reviews again.",
         head_oid.chars().take(12).collect::<String>()
     );
-    host.approve(reference, head_oid, &body)
-        .map(Some)
-        .map_err(host_error)
+    let given = host
+        .approve(reference, head_oid, &body)
+        .map_err(host_error)?;
+    verdict.approved = true;
+    Ok((verdict, Some(given)))
 }
 
 type Conversation = (
@@ -537,6 +571,7 @@ fn publish_summary(
     pull_request: &CiPullRequest,
     review: &crate::ReviewResult,
     gate: vee_core::GateStatus,
+    approvals: Vec<crate::incremental::ApprovalVerdict>,
     existing: Option<&vee_hosting::ConversationComment>,
 ) -> Result<()> {
     let record = crate::incremental::ReviewRecord {
@@ -552,11 +587,16 @@ fn publish_summary(
             .policy_findings
             .clone()
             .unwrap_or_else(|| review.findings.clone()),
+        approvals,
     };
     let body = summary_text(
         review,
         gate,
         &pull_request.head_oid,
+        record
+            .approvals
+            .last()
+            .filter(|verdict| verdict.head_oid == pull_request.head_oid),
         crate::incremental::encode(&record),
     );
     let reference = pull_request_ref(pull_request);
@@ -575,6 +615,7 @@ fn summary_text(
     review: &crate::ReviewResult,
     gate: vee_core::GateStatus,
     head_oid: &str,
+    approval: Option<&crate::incremental::ApprovalVerdict>,
     record: Option<String>,
 ) -> String {
     let short = |oid: &str| oid.chars().take(7).collect::<String>();
@@ -597,6 +638,16 @@ fn summary_text(
             carried.paths.len(),
             carried.findings
         ));
+    }
+    if let Some(verdict) = approval {
+        text.push_str(&match (verdict.eligible, verdict.approved) {
+            (true, true) => "\n\nVee approved this head: it is eligible for approval without a person.".to_owned(),
+            (true, false) => "\n\nVee would approve this head without a person. It approves nothing while `approval.mode` is `observe`.".to_owned(),
+            (false, _) => format!(
+                "\n\nThis head needs a person to approve it (failed: {}).",
+                verdict.failed_stages.join(", ")
+            ),
+        });
     }
     text.push_str(
         "\n\n<sub>Vee updates this comment after each review. Comment `@vee review` to review the whole change again.</sub>\n\n",

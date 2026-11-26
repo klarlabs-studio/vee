@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 pub mod acceptance;
 pub mod analytics;
 mod approval;
+pub mod approval_report;
 pub mod attestation;
 pub mod ci;
 mod config;

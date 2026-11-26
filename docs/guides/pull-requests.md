@@ -108,11 +108,30 @@ have matching Action inputs, `labels` and `approve`.
 
 - `--labels` keeps a `vee:gate:pass|block|incomplete` label and a
   `vee:risk:low|elevated|high` label on the pull request.
-- `--approve` approves the head when the change is eligible for approval
-  without a person. It withdraws Vee's approval when a push or a later
-  review makes it stale. For this to work, allow GitHub Actions to approve
-  pull requests in the repository's Actions settings; branch protection
-  decides whether the approval counts.
+- `--approve` decides on every review whether the head is eligible for
+  approval without a person, and records the verdict in Vee's summary
+  comment.
+  - With `approval.mode: observe`, the default, Vee approves nothing.
+  - With `approval.mode: enforce`, Vee approves an eligible head. It
+    withdraws its approval when a push or a later review makes it stale.
+    For this to work, allow GitHub Actions to approve pull requests in the
+    repository's Actions settings; branch protection decides whether the
+    approval counts.
+
+Before switching to `enforce`, see how Vee's verdicts compared with what
+people did ([ADR 0025](../adr/0025-observe-mode-for-approvals.md)):
+
+```sh
+GH_TOKEN=... vee ci approvals --repository OWNER/REPO
+```
+
+It reads the latest 100 closed pull requests and counts those with a head
+Vee called eligible:
+
+- merged at that head (agreement);
+- changed afterwards;
+- sent back by a person;
+- closed without merging.
 
 ## Commands in comments
 

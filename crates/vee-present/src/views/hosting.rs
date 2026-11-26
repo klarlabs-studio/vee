@@ -380,3 +380,54 @@ impl ToView for vee_application::pr_commands::CommandOutcome {
             .fields(fields)
     }
 }
+
+impl ToView for vee_application::approval_report::ApprovalReport {
+    fn to_view(&self) -> View {
+        let percent = |rate: Option<f64>| {
+            rate.map_or_else(|| "n/a".into(), |rate| format!("{:.0}%", rate * 100.0))
+        };
+        let view = View::new()
+            .title(
+                format!("Approval verdicts on {}", self.repository),
+                Some(Cell::badge(
+                    Tone::Neutral,
+                    format!("{} with an eligible head", self.eligible),
+                )),
+            )
+            .fields(vec![
+                (
+                    "Read".into(),
+                    Cell::plain(format!(
+                        "{} closed pull requests, {} with Vee verdicts",
+                        self.pull_requests_read, self.with_verdicts
+                    )),
+                ),
+                (
+                    "Agreement".into(),
+                    Cell::plain(format!(
+                        "{} of pull requests with an eligible head were merged at one",
+                        percent(self.agreement_rate)
+                    )),
+                ),
+                (
+                    "Overrides".into(),
+                    Cell::plain(format!(
+                        "{} were changed, sent back or closed",
+                        percent(self.override_rate)
+                    )),
+                ),
+            ])
+            .table(
+                &["Outcome", "Pull requests"],
+                self.outcomes
+                    .iter()
+                    .map(|(outcome, count)| {
+                        vec![Cell::code(outcome.as_str()), Cell::plain(count.to_string())]
+                    })
+                    .collect(),
+            );
+        self.limitations.iter().fold(view, |view, limitation| {
+            view.note(Tone::Neutral, Cell::muted(limitation))
+        })
+    }
+}

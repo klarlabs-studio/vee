@@ -42,6 +42,40 @@ pub struct ReviewRecord {
     /// Each reviewer's findings, before findings of several reviewers at one
     /// location are merged.
     pub findings: Vec<Finding>,
+    /// Vee's approval verdicts on this pull request, oldest first, with
+    /// `--approve` (ADR 0025).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approvals: Vec<ApprovalVerdict>,
+}
+
+/// Verdicts kept in a record; older ones are dropped first.
+pub const MAX_APPROVAL_VERDICTS: usize = 50;
+
+/// Whether one head was eligible for approval without a person, and whether
+/// Vee approved it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalVerdict {
+    pub head_oid: String,
+    pub review_id: String,
+    pub eligible: bool,
+    /// True when Vee approved the head on the host (`approval.mode: enforce`).
+    pub approved: bool,
+    /// The approval stages that failed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_stages: Vec<String>,
+}
+
+/// `earlier` with `verdict` appended, replacing a verdict on the same head,
+/// and at most [`MAX_APPROVAL_VERDICTS`] long.
+pub fn append_verdict(
+    mut earlier: Vec<ApprovalVerdict>,
+    verdict: ApprovalVerdict,
+) -> Vec<ApprovalVerdict> {
+    earlier.retain(|kept| kept.head_oid != verdict.head_oid);
+    earlier.push(verdict);
+    let excess = earlier.len().saturating_sub(MAX_APPROVAL_VERDICTS);
+    earlier.drain(..excess);
+    earlier
 }
 
 /// An earlier review a new review may build on.
@@ -202,6 +236,7 @@ mod tests {
                     ("b.rs".into(), file("b0", "b1")),
                 ]),
                 findings,
+                approvals: vec![],
             },
         }
     }
@@ -249,6 +284,25 @@ mod tests {
         )
         .unwrap();
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn a_verdict_replaces_one_on_the_same_head_and_history_is_bounded() {
+        let verdict = |head: &str, eligible: bool| ApprovalVerdict {
+            head_oid: head.into(),
+            review_id: "r".into(),
+            eligible,
+            approved: false,
+            failed_stages: vec![],
+        };
+        let history = append_verdict(vec![verdict("h1", false)], verdict("h1", true));
+        assert_eq!(history, vec![verdict("h1", true)]);
+        let mut history = Vec::new();
+        for index in 0..60 {
+            history = append_verdict(history, verdict(&format!("h{index}"), true));
+        }
+        assert_eq!(history.len(), MAX_APPROVAL_VERDICTS);
+        assert_eq!(history[0].head_oid, "h10");
     }
 
     #[test]

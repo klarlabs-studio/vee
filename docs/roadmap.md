@@ -68,9 +68,10 @@ changed since the last review, with earlier findings carried over.
 Teams will not turn on automatic approval without first seeing what it
 would have approved.
 
-- [ ] `approval.mode: observe | enforce`
-- [ ] Record each would-have-approved verdict next to the outcome: merged unchanged, changes requested, or reverted
-- [ ] Agreement and override rates in `vee analytics`
+- [x] `approval.mode: observe | enforce` ([ADR 0025](adr/0025-observe-mode-for-approvals.md))
+- [x] Record each would-have-approved verdict next to the outcome: merged unchanged, changes requested, or closed (`vee ci approvals`)
+- [ ] Detect merges that were reverted
+- [x] Agreement and override rates, with their denominator (`vee ci approvals`)
 - [ ] Rate limits on automatic approvals
 - [ ] Close the remaining items of [ADR 0015](adr/0015-layered-approval-eligibility.md)
 - [ ] Code ownership in approval: require the owners of touched paths, or keep changes to some owners' paths for a person

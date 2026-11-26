@@ -41,6 +41,11 @@ change configuration and output contracts.
   pull requests. `--approve` approves an eligible head and withdraws Vee's
   approvals that a push or a later review made stale
   ([ADR 0024](docs/adr/0024-approval-and-risk-on-the-pull-request.md)).
+- `approval.mode: observe | enforce`. In observe mode, the default, `--approve`
+  records Vee's verdict in its summary comment and approves nothing.
+  `vee ci approvals --repository OWNER/REPO` compares the verdicts on closed
+  GitHub pull requests with what people did, with agreement and override
+  rates ([ADR 0025](docs/adr/0025-observe-mode-for-approvals.md)).
 
 ## 0.1.0 — 2026-11-25
 
