@@ -151,6 +151,81 @@ impl ToView for CandidateReport {
                     );
             }
         }
+        if let Some(pull_requests) = &self.pull_requests {
+            let signals = pull_requests
+                .weak_labels
+                .iter()
+                .map(|(signal, count)| format!("{count} {}", signal.replace('_', " ")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            view = view
+                .section(format!(
+                    "Weak candidates from pull requests ({})",
+                    self.weak_candidates.len()
+                ))
+                .fields(vec![
+                    (
+                        "Read".into(),
+                        Cell::plain(format!(
+                            "{} closed pull requests of {}",
+                            pull_requests.pull_requests_read, pull_requests.repository
+                        )),
+                    ),
+                    (
+                        "Signals".into(),
+                        if signals.is_empty() {
+                            Cell::muted("none")
+                        } else {
+                            Cell::plain(signals)
+                        },
+                    ),
+                    (
+                        "Disputed findings excluded".into(),
+                        Cell::plain(pull_requests.disputed_findings_excluded.to_string()),
+                    ),
+                ]);
+            for candidate in &self.weak_candidates {
+                view = view
+                    .paragraph(
+                        Cell::id(&candidate.candidate_id)
+                            .then(Span::new(&candidate.suggestion, Style::Plain)),
+                    )
+                    .list(
+                        candidate
+                            .feedback
+                            .iter()
+                            .map(|example| {
+                                let place = example
+                                    .pull_request
+                                    .as_ref()
+                                    .map(|pull| format!("#{}", pull.number))
+                                    .unwrap_or_default();
+                                let mut cell = Cell::plain(format!(
+                                    "{} {place}",
+                                    example.source_kind.replace('_', " ")
+                                ));
+                                if !example.reviewer.is_empty() {
+                                    cell = cell.then(Span::new(
+                                        format!("by {}", example.reviewer),
+                                        Style::Muted,
+                                    ));
+                                }
+                                if !example.reason.is_empty() {
+                                    cell = cell.then(Span::new(
+                                        format!("“{}”", summary(&example.reason, SUMMARY_WIDTH)),
+                                        Style::Plain,
+                                    ));
+                                }
+                                cell
+                            })
+                            .collect(),
+                    )
+                    .paragraph(
+                        Cell::muted("evidence digest")
+                            .then(Span::new(&candidate.evidence_digest, Style::Id)),
+                    );
+            }
+        }
         view = view.extend(limitations_view(&self.limitations)).note(
             Tone::Info,
             "Suggestions require human review and are not active policy.",

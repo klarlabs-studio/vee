@@ -800,6 +800,7 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
             reason: input.reason,
             supersedes_approval_id: input.supersedes_approval_id,
             expires_in_days: input.expires_in_days,
+            pull_requests: None,
         }));
 
     viewed_tool!(server, workspace, "list_rule_approvals", "List rule approvals", read_only_tool(),

@@ -101,16 +101,21 @@ What is missing is the loop.
 - [x] Waivers only for actors that code ownership permits, read from the base branch
 - [x] Comment text stays untrusted and maps only to these operations
 - [x] `@vee fix`: a reviewed fix pushed as one commit, with how to revert it ([ADR 0023](adr/0023-fixes-from-pull-request-comments.md))
-- [ ] Dismissals become finding feedback in `vee rules candidates`
+- [x] Dismissals become finding feedback in `vee rules candidates`
 - [x] Commands on GitLab, through a webhook that starts a pipeline
 
 ### 7. Learn from PR feedback automatically (S–M)
 
-- [ ] Reactions, resolved threads, and fix commits that touch a flagged line become weak labels, kept apart from explicit labels
-- [ ] Weak labels shown with their provenance in `vee rules candidates`
-- [ ] Rules still need a person's approval, and weak labels never affect the gate
-- [ ] Export learned guidance as a pull request to `REVIEW.md` or `AGENTS.md`
-- [ ] Retire noisy rules automatically: a rule whose findings are dismissed above a threshold is suspended, with an audit entry and a way to restore it
+- [x] Reactions, resolved threads, and fix commits that touch a flagged line become weak labels, kept apart from explicit labels
+- [x] Weak labels shown with their provenance in `vee rules candidates`
+- [x] Rules still need a person's approval, and weak labels never affect the gate
+- [x] Export learned guidance as a pull request to `REVIEW.md` or `AGENTS.md`
+- [x] Retire noisy rules automatically: a rule whose findings are dismissed above a threshold is suspended, with an audit entry and a way to restore it
+
+Weak labels come from dismissals, thumbs-up and thumbs-down, and findings no
+longer reported at merge. A thread a person resolved is not yet read, and the
+export writes the file for a person to commit rather than opening a pull
+request itself ([ADR 0031](adr/0031-learning-from-pull-request-feedback.md)).
 
 ### 8. Committable suggestions (S)
 

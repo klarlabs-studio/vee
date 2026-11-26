@@ -1687,6 +1687,38 @@ impl PullRequestConversationProvider for GitHubAdapter {
         self.reconcile_resolution(pull_request, numeric_id(comment_id)?, resolved)?;
         Ok(())
     }
+
+    fn reactions(
+        &self,
+        pull_request: &PullRequestRef,
+        comment_id: &str,
+    ) -> Result<Vec<crate::conversation::Reaction>, HostingError> {
+        let mut url = self.repository_path(
+            pull_request,
+            &format!("/pulls/comments/{}/reactions", numeric_id(comment_id)?),
+        )?;
+        url.query_pairs_mut().append_pair("per_page", "100");
+        let answer = self.get_json(url)?;
+        Ok(answer
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|reaction| {
+                let positive = match reaction.get("content")?.as_str()? {
+                    "+1" => true,
+                    "-1" => false,
+                    _ => return None,
+                };
+                let user = reaction.get("user")?;
+                Some(crate::conversation::Reaction {
+                    author: user.get("login")?.as_str()?.to_owned(),
+                    author_is_bot: user.get("type").and_then(serde_json::Value::as_str)
+                        == Some("Bot"),
+                    positive,
+                })
+            })
+            .collect())
+    }
 }
 
 #[cfg(test)]

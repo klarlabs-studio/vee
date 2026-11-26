@@ -136,6 +136,8 @@ fn candidate(id: &str, suggestion: &str) -> RuleCandidate {
 #[test]
 fn rule_candidates_view_shows_candidates_full_suggestions_and_approval_step() {
     let report = CandidateReport {
+        weak_candidates: vec![],
+        pull_requests: None,
         schema_version: 3,
         candidates: vec![candidate(
             "cand_1",
@@ -179,6 +181,8 @@ fn rule_candidates_view_shows_candidates_full_suggestions_and_approval_step() {
 #[test]
 fn rule_candidates_view_says_when_nothing_qualifies() {
     let report = CandidateReport {
+        weak_candidates: vec![],
+        pull_requests: None,
         schema_version: 3,
         candidates: vec![],
         disputed_findings_excluded: 0,
@@ -197,6 +201,41 @@ fn rule_candidates_view_says_when_nothing_qualifies() {
         "{text}"
     );
     assert!(!text.contains("→"), "{text}");
+}
+
+#[test]
+fn rule_candidates_view_shows_pull_request_signals_apart() {
+    let mut weak_labels = std::collections::BTreeMap::new();
+    weak_labels.insert("dismissed".to_owned(), 6);
+    weak_labels.insert("thumbs_up".to_owned(), 2);
+    let report = CandidateReport {
+        schema_version: 3,
+        candidates: vec![],
+        weak_candidates: vec![],
+        pull_requests: Some(
+            vee_application::rule_candidates::PullRequestFeedbackSummary {
+                repository: "acme/app".into(),
+                pull_requests_read: 40,
+                weak_labels,
+                disputed_findings_excluded: 1,
+            },
+        ),
+        disputed_findings_excluded: 0,
+        disputed_external_comments_excluded: 0,
+        feedback_without_saved_finding: 0,
+        truncated: false,
+        limitations: vec![],
+    };
+    let text = text(&report);
+    assert!(
+        text.contains("Weak candidates from pull requests (0)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("40 closed pull requests of acme/app"),
+        "{text}"
+    );
+    assert!(text.contains("6 dismissed, 2 thumbs up"), "{text}");
 }
 
 fn window(

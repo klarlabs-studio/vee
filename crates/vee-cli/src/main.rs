@@ -485,10 +485,56 @@ enum ReposCommand {
         output: Output,
     },
 }
+/// Read pull requests for weak labels (ADR 0031).
+#[derive(clap::Args, Clone, Debug)]
+struct PullRequestFeedbackArgs {
+    /// Also read the closed pull requests of this repository (OWNER/REPO, or
+    /// a GitLab project path) for dismissals, fixes and reactions.
+    #[arg(long = "pull-requests", value_name = "OWNER/REPO")]
+    repository: Option<String>,
+    /// Hosting provider of --pull-requests: `github` or `gitlab`.
+    #[arg(long = "pull-requests-provider", default_value = "github", value_parser = ["github", "gitlab"])]
+    provider: String,
+    /// API base URL, for example https://gitlab.example.com/api/v4/.
+    #[arg(
+        long = "pull-requests-api-base",
+        default_value = "https://api.github.com/"
+    )]
+    api_base: String,
+    /// Environment variable holding the hosting token.
+    #[arg(long = "pull-requests-token-env", default_value = "GH_TOKEN")]
+    token_env: String,
+    /// The account Vee publishes as (default: github-actions[bot], or the
+    /// GitLab token's user).
+    #[arg(long = "pull-requests-actor-login")]
+    actor_login: Option<String>,
+    /// Closed pull requests to read, newest first.
+    #[arg(long = "pull-requests-limit", default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=1000))]
+    limit: u16,
+}
+
+impl PullRequestFeedbackArgs {
+    fn source(&self) -> Option<operations::PullRequestSource> {
+        self.repository
+            .clone()
+            .map(|repository| operations::PullRequestSource {
+                provider: self.provider.clone(),
+                repository,
+                api_base: self.api_base.clone(),
+                token_env: self.token_env.clone(),
+                actor_login: self.actor_login.clone(),
+                limit: usize::from(self.limit),
+            })
+    }
+}
+
 #[derive(Subcommand)]
 enum RulesCommand {
-    /// List rule candidates mined from repeated human feedback.
+    /// List rule candidates mined from repeated human feedback, and with
+    /// --pull-requests, weak candidates from what people did on pull requests.
     Candidates {
+        #[command(flatten)]
+        pull_requests: PullRequestFeedbackArgs,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
@@ -518,6 +564,9 @@ enum RulesCommand {
         /// Expire the approval after this many days (1 to 3650).
         #[arg(long)]
         expires_in_days: Option<u32>,
+        /// For a weak candidate: the pull requests it was mined from.
+        #[command(flatten)]
+        pull_requests: PullRequestFeedbackArgs,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
@@ -538,6 +587,30 @@ enum RulesCommand {
         /// Why the approval is being revoked.
         #[arg(long)]
         reason: String,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
+    /// Put a rule Vee suspended back in effect.
+    Restore {
+        /// Approval ID to restore.
+        approval_id: String,
+        /// Name of the person restoring the approval.
+        #[arg(long)]
+        actor: String,
+        /// Why the rule should apply again.
+        #[arg(long)]
+        reason: String,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
+    /// Print the approved rules as a Markdown section, or write them into a
+    /// standards file such as REVIEW.md or AGENTS.md.
+    Export {
+        /// Repository Markdown file whose rules section to replace or add.
+        #[arg(long, value_name = "FILE")]
+        write: Option<String>,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
@@ -2305,10 +2378,14 @@ fn run() -> Result<u8> {
             Ok(0)
         }
         Command::Rules { command } => match command {
-            RulesCommand::Candidates { output } => {
-                let report = operations::rule_candidates(&operations::Workspace::discover(
-                    crate::local_stores(),
-                )?)?;
+            RulesCommand::Candidates {
+                pull_requests,
+                output,
+            } => {
+                let report = operations::rule_candidates_from(
+                    &operations::Workspace::discover(crate::local_stores())?,
+                    pull_requests.source().as_ref(),
+                )?;
                 match output {
                     Output::Json => emit_json(&report)?,
                     Output::Text => print_view(&report)?,
@@ -2324,6 +2401,7 @@ fn run() -> Result<u8> {
                 reason,
                 supersedes,
                 expires_in_days,
+                pull_requests,
                 output,
             } => {
                 let result = operations::approve_rule(
@@ -2337,6 +2415,7 @@ fn run() -> Result<u8> {
                         reason,
                         supersedes_approval_id: supersedes,
                         expires_in_days,
+                        pull_requests: pull_requests.source(),
                     },
                 )?;
                 match output {
@@ -2370,6 +2449,40 @@ fn run() -> Result<u8> {
                 match output {
                     Output::Json => emit_json(&result)?,
                     Output::Text => print_view(&result)?,
+                }
+                Ok(0)
+            }
+            RulesCommand::Restore {
+                approval_id,
+                actor,
+                reason,
+                output,
+            } => {
+                let result = operations::restore_rule(
+                    &operations::Workspace::discover(crate::local_stores())?,
+                    &approval_id,
+                    &actor,
+                    &reason,
+                )?;
+                match output {
+                    Output::Json => emit_json(&result)?,
+                    Output::Text => print_view(&result)?,
+                }
+                Ok(0)
+            }
+            RulesCommand::Export { write, output } => {
+                let result = operations::export_rules(
+                    &operations::Workspace::discover(crate::local_stores())?,
+                    write.as_deref(),
+                )?;
+                match output {
+                    Output::Json => emit_json(&result)?,
+                    Output::Text if result.path.is_none() => print!("{}", result.content),
+                    Output::Text => println!(
+                        "Wrote {} approved rule(s) to {}. Commit it to share them.",
+                        result.rules,
+                        result.path.as_deref().unwrap_or_default()
+                    ),
                 }
                 Ok(0)
             }
