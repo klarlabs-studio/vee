@@ -49,6 +49,25 @@ impl RepositoryPermission {
     }
 }
 
+/// A closed pull request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClosedPullRequest {
+    pub number: u64,
+    pub merged: bool,
+    /// The head when it was closed.
+    pub head_oid: String,
+}
+
+/// A review on a pull request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullRequestReview {
+    pub author: String,
+    pub author_is_bot: bool,
+    /// `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED` or `DISMISSED`.
+    pub state: String,
+    pub commit_id: String,
+}
+
 /// An approving review that still stands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Approval {
@@ -139,6 +158,18 @@ pub trait PullRequestConversationProvider: Send + Sync {
         prefix: &str,
         wanted: &[String],
     ) -> Result<(), HostingError>;
+    /// The repository's most recently updated closed pull requests, newest
+    /// first, at most `limit`.
+    fn closed_pull_requests(
+        &self,
+        repository: &crate::RepositoryRef,
+        limit: usize,
+    ) -> Result<Vec<ClosedPullRequest>, HostingError>;
+    /// Every review on the pull request, oldest first.
+    fn reviews(
+        &self,
+        pull_request: &PullRequestRef,
+    ) -> Result<Vec<PullRequestReview>, HostingError>;
     /// The approving reviews `login` gave on the pull request that still stand.
     fn approvals(
         &self,
