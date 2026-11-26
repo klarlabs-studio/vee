@@ -125,6 +125,21 @@ pub struct ReviewerOutcome {
     /// provider did not report them; Vee does not estimate usage or cost.
     #[serde(default)]
     pub usage: Option<vee_core::ProviderUsage>,
+    /// Why the reviewer did not return findings, shortened, when it failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// The longest failure detail kept on a reviewer outcome.
+pub(crate) const MAX_OUTCOME_DETAIL_CHARS: usize = 500;
+
+/// A failure message on one line, at most [`MAX_OUTCOME_DETAIL_CHARS`].
+pub(crate) fn outcome_detail(error: &str) -> String {
+    let line = error.split_whitespace().collect::<Vec<_>>().join(" ");
+    match line.char_indices().nth(MAX_OUTCOME_DETAIL_CHARS) {
+        Some((end, _)) => format!("{}…", &line[..end]),
+        None => line,
+    }
 }
 
 /// Outcome statuses of a reviewer whose provider returned valid findings: a
@@ -569,6 +584,7 @@ pub fn run_review_with_provider_and_selection_context(
                 reviewer,
             ));
             reviewer_outcomes[index] = Some(ReviewerOutcome {
+                detail: None,
                 reviewer_id: reviewer_id.to_string(),
                 provider_id: reviewer.provider.clone(),
                 provider_kind: provider.kind,
@@ -878,6 +894,7 @@ pub fn run_review_with_provider_and_selection_context(
                 }
                 complete = false;
                 reviewer_outcomes[index] = Some(ReviewerOutcome {
+                    detail: None,
                     reviewer_id: reviewer_id.to_string(),
                     provider_id: reviewer.provider.clone(),
                     provider_kind: provider.kind,
@@ -942,6 +959,7 @@ pub fn run_review_with_provider_and_selection_context(
         {
             complete = false;
             reviewer_outcomes[index] = Some(ReviewerOutcome {
+                detail: None,
                 reviewer_id: reviewer_id.to_string(),
                 provider_id: reviewer.provider.clone(),
                 provider_kind: provider.kind,
@@ -1075,6 +1093,7 @@ pub fn run_review_with_provider_and_selection_context(
                             );
                             complete = false;
                             reviewer_outcomes[reviewer.index] = Some(ReviewerOutcome {
+                                detail: None,
                                 reviewer_id: reviewer.reviewer_id.clone(),
                                 provider_id: reviewer.provider_id.clone(),
                                 provider_kind: reviewer.provider_kind,
@@ -1112,6 +1131,7 @@ pub fn run_review_with_provider_and_selection_context(
                             continue;
                         }
                         reviewer_outcomes[reviewer.index] = Some(ReviewerOutcome {
+                            detail: None,
                             reviewer_id: reviewer.reviewer_id.clone(),
                             provider_id: reviewer.provider_id.clone(),
                             provider_kind: reviewer.provider_kind,
@@ -1135,6 +1155,7 @@ pub fn run_review_with_provider_and_selection_context(
                         );
                         complete = false;
                         reviewer_outcomes[reviewer.index] = Some(ReviewerOutcome {
+                            detail: Some(outcome_detail(&error.to_string())),
                             reviewer_id: reviewer.reviewer_id.clone(),
                             provider_id: reviewer.provider_id.clone(),
                             provider_kind: reviewer.provider_kind,
@@ -1154,6 +1175,7 @@ pub fn run_review_with_provider_and_selection_context(
                     reviewer.reviewer_id, reviewer.provider_id
                 );
                 reviewer_outcomes[reviewer.index] = Some(ReviewerOutcome {
+                    detail: Some(outcome_detail(&error.to_string())),
                     reviewer_id: reviewer.reviewer_id.clone(),
                     provider_id: reviewer.provider_id.clone(),
                     provider_kind: reviewer.provider_kind,
@@ -1213,6 +1235,7 @@ pub fn run_review_with_provider_and_selection_context(
         Err(error) => {
             complete = false;
             reviewer_outcomes.push(ReviewerOutcome {
+                detail: None,
                 reviewer_id: "vee.source_evidence".into(),
                 provider_id: "vee".into(),
                 provider_kind: vee_core::ProviderKind::Cli,
@@ -1251,6 +1274,7 @@ pub fn run_review_with_provider_and_selection_context(
     if !invalid_source_locations.is_empty() {
         complete = false;
         reviewer_outcomes.push(ReviewerOutcome {
+            detail: None,
             reviewer_id: "vee.source_evidence".into(),
             provider_id: "vee".into(),
             provider_kind: vee_core::ProviderKind::Cli,
@@ -1269,6 +1293,7 @@ pub fn run_review_with_provider_and_selection_context(
         Ok(_) => {
             complete = false;
             reviewer_outcomes.push(ReviewerOutcome {
+                detail: None,
                 reviewer_id: "vee.snapshot_consistency".into(),
                 provider_id: "vee".into(),
                 provider_kind: vee_core::ProviderKind::Cli,
@@ -1283,6 +1308,7 @@ pub fn run_review_with_provider_and_selection_context(
             complete = false;
             eprintln!("vee: could not revalidate source snapshot after review: {error}");
             reviewer_outcomes.push(ReviewerOutcome {
+                detail: None,
                 reviewer_id: "vee.snapshot_consistency".into(),
                 provider_id: "vee".into(),
                 provider_kind: vee_core::ProviderKind::Cli,
@@ -1316,6 +1342,7 @@ pub fn run_review_with_provider_and_selection_context(
         Ok(_) => {
             complete = false;
             reviewer_outcomes.push(ReviewerOutcome {
+                detail: None,
                 reviewer_id: "vee.configuration_consistency".into(),
                 provider_id: "vee".into(),
                 provider_kind: vee_core::ProviderKind::Cli,
@@ -1330,6 +1357,7 @@ pub fn run_review_with_provider_and_selection_context(
             complete = false;
             eprintln!("vee: could not revalidate review configuration after review: {error}");
             reviewer_outcomes.push(ReviewerOutcome {
+                detail: None,
                 reviewer_id: "vee.configuration_consistency".into(),
                 provider_id: "vee".into(),
                 provider_kind: vee_core::ProviderKind::Cli,

@@ -192,6 +192,7 @@ fn passing_review() -> ReviewResult {
         evidence: vec![],
         verification_runs: vec![],
         reviewer_outcomes: vec![ReviewerOutcome {
+            detail: None,
             reviewer_id: "correctness".into(),
             provider_id: "local".into(),
             provider_kind: vee_core::ProviderKind::OllamaNative,

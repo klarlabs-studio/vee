@@ -620,6 +620,7 @@ mod next_action_tests {
 
     fn outcome(reviewer: &str, status: &str) -> crate::ReviewerOutcome {
         crate::ReviewerOutcome {
+            detail: None,
             reviewer_id: reviewer.into(),
             provider_id: "provider".into(),
             provider_kind: Default::default(),

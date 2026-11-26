@@ -1514,3 +1514,29 @@ fn the_cache_key_covers_the_prompt_the_adapters_add() {
     assert!(digest.starts_with("sha256:"), "{digest}");
     assert_eq!(digest, crate::providers::adapter_prompt_digest());
 }
+
+#[test]
+fn a_claude_error_envelope_keeps_its_reason() {
+    use crate::providers::claude_error_reason;
+    assert_eq!(
+        claude_error_reason(&serde_json::json!({"is_error": false, "result": "ok"})),
+        None
+    );
+    assert_eq!(
+        claude_error_reason(&serde_json::json!({
+            "is_error": true, "subtype": "error_during_execution", "result": "Prompt is too long"
+        }))
+        .as_deref(),
+        Some("error_during_execution: Prompt is too long")
+    );
+    assert_eq!(
+        claude_error_reason(&serde_json::json!({"is_error": true})).as_deref(),
+        Some("no reason given")
+    );
+    assert_eq!(
+        crate::review::outcome_detail(&format!("line one\n  line two {}", "x".repeat(600)))
+            .chars()
+            .count(),
+        crate::review::MAX_OUTCOME_DETAIL_CHARS + 1
+    );
+}
