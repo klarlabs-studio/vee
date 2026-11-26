@@ -72,9 +72,10 @@ would have approved.
 - [x] Record each would-have-approved verdict next to the outcome: merged unchanged, changes requested, or closed (`vee ci approvals`)
 - [ ] Detect merges that were reverted
 - [x] Agreement and override rates, with their denominator (`vee ci approvals`)
-- [ ] Rate limits on automatic approvals
+- [x] Rate limits on automatic approvals: `approval.max_per_day` ([ADR 0026](adr/0026-owner-guards-and-a-daily-limit-for-approvals.md))
 - [ ] Close the remaining items of [ADR 0015](adr/0015-layered-approval-eligibility.md)
-- [ ] Code ownership in approval: require the owners of touched paths, or keep changes to some owners' paths for a person
+- [x] Code ownership in approval: `approval.never_owners` keeps changes to some owners' paths for a person
+- [ ] Require approval from the owners of touched paths
 
 ### 5. A PR steward on the user's own agent (M–L)
 
