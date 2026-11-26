@@ -47,9 +47,10 @@ still has the context.
 The gate decision is published as a check, but the approval verdict and the
 risk tier are only visible locally or in that check's text.
 
-- [ ] Publish an eligible approval as the host's own approval: an approving review on GitHub, an approval on GitLab and Bitbucket, a vote on Azure DevOps, a label vote on Gerrit
-- [ ] Risk-tier and gate labels on the pull request, so teams can filter and route by them
-- [ ] Withdraw both when a new push makes the review stale
+- [x] Publish an eligible approval as an approving review on GitHub ([ADR 0024](adr/0024-approval-and-risk-on-the-pull-request.md))
+- [ ] The same on GitLab and Bitbucket (an approval), Azure DevOps (a vote) and Gerrit (a label vote)
+- [x] Risk-tier and gate labels on GitHub pull requests, so teams can filter and route by them
+- [x] Withdraw both when a new push makes the review stale
 
 ### 3. Incremental review after a push (M)
 

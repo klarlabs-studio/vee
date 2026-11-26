@@ -37,6 +37,10 @@ change configuration and output contracts.
   to revert it ([ADR 0023](docs/adr/0023-fixes-from-pull-request-comments.md)).
   The workflow `vee init --ci github` writes gives the comment job
   `contents: write`.
+- `vee ci run --labels` keeps `vee:gate:*` and `vee:risk:*` labels on GitHub
+  pull requests. `--approve` approves an eligible head and withdraws Vee's
+  approvals that a push or a later review made stale
+  ([ADR 0024](docs/adr/0024-approval-and-risk-on-the-pull-request.md)).
 
 ## 0.1.0 — 2026-11-25
 
