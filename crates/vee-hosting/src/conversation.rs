@@ -111,6 +111,13 @@ pub trait PullRequestConversationProvider: Send + Sync {
         target: &ReplyTarget,
         body: &str,
     ) -> Result<String, HostingError>;
+    /// Replace the body of a comment in the main conversation.
+    fn edit_comment(
+        &self,
+        pull_request: &PullRequestRef,
+        comment_id: &str,
+        body: &str,
+    ) -> Result<(), HostingError>;
     /// Resolve or reopen the review thread that starts with `comment_id`.
     fn set_thread_resolved(
         &self,
