@@ -143,6 +143,21 @@
         "never_paths": { "type": "array", "maxItems": 256, "items": { "type": "string", "minLength": 1, "maxLength": 512 }, "description": "Changes touching these paths (globs) always need a human." },
         "never_authors": { "type": "array", "maxItems": 256, "items": { "type": "string", "minLength": 1, "maxLength": 512 }, "description": "Changes with a commit by an author whose name or email matches (globs) always need a human." },
         "never_owners": { "type": "array", "maxItems": 256, "items": { "type": "string", "minLength": 1, "maxLength": 512 }, "description": "Changes to a file that CODEOWNERS on the base assigns to any of these owners (@org/team, @user or an email) always need a human." },
+        "conditions": {
+          "type": "array",
+          "maxItems": 20,
+          "description": "Natural-language conditions a reviewer's model checks for each change; when one holds, a person must approve. They never pass or block the gate (ADR 0035).",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "when"],
+            "properties": {
+              "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+              "when": { "type": "string", "minLength": 1, "maxLength": 500, "description": "Completes \"the change …\", such as \"changes the authentication flow\"." }
+            }
+          }
+        },
+        "condition_reviewer": { "type": "string", "minLength": 1, "description": "The reviewer whose model classifies the conditions; the review's first reviewer when unset." },
         "require_owner_approval": { "type": "boolean", "default": false, "description": "Approve only once, for every changed file CODEOWNERS on the base assigns, one of its owners has approved the current head; owners that are teams are checked for membership, and email owners cannot be matched (ADR 0034)." },
         "max_per_day": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "At most this many approvals by Vee in any 24 hours, in enforce mode (GitHub)." },
         "max_risk": { "enum": ["low", "elevated"], "default": "low", "description": "Highest change-risk tier still eligible." },

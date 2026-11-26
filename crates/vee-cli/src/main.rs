@@ -1445,6 +1445,17 @@ enum GateCommand {
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
+    /// Classify a saved review's change against `approval.conditions` with a
+    /// reviewer's model, or show the stored classification. Conditions only
+    /// decide whether a person approves; they never change the gate.
+    Conditions {
+        /// Saved review ID.
+        #[arg(long)]
+        review: String,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
     /// List persisted gate decisions for a saved review.
     History {
         /// Saved review ID.
@@ -2923,6 +2934,43 @@ fn run() -> Result<u8> {
                 }
                 // Like `gate check`, a non-zero exit lets scripts branch on it.
                 Ok(if approval.eligible { 0 } else { 1 })
+            }
+            GateCommand::Conditions { review, output } => {
+                let classification = operations::classify_conditions(
+                    &operations::Workspace::discover(crate::local_stores())?,
+                    &review,
+                )?;
+                match output {
+                    Output::Json => emit_json(&classification)?,
+                    Output::Text => {
+                        for result in &classification.results {
+                            println!(
+                                "{} {}: {}",
+                                if result.holds { "holds" } else { "clear" },
+                                result.id,
+                                result.evidence
+                            );
+                        }
+                        println!(
+                            "Classified by {}{}; output {}.",
+                            classification.reviewer_id,
+                            classification
+                                .model
+                                .as_deref()
+                                .map(|model| format!(" on {model}"))
+                                .unwrap_or_default(),
+                            classification.output_digest
+                        );
+                    }
+                }
+                // Like `gate approval`: non-zero when a person must approve.
+                Ok(
+                    if classification.results.iter().any(|result| result.holds) {
+                        1
+                    } else {
+                        0
+                    },
+                )
             }
             GateCommand::History { review, output } => {
                 let history = operations::gate_history(

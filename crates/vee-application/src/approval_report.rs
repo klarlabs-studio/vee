@@ -210,6 +210,7 @@ mod tests {
 
     fn verdict(head: &str, eligible: bool) -> ApprovalVerdict {
         ApprovalVerdict {
+            conditions: None,
             head_oid: head.into(),
             review_id: "r".into(),
             eligible,

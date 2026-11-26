@@ -71,6 +71,10 @@ pub struct ApprovalVerdict {
     /// The approval stages that failed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_stages: Vec<String>,
+    /// The approval-condition classification this verdict used, so a later
+    /// run on the same head replays it instead of asking again (ADR 0035).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conditions: Option<crate::conditions::ConditionClassification>,
 }
 
 /// `earlier` with `verdict` appended, replacing a verdict on the same head,
@@ -304,6 +308,7 @@ mod tests {
     #[test]
     fn a_verdict_replaces_one_on_the_same_head_and_history_is_bounded() {
         let verdict = |head: &str, eligible: bool| ApprovalVerdict {
+            conditions: None,
             head_oid: head.into(),
             review_id: "r".into(),
             eligible,
