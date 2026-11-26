@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vee.klarlabs.de/schemas/rules-export-v1.schema.json",
+  "title": "Vee approved rules export v1",
+  "description": "`vee rules export --output json`: the active approved rules as a Markdown section, and the file it was written to (ADR 0031).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "rules", "content"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "rules": { "type": "integer", "minimum": 0, "description": "Active approved rules in the section." },
+    "path": { "type": "string", "description": "The repository file written, when --write was given." },
+    "content": { "type": "string", "description": "The section, or with --write the whole file as written." }
+  }
+}

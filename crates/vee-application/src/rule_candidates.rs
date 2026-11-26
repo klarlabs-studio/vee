@@ -11,11 +11,28 @@ const MAX_REASON_CHARS: usize = 500;
 pub struct CandidateReport {
     pub schema_version: u32,
     pub candidates: Vec<RuleCandidate>,
+    /// Candidates from weak labels on pull requests, kept apart from those
+    /// from explicit feedback (ADR 0031).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub weak_candidates: Vec<RuleCandidate>,
+    /// What was read from pull requests, when they were a source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_requests: Option<PullRequestFeedbackSummary>,
     pub disputed_findings_excluded: usize,
     pub disputed_external_comments_excluded: usize,
     pub feedback_without_saved_finding: usize,
     pub truncated: bool,
     pub limitations: Vec<String>,
+}
+
+/// The weak labels read from pull requests.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PullRequestFeedbackSummary {
+    pub repository: String,
+    pub pull_requests_read: usize,
+    /// Weak labels by signal: `dismissed`, `fixed`, `thumbs_up`, `thumbs_down`.
+    pub weak_labels: BTreeMap<String, usize>,
+    pub disputed_findings_excluded: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -197,6 +214,8 @@ pub fn mine(
 
     CandidateReport {
         schema_version: 3,
+        weak_candidates: Vec::new(),
+        pull_requests: None,
         candidates,
         disputed_findings_excluded: disputed.len(),
         disputed_external_comments_excluded: 0,

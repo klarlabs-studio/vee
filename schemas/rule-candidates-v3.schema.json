@@ -4,30 +4,99 @@
   "title": "Vee Review Rule Candidates v3",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "candidates", "disputed_findings_excluded", "disputed_external_comments_excluded", "feedback_without_saved_finding", "truncated", "limitations"],
+  "required": [
+    "schema_version",
+    "candidates",
+    "disputed_findings_excluded",
+    "disputed_external_comments_excluded",
+    "feedback_without_saved_finding",
+    "truncated",
+    "limitations"
+  ],
   "properties": {
-    "schema_version": { "const": 3 },
-    "disputed_findings_excluded": { "type": "integer", "minimum": 0 },
-    "disputed_external_comments_excluded": { "type": "integer", "minimum": 0 },
-    "feedback_without_saved_finding": { "type": "integer", "minimum": 0 },
-    "truncated": { "type": "boolean" },
-    "limitations": { "type": "array", "items": { "type": "string" } },
+    "schema_version": {
+      "const": 3
+    },
+    "disputed_findings_excluded": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "disputed_external_comments_excluded": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "feedback_without_saved_finding": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "truncated": {
+      "type": "boolean"
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "candidates": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["candidate_id", "source_kind", "category", "feedback_label", "feedback_count", "feedback_event_count", "evidence_digest", "suggestion", "feedback", "approval_status"],
+        "required": [
+          "candidate_id",
+          "source_kind",
+          "category",
+          "feedback_label",
+          "feedback_count",
+          "feedback_event_count",
+          "evidence_digest",
+          "suggestion",
+          "feedback",
+          "approval_status"
+        ],
         "properties": {
-          "candidate_id": { "type": "string", "pattern": "^rule-candidate:[0-9a-f]{32}$" },
-          "source_kind": { "enum": ["finding_feedback", "provider_discussions"] },
-          "category": { "type": "string", "minLength": 1 },
-          "feedback_label": { "enum": ["confirmed", "false_positive", "actionable", "not_actionable"] },
-          "feedback_count": { "type": "integer", "minimum": 3 },
-          "feedback_event_count": { "type": "integer", "minimum": 3 },
-          "evidence_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
-          "suggestion": { "type": "string" },
-          "approval_status": { "const": "requires_human_review" },
+          "candidate_id": {
+            "type": "string",
+            "pattern": "^rule-candidate:[0-9a-f]{32}$"
+          },
+          "source_kind": {
+            "enum": [
+              "finding_feedback",
+              "provider_discussions",
+              "pull_request_feedback"
+            ]
+          },
+          "category": {
+            "type": "string",
+            "minLength": 1
+          },
+          "feedback_label": {
+            "enum": [
+              "confirmed",
+              "false_positive",
+              "actionable",
+              "not_actionable"
+            ]
+          },
+          "feedback_count": {
+            "type": "integer",
+            "minimum": 3
+          },
+          "feedback_event_count": {
+            "type": "integer",
+            "minimum": 3
+          },
+          "evidence_digest": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "suggestion": {
+            "type": "string"
+          },
+          "approval_status": {
+            "const": "requires_human_review"
+          },
           "feedback": {
             "type": "array",
             "maxItems": 5,
@@ -36,34 +105,191 @@
               "oneOf": [
                 {
                   "additionalProperties": false,
-                  "required": ["source_kind", "finding_id", "snapshot_id", "reviewer", "reason"],
+                  "required": [
+                    "source_kind",
+                    "finding_id",
+                    "snapshot_id",
+                    "reviewer",
+                    "reason"
+                  ],
                   "properties": {
-                    "source_kind": { "const": "finding_feedback" },
-                    "finding_id": { "type": "string" },
-                    "snapshot_id": { "type": "string" },
-                    "reviewer": { "type": "string" },
-                    "reason": { "type": "string", "maxLength": 501 }
+                    "source_kind": {
+                      "const": "finding_feedback"
+                    },
+                    "finding_id": {
+                      "type": "string"
+                    },
+                    "snapshot_id": {
+                      "type": "string"
+                    },
+                    "reviewer": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string",
+                      "maxLength": 501
+                    }
                   },
-                  "not": { "anyOf": [{"required":["external_comment_id"]},{"required":["archive_digest"]},{"required":["provider"]},{"required":["pull_request"]}] }
+                  "not": {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "external_comment_id"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "archive_digest"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "provider"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "pull_request"
+                        ]
+                      }
+                    ]
+                  }
                 },
                 {
                   "additionalProperties": false,
-                  "required": ["source_kind", "external_comment_id", "archive_digest", "provider", "pull_request", "snapshot_id", "reviewer", "reason"],
+                  "required": [
+                    "source_kind",
+                    "external_comment_id",
+                    "archive_digest",
+                    "provider",
+                    "pull_request",
+                    "snapshot_id",
+                    "reviewer",
+                    "reason"
+                  ],
                   "properties": {
-                    "source_kind": { "const": "provider_comment_feedback" },
-                    "external_comment_id": { "type": "string" },
-                    "archive_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
-                    "provider": { "type": "string" },
-                    "pull_request": { "type": "object" },
-                    "snapshot_id": { "type": "string" },
-                    "reviewer": { "type": "string" },
-                    "reason": { "type": "string", "maxLength": 501 }
+                    "source_kind": {
+                      "const": "provider_comment_feedback"
+                    },
+                    "external_comment_id": {
+                      "type": "string"
+                    },
+                    "archive_digest": {
+                      "type": "string",
+                      "pattern": "^sha256:[a-f0-9]{64}$"
+                    },
+                    "provider": {
+                      "type": "string"
+                    },
+                    "pull_request": {
+                      "type": "object"
+                    },
+                    "snapshot_id": {
+                      "type": "string"
+                    },
+                    "reviewer": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string",
+                      "maxLength": 501
+                    }
                   },
-                  "not": { "required": ["finding_id"] }
+                  "not": {
+                    "required": [
+                      "finding_id"
+                    ]
+                  }
+                },
+                {
+                  "additionalProperties": false,
+                  "required": [
+                    "source_kind",
+                    "finding_id",
+                    "external_comment_id",
+                    "pull_request",
+                    "snapshot_id",
+                    "reviewer",
+                    "reason"
+                  ],
+                  "properties": {
+                    "source_kind": {
+                      "enum": [
+                        "dismissed",
+                        "fixed",
+                        "thumbs_up",
+                        "thumbs_down"
+                      ],
+                      "description": "What a person did on the pull request (ADR 0031)."
+                    },
+                    "finding_id": {
+                      "type": "string"
+                    },
+                    "external_comment_id": {
+                      "type": "string",
+                      "description": "The finding thread's first comment."
+                    },
+                    "pull_request": {
+                      "type": "object"
+                    },
+                    "snapshot_id": {
+                      "type": "string"
+                    },
+                    "reviewer": {
+                      "type": "string",
+                      "description": "Who gave the signal; empty for fixed."
+                    },
+                    "reason": {
+                      "type": "string",
+                      "maxLength": 501
+                    }
+                  }
                 }
               ]
             }
           }
+        }
+      }
+    },
+    "weak_candidates": {
+      "description": "Candidates from weak labels on pull requests, kept apart from explicit feedback (ADR 0031).",
+      "$ref": "#/properties/candidates"
+    },
+    "pull_requests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "pull_requests_read",
+        "weak_labels",
+        "disputed_findings_excluded"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string"
+        },
+        "pull_requests_read": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "weak_labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "propertyNames": {
+            "enum": [
+              "dismissed",
+              "fixed",
+              "thumbs_up",
+              "thumbs_down"
+            ]
+          }
+        },
+        "disputed_findings_excluded": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     }

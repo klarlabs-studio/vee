@@ -240,7 +240,7 @@ pub struct Acknowledgement {
 }
 
 impl Acknowledgement {
-    fn marker(&self) -> String {
+    pub(crate) fn marker(&self) -> String {
         format!(
             "{ACK_MARKER}{} -->",
             serde_json::to_string(self).expect("acknowledgements serialize")

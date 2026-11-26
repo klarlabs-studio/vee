@@ -7,7 +7,8 @@
 use super::{GitLabAdapter, MAX_API_RESPONSE_BYTES};
 use crate::conversation::{
     Approval, ConversationComment, ConversationKind, PullRequestConversationProvider,
-    PullRequestOrigin, PullRequestReview, PullRequestSummary, ReplyTarget, RepositoryPermission,
+    PullRequestOrigin, PullRequestReview, PullRequestSummary, Reaction, ReplyTarget,
+    RepositoryPermission,
 };
 use crate::{HostingError, PullRequestRef, RepositoryRef};
 use reqwest::{Method, Url};
@@ -655,6 +656,34 @@ impl PullRequestConversationProvider for GitLabAdapter {
     ) -> Result<(), HostingError> {
         let (discussion, _) = split_comment_id(comment_id)?;
         self.set_discussion_resolved(pull_request, discussion, resolved)
+    }
+
+    fn reactions(
+        &self,
+        pull_request: &PullRequestRef,
+        comment_id: &str,
+    ) -> Result<Vec<Reaction>, HostingError> {
+        let (_, note) = split_comment_id(comment_id)?;
+        let awards = self.pages(
+            self.project_path(pull_request, &format!("/notes/{note}/award_emoji"))?,
+            PAGE_SIZE,
+            "listing GitLab award emoji",
+        )?;
+        Ok(awards
+            .iter()
+            .filter_map(|award| {
+                let positive = match text(award, "/name")? {
+                    "thumbsup" => true,
+                    "thumbsdown" => false,
+                    _ => return None,
+                };
+                Some(Reaction {
+                    author: text(award, "/user/username")?.to_owned(),
+                    author_is_bot: award.get("user").is_some_and(is_bot),
+                    positive,
+                })
+            })
+            .collect())
     }
 }
 

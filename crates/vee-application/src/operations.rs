@@ -855,8 +855,8 @@ pub fn record_finding_feedback(
 ) -> Result<FindingFeedback> {
     let reason = Reason::new(request.reason).map_err(usage_failure)?;
     let reviewer = ActorName::new("reviewer", request.reviewer).map_err(usage_failure)?;
-    workspace
-        .store()?
+    let mut store = workspace.store()?;
+    let feedback = store
         .add_finding_feedback(
             request.finding_id,
             request.snapshot_id,
@@ -864,7 +864,36 @@ pub fn record_finding_feedback(
             &reason,
             &reviewer,
         )
-        .map_err(anyhow::Error::msg)
+        .map_err(anyhow::Error::msg)?;
+    if matches!(
+        feedback.label,
+        FindingFeedbackLabel::FalsePositive | FindingFeedbackLabel::NotActionable
+    ) {
+        suspend_noisy_rules(&mut *store)?;
+    }
+    Ok(feedback)
+}
+
+/// Suspend the rules people keep rejecting, each with an audit event
+/// (ADR 0031). Returns the rules suspended.
+fn suspend_noisy_rules(store: &mut dyn Repositories) -> Result<Vec<crate::learning::NoisyRule>> {
+    let approvals = store.list_rule_approvals().map_err(anyhow::Error::msg)?;
+    if !approvals.iter().any(vee_core::RuleApproval::is_active) {
+        return Ok(Vec::new());
+    }
+    let (records, _) = store
+        .list_findings_page(None, None, None, RULE_MINING_FINDING_LIMIT, 0)
+        .map_err(anyhow::Error::msg)?;
+    let feedback = store.list_finding_feedback().map_err(anyhow::Error::msg)?;
+    let noisy = crate::learning::noisy_rules(&approvals, &records, &feedback);
+    let vee = ActorName::new("actor", "vee").map_err(anyhow::Error::msg)?;
+    for rule in &noisy {
+        let reason = Reason::new(&rule.reason()).map_err(anyhow::Error::msg)?;
+        store
+            .set_rule_approval_suspended(&rule.approval_id, true, &vee, &reason)
+            .map_err(anyhow::Error::msg)?;
+    }
+    Ok(noisy)
 }
 
 // ---------------------------------------------------------------------------
@@ -1664,8 +1693,92 @@ fn mine_candidates(
 }
 
 pub fn rule_candidates(workspace: &Workspace) -> Result<crate::rule_candidates::CandidateReport> {
+    rule_candidates_from(workspace, None)
+}
+
+/// Where to read pull request feedback from (ADR 0031).
+#[derive(Clone, Debug)]
+pub struct PullRequestSource {
+    /// `github` or `gitlab`.
+    pub provider: String,
+    /// OWNER/REPO, or the GitLab project path.
+    pub repository: String,
+    pub api_base: String,
+    pub token_env: String,
+    /// The account Vee publishes as; on GitLab, the token's user when unset.
+    pub actor_login: Option<String>,
+    /// Closed pull requests to read, newest first.
+    pub limit: usize,
+}
+
+/// Rule candidates from explicit feedback and, with `pull_requests`, weak
+/// candidates from what people did on pull requests.
+pub fn rule_candidates_from(
+    workspace: &Workspace,
+    pull_requests: Option<&PullRequestSource>,
+) -> Result<crate::rule_candidates::CandidateReport> {
     let store = workspace.existing_store()?;
-    mine_candidates(workspace, store.as_deref())
+    let mut report = mine_candidates(workspace, store.as_deref())?;
+    if let Some(source) = pull_requests {
+        add_pull_request_candidates(&mut report, source)?;
+    }
+    Ok(report)
+}
+
+fn add_pull_request_candidates(
+    report: &mut crate::rule_candidates::CandidateReport,
+    source: &PullRequestSource,
+) -> Result<()> {
+    let api_base = if source.api_base.ends_with('/') {
+        source.api_base.clone()
+    } else {
+        format!("{}/", source.api_base)
+    };
+    let api = url::Url::parse(&api_base)
+        .map_err(|_| usage_failure(format!("the API base is not a URL: {api_base}")))?;
+    let host = match api.host_str() {
+        Some("api.github.com") => "github.com".to_owned(),
+        Some(host) => host.to_owned(),
+        None => {
+            return Err(usage_failure(format!(
+                "the API base has no host: {api_base}"
+            )))
+        }
+    };
+    let actor_login = match &source.actor_login {
+        Some(login) => login.clone(),
+        None if source.provider == "github" => "github-actions[bot]".to_owned(),
+        None => crate::hosting::token_login(&source.provider, &api_base, &source.token_env)?
+            .unwrap_or_default(),
+    };
+    let provider = crate::hosting::conversation_provider(
+        &source.provider,
+        &api_base,
+        &source.token_env,
+        &actor_login,
+    )?;
+    let repository = vee_hosting::RepositoryRef {
+        host,
+        full_name: source.repository.clone(),
+    };
+    let feedback =
+        crate::pr_feedback::collect(&*provider, &repository, &actor_login, source.limit)?;
+    let (weak, disputed) = crate::pr_feedback::candidates(&feedback);
+    report.weak_candidates = weak;
+    report.pull_requests = Some(crate::rule_candidates::PullRequestFeedbackSummary {
+        repository: source.repository.clone(),
+        pull_requests_read: feedback.pull_requests_read,
+        weak_labels: feedback
+            .counts()
+            .into_iter()
+            .map(|(signal, count)| (signal.as_str().to_owned(), count))
+            .collect(),
+        disputed_findings_excluded: disputed,
+    });
+    report.limitations.push(
+        "Weak candidates come from pull requests: dismissals, findings no longer reported at merge, and thumbs-up or thumbs-down on Vee's threads. They need five distinct findings, never affect the gate, and need a person's approval like any candidate.".into(),
+    );
+    Ok(())
 }
 
 pub struct ApproveRuleRequest {
@@ -1677,6 +1790,8 @@ pub struct ApproveRuleRequest {
     pub reason: String,
     pub supersedes_approval_id: Option<String>,
     pub expires_in_days: Option<u32>,
+    /// Also find the candidate among weak candidates from these pull requests.
+    pub pull_requests: Option<PullRequestSource>,
 }
 
 pub fn approve_rule(
@@ -1700,7 +1815,10 @@ pub fn approve_rule(
         Some(_) => return Err(usage_failure("expires_in_days must be between 1 and 3650")),
     };
     let mut store = workspace.store()?;
-    let report = mine_candidates(workspace, Some(&*store))?;
+    let mut report = mine_candidates(workspace, Some(&*store))?;
+    if let Some(source) = &request.pull_requests {
+        add_pull_request_candidates(&mut report, source)?;
+    }
     if report.truncated {
         return Err(configuration_failure(
             "cannot approve candidates while feedback history is truncated",
@@ -1709,6 +1827,7 @@ pub fn approve_rule(
     let candidate = report
         .candidates
         .iter()
+        .chain(&report.weak_candidates)
         .find(|candidate| candidate.candidate_id == request.candidate_id)
         .ok_or_else(|| {
             usage_failure(
@@ -1798,6 +1917,95 @@ pub fn revoke_rule(
     store
         .revoke_rule_approval(approval_id, &actor, &reason)
         .map_err(anyhow::Error::msg)?;
+    saved_approval(&*store, approval_id)
+}
+
+/// `rules-export-v1`: the approved rules as a Markdown section.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RulesExport {
+    pub schema_version: u32,
+    pub rules: usize,
+    /// The file written, when one was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub content: String,
+}
+
+/// Render the active approved rules, and with `write`, put them into that
+/// repository file's rules section (ADR 0031).
+pub fn export_rules(workspace: &Workspace, write: Option<&str>) -> Result<RulesExport> {
+    let approvals = match workspace.existing_store()? {
+        Some(store) => store.list_rule_approvals().map_err(anyhow::Error::msg)?,
+        None => Vec::new(),
+    };
+    let section = crate::learning::rules_section(&approvals);
+    let rules = approvals
+        .iter()
+        .filter(|approval| approval.is_active())
+        .count();
+    let Some(relative) = write else {
+        return Ok(RulesExport {
+            schema_version: 1,
+            rules,
+            path: None,
+            content: section,
+        });
+    };
+    let relative_path = Path::new(relative);
+    if relative.trim().is_empty()
+        || relative_path.is_absolute()
+        || relative_path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        || !relative.ends_with(".md")
+    {
+        return Err(usage_failure(
+            "--write takes a Markdown file inside the repository, such as REVIEW.md or AGENTS.md",
+        ));
+    }
+    let path = workspace.root().join(relative_path);
+    if std::fs::symlink_metadata(&path).is_ok_and(|metadata| !metadata.is_file()) {
+        return Err(usage_failure(format!("{relative} is not a regular file")));
+    }
+    let current = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(anyhow::anyhow!("reading {relative}: {error}")),
+    };
+    let content = crate::learning::with_rules_section(&current, &section);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        // A symlinked directory must not lead the write outside the checkout.
+        let root = vee_core::paths::canonicalize(workspace.root()).map_err(anyhow::Error::msg)?;
+        let parent = vee_core::paths::canonicalize(parent).map_err(anyhow::Error::msg)?;
+        if !parent.starts_with(&root) {
+            return Err(usage_failure(format!(
+                "{relative} is outside the repository"
+            )));
+        }
+    }
+    std::fs::write(&path, &content).with_context(|| format!("writing {relative}"))?;
+    Ok(RulesExport {
+        schema_version: 1,
+        rules,
+        path: Some(relative.to_owned()),
+        content,
+    })
+}
+
+/// Put a suspended rule back in effect (ADR 0031).
+pub fn restore_rule(
+    workspace: &Workspace,
+    approval_id: &str,
+    actor: &str,
+    reason: &str,
+) -> Result<vee_core::RuleApproval> {
+    let actor = ActorName::new("actor", actor).map_err(usage_failure)?;
+    let reason = Reason::new(reason).map_err(usage_failure)?;
+    let mut store = workspace.store()?;
+    store
+        .set_rule_approval_suspended(approval_id, false, &actor, &reason)
+        .map_err(usage_failure)?;
     saved_approval(&*store, approval_id)
 }
 

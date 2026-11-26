@@ -117,6 +117,16 @@ pub trait RuleApprovalRepository {
         reason: &Reason,
     ) -> Result<(), String>;
 
+    /// Suspend an active approval, or restore a suspended one, as an audit
+    /// event (ADR 0031).
+    fn set_rule_approval_suspended(
+        &mut self,
+        approval_id: &str,
+        suspended: bool,
+        actor: &ActorName,
+        reason: &Reason,
+    ) -> Result<(), String>;
+
     fn list_rule_approvals(&self) -> Result<Vec<RuleApproval>, String>;
 }
 
