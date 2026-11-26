@@ -147,9 +147,9 @@ and `CLAUDE.md`. Teams keep standards elsewhere too.
 
 ### 12. A PR walkthrough with measured diagrams (S–M)
 
-- [ ] `vee hosting publish --describe` posts the PR draft and the risk tier
-- [ ] A Mermaid graph of the changed files and their impacted consumers and tests, with each edge labelled measured or heuristic
-- [ ] Generated text never affects the gate
+- [x] `vee ci run --describe` (Action input `describe`, GitLab `VEE_DESCRIBE`) adds the PR draft and the risk tier to Vee's summary ([ADR 0032](adr/0032-pull-request-walkthrough.md))
+- [x] A Mermaid graph of the changed files and their impacted consumers and tests, with each edge labelled measured or heuristic
+- [x] Generated text never affects the gate
 
 ### 13. Team analytics without a server (M)
 

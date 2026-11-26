@@ -34,6 +34,8 @@ variables:
   VEE_APPROVE: "false"
   # A policy profile from .vee.yaml, such as security or regulated.
   VEE_POLICY_PROFILE: ""
+  # Add a walkthrough to Vee's summary note (one more model call).
+  VEE_DESCRIBE: "false"
 
 .vee-setup: &vee-setup
   - |
@@ -45,6 +47,7 @@ variables:
     if [ "$VEE_APPROVAL" = "true" ]; then VEE_ARGS="$VEE_ARGS --approval"; fi
     if [ "$VEE_LABELS" = "true" ]; then VEE_ARGS="$VEE_ARGS --labels"; fi
     if [ "$VEE_APPROVE" = "true" ]; then VEE_ARGS="$VEE_ARGS --approve"; fi
+    if [ "$VEE_DESCRIBE" = "true" ]; then VEE_ARGS="$VEE_ARGS --describe"; fi
     if [ -n "$VEE_POLICY_PROFILE" ]; then VEE_ARGS="$VEE_ARGS --policy-profile $VEE_POLICY_PROFILE"; fi
     if [ -n "${VEE_ACTOR_LOGIN:-}" ]; then VEE_ARGS="$VEE_ARGS --actor-login $VEE_ACTOR_LOGIN"; fi
 

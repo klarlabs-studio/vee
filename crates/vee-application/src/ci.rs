@@ -169,7 +169,45 @@ pub struct CiRunOptions {
     /// Approve the pull request when the change is eligible, and withdraw
     /// Vee's approvals that no longer hold (ADR 0024).
     pub approve: bool,
+    /// Add a walkthrough to the summary: the risk tier, a graph of what the
+    /// change reaches, and a drafted description (ADR 0032).
+    pub describe: bool,
 }
+
+/// What a summary's walkthrough is made of.
+struct WalkthroughInputs {
+    draft: Option<serde_json::Value>,
+    risk: Option<crate::ChangeRisk>,
+    impact: crate::ImpactAssessment,
+}
+
+/// The walkthrough's parts for `review`. A description that cannot be
+/// drafted is left out; the rest needs only local analysis.
+fn walkthrough_inputs(
+    workspace: &Workspace,
+    review: &crate::ReviewResult,
+) -> Result<WalkthroughInputs> {
+    let detail = crate::operations::review_detail(workspace, &review.review_id)?;
+    let draft = review.selected_reviewers.first().and_then(|reviewer| {
+        crate::operations::draft_pr_description(
+            workspace,
+            crate::operations::ChangeTarget::Review(review.review_id.clone()),
+            reviewer,
+        )
+        .map(|result| result.output)
+        .map_err(|error| eprintln!("warning: the description was not drafted: {error:#}"))
+        .ok()
+    });
+    Ok(WalkthroughInputs {
+        draft,
+        risk: detail.risk,
+        impact: detail.impact,
+    })
+}
+
+/// Hosts take comments up to 65,536 characters; the walkthrough gets what
+/// the rest of the summary leaves.
+const MAX_SUMMARY_CHARS: usize = 65_000;
 
 /// The outcome of `vee ci run`.
 #[derive(Clone, Debug, Serialize)]
@@ -432,14 +470,24 @@ pub(crate) fn publish(
                 .map(|record| record.approvals)
                 .unwrap_or_default(),
         };
+        let walkthrough = if options.describe {
+            walkthrough_inputs(workspace, &review)
+                .map_err(|error| eprintln!("warning: the walkthrough was left out: {error:#}"))
+                .ok()
+        } else {
+            None
+        };
         if let Err(error) = publish_summary(
             root,
             host.as_ref(),
             &pull_request,
             &review,
-            gate,
-            approvals,
-            summary.as_ref(),
+            SummaryUpdate {
+                gate,
+                approvals,
+                existing: summary.as_ref(),
+                walkthrough: walkthrough.as_ref(),
+            },
         ) {
             // The next review is then a full one.
             eprintln!("warning: Vee's summary comment was not updated: {error:#}");
@@ -668,15 +716,27 @@ pub(crate) fn summary_record(
 
 /// Post or update Vee's summary of `review`, with the record the next
 /// review builds on.
+/// What Vee's summary comment says, and the comment it replaces.
+struct SummaryUpdate<'a> {
+    gate: vee_core::GateStatus,
+    approvals: Vec<crate::incremental::ApprovalVerdict>,
+    existing: Option<&'a vee_hosting::ConversationComment>,
+    walkthrough: Option<&'a WalkthroughInputs>,
+}
+
 fn publish_summary(
     root: &Path,
     host: &dyn vee_hosting::PullRequestConversationProvider,
     pull_request: &CiPullRequest,
     review: &crate::ReviewResult,
-    gate: vee_core::GateStatus,
-    approvals: Vec<crate::incremental::ApprovalVerdict>,
-    existing: Option<&vee_hosting::ConversationComment>,
+    update: SummaryUpdate<'_>,
 ) -> Result<()> {
+    let SummaryUpdate {
+        gate,
+        approvals,
+        existing,
+        walkthrough,
+    } = update;
     let record = crate::incremental::ReviewRecord {
         schema_version: 1,
         repository: pull_request.repository.clone(),
@@ -693,16 +753,43 @@ fn publish_summary(
             .unwrap_or_else(|| review.findings.clone()),
         approvals,
     };
-    let body = summary_text(
+    let approval = record
+        .approvals
+        .last()
+        .filter(|verdict| verdict.head_oid == pull_request.head_oid);
+    let encoded = crate::incremental::encode(&record);
+    let without = summary_text(
         review,
         gate,
         &pull_request.head_oid,
-        record
-            .approvals
-            .last()
-            .filter(|verdict| verdict.head_oid == pull_request.head_oid),
-        crate::incremental::encode(&record),
+        approval,
+        encoded.clone(),
+        None,
     );
+    let walkthrough = walkthrough.and_then(|inputs| {
+        let budget = MAX_SUMMARY_CHARS.saturating_sub(without.chars().count() + 4);
+        let section = crate::walkthrough::section(
+            inputs.draft.as_ref(),
+            inputs.risk.as_ref(),
+            &inputs.impact,
+            budget,
+        );
+        if section.is_none() {
+            eprintln!("warning: the walkthrough did not fit in the summary comment");
+        }
+        section
+    });
+    let body = match walkthrough {
+        Some(section) => summary_text(
+            review,
+            gate,
+            &pull_request.head_oid,
+            approval,
+            encoded,
+            Some(&section),
+        ),
+        None => without,
+    };
     let reference = pull_request_ref(pull_request);
     match existing {
         Some(comment) => host
@@ -721,6 +808,7 @@ fn summary_text(
     head_oid: &str,
     approval: Option<&crate::incremental::ApprovalVerdict>,
     record: Option<String>,
+    walkthrough: Option<&str>,
 ) -> String {
     let short = |oid: &str| oid.chars().take(7).collect::<String>();
     let verdict = match gate {
@@ -753,6 +841,10 @@ fn summary_text(
                 verdict.failed_stages.join(", ")
             ),
         });
+    }
+    if let Some(walkthrough) = walkthrough {
+        text.push_str("\n\n");
+        text.push_str(walkthrough);
     }
     text.push_str(
         "\n\n<sub>Vee updates this comment after each review. Comment `@vee review` to review the whole change again.</sub>\n\n",

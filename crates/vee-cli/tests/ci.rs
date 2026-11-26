@@ -130,7 +130,10 @@ fn fake_github(
             )
             .unwrap();
             requests.push(
-                if line.contains("graphql") || line.contains("/pulls/9/comments ") {
+                if line.contains("graphql")
+                    || line.contains("/pulls/9/comments ")
+                    || line.contains("/issues/9/comments ")
+                {
                     request.clone()
                 } else {
                     line
@@ -279,6 +282,61 @@ fn ci_run_reviews_a_github_pull_request_and_publishes_its_gate() {
         .unwrap();
     assert!(!wrong.status.success());
     assert!(String::from_utf8_lossy(&wrong.stdout).contains("pull_request.head.sha"));
+}
+
+#[cfg(unix)]
+#[test]
+fn ci_run_describe_adds_a_walkthrough_to_the_summary() {
+    let repository = pull_request_repository("[]");
+    let (root, outside) = (repository.directory.path(), &repository.outside);
+    let event = outside.path().join("event.json");
+    std::fs::write(
+        &event,
+        serde_json::json!({"pull_request": {"number": 9, "base": {"sha": repository.base_tip}, "head": {"sha": repository.head}}})
+            .to_string(),
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let server = fake_github(
+        listener,
+        stop.clone(),
+        repository.base_tip.clone(),
+        repository.head.clone(),
+    );
+    let output = vee()
+        .args(["ci", "run", "--describe", "--output", "json"])
+        .env("GITHUB_ACTIONS", "true")
+        .env("GITHUB_EVENT_NAME", "pull_request")
+        .env("GITHUB_EVENT_PATH", &event)
+        .env("GITHUB_REPOSITORY", "team/repo")
+        .env("GITHUB_SERVER_URL", "http://127.0.0.1")
+        .env("GITHUB_API_URL", format!("http://{address}"))
+        .env("GH_TOKEN", "fixture-token")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    stop.store(true, Ordering::SeqCst);
+    let requests = server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let summary = requests
+        .iter()
+        .find(|request| {
+            request.starts_with("POST /repos/team/repo/issues/9/comments")
+                && request.contains("vee:summary")
+        })
+        .unwrap_or_else(|| panic!("a summary is posted: {requests:#?}"));
+    assert!(summary.contains("### Walkthrough"), "{summary}");
+    assert!(summary.contains("**Risk:**"), "{summary}");
+    // The fake reviewer cannot draft a description; the summary goes out
+    // without one.
+    assert!(!summary.contains("Drafted description"), "{summary}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("the description was not drafted"));
 }
 
 #[cfg(unix)]

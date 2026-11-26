@@ -6,6 +6,14 @@ change configuration and output contracts.
 
 ## Unreleased
 
+### Pull request walkthrough
+
+- `vee ci run --describe` (Action input `describe`, GitLab `VEE_DESCRIBE`)
+  adds a walkthrough to Vee's summary: the risk tier, a Mermaid graph of
+  what the change reaches with each edge labelled measured or heuristic, and
+  a drafted description marked as unverified. It never affects the gate
+  (ADR 0032).
+
 ### GitLab parity
 
 - On GitLab merge requests, `vee ci run` now keeps Vee's summary note with

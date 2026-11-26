@@ -1032,6 +1032,10 @@ enum CiCommand {
         /// findings are carried over.
         #[arg(long)]
         full: bool,
+        /// Add a walkthrough to Vee's summary: the risk tier, a graph of what
+        /// the change reaches, and a drafted description (one more model call).
+        #[arg(long)]
+        describe: bool,
         /// Keep `vee:gate:*` and `vee:risk:*` labels on the pull request (GitHub, GitLab).
         #[arg(long)]
         labels: bool,
@@ -1085,6 +1089,10 @@ enum CiCommand {
         /// Account Vee posts as.
         #[arg(long)]
         actor_login: Option<String>,
+        /// Add a walkthrough to Vee's summary: the risk tier, a graph of what
+        /// the change reaches, and a drafted description (one more model call).
+        #[arg(long)]
+        describe: bool,
         /// Keep `vee:gate:*` and `vee:risk:*` labels on the pull request (GitHub, GitLab).
         #[arg(long)]
         labels: bool,
@@ -3282,6 +3290,7 @@ fn run() -> Result<u8> {
                     full,
                     labels,
                     approve,
+                    describe,
                     output,
                 },
         } => {
@@ -3292,6 +3301,7 @@ fn run() -> Result<u8> {
                 &operations::Workspace::new(top, crate::local_stores()),
                 pull_request,
                 vee_application::ci::CiRunOptions {
+                    describe,
                     approval,
                     effort: effort.map(Into::into),
                     policy_profile,
@@ -3320,6 +3330,7 @@ fn run() -> Result<u8> {
                     actor_login,
                     labels,
                     approve,
+                    describe,
                     output,
                 },
         } => {
@@ -3355,6 +3366,7 @@ fn run() -> Result<u8> {
                 event,
                 vee_application::pr_commands::CommandOptions {
                     run: vee_application::ci::CiRunOptions {
+                        describe,
                         approval,
                         effort: effort.map(Into::into),
                         policy_profile,
