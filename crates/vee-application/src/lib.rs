@@ -5,6 +5,7 @@ mod approval;
 pub mod approval_report;
 pub mod attestation;
 pub mod ci;
+pub mod conditions;
 mod config;
 mod context_budget;
 pub mod coverage;
