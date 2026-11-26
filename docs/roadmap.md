@@ -90,7 +90,7 @@ What is missing is the loop.
 
 - [ ] A `vee steward` operation, available in the CLI and MCP, that drives the configured agent CLI or local model
 - [ ] The gate must pass again after every fix
-- [ ] After every push, a comment naming the commit and how to revert it
+- [x] After every push, a comment naming the commit and how to revert it (`@vee fix`, `@vee fix all`: [ADR 0023](adr/0023-fixes-from-pull-request-comments.md), [ADR 0027](adr/0027-fixing-every-open-finding.md))
 - [ ] Merge conflicts resolved only when the result can be verified; otherwise the change goes back to a person
 - [ ] Applying a patch stays approved by a person or permitted by policy
 
