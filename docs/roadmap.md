@@ -146,9 +146,9 @@ and `CLAUDE.md`. Teams keep standards elsewhere too.
 
 ### 11. Jira and Linear work items (S–M each)
 
-- [ ] Jira Cloud and Data Center adapters for `--work-item`, acceptance traceability and repository context
-- [ ] A Linear adapter
-- [ ] Acceptance criteria are mapped, and work items are digest-bound, as the existing connectors do
+- [x] Jira Cloud and Data Center adapters for `--work-item`, acceptance traceability and repository context ([ADR 0033](adr/0033-jira-and-linear-work-items.md))
+- [x] A Linear adapter
+- [x] Acceptance criteria are mapped, and work items are digest-bound, as the existing connectors do
 
 ### 12. A PR walkthrough with measured diagrams (S–M)
 

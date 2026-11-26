@@ -121,6 +121,20 @@
     "hosting": {
       "$ref": "#/$defs/hosting"
     },
+    "work_items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider"],
+      "description": "The issue tracker `--work-item` reads when it is not the code host (ADR 0033). A Jira site must also be listed in VEE_HOSTING_HOSTS before Vee sends it a token.",
+      "properties": {
+        "provider": { "enum": ["jira", "linear"] },
+        "host": { "type": "string", "minLength": 1, "maxLength": 253, "description": "Jira's site, such as acme.atlassian.net, or a Data Center host." },
+        "api_base": { "type": "string", "format": "uri", "description": "API base URL; https://<host>/ for Jira and https://api.linear.app/graphql for Linear when unset." },
+        "token_env": { "type": "string", "description": "Variable holding the token: JIRA_API_TOKEN or LINEAR_API_KEY by default." },
+        "user_env": { "type": "string", "description": "Jira Cloud: variable holding the account email (JIRA_EMAIL by default). When it is unset, the token is sent as a Data Center personal access token." },
+        "acceptance_field": { "type": "string", "pattern": "^[A-Za-z0-9_]{1,64}$", "description": "Jira: the field holding acceptance criteria, such as customfield_10050." }
+      }
+    },
     "approval": {
       "type": "object",
       "additionalProperties": false,

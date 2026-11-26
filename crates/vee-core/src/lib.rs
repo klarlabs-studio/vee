@@ -2777,6 +2777,45 @@ policy_profiles:
     }
 
     #[test]
+    fn work_items_name_a_tracker_and_only_tracker_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".vee.yaml");
+        let load = |work_items: &str| {
+            std::fs::write(&file, format!("version: 1\nwork_items: {work_items}\n")).unwrap();
+            RepositoryConfig::load(&file)
+        };
+        assert!(load("{ provider: linear }").is_ok());
+        assert!(load(
+            "{ provider: jira, host: acme.atlassian.net, acceptance_field: customfield_10050 }"
+        )
+        .is_ok());
+        for (work_items, expected) in [
+            ("{ provider: asana }", "jira or linear"),
+            ("{ provider: jira }", "Jira site"),
+            ("{ provider: jira, host: \"evil/x\" }", "host name"),
+            (
+                "{ provider: linear, token_env: AWS_SECRET_ACCESS_KEY }",
+                "tracker credential",
+            ),
+            (
+                "{ provider: jira, host: a.example, user_env: HOME }",
+                "tracker credential",
+            ),
+            (
+                "{ provider: jira, host: a.example, api_base: \"http://a.example/\" }",
+                "HTTPS",
+            ),
+            (
+                "{ provider: linear, acceptance_field: customfield_1 }",
+                "Jira field",
+            ),
+        ] {
+            let error = load(work_items).unwrap_err();
+            assert!(error.contains(expected), "{work_items}: {error}");
+        }
+    }
+
+    #[test]
     fn a_cli_provider_may_not_allowlist_pwd() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join(".vee.yaml");
@@ -3269,6 +3308,10 @@ pub struct RepositoryConfig {
     /// webhook secrets are always read from the named environment variables.
     #[serde(default)]
     pub hosting: HostingConfig,
+    /// The issue tracker `--work-item` reads, when it is not the code host:
+    /// Jira or Linear (ADR 0033). Absent, work items come from `hosting`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_items: Option<WorkItemsConfig>,
     /// Guards on when a passing change is eligible for approval without a
     /// human. Absent when unset, so existing configuration digests stay the same.
     #[serde(default, skip_serializing_if = "ApprovalConfig::is_unset")]
@@ -3373,6 +3416,33 @@ pub struct HostingConfig {
     #[serde(default)]
     pub username: Option<String>,
 }
+/// An issue tracker for `--work-item` (ADR 0033). Secrets are read from the
+/// named environment variables.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkItemsConfig {
+    /// `jira` or `linear`.
+    pub provider: String,
+    /// Jira's site, such as `acme.atlassian.net` or a Data Center host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// API base URL; derived from the host or the provider when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_base: Option<String>,
+    /// Variable holding the API token: `JIRA_API_TOKEN` or `LINEAR_API_KEY`
+    /// by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_env: Option<String>,
+    /// Jira Cloud: variable holding the account email for basic auth.
+    /// Without it, the token is sent as a Data Center personal access token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_env: Option<String>,
+    /// Jira: the field holding acceptance criteria, such as
+    /// `customfield_10050`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance_field: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewConfig {
@@ -3805,10 +3875,70 @@ pub const HOSTING_CREDENTIAL_NAMES: &[&str] = &[
     "AZURE_DEVOPS_EXT_PAT",
     "SYSTEM_ACCESSTOKEN",
     "GERRIT_TOKEN",
+    "JIRA_API_TOKEN",
+    "JIRA_EMAIL",
+    "LINEAR_API_KEY",
 ];
 
 pub fn is_hosting_credential_name(name: &str) -> bool {
     HOSTING_CREDENTIAL_NAMES.contains(&name) || name.starts_with("VEE_")
+}
+
+fn validate_work_items(tracker: &WorkItemsConfig) -> Result<(), String> {
+    if !matches!(tracker.provider.as_str(), "jira" | "linear") {
+        return Err("work_items.provider must be jira or linear".into());
+    }
+    if tracker.provider == "jira" && tracker.host.is_none() && tracker.api_base.is_none() {
+        return Err("work_items.host must name the Jira site, such as acme.atlassian.net".into());
+    }
+    if let Some(host) = &tracker.host {
+        let valid = !host.is_empty()
+            && host.len() <= 253
+            && host
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b".-:".contains(&byte));
+        if !valid {
+            return Err("work_items.host must be a host name".into());
+        }
+    }
+    if let Some(api_base) = &tracker.api_base {
+        let url = url::Url::parse(api_base)
+            .map_err(|_| "work_items.api_base must be an absolute HTTPS URL".to_string())?;
+        let loopback = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
+        if !(url.scheme() == "https" || url.scheme() == "http" && loopback)
+            || url.host().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err("work_items.api_base must be an HTTPS URL without credentials, a query or a fragment".into());
+        }
+    }
+    for (field, value) in [
+        ("work_items.token_env", tracker.token_env.as_deref()),
+        ("work_items.user_env", tracker.user_env.as_deref()),
+    ] {
+        if value.is_some_and(|name| !is_hosting_credential_name(name)) {
+            return Err(format!(
+                "{field} must name a tracker credential (JIRA_API_TOKEN, JIRA_EMAIL, LINEAR_API_KEY or a VEE_ variable)"
+            ));
+        }
+    }
+    if let Some(field) = &tracker.acceptance_field {
+        let valid = !field.is_empty()
+            && field.len() <= 64
+            && field
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+        if !valid || tracker.provider != "jira" {
+            return Err(
+                "work_items.acceptance_field must be a Jira field ID such as customfield_10050"
+                    .into(),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// API key environment variables an HTTP provider may forward, with the vendor
@@ -4097,6 +4227,9 @@ impl RepositoryConfig {
                     ));
                 }
             }
+        }
+        if let Some(tracker) = &config.work_items {
+            validate_work_items(tracker)?;
         }
         if let Some(api_base) = config.hosting.api_base.as_deref() {
             let url = url::Url::parse(api_base)

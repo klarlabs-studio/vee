@@ -275,10 +275,22 @@ pub fn review(
     // Every transport records the credential variable, so a later gate check
     // re-fetches the work item the same way whichever transport started the review.
     let hosting = crate::work_items::resolve_hosting(request.hosting, &config.hosting);
-    let work_item = request
-        .work_item
-        .map(|spec| crate::work_items::fetch_work_item(&hosting, spec))
+    // A configured tracker (Jira or Linear) holds work items instead of the
+    // code host (ADR 0033).
+    let tracker = config
+        .work_items
+        .as_ref()
+        .map(crate::work_items::tracker_settings)
         .transpose()?;
+    let work_item = match (&tracker, request.work_item) {
+        (Some(tracker), Some(spec)) => Some(crate::work_items::fetch_tracker_item(tracker, spec)?),
+        (None, Some(spec)) => Some(crate::work_items::fetch_work_item(&hosting, spec)?),
+        (_, None) => None,
+    };
+    let work_item_token_env = match &tracker {
+        Some(tracker) => tracker.token_env.clone(),
+        None => hosting.token_env.clone(),
+    };
     let scope = request.scope.resolve(workspace.root())?;
     let change_set =
         crate::capture_change_set(workspace.root(), scope).map_err(anyhow::Error::msg)?;
@@ -293,7 +305,7 @@ pub fn review(
             requested_reviewers: request.reviewer_ids,
             cancellation,
             work_item,
-            work_item_token_env: Some(hosting.token_env),
+            work_item_token_env: Some(work_item_token_env),
             progress: request.progress,
             carried: request.carried,
         },
@@ -928,6 +940,24 @@ pub fn current_review_config(
             return Err(configuration_failure(
                 "offline mode prevents revalidating the work item used by this review",
             ))
+        }
+        Some(item) if matches!(item.provider.as_str(), "jira" | "linear") => {
+            let tracker = config.work_items.as_ref().ok_or_else(|| {
+                configuration_failure(format!(
+                    "this review used a {} work item, but .vee.yaml no longer configures work_items",
+                    item.provider
+                ))
+            })?;
+            let mut settings = crate::work_items::tracker_settings(tracker)?;
+            // Read the item where it was read, not where the config now points.
+            settings.api_base = item.api_base.clone();
+            if let Some(token_env) = token_env_override.or(review.work_item_token_env.as_deref()) {
+                settings.token_env = token_env.to_owned();
+            }
+            Some(crate::work_items::get_tracker_item(
+                &settings,
+                &item.reference,
+            )?)
         }
         Some(item) => {
             let configured = token_env_override

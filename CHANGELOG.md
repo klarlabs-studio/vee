@@ -6,6 +6,14 @@ change configuration and output contracts.
 
 ## Unreleased
 
+### Jira and Linear work items
+
+- `work_items` in `.vee.yaml` names Jira (Cloud or Data Center) or Linear,
+  and `vee review --work-item PROJ-123` reads the issue from it. Issues are
+  digest-bound and revalidated by `vee gate check`; a Jira acceptance field
+  feeds acceptance traceability. A Jira site receives a token only once it
+  is listed in `VEE_HOSTING_HOSTS` (ADR 0033).
+
 ### Pull request walkthrough
 
 - `vee ci run --describe` (Action input `describe`, GitLab `VEE_DESCRIBE`)

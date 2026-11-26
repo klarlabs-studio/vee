@@ -91,6 +91,7 @@ fn public_hosts(provider: &str) -> &'static [&'static str] {
         "gitlab" => &["gitlab.com"],
         "azure-devops" => &["dev.azure.com"],
         "bitbucket" => &["bitbucket.org", "api.bitbucket.org"],
+        "linear" => &["linear.app", "api.linear.app"],
         _ => &[],
     }
 }
@@ -180,6 +181,133 @@ pub fn fetch_work_item(
         &trusted_hosts_from_env(),
     )?;
     get_work_item(&settings.provider, &api_base, token, &reference)
+}
+
+/// The settings for an issue tracker named in `work_items` (ADR 0033).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrackerSettings {
+    pub provider: String,
+    pub host: String,
+    pub api_base: String,
+    pub token_env: String,
+    /// Jira Cloud's email variable; unset or empty selects a Data Center
+    /// personal access token.
+    pub user_env: Option<String>,
+    pub acceptance_field: Option<String>,
+}
+
+pub fn tracker_settings(tracker: &vee_core::WorkItemsConfig) -> anyhow::Result<TrackerSettings> {
+    let (default_token, default_user) = match tracker.provider.as_str() {
+        "jira" => ("JIRA_API_TOKEN", Some("JIRA_EMAIL")),
+        "linear" => ("LINEAR_API_KEY", None),
+        other => {
+            return Err(configuration_failure(format!(
+                "unsupported work item tracker `{other}`"
+            )))
+        }
+    };
+    let host = match (&tracker.host, tracker.provider.as_str()) {
+        (Some(host), _) => host.clone(),
+        (None, "linear") => "linear.app".to_owned(),
+        (None, _) => tracker
+            .api_base
+            .as_deref()
+            .and_then(|api_base| url::Url::parse(api_base).ok())
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .ok_or_else(|| configuration_failure("work_items.host is required for Jira"))?,
+    };
+    let api_base = match (&tracker.api_base, tracker.provider.as_str()) {
+        (Some(api_base), _) => api_base.clone(),
+        (None, "linear") => "https://api.linear.app/graphql".to_owned(),
+        (None, _) => format!("https://{host}/"),
+    };
+    Ok(TrackerSettings {
+        provider: tracker.provider.clone(),
+        host,
+        api_base,
+        token_env: tracker
+            .token_env
+            .clone()
+            .unwrap_or_else(|| default_token.to_owned()),
+        user_env: tracker
+            .user_env
+            .clone()
+            .or_else(|| default_user.map(str::to_owned)),
+        acceptance_field: tracker.acceptance_field.clone(),
+    })
+}
+
+/// Fetch `PROJ-123` from the tracker. Linear's public API may receive the
+/// token; a Jira site must be in `VEE_HOSTING_HOSTS`, because the shared
+/// repository configuration names it.
+pub fn fetch_tracker_item(
+    settings: &TrackerSettings,
+    specification: &str,
+) -> anyhow::Result<vee_hosting::WorkItemSnapshot> {
+    let (project, number) =
+        vee_hosting::trackers::parse_tracker_key(specification).ok_or_else(|| {
+            usage_failure(format!(
+                "--work-item must be a {} key such as PROJ-123",
+                settings.provider
+            ))
+        })?;
+    ensure_credential_destination(
+        &settings.provider,
+        &settings.host,
+        &settings.api_base,
+        false,
+        &trusted_hosts_from_env(),
+    )?;
+    let reference = vee_hosting::WorkItemRef {
+        repository: vee_hosting::RepositoryRef {
+            host: settings.host.clone(),
+            full_name: project,
+        },
+        number,
+    };
+    reference.validate().map_err(configuration_failure)?;
+    get_tracker_item(settings, &reference)
+}
+
+/// Read a tracker item with the settings' credentials.
+pub fn get_tracker_item(
+    settings: &TrackerSettings,
+    reference: &vee_hosting::WorkItemRef,
+) -> anyhow::Result<vee_hosting::WorkItemSnapshot> {
+    let token = std::env::var(&settings.token_env).with_context(|| {
+        format!(
+            "required credential environment variable {} is not set",
+            settings.token_env
+        )
+    })?;
+    let item = match settings.provider.as_str() {
+        "jira" => {
+            let email = settings
+                .user_env
+                .as_deref()
+                .and_then(|name| std::env::var(name).ok())
+                .filter(|email| !email.trim().is_empty());
+            let adapter = vee_hosting::trackers::JiraAdapter::new(
+                &settings.api_base,
+                &token,
+                email.as_deref(),
+                settings.acceptance_field.clone(),
+            )
+            .map_err(configuration_failure)?;
+            vee_hosting::WorkItemProvider::get_work_item(&adapter, reference)
+        }
+        "linear" => {
+            let adapter = vee_hosting::trackers::LinearAdapter::new(&settings.api_base, &token)
+                .map_err(configuration_failure)?;
+            vee_hosting::WorkItemProvider::get_work_item(&adapter, reference)
+        }
+        other => {
+            return Err(configuration_failure(format!(
+                "unsupported work item tracker `{other}`"
+            )))
+        }
+    };
+    item.map_err(anyhow::Error::msg)
 }
 
 pub fn effective_work_item_token_env<'a>(provider: &str, configured: &'a str) -> &'a str {
