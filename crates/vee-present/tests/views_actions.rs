@@ -182,6 +182,7 @@ fn passing_review() -> ReviewResult {
     );
     assert_eq!(gate.status, GateStatus::Pass);
     ReviewResult {
+        carried: None,
         schema_version: 2,
         review_id: "rev_follow_up".into(),
         snapshot_id: "sha256:snap".into(),

@@ -525,6 +525,7 @@ async fn start_review(
                 work_item: None,
                 hosting: Default::default(),
                 progress: Some(&reporter),
+                carried: None,
             },
             None,
         )
@@ -1697,6 +1698,7 @@ mod tests {
         dimension_finding.id = "FIND-DIMENSION".into();
         dimension_finding.fingerprint = "sha256:dimension-finding".into();
         let saved_review = vee_application::ReviewResult {
+            carried: None,
             schema_version: 2,
             review_id: "rev_dimensions".into(),
             snapshot_id: "snapshot_dimensions".into(),
@@ -2074,6 +2076,7 @@ mod tests {
         let change_set =
             vee_application::capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
         let review = ReviewResult {
+            carried: None,
             schema_version: 2,
             review_id: review_id.into(),
             snapshot_id: format!("{}-{review_id}", change_set.digest),
@@ -2252,6 +2255,7 @@ mod tests {
             advisory: false,
         };
         let review = ReviewResult {
+            carried: None,
             schema_version: 2,
             review_id: "rev_drawer".into(),
             snapshot_id: change_set.digest.clone(),
@@ -2351,6 +2355,7 @@ mod tests {
         let change_set =
             vee_application::capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
         let review = ReviewResult {
+            carried: None,
             schema_version: 2,
             review_id: "rev_saved".into(),
             snapshot_id: change_set.digest.clone(),

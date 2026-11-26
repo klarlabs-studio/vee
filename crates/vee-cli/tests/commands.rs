@@ -79,6 +79,10 @@ struct State {
     /// Conclusions of the check runs Vee created, in order.
     checks: Vec<String>,
     next_id: u64,
+    /// The pull request's head, when a test pushes after the server started.
+    head: Option<String>,
+    /// Requests to edit a conversation comment.
+    edits: usize,
 }
 
 impl State {
@@ -141,6 +145,8 @@ fn respond(state: &Mutex<State>, line: &str, body: &str, base: &str, head: &str)
     let (method, target) = line.split_once(' ').unwrap();
     let path = target.split(' ').next().unwrap();
     let route = path.split('?').next().unwrap();
+    let pushed = state.head.clone();
+    let head = pushed.as_deref().unwrap_or(head);
     match (method, route) {
         ("GET", "/repos/team/repo/pulls/9") => json(serde_json::json!({
             "number": 9, "title": "Change", "body": null, "state": "open", "merged": false,
@@ -194,6 +200,14 @@ fn respond(state: &Mutex<State>, line: &str, body: &str, base: &str, head: &str)
         ("POST", "/repos/team/repo/issues/9/comments") => {
             let id = state.add(false, BOT, serde_json::json!({"body": request["body"]}));
             (201, serde_json::json!({"id": id}).to_string())
+        }
+        ("PATCH", route) if route.starts_with("/repos/team/repo/issues/comments/") => {
+            let id: u64 = route.rsplit('/').next().unwrap().parse().unwrap();
+            state.edits += 1;
+            if let Some(comment) = state.conversation.iter_mut().find(|c| c["id"] == id) {
+                comment["body"] = request["body"].clone();
+            }
+            json(serde_json::json!({"id": id}))
         }
         ("PATCH", route) if route.starts_with("/repos/team/repo/pulls/comments/") => {
             let id: u64 = route.rsplit('/').next().unwrap().parse().unwrap();
@@ -463,4 +477,170 @@ fn a_waiver_given_in_a_finding_thread_passes_the_gate_on_that_head() {
         3,
         "the refused command reviewed nothing"
     );
+}
+
+/// The summary comment's record lets the next push send reviewers only the
+/// files whose change is new, and carry the earlier findings (ADR 0022).
+#[test]
+fn a_push_reviews_only_the_files_it_changed_and_keeps_earlier_findings() {
+    use std::os::unix::fs::PermissionsExt;
+    let outside = tempfile::tempdir().unwrap();
+    let log = outside.path().join("requests");
+    std::fs::create_dir_all(&log).unwrap();
+    let provider = outside.path().join("provider");
+    std::fs::write(
+        &provider,
+        format!(
+            "#!/bin/sh\ninput=$(cat)\nprintf '%s' \"$input\" > \"{}/$(date +%s%N)-$$\"\ncase \"$input\" in\n  *BUG_A*) printf '%s' '{{\"schema_version\":1,\"findings\":[{{\"category\":\"correctness\",\"severity\":\"high\",\"confidence\":90,\"rationale\":\"a() drops the result.\",\"path\":\"src/a.rs\",\"line\":1}}]}}' ;;\n  *) printf '%s' '{{\"schema_version\":1,\"findings\":[]}}' ;;\nesac\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/a.rs"), "pub fn a() {}\n").unwrap();
+    std::fs::write(root.join("src/b.rs"), "pub fn b() {}\n").unwrap();
+    std::fs::write(root.join("reviewer.md"), "Review the change.\n").unwrap();
+    std::fs::write(
+        root.join(".vee.yaml"),
+        format!(
+            "version: 1\noffline: false\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\n",
+            provider.display()
+        ),
+    )
+    .unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "base"]);
+    let base = git(root, &["rev-parse", "HEAD"]);
+    git(root, &["checkout", "-q", "-b", "feature"]);
+    let commit = |a: Option<&str>, b: Option<&str>| {
+        if let Some(a) = a {
+            std::fs::write(root.join("src/a.rs"), a).unwrap();
+        }
+        if let Some(b) = b {
+            std::fs::write(root.join("src/b.rs"), b).unwrap();
+        }
+        git(root, &["commit", "-qam", "push"]);
+        git(root, &["rev-parse", "HEAD"])
+    };
+    let first_head = commit(Some("pub fn a() { BUG_A }\n"), Some("pub fn b() { 1 }\n"));
+
+    let state = Arc::new(Mutex::new(State::default()));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let server = serve(
+        listener,
+        stop.clone(),
+        state.clone(),
+        base.clone(),
+        first_head.clone(),
+    );
+    // Each run: the paths reviewers were sent, and the run's output.
+    let run_ci = |head: &str, extra: &[&str]| {
+        state.lock().unwrap().head = Some(head.to_owned());
+        for entry in std::fs::read_dir(&log).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        let event = outside.path().join("event.json");
+        std::fs::write(
+            &event,
+            serde_json::json!({"pull_request": {"number": 9, "base": {"sha": base}, "head": {"sha": head}}}).to_string(),
+        )
+        .unwrap();
+        let output = vee()
+            .args(["ci", "run", "--output", "json"])
+            .args(extra)
+            .env("GITHUB_ACTIONS", "true")
+            .env("GITHUB_EVENT_NAME", "pull_request")
+            .env("GITHUB_EVENT_PATH", &event)
+            .env("GITHUB_REPOSITORY", "team/repo")
+            .env("GITHUB_SERVER_URL", "http://127.0.0.1")
+            .env("GITHUB_API_URL", format!("http://{address}"))
+            .env("GH_TOKEN", "fixture-token")
+            .current_dir(root)
+            .output()
+            .unwrap();
+        let mut sent = std::collections::BTreeSet::new();
+        for entry in std::fs::read_dir(&log).unwrap() {
+            let request: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
+            for file in request["context_files"].as_array().unwrap() {
+                sent.insert(file["path"].as_str().unwrap().to_owned());
+            }
+        }
+        (output, sent)
+    };
+    let summary = || {
+        let state = state.lock().unwrap();
+        let summaries: Vec<_> = state
+            .conversation
+            .iter()
+            .filter(|c| c["body"].as_str().unwrap().contains("<!-- vee:summary -->"))
+            .map(|c| c["body"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(summaries.len(), 1, "one summary comment, edited in place");
+        summaries[0].clone()
+    };
+
+    // 1. The first review sees both files and blocks on a.rs.
+    let (output, sent) = run_ci(&first_head, &[]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(sent, ["src/a.rs", "src/b.rs"].map(String::from).into());
+    assert!(summary().contains("**blocked**"));
+
+    // 2. A push that changes only b.rs: reviewers see only b.rs, and the
+    //    finding on a.rs still blocks.
+    let second_head = commit(None, Some("pub fn b() { 2 }\n"));
+    let (output, sent) = run_ci(&second_head, &[]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(sent, ["src/b.rs"].map(String::from).into());
+    let text = summary();
+    assert!(text.contains("carried over"), "{text}");
+    assert!(text.contains(&first_head[..7]), "{text}");
+    assert_eq!(state.lock().unwrap().edits, 1);
+
+    // 3. The fix to a.rs is reviewed, and b.rs is not sent again.
+    let third_head = commit(Some("pub fn a() { fixed() }\n"), None);
+    let (output, sent) = run_ci(&third_head, &[]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(sent, ["src/a.rs"].map(String::from).into());
+    assert!(summary().contains("**passed**"));
+
+    // 4. --full reviews the whole change again.
+    let (output, sent) = run_ci(&third_head, &["--full"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(sent, ["src/a.rs", "src/b.rs"].map(String::from).into());
+    assert!(!summary().contains("carried over"));
+
+    // 5. A record in someone else's comment is ignored.
+    {
+        let mut state = state.lock().unwrap();
+        let forged = state.conversation[0]["body"].clone();
+        state.conversation.clear();
+        state.add(false, "mallory", serde_json::json!({ "body": forged }));
+    }
+    let (_, sent) = run_ci(&third_head, &[]);
+    assert_eq!(sent, ["src/a.rs", "src/b.rs"].map(String::from).into());
+
+    stop.store(true, Ordering::SeqCst);
+    server.join().unwrap();
 }
