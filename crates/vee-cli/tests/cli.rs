@@ -11411,6 +11411,32 @@ fn agent_plugins_match_the_bundled_skills_version_and_mcp_command() {
         help.status.success(),
         "the plugin's MCP command must be valid: {args:?}"
     );
+    // Every hook the plugin runs is a valid command of the installed binary.
+    let hooks = json(plugin.join("hooks/hooks.json"));
+    let mut commands = Vec::new();
+    for (event, groups) in hooks["hooks"].as_object().unwrap() {
+        for group in groups.as_array().unwrap() {
+            for hook in group["hooks"].as_array().unwrap() {
+                let command = hook["command"].as_str().unwrap();
+                let words: Vec<&str> = command.split_whitespace().collect();
+                assert_eq!(words[0], "vee", "{event}: {command}");
+                let help = vee().args(&words[1..]).arg("--help").output().unwrap();
+                assert!(
+                    help.status.success(),
+                    "{event}: {command} is not a vee command"
+                );
+                commands.push(command.to_owned());
+            }
+        }
+    }
+    commands.sort();
+    assert_eq!(
+        commands,
+        [
+            "vee hooks run agent-session-start",
+            "vee hooks run agent-stop"
+        ]
+    );
     for marketplace in [
         ".claude-plugin/marketplace.json",
         ".agents/plugins/marketplace.json",

@@ -1,0 +1,19 @@
+{
+  "description": "Vee reviews the agent's changes before it finishes, in repositories with a .vee.yaml. Set VEE_AGENT_REVIEW=off to turn it off.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "vee hooks run agent-session-start", "timeout": 30 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "vee hooks run agent-stop", "timeout": 1800 }
+        ]
+      }
+    ]
+  }
+}
