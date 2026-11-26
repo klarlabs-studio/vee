@@ -118,7 +118,11 @@ On GitHub and GitLab, a later push is reviewed incrementally
 ([ADR 0022](../adr/0022-incremental-review-after-a-push.md)). The summary
 comment records what the last review covered. A changed file whose change is
 the same as then is not sent to reviewers again, and its findings are
-carried over. The gate still covers the whole change. A changed `.vee.yaml`,
+carried over. In a file the push changed, each hunk that is the same as
+before keeps its findings, moved to where the hunk is now, and reviewers are
+pointed at the other changed lines
+([ADR 0036](../adr/0036-carry-findings-on-unchanged-hunks.md)). The gate
+still covers the whole change. A changed `.vee.yaml`,
 reviewer instructions or provider version makes the next review a full one,
 as does `--full`, `full-review: true` in the Action, or an `@vee review`
 comment.

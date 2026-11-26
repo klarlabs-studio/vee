@@ -911,8 +911,12 @@ fn summary_text(
     );
     if let Some(carried) = &review.carried {
         let changed = review.change_set.files.len();
+        let partial = match carried.partial_paths.len() {
+            0 => String::new(),
+            count => format!(", {count} more kept the parts that did not change"),
+        };
         text.push_str(&format!(
-            "\n\nOnly the changes since `{}` were reviewed again: {} of {changed} changed file(s) were the same as then, and their {} finding(s) are carried over.",
+            "\n\nOnly the changes since `{}` were reviewed again: {} of {changed} changed file(s) were the same as then{partial}, and {} earlier finding(s) are carried over.",
             short(&carried.from_head),
             carried.paths.len(),
             carried.findings

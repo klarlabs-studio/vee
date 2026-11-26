@@ -358,9 +358,14 @@ pub fn run_review_with_provider_and_selection_context(
         ),
         None => None,
     };
-    let (carried_paths, carried_findings, carried_summary) = match carried {
-        Some((paths, findings, summary)) => (paths, findings, Some(summary)),
-        None => (std::collections::BTreeSet::new(), Vec::new(), None),
+    let (carried_paths, carried_lines, carried_findings, carried_summary) = match carried {
+        Some(carry) => (
+            carry.paths,
+            carry.lines,
+            carry.findings,
+            Some(carry.summary),
+        ),
+        None => Default::default(),
     };
     let reviewer_policies = configured_reviewer_policies(config);
     let policy_digest = digest(
@@ -525,11 +530,17 @@ pub fn run_review_with_provider_and_selection_context(
             let relative = Path::new(&file.path);
             let base_bytes = vee_git::read_snapshot_base_file(root, &change_set, relative)?;
             let source_bytes = vee_git::read_snapshot_file(root, &change_set, relative)?;
-            let changed_line_ranges = changed_line_ranges(
+            let mut changed_line_ranges = changed_line_ranges(
                 base_bytes.as_deref(),
                 source_bytes.as_deref(),
                 config.review.max_context_file_bytes,
             )?;
+            // Hunks the earlier review covered unchanged are not pointed out
+            // again; their findings stand (ADR 0036).
+            if let Some(carried) = carried_lines.get(&file.path) {
+                changed_line_ranges = changed_line_ranges
+                    .map(|ranges| crate::incremental::uncarried_ranges(ranges, carried));
+            }
             let base_is_lfs_pointer = base_bytes.as_deref().is_some_and(vee_core::is_lfs_pointer);
             let as_text = |bytes: Option<Vec<u8>>| match bytes {
                 Some(bytes) if bytes.contains(&0) => (None, true),
@@ -685,6 +696,17 @@ pub fn run_review_with_provider_and_selection_context(
                     omitted_context_files += 1;
                     serde_json::json!({"path":path,"base_content":null,"content":null,"changed_line_ranges":changed_line_ranges,"note":"full contents and bounded diff omitted because the context size limit was reached","truncated":true,"classification":"untrusted_repository_source"})
                 }
+            };
+            let context = match (context, carried_lines.get(&path)) {
+                (serde_json::Value::Object(mut context), Some(carried)) => {
+                    context.insert("carried_line_ranges".into(), serde_json::json!(carried));
+                    context.insert(
+                        "carried_note".into(),
+                        "An earlier review of this pull request covered these lines with the same change; its findings on them stand. Review the other changed lines.".into(),
+                    );
+                    serde_json::Value::Object(context)
+                }
+                (context, _) => context,
             };
             context_files.push(context);
         }
@@ -1223,13 +1245,17 @@ pub fn run_review_with_provider_and_selection_context(
     let mut policy_findings = findings_by_reviewer
         .into_iter()
         .flatten()
-        // New findings on carried files are dropped: the earlier review's
-        // findings on them stand.
+        // New findings on carried files and hunks are dropped: the earlier
+        // review's findings on them stand.
         .filter(|finding| {
-            finding
-                .path
-                .as_ref()
-                .is_none_or(|path| !carried_paths.contains(path))
+            finding.path.as_ref().is_none_or(|path| {
+                !carried_paths.contains(path)
+                    && !finding.line.is_some_and(|line| {
+                        carried_lines
+                            .get(path)
+                            .is_some_and(|ranges| crate::incremental::in_ranges(ranges, line))
+                    })
+            })
         })
         .chain(carried_findings)
         .collect::<Vec<_>>();

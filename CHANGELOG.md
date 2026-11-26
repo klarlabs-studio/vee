@@ -6,6 +6,15 @@ change configuration and output contracts.
 
 ## Unreleased
 
+### Findings carried on unchanged hunks
+
+- In a file a push changed, hunks whose content is the same as at the last
+  review keep their findings, moved with the hunk, and new findings there are
+  dropped. Reviewers still get the whole file, with `carried_line_ranges`
+  marking what was covered, and `changed_line_ranges` lists only the rest.
+  Vee's record on the pull request keeps each file's hunks, and the review
+  output's `carried.partial_paths` names such files (ADR 0036).
+
 ### Natural-language approval conditions
 
 - `approval.conditions` names conditions, such as "changes the
