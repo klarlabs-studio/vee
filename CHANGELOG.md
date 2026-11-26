@@ -46,6 +46,9 @@ change configuration and output contracts.
   `vee ci approvals --repository OWNER/REPO` compares the verdicts on closed
   GitHub pull requests with what people did, with agreement and override
   rates ([ADR 0025](docs/adr/0025-observe-mode-for-approvals.md)).
+- `@vee fix all` fixes up to five open findings in turn. Vee keeps each fix
+  the review accepts and pushes the kept fixes together, one commit per
+  finding ([ADR 0027](docs/adr/0027-fixing-every-open-finding.md)).
 - Approval guards `approval.never_owners`, a new `owners` stage that reads
   `CODEOWNERS` from the base, and `approval.max_per_day`, a limit on Vee's
   approvals in enforce mode

@@ -151,6 +151,7 @@ Write the command on its own line:
 | `@vee review` | Reviews the pull request's head again and publishes the result. |
 | `@vee status` | Replies with its findings on the pull request and the waivers and dismissals in effect. |
 | `@vee explain` | Replies in the finding's thread with an explanation from the configured model. |
+| `@vee fix all` | Fixes up to five open findings in turn, keeps each fix the review accepts, and pushes the kept fixes together ([ADR 0027](../adr/0027-fixing-every-open-finding.md)). |
 | `@vee fix` | Asks the configured model for a fix to the finding's file, reviews the result, and pushes it as one commit only if the finding is gone and nothing new blocks ([ADR 0023](../adr/0023-fixes-from-pull-request-comments.md)). |
 | `@vee dismiss <reason>` | Records the finding as a false positive and resolves its thread. A finding that blocks keeps blocking. |
 | `@vee waive <days>d <reason>` | Waives the finding on the current head, for 1 to 90 days, and reviews again so the check shows the new verdict. |

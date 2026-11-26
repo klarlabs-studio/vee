@@ -89,6 +89,8 @@ struct State {
     labels: Vec<String>,
     /// Reviews on the pull request: approvals and their state.
     reviews: Vec<serde_json::Value>,
+    /// The pull request's files, when a test needs another diff.
+    files: Option<serde_json::Value>,
 }
 
 impl State {
@@ -164,6 +166,9 @@ fn respond(state: &Mutex<State>, line: &str, body: &str, base: &str, head: &str)
             "base": {"sha": base, "repo": {"full_name": "team/repo"}},
             "head": {"sha": head, "ref": "feature", "repo": {"full_name": "team/repo"}},
         })),
+        ("GET", "/repos/team/repo/pulls/9/files") if state.files.is_some() => {
+            json(state.files.clone().unwrap())
+        }
         ("GET", "/repos/team/repo/pulls/9/files") => json(serde_json::json!([{
             "filename": "src/lib.rs", "status": "modified", "previous_filename": null,
             "patch": "@@ -1 +1 @@\n-pub fn initial() {}\n+pub fn changed() {}",
@@ -1087,6 +1092,175 @@ fn labels_and_approval(enforce: bool) {
         .find(|body| body.contains("<!-- vee:summary -->"))
         .unwrap();
     assert!(summary.contains("max_per_day"), "{summary}");
+
+    stop.store(true, Ordering::SeqCst);
+    server.join().unwrap();
+}
+
+/// `@vee fix all` fixes each open finding in turn, keeps the fixes the
+/// review accepts, and pushes them together (ADR 0027).
+#[test]
+fn fix_all_pushes_the_fixes_the_review_accepts() {
+    use std::os::unix::fs::PermissionsExt;
+    let outside = tempfile::tempdir().unwrap();
+    let provider = outside.path().join("provider");
+    // A review reports each BUG marker that is left. The fix for the first
+    // finding removes it; the one for the second only renames the function.
+    std::fs::write(
+        &provider,
+        r#"#!/bin/sh
+input=$(cat)
+case "$input" in
+  *'Fix the supplied code review finding'*)
+    case "$input" in
+      *'first bug'*) printf '%s' '{"schema_version":1,"summary":"Drop the marker.","edits":[{"old":"BUG_A","new":"fixed_a()"}]}' ;;
+      *) printf '%s' '{"schema_version":1,"summary":"Rename.","edits":[{"old":"fn b()","new":"fn b2()"}]}' ;;
+    esac ;;
+  *)
+    findings=""
+    case "$input" in *BUG_A*) findings='{"category":"correctness","severity":"high","confidence":90,"rationale":"The first bug drops a result.","path":"src/lib.rs","line":1}' ;; esac
+    case "$input" in *BUG_B*) [ -n "$findings" ] && findings="$findings,"; findings="$findings"'{"category":"correctness","severity":"high","confidence":90,"rationale":"The second bug drops a result.","path":"src/lib.rs","line":2}' ;; esac
+    printf '{"schema_version":1,"findings":[%s]}' "$findings" ;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let origin = outside.path().join("origin.git");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "--bare", "-b", "main"]);
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn initial() {}\n").unwrap();
+    std::fs::write(root.join("reviewer.md"), "Review the change.\n").unwrap();
+    std::fs::write(
+        root.join(".vee.yaml"),
+        format!(
+            "version: 1\noffline: false\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\n",
+            provider.display()
+        ),
+    )
+    .unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "base"]);
+    let base = git(root, &["rev-parse", "HEAD"]);
+    git(root, &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "pub fn a() { BUG_A }\npub fn b() { BUG_B }\n",
+    )
+    .unwrap();
+    git(root, &["commit", "-qam", "change"]);
+    let head = git(root, &["rev-parse", "HEAD"]);
+    git(root, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(
+        root,
+        &[
+            "push",
+            "-q",
+            "origin",
+            "main",
+            "feature",
+            "feature:refs/pull/9/head",
+        ],
+    );
+
+    let state = Arc::new(Mutex::new(State {
+        origin: Some(origin.clone()),
+        files: Some(serde_json::json!([{
+            "filename": "src/lib.rs", "status": "modified", "previous_filename": null,
+            "patch": "@@ -1 +1,2 @@\n-pub fn initial() {}\n+pub fn a() { BUG_A }\n+pub fn b() { BUG_B }",
+            "additions": 2, "deletions": 1,
+        }])),
+        ..State::default()
+    }));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let server = serve(
+        listener,
+        stop.clone(),
+        state.clone(),
+        base.clone(),
+        head.clone(),
+    );
+    let github =
+        |command: &mut std::process::Command, event_name: &str, event: &serde_json::Value| {
+            let path = outside.path().join(format!("{event_name}.json"));
+            std::fs::write(&path, event.to_string()).unwrap();
+            command
+                .env("GITHUB_ACTIONS", "true")
+                .env("GITHUB_EVENT_NAME", event_name)
+                .env("GITHUB_EVENT_PATH", &path)
+                .env("GITHUB_REPOSITORY", "team/repo")
+                .env("GITHUB_SERVER_URL", "http://127.0.0.1")
+                .env("GITHUB_API_URL", format!("http://{address}"))
+                .env("GH_TOKEN", "fixture-token")
+                .current_dir(root);
+        };
+    let mut command = vee();
+    command.args(["ci", "run", "--output", "json"]);
+    github(
+        &mut command,
+        "pull_request",
+        &serde_json::json!({"pull_request": {"number": 9, "base": {"sha": base}, "head": {"sha": head}}}),
+    );
+    assert_eq!(command.output().unwrap().status.code(), Some(1));
+    assert_eq!(state.lock().unwrap().review.len(), 2, "two finding threads");
+
+    // A conversation comment, from a job that checked out main.
+    git(root, &["checkout", "-q", "--force", "main"]);
+    let comment_id =
+        state
+            .lock()
+            .unwrap()
+            .add(false, "alice", serde_json::json!({"body": "@vee fix all"}));
+    let event = {
+        let state = state.lock().unwrap();
+        let comment = state
+            .conversation
+            .iter()
+            .find(|c| c["id"] == comment_id)
+            .unwrap()
+            .clone();
+        serde_json::json!({"action": "created", "comment": comment, "issue": {"number": 9, "pull_request": {}}})
+    };
+    let mut command = vee();
+    command.args(["ci", "command", "--output", "json"]);
+    github(&mut command, "issue_comment", &event);
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let done: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(done["outcome"], "done", "{done:#}");
+    let message = done["message"].as_str().unwrap();
+    // One fix kept and pushed, the other reported.
+    let pushed = git(&origin, &["rev-parse", "feature"]);
+    assert_eq!(
+        git(&origin, &["rev-parse", &format!("{pushed}^")]),
+        head,
+        "one commit on top of the head"
+    );
+    assert_eq!(
+        git(&origin, &["show", &format!("{pushed}:src/lib.rs")]),
+        "pub fn a() { fixed_a() }\npub fn b() { BUG_B }"
+    );
+    assert!(
+        message.contains(&format!("git revert {pushed}")),
+        "{message}"
+    );
+    assert!(message.contains("Not pushed"), "{message}");
+    assert!(message.contains("Vee did not push it"), "{message}");
+    assert_eq!(
+        done["run"]["gate"], "block",
+        "the second finding still blocks"
+    );
 
     stop.store(true, Ordering::SeqCst);
     server.join().unwrap();
