@@ -14,7 +14,7 @@
     "eligible": { "type": "integer", "minimum": 0, "description": "Pull requests with at least one head Vee called eligible: the denominator of both rates." },
     "outcomes": {
       "type": "object",
-      "propertyNames": { "enum": ["merged_as_eligible", "changed_after_eligible", "changes_requested_on_eligible", "closed_after_eligible", "never_eligible"] },
+      "propertyNames": { "enum": ["merged_as_eligible", "reverted_after_eligible", "changed_after_eligible", "changes_requested_on_eligible", "closed_after_eligible", "never_eligible"] },
       "additionalProperties": { "type": "integer", "minimum": 1 }
     },
     "agreement_rate": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
@@ -27,9 +27,11 @@
         "required": ["number", "outcome", "eligible_heads", "approved_heads"],
         "properties": {
           "number": { "type": "integer", "minimum": 1 },
-          "outcome": { "enum": ["merged_as_eligible", "changed_after_eligible", "changes_requested_on_eligible", "closed_after_eligible", "never_eligible"] },
+          "outcome": { "enum": ["merged_as_eligible", "reverted_after_eligible", "changed_after_eligible", "changes_requested_on_eligible", "closed_after_eligible", "never_eligible"] },
           "eligible_heads": { "type": "array", "items": { "type": "string" } },
-          "approved_heads": { "type": "array", "items": { "type": "string" } }
+          "approved_heads": { "type": "array", "items": { "type": "string" } },
+          "reverted_by_pull_request": { "type": "integer", "minimum": 1, "description": "The merged pull request that reverted this one." },
+          "reverted_by_commit": { "type": "string", "minLength": 1, "description": "The commit on the checked-out branch that reverted this one." }
         }
       }
     },

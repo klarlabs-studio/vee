@@ -1259,6 +1259,22 @@ impl GitHubAdapter {
                         .get("updated_at")
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_owned),
+                    title: pull
+                        .get("title")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    description: crate::conversation::bounded_text(
+                        pull.get("body")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default(),
+                        crate::conversation::MAX_SUMMARY_DESCRIPTION_BYTES,
+                    ),
+                    merge_commit: pull
+                        .get("merged_at")
+                        .is_some_and(|merged| !merged.is_null())
+                        .then(|| pull.get("merge_commit_sha")?.as_str().map(str::to_owned))
+                        .flatten(),
                 })
             }));
             if listed.len() < 100 || closed.len() >= limit {

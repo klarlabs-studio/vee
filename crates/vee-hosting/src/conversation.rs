@@ -58,6 +58,24 @@ pub struct PullRequestSummary {
     pub head_oid: String,
     /// RFC 3339 time of the last update.
     pub updated_at: Option<String>,
+    pub title: String,
+    /// The description, at most [`MAX_SUMMARY_DESCRIPTION_BYTES`].
+    pub description: String,
+    /// The commit the merge put on the target branch: a merge, squash or the
+    /// last rebased commit. `None` unless merged.
+    pub merge_commit: Option<String>,
+}
+
+/// Bytes of a pull request description kept in a [`PullRequestSummary`].
+pub const MAX_SUMMARY_DESCRIPTION_BYTES: usize = 8 * 1024;
+
+/// `text` cut to at most `max` bytes on a character boundary.
+pub fn bounded_text(text: &str, max: usize) -> String {
+    let mut end = text.len().min(max);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
 }
 
 /// A review on a pull request.

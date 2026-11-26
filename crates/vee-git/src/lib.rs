@@ -202,6 +202,52 @@ pub fn commit_history(
     Ok(commits)
 }
 
+/// A commit whose message says it reverts something.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RevertCommit {
+    pub oid: String,
+    pub message: String,
+}
+
+/// The newest `limit` commits reachable from `revision` whose message
+/// contains `This reverts`, as `git revert` and the hosts' revert buttons
+/// write it, newest first.
+pub fn revert_commits(
+    root: &Path,
+    revision: &str,
+    limit: usize,
+) -> Result<Vec<RevertCommit>, String> {
+    validate_revision(revision)?;
+    let limit = format!("--max-count={limit}");
+    let output = git(
+        root,
+        &[
+            "log",
+            "-z",
+            "--fixed-strings",
+            "--grep=This reverts",
+            "--format=%H%x01%B",
+            &limit,
+            revision,
+            "--",
+        ],
+    )?;
+    output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .map(|record| {
+            let record = String::from_utf8_lossy(record);
+            let (oid, message) = record
+                .split_once('\x01')
+                .ok_or("unexpected git log record")?;
+            Ok(RevertCommit {
+                oid: oid.trim().to_owned(),
+                message: message.to_owned(),
+            })
+        })
+        .collect()
+}
+
 /// The paths each of the newest `limit` commits reachable from `revision`
 /// changed (see [`commit_history`]).
 pub fn commit_paths(root: &Path, revision: &str, limit: usize) -> Result<Vec<Vec<String>>, String> {

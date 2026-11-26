@@ -3434,6 +3434,7 @@ fn run() -> Result<u8> {
                 },
                 &actor_login,
                 usize::from(limit),
+                &local_revert_commits(),
             )?;
             match output {
                 Output::Json => emit_json(&report)?,
@@ -4442,6 +4443,23 @@ fn confirm_patch_application(
         return Err(usage_failure(format!("{kind} {id} was not applied")));
     }
     Ok(())
+}
+
+/// Revert commits on the checked-out branch, when `vee ci approvals` runs in
+/// a clone; none otherwise.
+fn local_revert_commits() -> Vec<vee_git::RevertCommit> {
+    std::env::current_dir()
+        .ok()
+        .and_then(|directory| vee_git::repository_root(&directory).ok())
+        .and_then(|root| {
+            vee_git::revert_commits(
+                &root,
+                "HEAD",
+                vee_application::approval_report::LOCAL_REVERT_LIMIT,
+            )
+            .ok()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
