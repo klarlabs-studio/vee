@@ -215,13 +215,26 @@ pub(crate) fn review(
     let root = workspace.root();
     ensure_checkout_is_head(root, pull_request)?;
     exclude_vee_runtime_files(root)?;
-    let actor_login = options
+    let actor_login = match options
         .actor_login
         .clone()
-        .or_else(|| pull_request.actor_login.clone());
+        .or_else(|| pull_request.actor_login.clone())
+    {
+        Some(login) => Some(login),
+        // GitLab CI does not name the account; the token's user is Vee.
+        None => crate::hosting::token_login(
+            &pull_request.provider,
+            &pull_request.api_base,
+            &pull_request.token_env,
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("warning: {error:#}; Vee's earlier comments are not recognized");
+            None
+        }),
+    };
     // The conversation holds commands and Vee's summary with its record of
-    // the last review. Only GitHub reads it so far.
-    let conversation = if pull_request.provider == "github" {
+    // the last review.
+    let conversation = if matches!(pull_request.provider.as_str(), "github" | "gitlab") {
         read_conversation(pull_request, actor_login.as_deref().unwrap_or_default())
             .map_err(|error| {
                 eprintln!(
@@ -433,7 +446,7 @@ pub(crate) fn publish(
         }
     } else if options.labels || options.approve {
         eprintln!(
-            "warning: labels and approvals are published on GitHub only; {} gets the check",
+            "warning: labels and approvals need the pull request's comments, which could not be read; {} gets the check",
             pull_request.provider
         );
     }

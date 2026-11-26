@@ -69,15 +69,36 @@ request comments; see [Commands in comments](#commands-in-comments).
 
 3. Add masked CI/CD variables:
    - the model key, for example `ANTHROPIC_API_KEY`;
-   - `GL_TOKEN`, a project access token with the `api` scope;
-   - `VEE_ACTOR_LOGIN`, the username of that token's bot.
+   - `GL_TOKEN`, a project access token with the `api` and
+     `write_repository` scopes. Vee posts as that token's user.
 
 The written file includes Vee's template,
 `integrations/gitlab/vee.gitlab-ci.yml`, at the release that wrote it, and
-sets its variables (`VEE_VERSION`, `VEE_PROVIDER`, `VEE_MODEL`, `VEE_EFFORT`,
-and `VEE_APPROVAL` to also publish the approval verdict). The job runs in
-merge request pipelines, in the Vee container image of that release, with
-full history, and publishes a commit status and discussions.
+sets its variables:
+- `VEE_VERSION`, `VEE_PROVIDER`, `VEE_MODEL` and `VEE_EFFORT`;
+- `VEE_APPROVAL`, to also publish the approval verdict;
+- `VEE_LABELS` and `VEE_APPROVE`, as on GitHub;
+- `VEE_POLICY_PROFILE`.
+
+The job runs in merge request pipelines, in the Vee container image of that
+release, with full history. It publishes a commit status, discussions and a
+summary note that carries the review record, so later pushes are reviewed
+incrementally ([ADR 0030](../adr/0030-gitlab-parity.md)).
+
+### Commands on GitLab
+
+GitLab does not start pipelines for comments, but a webhook can:
+
+1. Create a pipeline trigger token (Settings → CI/CD → Pipeline trigger
+   tokens).
+2. Add a project webhook for **Comments** events with the URL
+   `https://<gitlab>/api/v4/projects/<project id>/ref/<default branch>/trigger/pipeline?token=<trigger token>`.
+
+GitLab then starts the template's `vee-command` job with the comment in
+`TRIGGER_PAYLOAD`. Anyone with the trigger token can start such a pipeline,
+so Vee takes only the comment's IDs from the payload and reads the comment,
+its author and its text back from the API before acting. `@vee fix` pushes
+to the merge request's branch with `GL_TOKEN`.
 
 ## What `vee ci run` does
 
@@ -93,7 +114,7 @@ full history, and publishes a commit status and discussions.
 7. Exits 0 when the gate passes, 1 when it blocks and 2 when the review is
    incomplete, so the job's status is the gate.
 
-On GitHub, a later push is reviewed incrementally
+On GitHub and GitLab, a later push is reviewed incrementally
 ([ADR 0022](../adr/0022-incremental-review-after-a-push.md)). The summary
 comment records what the last review covered. A changed file whose change is
 the same as then is not sent to reviewers again, and its findings are
@@ -111,7 +132,7 @@ writes when it finds security scanners
 ([ADR 0029](../adr/0029-security-scanner-presets.md)). Under a policy with
 `automatic_approval: false`, every change needs a person's approval.
 
-On GitHub, two more flags put Vee's verdict where the host's own tools use
+On GitHub and GitLab, two more flags put Vee's verdict where the host's own tools use
 it ([ADR 0024](../adr/0024-approval-and-risk-on-the-pull-request.md)). Both
 have matching Action inputs, `labels` and `approve`.
 
@@ -192,8 +213,8 @@ and applies a dismissal or waiver only if its command is unedited and its
 author still has the access it needs, so Vee's own replies grant nothing by
 themselves.
 
-GitLab does not start pipelines for comments, so commands are GitHub-only
-for now.
+On GitLab, commands run in a pipeline a Comments webhook triggers; see
+[Commands on GitLab](#commands-on-gitlab).
 
 ## Suggested fixes
 
