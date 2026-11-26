@@ -1396,6 +1396,7 @@ impl PullRequestConversationProvider for GitHubAdapter {
                 .unwrap_or(&pull_request.repository.full_name)
                 .to_owned(),
             head_repository: text("/head/repo/full_name").map(str::to_owned),
+            head_ref: text("/head/ref").map(str::to_owned),
             open: text("/state") == Some("open"),
         })
     }

@@ -57,6 +57,8 @@ pub struct PullRequestOrigin {
     pub base_repository: String,
     /// `None` when the head repository was deleted.
     pub head_repository: Option<String>,
+    /// The head branch's name in the head repository.
+    pub head_ref: Option<String>,
     pub open: bool,
 }
 
@@ -174,6 +176,7 @@ mod tests {
             base_oid: "b".into(),
             base_repository: "team/repo".into(),
             head_repository: head.map(str::to_owned),
+            head_ref: Some("feature".into()),
             open: true,
         };
         assert!(!origin(Some("Team/Repo")).is_fork());
