@@ -254,6 +254,7 @@ fn respond(state: &Mutex<State>, line: &str, body: &str, base: &str, head: &str)
             json(if page_one {
                 serde_json::json!([{
                     "number": 9, "merged_at": "2026-11-26T00:00:00Z", "head": {"sha": head},
+                    "merge_commit_sha": head, "title": "Change", "body": "",
                     "updated_at": rfc3339(now()),
                 }])
             } else {
@@ -1186,39 +1187,55 @@ fn labels_and_approval(enforce: bool) {
         assert_eq!(record.approvals.len(), 1);
         assert!(record.approvals[0].eligible && !record.approvals[0].approved);
 
-        // Merged at the head Vee would have approved: the report counts agreement.
-        let output = vee()
-            .args([
-                "ci",
-                "approvals",
-                "--repository",
-                "team/repo",
-                "--output",
-                "json",
-            ])
-            .args(["--api-base", &format!("http://{address}/")])
-            .env("GH_TOKEN", "fixture-token")
-            .output()
+        let approvals = || {
+            let output = vee()
+                .args([
+                    "ci",
+                    "approvals",
+                    "--repository",
+                    "team/repo",
+                    "--output",
+                    "json",
+                ])
+                .args(["--api-base", &format!("http://{address}/")])
+                .env("GH_TOKEN", "fixture-token")
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let schema: serde_json::Value = serde_json::from_str(include_str!(
+                "../../../schemas/approval-report-v1.schema.json"
+            ))
             .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        let schema: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../schemas/approval-report-v1.schema.json"
-        ))
-        .unwrap();
-        let validator = jsonschema::validator_for(&schema).unwrap();
-        let errors: Vec<String> = validator
-            .iter_errors(&report)
-            .map(|e| e.to_string())
-            .collect();
-        assert!(errors.is_empty(), "{errors:?}\n{report:#}");
+            let validator = jsonschema::validator_for(&schema).unwrap();
+            let errors: Vec<String> = validator
+                .iter_errors(&report)
+                .map(|e| e.to_string())
+                .collect();
+            assert!(errors.is_empty(), "{errors:?}\n{report:#}");
+            report
+        };
+        // Merged at the head Vee would have approved: the report counts agreement.
+        let report = approvals();
         assert_eq!(report["eligible"], 1, "{report:#}");
         assert_eq!(report["outcomes"]["merged_as_eligible"], 1, "{report:#}");
         assert_eq!(report["agreement_rate"], 1.0);
+
+        // A revert of the merge on the checked-out branch makes it an override.
+        git(root, &["revert", "--no-edit", &first]);
+        let revert = git(root, &["rev-parse", "HEAD"]);
+        let report = approvals();
+        assert_eq!(
+            report["outcomes"]["reverted_after_eligible"], 1,
+            "{report:#}"
+        );
+        assert_eq!(report["agreement_rate"], 0.0);
+        assert_eq!(report["cases"][0]["reverted_by_commit"], revert.as_str());
         stop.store(true, Ordering::SeqCst);
         server.join().unwrap();
         return;

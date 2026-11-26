@@ -530,12 +530,18 @@ mod tests {
                     merged: true,
                     head_oid: "h".into(),
                     updated_at: None,
+                    title: String::new(),
+                    description: String::new(),
+                    merge_commit: None,
                 },
                 vee_hosting::PullRequestSummary {
                     number: 2,
                     merged: false,
                     head_oid: "h2".into(),
                     updated_at: None,
+                    title: String::new(),
+                    description: String::new(),
+                    merge_commit: None,
                 },
             ])
         }
