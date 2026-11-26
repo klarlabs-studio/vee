@@ -79,7 +79,12 @@ fn host_of(url: &str, name: &str) -> Result<String> {
 
 fn detect_github(set: &dyn Fn(&str) -> Option<String>) -> Result<CiPullRequest> {
     let event_name = required(set, "GITHUB_EVENT_NAME")?;
-    if !matches!(event_name.as_str(), "pull_request" | "pull_request_target") {
+    // A review event re-runs Vee so a code owner's approval can complete
+    // `approval.require_owner_approval`; unchanged files are carried.
+    if !matches!(
+        event_name.as_str(),
+        "pull_request" | "pull_request_target" | "pull_request_review"
+    ) {
         return Err(usage_failure(format!(
             "`vee ci run` reviews pull requests; this workflow runs for `{event_name}`. Trigger it on `pull_request`"
         )));
@@ -509,6 +514,23 @@ pub(crate) fn publish(
     })
 }
 
+/// People whose approval of `head_oid` stands on the pull request.
+fn owner_approvers(
+    host: &dyn vee_hosting::PullRequestConversationProvider,
+    reference: &vee_hosting::PullRequestRef,
+    head_oid: &str,
+    actor_login: &str,
+) -> Result<Vec<String>> {
+    let reviews = host
+        .reviews(reference)
+        .map_err(|error| anyhow::anyhow!("reading the pull request's reviews: {error}"))?;
+    Ok(crate::approval::standing_approvers(
+        &reviews,
+        head_oid,
+        actor_login,
+    ))
+}
+
 /// Labels name the gate and the risk tier, so teams can filter and route
 /// pull requests by them.
 const GATE_LABEL: &str = "vee:gate:";
@@ -553,8 +575,28 @@ fn apply_approval(
     head_oid: &str,
     actor_login: &str,
 ) -> Result<(crate::incremental::ApprovalVerdict, Option<String>)> {
-    let eligibility = crate::operations::approval_eligibility(workspace, review_id)?;
+    let mut eligibility = crate::operations::approval_eligibility(workspace, review_id)?;
     let guards = workspace.effective_config(None)?.approval;
+    if guards.require_owner_approval {
+        let payload = workspace
+            .store()?
+            .get(review_id)
+            .map_err(anyhow::Error::msg)?
+            .ok_or_else(|| anyhow::anyhow!("review {review_id} was not found"))?;
+        let review = crate::deserialize_review_result(&payload).map_err(anyhow::Error::msg)?;
+        let approvers = owner_approvers(host, reference, head_oid, actor_login)?;
+        let stage = crate::approval::owner_approvals_stage(
+            workspace.root(),
+            &review.change_set,
+            &approvers,
+            &|team, login| host.is_team_member(reference, team, login).unwrap_or(false),
+        );
+        eligibility
+            .stages
+            .retain(|existing| existing.id != crate::approval::OWNER_APPROVALS_STAGE);
+        eligibility.stages.push(stage);
+        eligibility.eligible = eligibility.stages.iter().all(|stage| stage.passed);
+    }
     let enforce = guards.enforces();
     let mut verdict = crate::incremental::ApprovalVerdict {
         head_oid: head_oid.to_owned(),
@@ -1012,6 +1054,19 @@ mod tests {
                 actor_login: Some("github-actions[bot]".into()),
             }
         );
+
+        // A submitted review carries the same pull request.
+        let on_review = detect(&environment(&[
+            ("GITHUB_ACTIONS", "true"),
+            ("GITHUB_EVENT_NAME", "pull_request_review"),
+            ("GITHUB_EVENT_PATH", &event),
+            ("GITHUB_REPOSITORY", "octo/repo"),
+            ("GITHUB_SERVER_URL", "https://git.example.com"),
+            ("GITHUB_API_URL", "https://git.example.com/api/v3"),
+            ("GH_TOKEN", "token"),
+        ]))
+        .unwrap();
+        assert_eq!(on_review.number, 42);
 
         let push = detect(&environment(&[
             ("GITHUB_ACTIONS", "true"),

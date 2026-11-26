@@ -6,6 +6,14 @@ change configuration and output contracts.
 
 ## Unreleased
 
+### Owner approval before Vee approves
+
+- `approval.require_owner_approval: true` makes Vee approve only once, for
+  every changed file `CODEOWNERS` on the base assigns, one of its owners
+  has approved the current head; team owners are checked for membership.
+  `vee ci run` also runs on `pull_request_review`, so an owner's approval
+  is picked up (ADR 0034).
+
 ### Jira and Linear work items
 
 - `work_items` in `.vee.yaml` names Jira (Cloud or Data Center) or Linear,
