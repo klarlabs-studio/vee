@@ -143,6 +143,7 @@
         "never_paths": { "type": "array", "maxItems": 256, "items": { "type": "string", "minLength": 1, "maxLength": 512 }, "description": "Changes touching these paths (globs) always need a human." },
         "never_authors": { "type": "array", "maxItems": 256, "items": { "type": "string", "minLength": 1, "maxLength": 512 }, "description": "Changes with a commit by an author whose name or email matches (globs) always need a human." },
         "never_owners": { "type": "array", "maxItems": 256, "items": { "type": "string", "minLength": 1, "maxLength": 512 }, "description": "Changes to a file that CODEOWNERS on the base assigns to any of these owners (@org/team, @user or an email) always need a human." },
+        "require_owner_approval": { "type": "boolean", "default": false, "description": "Approve only once, for every changed file CODEOWNERS on the base assigns, one of its owners has approved the current head; owners that are teams are checked for membership, and email owners cannot be matched (ADR 0034)." },
         "max_per_day": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "At most this many approvals by Vee in any 24 hours, in enforce mode (GitHub)." },
         "max_risk": { "enum": ["low", "elevated"], "default": "low", "description": "Highest change-risk tier still eligible." },
         "mode": { "enum": ["observe", "enforce"], "default": "observe", "description": "observe: `vee ci run --approve` records what it would approve on the pull request and approves nothing. enforce: it approves eligible changes." }

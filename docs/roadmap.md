@@ -76,7 +76,7 @@ would have approved.
 - [x] Rate limits on automatic approvals: `approval.max_per_day` ([ADR 0026](adr/0026-owner-guards-and-a-daily-limit-for-approvals.md))
 - [ ] Close the remaining items of [ADR 0015](adr/0015-layered-approval-eligibility.md)
 - [x] Code ownership in approval: `approval.never_owners` keeps changes to some owners' paths for a person
-- [ ] Require approval from the owners of touched paths
+- [x] Require approval from the owners of touched paths: `approval.require_owner_approval` ([ADR 0034](adr/0034-owner-approval-before-vee-approves.md))
 
 ### 5. A PR steward on the user's own agent (M–L)
 

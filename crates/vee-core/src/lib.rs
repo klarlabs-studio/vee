@@ -3353,6 +3353,10 @@ pub struct ApprovalConfig {
     /// owners (`@org/team`, `@user` or an email) always need a human.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub never_owners: Vec<String>,
+    /// Approve only once, for every changed file `CODEOWNERS` on the base
+    /// assigns, one of its owners has approved the current head (ADR 0034).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_owner_approval: bool,
     /// At most this many approvals by Vee in any 24 hours, in enforce mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_per_day: Option<u32>,

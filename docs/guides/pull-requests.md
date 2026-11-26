@@ -168,6 +168,37 @@ Two more guards apply ([ADR 0026](../adr/0026-owner-guards-and-a-daily-limit-for
 - `approval.max_per_day: 10` caps Vee's approvals in any 24 hours in enforce
   mode. Past the limit, an eligible head is left to a person.
 
+With `approval.require_owner_approval: true`, Vee approves only once a code
+owner has approved each changed file that has one
+([ADR 0034](../adr/0034-owner-approval-before-vee-approves.md)). Vee's
+approval then adds to the owners' approval and never replaces it.
+
+- Owners come from `CODEOWNERS` on the base, so a change cannot edit its
+  own owners.
+- An `@user` owner counts when that person's latest review approves the
+  current head.
+- An `@org/team` owner counts when such an approver is a member of the
+  team.
+- Email owners cannot be matched to an approval, so their files always wait
+  for a person.
+- Bots and Vee's own approvals don't count. A push makes every earlier
+  approval stale.
+
+On GitHub, add `pull_request_review` to the workflow's triggers, so Vee
+looks again when an owner approves. A re-run whose files haven't changed
+carries the earlier findings and makes no model calls:
+
+```yaml
+on:
+  pull_request:
+  pull_request_review:
+    types: [submitted, dismissed]
+```
+
+GitLab doesn't start a pipeline when someone approves; write `@vee review`
+or re-run the pipeline. `vee gate approval` outside CI cannot see the pull
+request, so it reports owner approval as not yet checked.
+
 Before switching to `enforce`, see how Vee's verdicts compared with what
 people did ([ADR 0025](../adr/0025-observe-mode-for-approvals.md)):
 
