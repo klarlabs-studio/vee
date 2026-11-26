@@ -17,6 +17,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+mod conversation;
+
 const MAX_WORK_ITEM_RESPONSE_BYTES: u64 = 1_048_576;
 const MAX_API_RESPONSE_BYTES: u64 = 5_242_880;
 type HmacSha256 = Hmac<Sha256>;
