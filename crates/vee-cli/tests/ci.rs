@@ -153,6 +153,12 @@ struct PullRequestRepository {
 
 #[cfg(unix)]
 fn pull_request_repository(findings: &str) -> PullRequestRepository {
+    pull_request_repository_with(findings, "")
+}
+
+/// A pull request repository whose `.vee.yaml` ends with `extra_config`.
+#[cfg(unix)]
+fn pull_request_repository_with(findings: &str, extra_config: &str) -> PullRequestRepository {
     use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
@@ -172,7 +178,7 @@ fn pull_request_repository(findings: &str) -> PullRequestRepository {
     std::fs::write(
         root.join(".vee.yaml"),
         format!(
-            "version: 1\noffline: false\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\n",
+            "version: 1\noffline: false\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\n{extra_config}",
             provider.display()
         ),
     )
@@ -273,6 +279,64 @@ fn ci_run_reviews_a_github_pull_request_and_publishes_its_gate() {
         .unwrap();
     assert!(!wrong.status.success());
     assert!(String::from_utf8_lossy(&wrong.stdout).contains("pull_request.head.sha"));
+}
+
+#[cfg(unix)]
+#[test]
+fn ci_run_runs_the_verifications_the_policy_requires() {
+    use std::os::unix::fs::PermissionsExt;
+    let checks = tempfile::tempdir().unwrap();
+    let marker = checks.path().join("ran");
+    let check = checks.path().join("check");
+    std::fs::write(&check, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+    std::fs::set_permissions(&check, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let repository = pull_request_repository_with(
+        "[]",
+        &format!(
+            "verification:\n  check: {{ executable: {} }}\npolicy:\n  required_reviewers: [correctness]\n  required_verifications: [check]\n",
+            check.display()
+        ),
+    );
+    let (root, outside) = (repository.directory.path(), &repository.outside);
+    let event = outside.path().join("event.json");
+    std::fs::write(
+        &event,
+        serde_json::json!({"pull_request": {"number": 9, "base": {"sha": repository.base_tip}, "head": {"sha": repository.head}}})
+            .to_string(),
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let server = fake_github(
+        listener,
+        stop.clone(),
+        repository.base_tip.clone(),
+        repository.head.clone(),
+    );
+    let output = vee()
+        .args(["ci", "run", "--output", "json"])
+        .env("GITHUB_ACTIONS", "true")
+        .env("GITHUB_EVENT_NAME", "pull_request")
+        .env("GITHUB_EVENT_PATH", &event)
+        .env("GITHUB_REPOSITORY", "team/repo")
+        .env("GITHUB_SERVER_URL", "http://127.0.0.1")
+        .env("GITHUB_API_URL", format!("http://{address}"))
+        .env("GH_TOKEN", "fixture-token")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    stop.store(true, Ordering::SeqCst);
+    server.join().unwrap();
+    assert!(marker.exists(), "the required check ran");
+    let run: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)));
+    assert_eq!(
+        run["gate"],
+        "pass",
+        "{run:#}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

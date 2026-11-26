@@ -245,6 +245,7 @@ pub(crate) fn review(
         .clone()
         .filter(|_| !options.full)
         .map(|record| crate::incremental::CarriedReview { record });
+    run_required_verifications(workspace, pull_request, options.policy_profile.as_deref())?;
     let review = crate::operations::review(
         workspace,
         crate::operations::ReviewRequest {
@@ -268,6 +269,37 @@ pub(crate) fn review(
         summary,
         actor_login,
     })
+}
+
+/// Run the verification profiles the policy requires on the change, so
+/// the gate has their runs: CI keeps no earlier ones. A profile that cannot
+/// run leaves the gate incomplete; the error is reported and the review
+/// goes on.
+fn run_required_verifications(
+    workspace: &Workspace,
+    pull_request: &CiPullRequest,
+    policy_profile: Option<&str>,
+) -> Result<()> {
+    let config = workspace.effective_config(policy_profile)?;
+    for profile_id in &config.policy.required_verifications {
+        let result = crate::operations::verify(
+            workspace,
+            crate::operations::VerifyRequest {
+                target: crate::operations::VerifyTarget::Scope(
+                    crate::operations::ScopeRequest::BaseAndWorktree {
+                        base: Some(pull_request.base_oid.clone()),
+                    },
+                ),
+                profile_id,
+                impacted_tests: false,
+            },
+        );
+        match result {
+            Ok(result) => eprintln!("vee: verification {profile_id}: {:?}", result.run.status),
+            Err(error) => eprintln!("warning: verification {profile_id} could not run: {error:#}"),
+        }
+    }
+    Ok(())
 }
 
 /// Publish a review of `pull_request`'s head: the check, threads, the
