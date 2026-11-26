@@ -182,6 +182,7 @@ fn passing_review() -> ReviewResult {
     );
     assert_eq!(gate.status, GateStatus::Pass);
     ReviewResult {
+        standards_digest: None,
         carried: None,
         schema_version: 2,
         review_id: "rev_follow_up".into(),

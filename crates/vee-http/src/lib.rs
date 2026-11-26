@@ -1698,6 +1698,7 @@ mod tests {
         dimension_finding.id = "FIND-DIMENSION".into();
         dimension_finding.fingerprint = "sha256:dimension-finding".into();
         let saved_review = vee_application::ReviewResult {
+            standards_digest: None,
             carried: None,
             schema_version: 2,
             review_id: "rev_dimensions".into(),
@@ -2079,6 +2080,7 @@ mod tests {
         let change_set =
             vee_application::capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
         let review = ReviewResult {
+            standards_digest: None,
             carried: None,
             schema_version: 2,
             review_id: review_id.into(),
@@ -2258,6 +2260,7 @@ mod tests {
             advisory: false,
         };
         let review = ReviewResult {
+            standards_digest: None,
             carried: None,
             schema_version: 2,
             review_id: "rev_drawer".into(),
@@ -2358,6 +2361,7 @@ mod tests {
         let change_set =
             vee_application::capture_change_set(root, vee_git::ChangeScope::WorkingTree).unwrap();
         let review = ReviewResult {
+            standards_digest: None,
             carried: None,
             schema_version: 2,
             review_id: "rev_saved".into(),

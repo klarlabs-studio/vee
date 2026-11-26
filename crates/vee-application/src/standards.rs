@@ -81,6 +81,8 @@ pub fn resolve(root: &Path, target: Option<&Path>) -> Result<StandardsReport, St
     };
 
     for (file, kind, precedence) in [
+        ("REVIEW.md", "review_instructions", 50),
+        (".cursorrules", "editor_rule", 50),
         ("AGENTS.md", "agent_instructions", 50),
         ("CLAUDE.md", "agent_instructions", 50),
         ("GEMINI.md", "agent_instructions", 50),
@@ -99,11 +101,16 @@ pub fn resolve(root: &Path, target: Option<&Path>) -> Result<StandardsReport, St
         let mut parent = target.parent();
         while let Some(directory) = parent {
             if !directory.as_os_str().is_empty() {
-                for file in ["AGENTS.md", "CLAUDE.md", "GEMINI.md"] {
+                for (file, kind) in [
+                    ("REVIEW.md", "review_instructions"),
+                    ("AGENTS.md", "agent_instructions"),
+                    ("CLAUDE.md", "agent_instructions"),
+                    ("GEMINI.md", "agent_instructions"),
+                ] {
                     let relative = directory.join(file);
                     add(
                         relative,
-                        "agent_instructions",
+                        kind,
                         (60 + directory.components().count().min(30)) as u8,
                         format!("applies to {}/ descendants", directory.display()),
                     )?;
@@ -113,6 +120,30 @@ pub fn resolve(root: &Path, target: Option<&Path>) -> Result<StandardsReport, St
                 break;
             }
             parent = directory.parent();
+        }
+    }
+
+    // Documents named in `.vee.yaml` (`review.standards`), for a target
+    // their path globs match, or for no target at all.
+    if let Ok(config) = crate::load_repository_config(&root) {
+        for source in &config.review.standards {
+            let applies = source.paths.is_empty()
+                || target.as_ref().is_none_or(|target| {
+                    let target = target.to_string_lossy().replace('\\', "/");
+                    source
+                        .paths
+                        .iter()
+                        .any(|glob| vee_core::glob_matches(glob, &target))
+                });
+            let relative = PathBuf::from(source.path.trim_start_matches("./"));
+            if applies && normalize_target(&relative).is_ok() {
+                let scope = if source.paths.is_empty() {
+                    "repository-wide (configured)".to_owned()
+                } else {
+                    format!("applies to {}", source.paths.join(", "))
+                };
+                add(relative, "configured_standard", 55, scope)?;
+            }
         }
     }
 
@@ -323,7 +354,7 @@ pub fn resolve(root: &Path, target: Option<&Path>) -> Result<StandardsReport, St
     let mut limitations = vec![
         "Standards are reported with provenance; Vee does not infer semantic contradictions between prose rules.".into(),
         "Editor-rule frontmatter and path globs are not evaluated; those files are marked repository-wide.".into(),
-        "Only repository-root agent files and ancestor AGENTS.md/CLAUDE.md/GEMINI.md files are discovered.".into(),
+        "Only repository-root agent files, ancestor REVIEW.md/AGENTS.md/CLAUDE.md/GEMINI.md files, and documents named in review.standards are discovered.".into(),
         "Each source is capped at 64 KiB; total returned source content is capped at 256 KiB.".into(),
         "Remote standards are guidance only; they cannot define or weaken Vee gate policy.".into(),
     ];

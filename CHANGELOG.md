@@ -6,6 +6,22 @@ change configuration and output contracts.
 
 ## Unreleased
 
+### Repository standards in every review
+
+- Reviewers now receive the repository's standards with every review:
+  `REVIEW.md`, `AGENTS.md`, `CLAUDE.md` and `GEMINI.md` from each changed
+  file's directories and the root, `.cursorrules`, Copilot instructions,
+  `.cursor/rules/` and `.claude/rules/`, and documents listed under
+  `review.standards` (optionally limited to changed paths). They are read
+  from the change's base, most specific first, within
+  `review.max_standards_bytes` (48 KiB by default; 0 turns this off).
+- Each standard sent is recorded in the reviewer context with role
+  `repository_standard`; `review-output-v2` gains `standards_digest` and the
+  `truncated_source` context status. Incremental review carries nothing
+  across a change of standards.
+- `vee standards` also lists `REVIEW.md`, `.cursorrules` and configured
+  documents (ADR 0028).
+
 ### Reviews while you work
 
 - The Claude Code plugin reviews an agent's changes when it finishes a turn:

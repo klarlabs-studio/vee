@@ -3391,6 +3391,24 @@ pub struct ReviewConfig {
     /// Read-only reviewer access to the review snapshot (ADR 0017).
     #[serde(default)]
     pub exploration: ReviewExplorationConfig,
+    /// Bytes of repository standards (`REVIEW.md`, `AGENTS.md`, editor
+    /// rules and `standards`) sent to reviewers; 0 sends none (ADR 0028).
+    #[serde(default = "default_standards_bytes")]
+    pub max_standards_bytes: usize,
+    /// More standards documents, each optionally limited to changed paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub standards: Vec<StandardsSourceConfig>,
+}
+
+/// A standards document named in `.vee.yaml`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StandardsSourceConfig {
+    /// Repository-relative path of the document.
+    pub path: String,
+    /// Globs of changed paths the document applies to; empty applies to all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
 }
 
 /// Lets reviewers read more of the review snapshot through Vee-served tools
@@ -3478,8 +3496,14 @@ impl Default for ReviewConfig {
             max_context_file_bytes: default_context_file_bytes(),
             max_context_bytes: default_context_bytes(),
             exploration: ReviewExplorationConfig::default(),
+            max_standards_bytes: default_standards_bytes(),
+            standards: Vec::new(),
         }
     }
+}
+
+fn default_standards_bytes() -> usize {
+    48 * 1024
 }
 
 fn default_review_concurrency() -> usize {
@@ -3943,6 +3967,24 @@ impl RepositoryConfig {
         }
         if !(1..=4 * 1024 * 1024).contains(&config.review.max_context_file_bytes) {
             return Err("review.max_context_file_bytes must be in 1..=4194304".into());
+        }
+        if config.review.max_standards_bytes > 1024 * 1024 {
+            return Err("review.max_standards_bytes must be at most 1048576".into());
+        }
+        if config.review.standards.len() > 64
+            || config.review.standards.iter().any(|source| {
+                source.path.trim().is_empty()
+                    || source.path.len() > 512
+                    || source.path.starts_with('/')
+                    || source.path.split(['/', '\\']).any(|part| part == "..")
+                    || source.paths.len() > 64
+                    || source
+                        .paths
+                        .iter()
+                        .any(|glob| glob.trim().is_empty() || glob.len() > 512)
+            })
+        {
+            return Err("review.standards entries need a relative path inside the repository and at most 64 path globs".into());
         }
         if !(1..=16 * 1024 * 1024).contains(&config.review.max_context_bytes) {
             return Err("review.max_context_bytes must be in 1..=16777216".into());
