@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vee.klarlabs.de/schemas/approval-report-v1.schema.json",
+  "title": "Vee approval report",
+  "description": "`vee ci approvals`: Vee's approval verdicts on recently closed pull requests, compared with what people did (ADR 0025).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "repository", "pull_requests_read", "with_verdicts", "eligible", "outcomes", "agreement_rate", "override_rate", "cases", "limitations"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "repository": { "type": "string", "minLength": 1 },
+    "pull_requests_read": { "type": "integer", "minimum": 0 },
+    "with_verdicts": { "type": "integer", "minimum": 0 },
+    "eligible": { "type": "integer", "minimum": 0, "description": "Pull requests with at least one head Vee called eligible: the denominator of both rates." },
+    "outcomes": {
+      "type": "object",
+      "propertyNames": { "enum": ["merged_as_eligible", "changed_after_eligible", "changes_requested_on_eligible", "closed_after_eligible", "never_eligible"] },
+      "additionalProperties": { "type": "integer", "minimum": 1 }
+    },
+    "agreement_rate": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+    "override_rate": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["number", "outcome", "eligible_heads", "approved_heads"],
+        "properties": {
+          "number": { "type": "integer", "minimum": 1 },
+          "outcome": { "enum": ["merged_as_eligible", "changed_after_eligible", "changes_requested_on_eligible", "closed_after_eligible", "never_eligible"] },
+          "eligible_heads": { "type": "array", "items": { "type": "string" } },
+          "approved_heads": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "limitations": { "type": "array", "items": { "type": "string" } }
+  }
+}

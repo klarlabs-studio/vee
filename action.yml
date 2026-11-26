@@ -28,10 +28,11 @@ inputs:
     default: "false"
   approve:
     description: >-
-      Approve the pull request when the change is eligible for approval
-      without a person, and withdraw Vee's approval when a push or a new
-      review makes it stale. The repository must allow GitHub Actions to
-      approve pull requests.
+      Decide on every review whether the change is eligible for approval
+      without a person, and record the verdict on the pull request. Vee
+      approves only with `approval.mode: enforce` in .vee.yaml, and then
+      withdraws its approval when a push or a new review makes it stale; the
+      repository must allow GitHub Actions to approve pull requests.
     default: "false"
   full-review:
     description: >-

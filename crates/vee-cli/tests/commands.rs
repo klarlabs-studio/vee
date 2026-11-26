@@ -243,6 +243,17 @@ fn respond(state: &Mutex<State>, line: &str, body: &str, base: &str, head: &str)
             state.labels.retain(|label| *label != name);
             json(serde_json::json!([]))
         }
+        ("GET", "/repos/team/repo/pulls") => {
+            // Pull request 9, merged at its current head.
+            let page_one = path.contains("page=1") || !path.contains("page=");
+            json(if page_one {
+                serde_json::json!([{
+                    "number": 9, "merged_at": "2026-11-26T00:00:00Z", "head": {"sha": head},
+                }])
+            } else {
+                serde_json::json!([])
+            })
+        }
         ("GET", "/repos/team/repo/pulls/9/reviews") => {
             let page_one = path.contains("page=1") || !path.contains("page=");
             json(if page_one {
@@ -872,6 +883,17 @@ fn a_fix_is_pushed_only_when_the_review_accepts_it() {
 /// approval in step with the latest review (ADR 0024).
 #[test]
 fn labels_and_approval_follow_the_latest_review() {
+    labels_and_approval(true);
+}
+
+/// In observe mode, the default, Vee approves nothing and records what it
+/// would have approved (ADR 0025).
+#[test]
+fn observe_mode_records_the_verdict_and_approves_nothing() {
+    labels_and_approval(false);
+}
+
+fn labels_and_approval(enforce: bool) {
     use std::os::unix::fs::PermissionsExt;
     let outside = tempfile::tempdir().unwrap();
     let provider = outside.path().join("provider");
@@ -890,8 +912,9 @@ fn labels_and_approval_follow_the_latest_review() {
     std::fs::write(
         root.join(".vee.yaml"),
         format!(
-            "version: 1\noffline: false\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\napproval:\n  max_risk: elevated\n",
-            provider.display()
+            "version: 1\noffline: false\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\napproval:\n  max_risk: elevated\n  mode: {}\n",
+            provider.display(),
+            if enforce { "enforce" } else { "observe" }
         ),
     )
     .unwrap();
@@ -936,7 +959,8 @@ fn labels_and_approval_follow_the_latest_review() {
             .unwrap();
         assert!(
             output.status.code().is_some_and(|code| code <= 1),
-            "{}",
+            "stdout={}\nstderr={}",
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
@@ -947,7 +971,63 @@ fn labels_and_approval_follow_the_latest_review() {
         labels
     };
 
-    // 1. A small, passing change: labelled and approved on its head.
+    if !enforce {
+        let run = run_ci(&first);
+        assert_eq!(run["gate"], "pass", "{run:#}");
+        assert_eq!(run.get("approval_review_id"), None, "{run:#}");
+        assert!(state.lock().unwrap().reviews.is_empty());
+        let summary = state
+            .lock()
+            .unwrap()
+            .conversation
+            .iter()
+            .map(|c| c["body"].as_str().unwrap().to_owned())
+            .find(|body| body.contains("<!-- vee:summary -->"))
+            .unwrap();
+        assert!(summary.contains("would approve this head"), "{summary}");
+        let record = vee_application::incremental::decode(&summary).unwrap();
+        assert_eq!(record.approvals.len(), 1);
+        assert!(record.approvals[0].eligible && !record.approvals[0].approved);
+
+        // Merged at the head Vee would have approved: the report counts agreement.
+        let output = vee()
+            .args([
+                "ci",
+                "approvals",
+                "--repository",
+                "team/repo",
+                "--output",
+                "json",
+            ])
+            .args(["--api-base", &format!("http://{address}/")])
+            .env("GH_TOKEN", "fixture-token")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../schemas/approval-report-v1.schema.json"
+        ))
+        .unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let errors: Vec<String> = validator
+            .iter_errors(&report)
+            .map(|e| e.to_string())
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}\n{report:#}");
+        assert_eq!(report["eligible"], 1, "{report:#}");
+        assert_eq!(report["outcomes"]["merged_as_eligible"], 1, "{report:#}");
+        assert_eq!(report["agreement_rate"], 1.0);
+        stop.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+        return;
+    }
+
+    // 1. A small, passing change is labelled and approved on its head.
     let run = run_ci(&first);
     assert_eq!(run["gate"], "pass", "{run:#}");
     assert_eq!(labels(), ["vee:gate:pass", "vee:risk:elevated"]);

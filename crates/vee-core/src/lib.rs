@@ -3306,6 +3306,10 @@ pub struct ApprovalConfig {
     /// Highest change-risk tier still eligible: `low` (default) or `elevated`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_risk: Option<String>,
+    /// `observe` (default): `vee ci run --approve` records what it would
+    /// approve and approves nothing. `enforce`: it approves eligible changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 impl ApprovalConfig {
@@ -3315,6 +3319,12 @@ impl ApprovalConfig {
 
     pub fn max_risk(&self) -> &str {
         self.max_risk.as_deref().unwrap_or("low")
+    }
+
+    /// Whether eligible changes are approved on the host, rather than only
+    /// recorded.
+    pub fn enforces(&self) -> bool {
+        self.mode.as_deref() == Some("enforce")
     }
 }
 
@@ -4069,6 +4079,12 @@ impl RepositoryConfig {
         }
         if !matches!(config.approval.max_risk(), "low" | "elevated") {
             return Err("approval.max_risk must be 'low' or 'elevated'".into());
+        }
+        if !matches!(
+            config.approval.mode.as_deref(),
+            None | Some("observe" | "enforce")
+        ) {
+            return Err("approval.mode must be 'observe' or 'enforce'".into());
         }
         for (field, patterns) in [
             ("approval.never_paths", &config.approval.never_paths),
