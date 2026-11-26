@@ -249,6 +249,7 @@ fn respond(state: &Mutex<State>, line: &str, body: &str, base: &str, head: &str)
             json(if page_one {
                 serde_json::json!([{
                     "number": 9, "merged_at": "2026-11-26T00:00:00Z", "head": {"sha": head},
+                    "updated_at": rfc3339(now()),
                 }])
             } else {
                 serde_json::json!([])
@@ -267,6 +268,7 @@ fn respond(state: &Mutex<State>, line: &str, body: &str, base: &str, head: &str)
             let id = 9000 + state.next_id;
             state.reviews.push(serde_json::json!({
                 "id": id, "state": "APPROVED", "commit_id": request["commit_id"],
+                "submitted_at": rfc3339(now()),
                 "body": request["body"], "user": {"login": BOT, "type": "Bot"},
             }));
             json(serde_json::json!({ "id": id }))
@@ -914,7 +916,7 @@ fn labels_and_approval(enforce: bool) {
         format!(
             "version: 1\noffline: false\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\napproval:\n  max_risk: elevated\n  mode: {}\n",
             provider.display(),
-            if enforce { "enforce" } else { "observe" }
+            if enforce { "enforce\n  max_per_day: 1" } else { "observe" }
         ),
     )
     .unwrap();
@@ -1066,6 +1068,25 @@ fn labels_and_approval(enforce: bool) {
     assert_eq!(state_now.reviews.len(), 1);
     assert_eq!(state_now.reviews[0]["state"], "DISMISSED");
     drop(state_now);
+
+    // 3. A clean head is eligible again, but Vee gave its one approval for
+    //    the day: it leaves this one to a person.
+    std::fs::write(root.join("src/lib.rs"), "pub fn changed() { 1 }\n").unwrap();
+    git(root, &["commit", "-qam", "fix"]);
+    let third = git(root, &["rev-parse", "HEAD"]);
+    let run = run_ci(&third);
+    assert_eq!(run["gate"], "pass", "{run:#}");
+    assert_eq!(run.get("approval_review_id"), None, "{run:#}");
+    assert_eq!(state.lock().unwrap().reviews.len(), 1);
+    let summary = state
+        .lock()
+        .unwrap()
+        .conversation
+        .iter()
+        .map(|c| c["body"].as_str().unwrap().to_owned())
+        .find(|body| body.contains("<!-- vee:summary -->"))
+        .unwrap();
+    assert!(summary.contains("max_per_day"), "{summary}");
 
     stop.store(true, Ordering::SeqCst);
     server.join().unwrap();

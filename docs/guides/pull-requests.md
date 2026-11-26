@@ -118,6 +118,13 @@ have matching Action inputs, `labels` and `approve`.
     repository's Actions settings; branch protection decides whether the
     approval counts.
 
+Two more guards apply ([ADR 0026](../adr/0026-owner-guards-and-a-daily-limit-for-approvals.md)):
+
+- `approval.never_owners: ["@acme/security"]` keeps every change to code
+  those owners own, per `CODEOWNERS` on the base, for a person.
+- `approval.max_per_day: 10` caps Vee's approvals in any 24 hours in enforce
+  mode. Past the limit, an eligible head is left to a person.
+
 Before switching to `enforce`, see how Vee's verdicts compared with what
 people did ([ADR 0025](../adr/0025-observe-mode-for-approvals.md)):
 

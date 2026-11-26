@@ -1225,6 +1225,50 @@ impl GitHubAdapter {
     }
 
     /// Every page of a comment listing, bounded.
+    fn pull_request_listing(
+        &self,
+        repository: &crate::RepositoryRef,
+        state: &str,
+        limit: usize,
+    ) -> Result<Vec<PullRequestSummary>, HostingError> {
+        let reference = PullRequestRef {
+            repository: repository.clone(),
+            number: 1,
+        };
+        let mut closed = Vec::new();
+        for page in 1..=limit.div_ceil(100).max(1) {
+            let mut url = self.repository_path(&reference, "/pulls")?;
+            url.query_pairs_mut()
+                .append_pair("state", state)
+                .append_pair("sort", "updated")
+                .append_pair("direction", "desc")
+                .append_pair("per_page", "100")
+                .append_pair("page", &page.to_string());
+            let listed = self.get_json(url)?;
+            let listed = listed.as_array().ok_or_else(|| {
+                HostingError::InvalidResponse("GitHub pull request listing is not a list".into())
+            })?;
+            closed.extend(listed.iter().filter_map(|pull| {
+                Some(PullRequestSummary {
+                    number: pull.get("number")?.as_u64()?,
+                    merged: pull
+                        .get("merged_at")
+                        .is_some_and(|merged| !merged.is_null()),
+                    head_oid: pull.pointer("/head/sha")?.as_str()?.to_owned(),
+                    updated_at: pull
+                        .get("updated_at")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                })
+            }));
+            if listed.len() < 100 || closed.len() >= limit {
+                break;
+            }
+        }
+        closed.truncate(limit);
+        Ok(closed)
+    }
+
     fn comment_pages(
         &self,
         reference: &PullRequestRef,
@@ -1498,39 +1542,16 @@ impl PullRequestConversationProvider for GitHubAdapter {
         &self,
         repository: &crate::RepositoryRef,
         limit: usize,
-    ) -> Result<Vec<ClosedPullRequest>, HostingError> {
-        let reference = PullRequestRef {
-            repository: repository.clone(),
-            number: 1,
-        };
-        let mut closed = Vec::new();
-        for page in 1..=limit.div_ceil(100).max(1) {
-            let mut url = self.repository_path(&reference, "/pulls")?;
-            url.query_pairs_mut()
-                .append_pair("state", "closed")
-                .append_pair("sort", "updated")
-                .append_pair("direction", "desc")
-                .append_pair("per_page", "100")
-                .append_pair("page", &page.to_string());
-            let listed = self.get_json(url)?;
-            let listed = listed.as_array().ok_or_else(|| {
-                HostingError::InvalidResponse("GitHub pull request listing is not a list".into())
-            })?;
-            closed.extend(listed.iter().filter_map(|pull| {
-                Some(ClosedPullRequest {
-                    number: pull.get("number")?.as_u64()?,
-                    merged: pull
-                        .get("merged_at")
-                        .is_some_and(|merged| !merged.is_null()),
-                    head_oid: pull.pointer("/head/sha")?.as_str()?.to_owned(),
-                })
-            }));
-            if listed.len() < 100 || closed.len() >= limit {
-                break;
-            }
-        }
-        closed.truncate(limit);
-        Ok(closed)
+    ) -> Result<Vec<PullRequestSummary>, HostingError> {
+        self.pull_request_listing(repository, "closed", limit)
+    }
+
+    fn recent_pull_requests(
+        &self,
+        repository: &crate::RepositoryRef,
+        limit: usize,
+    ) -> Result<Vec<PullRequestSummary>, HostingError> {
+        self.pull_request_listing(repository, "all", limit)
     }
 
     fn reviews(
@@ -1554,6 +1575,10 @@ impl PullRequestConversationProvider for GitHubAdapter {
                         == Some("Bot"),
                     state: review.get("state")?.as_str()?.to_owned(),
                     commit_id: review.get("commit_id")?.as_str()?.to_owned(),
+                    submitted_at: review
+                        .get("submitted_at")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
                 })
             })
             .collect())

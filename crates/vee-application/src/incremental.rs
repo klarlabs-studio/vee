@@ -60,6 +60,10 @@ pub struct ApprovalVerdict {
     pub eligible: bool,
     /// True when Vee approved the head on the host (`approval.mode: enforce`).
     pub approved: bool,
+    /// True when Vee did not approve an eligible head because it had reached
+    /// `approval.max_per_day`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rate_limited: bool,
     /// The approval stages that failed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_stages: Vec<String>,
@@ -293,6 +297,7 @@ mod tests {
             review_id: "r".into(),
             eligible,
             approved: false,
+            rate_limited: false,
             failed_stages: vec![],
         };
         let history = append_verdict(vec![verdict("h1", false)], verdict("h1", true));

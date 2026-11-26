@@ -43,6 +43,7 @@
               "snapshot",
               "paths",
               "authors",
+              "owners",
               "risk",
               "gate"
             ]

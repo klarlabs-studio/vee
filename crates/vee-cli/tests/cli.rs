@@ -11211,6 +11211,8 @@ fn gate_approval_layers_snapshot_path_author_risk_and_gate_guards() {
     )
     .unwrap();
     fs::write(root.join("reviewer.md"), "Review changed code.\n").unwrap();
+    fs::create_dir_all(root.join(".github")).unwrap();
+    fs::write(root.join(".github/CODEOWNERS"), "/src/ @acme/core\n").unwrap();
     let provider = directory.path().join("fake-provider");
     fs::write(
         &provider,
@@ -11303,11 +11305,14 @@ fn gate_approval_layers_snapshot_path_author_risk_and_gate_guards() {
         .iter()
         .map(|stage| stage["id"].as_str().unwrap().to_owned())
         .collect();
-    assert_eq!(order, ["snapshot", "paths", "authors", "risk", "gate"]);
+    assert_eq!(
+        order,
+        ["snapshot", "paths", "authors", "owners", "risk", "gate"]
+    );
 
     fs::write(
         root.join(".vee.yaml"),
-        format!("{config}approval:\n  never_paths: [\"src/**\"]\n  never_authors: [\"*@example.invalid\"]\n"),
+        format!("{config}approval:\n  never_paths: [\"src/**\"]\n  never_authors: [\"*@example.invalid\"]\n  never_owners: [\"@ACME/core\"]\n"),
     )
     .unwrap();
     let guarded = approval(1);
@@ -11325,6 +11330,11 @@ fn gate_approval_layers_snapshot_path_author_risk_and_gate_guards() {
     assert!(
         !guarded.to_string().contains("Vee test"),
         "no author identity is reported"
+    );
+    // CODEOWNERS on the base assigns src/ to a guarded team.
+    assert_eq!(
+        stage(&guarded, "owners")["detail"],
+        "Changed files with a guarded owner: src/lib.rs (@acme/core)."
     );
     assert_eq!(stage(&guarded, "gate")["passed"], true);
     // Approval is read-only: it evaluates the gate without recording a decision.
