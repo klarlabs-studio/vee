@@ -72,6 +72,15 @@ pub struct PullRequestReview {
     pub submitted_at: Option<String>,
 }
 
+/// A thumbs-up or thumbs-down on a comment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reaction {
+    pub author: String,
+    pub author_is_bot: bool,
+    /// Thumbs up; otherwise thumbs down.
+    pub positive: bool,
+}
+
 /// An approving review that still stands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Approval {
@@ -215,6 +224,16 @@ pub trait PullRequestConversationProvider: Send + Sync {
         comment_id: &str,
         resolved: bool,
     ) -> Result<(), HostingError>;
+
+    /// The thumbs-up and thumbs-down reactions on a review thread comment.
+    /// Hosts without reactions report none.
+    fn reactions(
+        &self,
+        _pull_request: &PullRequestRef,
+        _comment_id: &str,
+    ) -> Result<Vec<Reaction>, HostingError> {
+        Ok(Vec::new())
+    }
 }
 
 /// A host login safe to put in an API path.

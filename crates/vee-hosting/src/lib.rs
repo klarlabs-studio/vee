@@ -15,7 +15,8 @@ pub mod github;
 pub mod gitlab;
 pub use conversation::{
     Approval, ConversationComment, ConversationKind, PullRequestConversationProvider,
-    PullRequestOrigin, PullRequestReview, PullRequestSummary, ReplyTarget, RepositoryPermission,
+    PullRequestOrigin, PullRequestReview, PullRequestSummary, Reaction, ReplyTarget,
+    RepositoryPermission,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
