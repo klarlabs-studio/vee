@@ -230,3 +230,119 @@ policy: { required_reviewers: [correctness] }
         .any(|reason| reason.contains("review did not complete")));
     let _ = &mut store;
 }
+
+#[cfg(unix)]
+#[test]
+fn owner_approval_needs_an_owner_of_every_owned_changed_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success())
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "vee@example.invalid"]);
+    git(&["config", "user.name", "Vee test"]);
+    std::fs::create_dir_all(root.join(".github")).unwrap();
+    std::fs::create_dir_all(root.join("src/api")).unwrap();
+    std::fs::create_dir_all(root.join("src/core")).unwrap();
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    std::fs::write(
+        root.join(".github/CODEOWNERS"),
+        "/src/api/ @alice\n/src/core/ @acme/core\n/docs/ docs@example.invalid\n",
+    )
+    .unwrap();
+    for path in [
+        "src/api/a.rs",
+        "src/core/b.rs",
+        "README.md",
+        "docs/guide.md",
+    ] {
+        std::fs::write(root.join(path), "one\n").unwrap();
+    }
+    git(&["add", "."]);
+    git(&["commit", "-qm", "base"]);
+    for path in ["src/api/a.rs", "src/core/b.rs", "README.md"] {
+        std::fs::write(root.join(path), "two\n").unwrap();
+    }
+    git(&["commit", "-qam", "change code"]);
+    let change =
+        capture_change_set(root, vee_git::ChangeScope::Commit { oid: "HEAD".into() }).unwrap();
+    let members = |team: &str, login: &str| team == "acme/core" && login == "bob";
+    let stage = |approvers: &[&str]| {
+        let approvers: Vec<String> = approvers.iter().map(|login| (*login).to_owned()).collect();
+        crate::approval::owner_approvals_stage(root, &change, &approvers, &members)
+    };
+
+    let none = stage(&[]);
+    assert!(!none.passed);
+    assert!(
+        none.detail.contains("src/api/a.rs (@alice)"),
+        "{}",
+        none.detail
+    );
+    assert!(
+        none.detail.contains("src/core/b.rs (@acme/core)"),
+        "{}",
+        none.detail
+    );
+    assert!(
+        !none.detail.contains("README.md"),
+        "unowned files need nobody"
+    );
+    let one = stage(&["ALICE"]);
+    assert!(
+        !one.passed && !one.detail.contains("a.rs"),
+        "{}",
+        one.detail
+    );
+    assert!(stage(&["alice", "bob"]).passed);
+    assert!(
+        !stage(&["alice", "carol"]).passed,
+        "carol is not in the team"
+    );
+
+    // An email owner cannot be matched to an approval.
+    std::fs::write(root.join("docs/guide.md"), "two\n").unwrap();
+    git(&["commit", "-qam", "change docs"]);
+    let docs =
+        capture_change_set(root, vee_git::ChangeScope::Commit { oid: "HEAD".into() }).unwrap();
+    let docs_stage = crate::approval::owner_approvals_stage(
+        root,
+        &docs,
+        &["alice".to_owned(), "bob".to_owned()],
+        &members,
+    );
+    assert!(!docs_stage.passed, "{}", docs_stage.detail);
+}
+
+#[test]
+fn standing_approvers_are_people_whose_latest_review_approves_the_head() {
+    let review =
+        |author: &str, bot: bool, state: &str, commit: &str| vee_hosting::PullRequestReview {
+            author: author.into(),
+            author_is_bot: bot,
+            state: state.into(),
+            commit_id: commit.into(),
+            submitted_at: None,
+        };
+    let reviews = [
+        review("alice", false, "APPROVED", "head"),
+        review("bob", false, "APPROVED", "head"),
+        review("bob", false, "CHANGES_REQUESTED", "head"),
+        review("carol", false, "APPROVED", "old"),
+        review("dave", false, "APPROVED", "head"),
+        review("dave", false, "COMMENTED", "head"),
+        review("renovate", true, "APPROVED", "head"),
+        review("vee-bot", false, "APPROVED", "head"),
+    ];
+    assert_eq!(
+        crate::approval::standing_approvers(&reviews, "head", "vee-bot"),
+        ["alice", "dave"]
+    );
+}

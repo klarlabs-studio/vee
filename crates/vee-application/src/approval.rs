@@ -95,6 +95,7 @@ pub fn evaluate_approval(
 
     stages.push(authors_stage(root, guards, &review.change_set));
     stages.push(owners_stage(root, guards, &review.change_set));
+    stages.extend(owner_approvals_pending(guards));
     stages.push(if policy.allows_automatic_approval() {
         stage("policy", true, "The policy allows approval without a person.")
     } else {
@@ -179,33 +180,10 @@ fn owners_stage(
     if guards.never_owners.is_empty() {
         return stage("owners", true, "No owner guards are configured.");
     }
-    let Some(base) = change_set.base_oid.as_deref() else {
-        return stage(
-            "owners",
-            false,
-            "The change has no base, so CODEOWNERS cannot be read.",
-        );
+    let codeowners = match base_codeowners(root, change_set) {
+        Ok(codeowners) => codeowners,
+        Err(error) => return stage("owners", false, error),
     };
-    let mut codeowners = None;
-    for path in [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"] {
-        match vee_git::read_tree_file(root, base, Path::new(path)) {
-            Ok(Some(bytes)) => {
-                let Ok(text) = String::from_utf8(bytes) else {
-                    return stage("owners", false, format!("{path} on the base is not UTF-8."));
-                };
-                codeowners = Some(text);
-                break;
-            }
-            Ok(None) => {}
-            Err(error) => {
-                return stage(
-                    "owners",
-                    false,
-                    format!("CODEOWNERS on the base could not be read: {error}"),
-                )
-            }
-        }
-    }
     let Some(codeowners) = codeowners else {
         return stage(
             "owners",
@@ -249,6 +227,143 @@ fn owners_stage(
                 guarded.join(", ")
             ),
         )
+    }
+}
+
+/// `CODEOWNERS` as it is on the change's base, or `None` when the base has
+/// none. The base's file, so a change cannot edit its own owners away.
+fn base_codeowners(root: &Path, change_set: &ChangeSet) -> Result<Option<String>, String> {
+    let Some(base) = change_set.base_oid.as_deref() else {
+        return Err("The change has no base, so CODEOWNERS cannot be read.".into());
+    };
+    for path in [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"] {
+        match vee_git::read_tree_file(root, base, Path::new(path)) {
+            Ok(Some(bytes)) => {
+                return String::from_utf8(bytes)
+                    .map(Some)
+                    .map_err(|_| format!("{path} on the base is not UTF-8."));
+            }
+            Ok(None) => {}
+            Err(error) => return Err(format!("CODEOWNERS on the base could not be read: {error}")),
+        }
+    }
+    Ok(None)
+}
+
+pub const OWNER_APPROVALS_STAGE: &str = "owner_approvals";
+
+/// People whose latest approving or blocking review, oldest first in
+/// `reviews`, approves `head_oid`. Bots and Vee's own account do not count.
+pub fn standing_approvers(
+    reviews: &[vee_hosting::PullRequestReview],
+    head_oid: &str,
+    actor_login: &str,
+) -> Vec<String> {
+    let mut latest: std::collections::BTreeMap<String, &vee_hosting::PullRequestReview> =
+        std::collections::BTreeMap::new();
+    for review in reviews {
+        if review.author_is_bot
+            || review.author.eq_ignore_ascii_case(actor_login)
+            || !matches!(
+                review.state.as_str(),
+                "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED"
+            )
+        {
+            continue;
+        }
+        latest.insert(review.author.to_ascii_lowercase(), review);
+    }
+    latest
+        .into_values()
+        .filter(|review| review.state == "APPROVED" && review.commit_id == head_oid)
+        .map(|review| review.author.clone())
+        .collect()
+}
+
+/// Until the host says who approved, owner approval cannot pass; `vee ci
+/// run` replaces this stage with [`owner_approvals_stage`].
+fn owner_approvals_pending(guards: &vee_core::ApprovalConfig) -> Option<ApprovalStage> {
+    guards.require_owner_approval.then(|| {
+        stage(
+            OWNER_APPROVALS_STAGE,
+            false,
+            "approval.require_owner_approval is set; owners' approvals are read from the pull request by `vee ci run`.",
+        )
+    })
+}
+
+/// Whether, for every changed file `CODEOWNERS` on the base assigns, one of
+/// its owners is among `approvers`: people whose approval of the current
+/// head stands. `@user` owners match a login, `@org/team` owners match a
+/// member as `is_member` reports, and email owners cannot be matched.
+pub fn owner_approvals_stage(
+    root: &Path,
+    change_set: &ChangeSet,
+    approvers: &[String],
+    is_member: &dyn Fn(&str, &str) -> bool,
+) -> ApprovalStage {
+    let codeowners = match base_codeowners(root, change_set) {
+        Ok(Some(codeowners)) => codeowners,
+        Ok(None) => {
+            return stage(
+                OWNER_APPROVALS_STAGE,
+                false,
+                "approval.require_owner_approval is set, but the base has no CODEOWNERS.",
+            )
+        }
+        Err(error) => return stage(OWNER_APPROVALS_STAGE, false, error),
+    };
+    let approved_by = |owner: &str| {
+        let Some(name) = owner.strip_prefix('@') else {
+            return false;
+        };
+        match name.split_once('/') {
+            Some(_) => approvers.iter().any(|login| is_member(name, login)),
+            None => approvers
+                .iter()
+                .any(|login| login.eq_ignore_ascii_case(name)),
+        }
+    };
+    let mut waiting = Vec::new();
+    let mut owned = 0;
+    for file in &change_set.files {
+        let owners = match crate::ownership::owners_in(&codeowners, &file.path) {
+            Ok(owners) => owners,
+            Err(error) => {
+                return stage(
+                    OWNER_APPROVALS_STAGE,
+                    false,
+                    format!("CODEOWNERS on the base could not be read: {error}"),
+                )
+            }
+        };
+        if owners.is_empty() {
+            continue;
+        }
+        owned += 1;
+        if !owners.iter().any(|owner| approved_by(owner)) {
+            waiting.push(format!("{} ({})", file.path, owners.join(" ")));
+        }
+    }
+    match (owned, waiting.is_empty()) {
+        (0, _) => stage(
+            OWNER_APPROVALS_STAGE,
+            true,
+            "No changed file has an owner in CODEOWNERS.",
+        ),
+        (_, true) => stage(
+            OWNER_APPROVALS_STAGE,
+            true,
+            "An owner approved every changed file that has one.",
+        ),
+        (_, false) => stage(
+            OWNER_APPROVALS_STAGE,
+            false,
+            format!(
+                "Waiting for an owner's approval of: {}.",
+                waiting.join(", ")
+            ),
+        ),
     }
 }
 
