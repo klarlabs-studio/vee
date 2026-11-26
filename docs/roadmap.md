@@ -61,7 +61,7 @@ changed since the last review, with earlier findings carried over.
 - [x] Review only the files whose change differs from the last review, with the whole snapshot readable through Vee's tools ([ADR 0022](adr/0022-incremental-review-after-a-push.md))
 - [x] Carry forward findings on unchanged files without asking the model again
 - [x] Resolve threads whose finding the new code fixed, and keep the gate over the whole change
-- [ ] Carry findings on unchanged lines within a file that changed
+- [x] Carry findings on unchanged lines within a file that changed ([ADR 0036](adr/0036-carry-findings-on-unchanged-hunks.md))
 - [x] The review record on GitLab merge requests
 
 ### 4. Observe mode for approvals (S–M)
