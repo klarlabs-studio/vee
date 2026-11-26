@@ -6,6 +6,18 @@ change configuration and output contracts.
 
 ## Unreleased
 
+### Natural-language approval conditions
+
+- `approval.conditions` names conditions, such as "changes the
+  authentication flow", that a reviewer's model checks for each change.
+  One that holds, or a missing answer, sends the change to a person; the
+  gate is unaffected. The answer is stored with its model and digest
+  (`condition-classification-v1`, storage schema 15) and carried in Vee's
+  record on the pull request, so approval replays. `vee gate conditions`
+  classifies locally (ADR 0035).
+- The approval eligibility schema lists the `owner_approvals` and
+  `conditions` stages.
+
 ### Owner approval before Vee approves
 
 - `approval.require_owner_approval: true` makes Vee approve only once, for

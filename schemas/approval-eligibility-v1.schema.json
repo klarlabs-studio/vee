@@ -44,9 +44,11 @@
               "paths",
               "authors",
               "owners",
+              "owner_approvals",
               "policy",
               "risk",
-              "gate"
+              "gate",
+              "conditions"
             ]
           },
           "passed": {

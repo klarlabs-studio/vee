@@ -449,13 +449,18 @@ pub(crate) fn publish(
             }
         }
         if options.approve {
+            let earlier_verdicts = earlier_record
+                .as_ref()
+                .map(|record| record.approvals.as_slice())
+                .unwrap_or_default();
             match apply_approval(
                 workspace,
                 host.as_ref(),
                 &reference,
-                &review.review_id,
+                &review,
                 &pull_request.head_oid,
                 actor_login.as_deref().unwrap_or_default(),
+                earlier_verdicts,
             ) {
                 Ok((approved, given)) => {
                     approval_review_id = given;
@@ -512,6 +517,32 @@ pub(crate) fn publish(
         labels,
         approval_review_id,
     })
+}
+
+/// Store the classification an earlier run on `head_oid` recorded, so this
+/// run reads it instead of asking the model again. The store is keyed by
+/// snapshot and conditions, so one for another change is never read.
+fn replay_classification(
+    workspace: &Workspace,
+    earlier: &[crate::incremental::ApprovalVerdict],
+    head_oid: &str,
+) -> Result<()> {
+    let Some(recorded) = earlier
+        .iter()
+        .rev()
+        .filter(|verdict| verdict.head_oid == head_oid)
+        .find_map(|verdict| verdict.conditions.as_ref())
+    else {
+        return Ok(());
+    };
+    workspace
+        .store()?
+        .save_condition_classification(
+            &recorded.snapshot_id,
+            &recorded.conditions_digest,
+            &serde_json::to_string(recorded)?,
+        )
+        .map_err(anyhow::Error::msg)
 }
 
 /// People whose approval of `head_oid` stands on the pull request.
@@ -571,12 +602,25 @@ fn apply_approval(
     workspace: &Workspace,
     host: &dyn vee_hosting::PullRequestConversationProvider,
     reference: &vee_hosting::PullRequestRef,
-    review_id: &str,
+    review: &crate::ReviewResult,
     head_oid: &str,
     actor_login: &str,
+    earlier: &[crate::incremental::ApprovalVerdict],
 ) -> Result<(crate::incremental::ApprovalVerdict, Option<String>)> {
-    let mut eligibility = crate::operations::approval_eligibility(workspace, review_id)?;
+    let review_id = review.review_id.as_str();
     let guards = workspace.effective_config(None)?.approval;
+    let mut classification = None;
+    if !guards.conditions.is_empty() {
+        replay_classification(workspace, earlier, head_oid)?;
+        // Unclassified, the conditions stage fails and a person approves.
+        match crate::operations::classify_conditions(workspace, review_id) {
+            Ok(classified) => classification = Some(classified),
+            Err(error) => {
+                eprintln!("warning: the approval conditions were not classified: {error:#}")
+            }
+        }
+    }
+    let mut eligibility = crate::operations::approval_eligibility(workspace, review_id)?;
     if guards.require_owner_approval {
         let payload = workspace
             .store()?
@@ -610,6 +654,7 @@ fn apply_approval(
             .filter(|stage| !stage.passed)
             .map(|stage| stage.id.clone())
             .collect(),
+        conditions: classification,
     };
     let host_error = |error: vee_hosting::HostingError| anyhow::anyhow!("{error}");
     let standing = host.approvals(reference, actor_login).map_err(host_error)?;

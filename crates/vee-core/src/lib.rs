@@ -3357,6 +3357,14 @@ pub struct ApprovalConfig {
     /// assigns, one of its owners has approved the current head (ADR 0034).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub require_owner_approval: bool,
+    /// Natural-language conditions a reviewer's model checks; a change for
+    /// which one holds needs a person (ADR 0035). Never part of the gate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<ApprovalCondition>,
+    /// The reviewer whose model classifies `conditions`; the review's first
+    /// reviewer when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition_reviewer: Option<String>,
     /// At most this many approvals by Vee in any 24 hours, in enforce mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_per_day: Option<u32>,
@@ -3364,6 +3372,61 @@ pub struct ApprovalConfig {
     /// approve and approves nothing. `enforce`: it approves eligible changes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+}
+
+/// A labelled condition, such as `auth_flow`: "changes the authentication
+/// flow".
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalCondition {
+    pub id: String,
+    /// What the change does when the condition holds, completing "the
+    /// change …".
+    pub when: String,
+}
+
+pub const MAX_APPROVAL_CONDITIONS: usize = 20;
+
+fn validate_approval_conditions(approval: &ApprovalConfig) -> Result<(), String> {
+    if approval.conditions.len() > MAX_APPROVAL_CONDITIONS {
+        return Err(format!(
+            "approval.conditions allows at most {MAX_APPROVAL_CONDITIONS} conditions"
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for condition in &approval.conditions {
+        let id_valid = (1..=64).contains(&condition.id.len())
+            && condition.id.as_bytes()[0].is_ascii_lowercase()
+            && condition
+                .id
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+        if !id_valid {
+            return Err(format!(
+                "approval.conditions id `{}` must be lowercase letters, digits and underscores",
+                condition.id
+            ));
+        }
+        if !seen.insert(condition.id.as_str()) {
+            return Err(format!("approval.conditions repeats `{}`", condition.id));
+        }
+        let when = condition.when.trim();
+        if when.is_empty() || when.chars().count() > 500 || when.chars().any(char::is_control) {
+            return Err(format!(
+                "approval.conditions `{}` needs a `when` of 1 to 500 characters on one line",
+                condition.id
+            ));
+        }
+    }
+    if let Some(reviewer) = &approval.condition_reviewer {
+        if approval.conditions.is_empty() {
+            return Err("approval.condition_reviewer is set without approval.conditions".into());
+        }
+        if reviewer.trim().is_empty() {
+            return Err("approval.condition_reviewer must name a reviewer".into());
+        }
+    }
+    Ok(())
 }
 
 impl ApprovalConfig {
@@ -4234,6 +4297,14 @@ impl RepositoryConfig {
         }
         if let Some(tracker) = &config.work_items {
             validate_work_items(tracker)?;
+        }
+        validate_approval_conditions(&config.approval)?;
+        if let Some(reviewer) = &config.approval.condition_reviewer {
+            if !config.reviewers.contains_key(reviewer) {
+                return Err(format!(
+                    "approval.condition_reviewer `{reviewer}` is not a configured reviewer"
+                ));
+            }
         }
         if let Some(api_base) = config.hosting.api_base.as_deref() {
             let url = url::Url::parse(api_base)

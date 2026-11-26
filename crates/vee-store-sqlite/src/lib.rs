@@ -37,7 +37,7 @@ fn validate_snapshot_manifest(snapshot_id: &str, manifest_json: &str) -> Result<
     Ok(())
 }
 
-const STORAGE_SCHEMA_VERSION: u32 = 14;
+const STORAGE_SCHEMA_VERSION: u32 = 15;
 
 fn migrate_storage(connection: &mut rusqlite::Connection) -> Result<(), String> {
     use rusqlite::TransactionBehavior;
@@ -488,6 +488,26 @@ fn migrate_storage(connection: &mut rusqlite::Connection) -> Result<(), String> 
         )
         .map_err(|error| error.to_string())?;
         tx.pragma_update(None, "user_version", 14u32)
+            .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+    }
+    if version < 15 {
+        // Approval-condition classifications (ADR 0035).
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS condition_classifications (
+                snapshot_id TEXT NOT NULL,
+                conditions_digest TEXT NOT NULL,
+                payload_digest TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY(snapshot_id, conditions_digest)
+            );",
+        )
+        .map_err(|error| error.to_string())?;
+        tx.pragma_update(None, "user_version", 15u32)
             .map_err(|error| error.to_string())?;
         tx.commit().map_err(|error| error.to_string())?;
     }
@@ -1090,6 +1110,49 @@ impl GateRepository for ReviewStore {
             .map_err(|error| error.to_string())?;
         rows.map(|row| row.map_err(|error| error.to_string()))
             .collect()
+    }
+
+    fn save_condition_classification(
+        &mut self,
+        snapshot_id: &str,
+        conditions_digest: &str,
+        payload: &str,
+    ) -> Result<(), String> {
+        if snapshot_id.trim().is_empty() || !is_sha256_digest(conditions_digest) {
+            return Err(
+                "a condition classification needs a snapshot and a conditions digest".into(),
+            );
+        }
+        self.connection
+            .execute(
+                "INSERT OR IGNORE INTO condition_classifications(snapshot_id,conditions_digest,payload_digest,payload) VALUES (?1,?2,?3,?4)",
+                rusqlite::params![snapshot_id, conditions_digest, digest(payload.as_bytes()), payload],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn condition_classification(
+        &self,
+        snapshot_id: &str,
+        conditions_digest: &str,
+    ) -> Result<Option<String>, String> {
+        let stored: Option<(String, String)> = self
+            .connection
+            .query_row(
+                "SELECT payload_digest,payload FROM condition_classifications WHERE snapshot_id=?1 AND conditions_digest=?2",
+                [snapshot_id, conditions_digest],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        match stored {
+            Some((expected, payload)) if digest(payload.as_bytes()) == expected => {
+                Ok(Some(payload))
+            }
+            Some(_) => Err("a stored condition classification failed its digest check".into()),
+            None => Ok(None),
+        }
     }
 }
 

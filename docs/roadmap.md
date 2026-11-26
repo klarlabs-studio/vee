@@ -168,9 +168,9 @@ and `CLAUDE.md`. Teams keep standards elsewhere too.
 
 ### 14. Natural-language policy conditions (M)
 
-- [ ] A classifier reviewer whose output is a labelled condition, such as "changes the authentication flow" or "adds a migration without a rollback"
-- [ ] Conditions only route a change to a person through approval eligibility; they never pass or block the gate
-- [ ] The classifier's response, model and digest are recorded, so the decision replays
+- [x] A classifier reviewer whose output is a labelled condition, such as "changes the authentication flow" or "adds a migration without a rollback": `approval.conditions` ([ADR 0035](adr/0035-natural-language-approval-conditions.md))
+- [x] Conditions only route a change to a person through approval eligibility; they never pass or block the gate
+- [x] The classifier's response, model and digest are recorded, so the decision replays
 
 ### 15. A network webhook server, and acceptance on more hosts (M)
 

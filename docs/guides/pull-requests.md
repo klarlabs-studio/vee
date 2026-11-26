@@ -196,7 +196,34 @@ on:
 ```
 
 GitLab doesn't start a pipeline when someone approves; write `@vee review`
-or re-run the pipeline. `vee gate approval` outside CI cannot see the pull
+or re-run the pipeline.
+
+`approval.conditions` sends a change to a person when a reviewer's model says
+it does something you name
+([ADR 0035](../adr/0035-natural-language-approval-conditions.md)):
+
+```yaml
+approval:
+  conditions:
+    - { id: auth_flow, when: changes the authentication flow }
+    - { id: migration_without_rollback, when: adds a database migration without a rollback }
+  condition_reviewer: correctness   # optional; the review's first reviewer by default
+```
+
+- **How it's checked.** `vee ci run --approve` asks the model once per
+  change, stores the answer with the model and a digest of its output, and
+  adds a `conditions` stage to the approval verdict. A condition that holds,
+  or a missing answer, means a person approves.
+- **Replay.** The answer is kept in Vee's record on the pull request, so a
+  later run on the same head reads it instead of asking again. Rewording a
+  condition asks again.
+- **Locally.** `vee gate conditions --review ID` classifies a saved review,
+  or shows the stored answer, and exits 1 when a condition holds.
+- **Never the gate.** Conditions never pass or block the gate.
+- **Not a security boundary.** The model reads the change, and a change can
+  try to talk it out of a condition. Use `never_paths` and `never_owners`
+  for what must always reach a person; conditions catch what paths can't
+  name. `vee gate approval` outside CI cannot see the pull
 request, so it reports owner approval as not yet checked.
 
 Before switching to `enforce`, see how Vee's verdicts compared with what

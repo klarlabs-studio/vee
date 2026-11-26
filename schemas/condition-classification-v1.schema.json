@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/klarlabs-studio/vee/schemas/condition-classification-v1.schema.json",
+  "title": "Vee approval-condition classification",
+  "description": "Whether each approval condition holds for a change, per a reviewer's model, stored for the snapshot and the exact conditions so approval replays (ADR 0035). It decides only whether a person must approve; it never changes the gate.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "snapshot_id", "conditions_digest", "reviewer_id", "provider_id", "output_digest", "results"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "snapshot_id": { "type": "string", "minLength": 1 },
+    "conditions_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "reviewer_id": { "type": "string", "minLength": 1 },
+    "provider_id": { "type": "string", "minLength": 1 },
+    "model": { "type": "string" },
+    "output_digest": { "type": "string", "minLength": 1, "description": "Digest of the model's raw answer." },
+    "results": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "holds", "evidence"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+          "holds": { "type": "boolean" },
+          "evidence": { "type": "string", "maxLength": 500, "description": "The model's reason; untrusted, shown only to people." }
+        }
+      }
+    }
+  }
+}

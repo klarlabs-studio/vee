@@ -1288,14 +1288,117 @@ pub fn approval_eligibility(
         detail.review.gate = gate;
     }
     let policy = review_policy(config.clone(), &detail.review)?;
-    Ok(crate::evaluate_approval(
+    let mut eligibility = crate::evaluate_approval(
         workspace.root(),
         &config.approval,
         &policy,
         &detail.review,
         current,
         detail.risk.as_ref(),
-    ))
+    );
+    let conditions = &config.approval.conditions;
+    if !conditions.is_empty() {
+        let stored =
+            stored_condition_classification(workspace, &detail.review.snapshot_id, conditions)?;
+        eligibility
+            .stages
+            .extend(crate::conditions::stage(conditions, stored.as_ref()));
+        eligibility.eligible = eligibility.stages.iter().all(|stage| stage.passed);
+    }
+    Ok(eligibility)
+}
+
+pub(crate) fn stored_condition_classification(
+    workspace: &Workspace,
+    snapshot_id: &str,
+    conditions: &[vee_core::ApprovalCondition],
+) -> Result<Option<crate::conditions::ConditionClassification>> {
+    let digest = crate::conditions::conditions_digest(conditions);
+    let Some(payload) = workspace
+        .store()?
+        .condition_classification(snapshot_id, &digest)
+        .map_err(anyhow::Error::msg)?
+    else {
+        return Ok(None);
+    };
+    let classification: crate::conditions::ConditionClassification = serde_json::from_str(&payload)
+        .map_err(|error| {
+            anyhow::anyhow!("a stored condition classification is invalid: {error}")
+        })?;
+    if classification.snapshot_id != snapshot_id || classification.conditions_digest != digest {
+        anyhow::bail!("a stored condition classification belongs to another change");
+    }
+    Ok(Some(classification))
+}
+
+/// Classify a saved review's change against `approval.conditions` with a
+/// reviewer's model, or return the stored classification for this snapshot
+/// and these conditions (ADR 0035). It never changes the gate.
+pub fn classify_conditions(
+    workspace: &Workspace,
+    review_id: &str,
+) -> Result<crate::conditions::ConditionClassification> {
+    let config = workspace.effective_config(None)?;
+    let conditions = &config.approval.conditions;
+    if conditions.is_empty() {
+        return Err(usage_failure(
+            "no approval.conditions are configured in .vee.yaml",
+        ));
+    }
+    let store = workspace.store()?;
+    let review = workspace.saved_review(&*store, review_id)?;
+    drop(store);
+    if let Some(stored) =
+        stored_condition_classification(workspace, &review.snapshot_id, conditions)?
+    {
+        return Ok(stored);
+    }
+    if config.offline {
+        return Err(configuration_failure(
+            "offline mode prevents classifying approval conditions",
+        ));
+    }
+    let reviewer = config
+        .approval
+        .condition_reviewer
+        .clone()
+        .or_else(|| review.selected_reviewers.first().cloned())
+        .ok_or_else(|| configuration_failure("no reviewer can classify approval conditions"))?;
+    let context = crate::pr_description::snapshot_context(
+        workspace.root(),
+        &review.change_set,
+        config.review.max_context_files,
+        config.review.max_context_file_bytes,
+        config.review.max_context_bytes,
+    )?;
+    let instructions = crate::conditions::instructions(conditions);
+    let task = crate::run_provider_task(
+        crate::ProviderTaskRequest {
+            root: workspace.root(),
+            snapshot_id: &review.change_set.digest,
+            config: &config,
+            reviewer_id: &reviewer,
+            task_instructions: &instructions,
+            context,
+            output_schema: crate::conditions::output_schema(conditions),
+        },
+        &crate::CliReviewProvider,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let mut classification =
+        crate::conditions::classification(&task, conditions).map_err(anyhow::Error::msg)?;
+    // Bind it to the review's snapshot identity, which approval reads by.
+    classification.snapshot_id = review.snapshot_id.clone();
+    let payload = serde_json::to_string(&classification)?;
+    workspace
+        .store()?
+        .save_condition_classification(
+            &classification.snapshot_id,
+            &classification.conditions_digest,
+            &payload,
+        )
+        .map_err(anyhow::Error::msg)?;
+    Ok(classification)
 }
 
 /// `review-session-v1`: several saved reviews read together, each with its

@@ -75,6 +75,21 @@ pub trait GateRepository {
     fn create_waiver(&mut self, waiver: &Waiver) -> Result<(), String>;
 
     fn waivers_for_snapshot(&self, snapshot_id: &str) -> Result<Vec<Waiver>, String>;
+
+    /// Store an approval-condition classification (ADR 0035) for a snapshot
+    /// and a set of conditions; an existing one is kept.
+    fn save_condition_classification(
+        &mut self,
+        snapshot_id: &str,
+        conditions_digest: &str,
+        payload: &str,
+    ) -> Result<(), String>;
+
+    fn condition_classification(
+        &self,
+        snapshot_id: &str,
+        conditions_digest: &str,
+    ) -> Result<Option<String>, String>;
 }
 
 /// Verification runs bound to snapshots, with their captured output artifacts.
