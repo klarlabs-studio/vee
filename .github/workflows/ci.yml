@@ -156,6 +156,9 @@ jobs:
       - name: Sign and verify a disposable release
         if: runner.os != 'Windows'
         run: python scripts/acceptance/release_signature.py
+      - name: Check macOS notarization refusals
+        if: runner.os != 'Windows'
+        run: python scripts/acceptance/notarize_macos.py
       - name: Install acceptance script dependencies
         if: runner.os != 'Windows'
         run: python -m pip install -r scripts/acceptance/requirements.txt
