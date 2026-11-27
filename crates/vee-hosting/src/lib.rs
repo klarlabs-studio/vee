@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 pub mod azure_devops;
 pub mod bitbucket;
+pub mod bitbucket_data_center;
 pub mod conversation;
 pub mod gerrit;
 pub mod github;
@@ -529,8 +530,9 @@ pub trait GitHostingProvider: Send + Sync {
 }
 
 /// Vee's own approval of a pull request on hosts whose approval is a single
-/// standing mark per account: a Bitbucket approval, an Azure DevOps vote and
-/// a Gerrit label vote (ADR 0041). GitHub and GitLab approve through
+/// standing mark per account: a Bitbucket Cloud or Data Center approval, an
+/// Azure DevOps vote and a Gerrit label vote (ADRs 0041 and 0047). GitHub and
+/// GitLab approve through
 /// [`PullRequestConversationProvider`] instead.
 pub trait PullRequestApprovalProvider: Send + Sync {
     /// Whether the authenticated account's approval stands on the pull request.
