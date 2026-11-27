@@ -337,14 +337,13 @@ impl PullRequestContextProvider for BitbucketAdapter {
             "MERGED" => PullRequestState::Merged,
             _ => PullRequestState::Closed,
         };
-        let revision = format!(
-            "{}:{}:{}",
-            api.destination.commit.hash, api.source.commit.hash, api.updated_on
-        );
+        let base_oid = self.full_hash(reference, &api.destination.commit.hash)?;
+        let head_oid = self.full_hash(reference, &api.source.commit.hash)?;
+        let revision = format!("{base_oid}:{head_oid}:{}", api.updated_on);
         Ok(PullRequestSnapshot {
             pull_request: reference.clone(),
-            base_oid: api.destination.commit.hash,
-            head_oid: api.source.commit.hash,
+            base_oid,
+            head_oid,
             title: api.title,
             body: api.description,
             state,
@@ -868,6 +867,55 @@ impl GitHostingProvider for BitbucketAdapter {
 }
 
 impl BitbucketAdapter {
+    fn authenticated_uuid(&self) -> Result<String, HostingError> {
+        #[derive(Deserialize)]
+        struct ApiUser {
+            uuid: String,
+        }
+        let user_url = self
+            .config
+            .api_base
+            .join("user")
+            .map_err(|error| HostingError::InvalidResponse(error.to_string()))?;
+        let user: ApiUser = Self::json(self.get(user_url)?)?;
+        if user.uuid.trim().is_empty() {
+            return Err(HostingError::InvalidResponse(
+                "Bitbucket authenticated user has no UUID".into(),
+            ));
+        }
+        Ok(user.uuid)
+    }
+
+    /// The full hash of a commit. Bitbucket abbreviates the commits of a pull
+    /// request to 12 digits; Vee compares and publishes full hashes.
+    fn full_hash(&self, reference: &PullRequestRef, hash: &str) -> Result<String, HostingError> {
+        let hash = hash.to_ascii_lowercase();
+        if hash.len() < 7 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(HostingError::InvalidResponse(
+                "Bitbucket returned an invalid commit hash".into(),
+            ));
+        }
+        if matches!(hash.len(), 40 | 64) {
+            return Ok(hash);
+        }
+        #[derive(Deserialize)]
+        struct ApiCommit {
+            hash: String,
+        }
+        let commit: ApiCommit =
+            Self::json(self.get(self.repository_url(reference, &format!("/commit/{hash}"))?)?)?;
+        let full = commit.hash.to_ascii_lowercase();
+        if !matches!(full.len(), 40 | 64)
+            || !full.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !full.starts_with(&hash)
+        {
+            return Err(HostingError::InvalidResponse(
+                "Bitbucket resolved an abbreviated hash to a different commit".into(),
+            ));
+        }
+        Ok(full)
+    }
+
     fn pull_request_source_branch(
         &self,
         reference: &PullRequestRef,
