@@ -586,7 +586,8 @@ fn ci_run_reuses_a_signed_local_review_of_the_same_head() {
             .unwrap();
         assert!(
             output.status.success(),
-            "{}",
+            "stdout={}\nstderr={}",
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()

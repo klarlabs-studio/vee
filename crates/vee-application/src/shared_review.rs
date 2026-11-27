@@ -120,19 +120,22 @@ pub fn share(
     }
     let file = tempfile::NamedTempFile::new().context("creating the note file")?;
     std::fs::write(file.path(), &bytes).context("writing the note file")?;
-    git(
-        root,
-        &[
-            "notes",
-            "--ref",
-            NOTES_REF,
-            "add",
-            "--force",
-            "--file",
-            &file.path().to_string_lossy(),
-            &head_oid,
-        ],
-    )?;
+    let file_path = file.path().to_string_lossy().into_owned();
+    let mut args: Vec<&str> = Vec::new();
+    // Git records who wrote a note. The signature, not that name, is what CI
+    // trusts, so a machine without a Git identity uses a neutral one.
+    if git(root, &["var", "GIT_COMMITTER_IDENT"]).is_err() {
+        args.extend([
+            "-c",
+            "user.name=Vee",
+            "-c",
+            "user.email=vee@localhost.invalid",
+        ]);
+    }
+    args.extend([
+        "notes", "--ref", NOTES_REF, "add", "--force", "--file", &file_path, &head_oid,
+    ]);
+    git(root, &args)?;
     Ok(SharedReview {
         schema_version: 1,
         review_id: review.review_id,
