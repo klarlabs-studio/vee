@@ -363,6 +363,8 @@ enum Command {
     },
     /// Summarize local review, gate, and finding lifecycle outcomes.
     Analytics {
+        #[command(subcommand)]
+        command: Option<AnalyticsCommand>,
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
@@ -1070,6 +1072,26 @@ enum ReviewsCommand {
 enum CiTargetArg {
     Github,
     Gitlab,
+}
+
+#[derive(Subcommand)]
+enum AnalyticsCommand {
+    /// Combine analytics documents collected across repositories and CI runs
+    /// into one report: gate outcomes, approval override rate, cost and rule
+    /// effectiveness, each with its denominator. Reads the JSON of
+    /// `vee analytics`, `vee ci approvals` and `vee rules effectiveness`. No
+    /// server, and no person is named.
+    Aggregate {
+        /// Documents or directories of `.json` documents; `NAME=PATH` labels one.
+        #[arg(required = true, value_name = "PATH")]
+        inputs: Vec<String>,
+        /// Also write the report as one self-contained HTML page.
+        #[arg(long, value_name = "FILE")]
+        html: Option<std::path::PathBuf>,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3398,7 +3420,34 @@ fn run() -> Result<u8> {
                 },
             }
         }
-        Command::Analytics { output } => {
+        Command::Analytics {
+            command:
+                Some(AnalyticsCommand::Aggregate {
+                    inputs,
+                    html,
+                    output,
+                }),
+            ..
+        } => {
+            let report = vee_application::team_analytics::aggregate(&inputs)?;
+            if let Some(path) = html {
+                let page = vee_present::html::render(
+                    &vee_present::ToView::to_view(&report),
+                    "Vee team analytics",
+                );
+                std::fs::write(&path, page)
+                    .with_context(|| format!("writing {}", path.display()))?;
+            }
+            match output {
+                Output::Json => emit_json(&report)?,
+                Output::Text => print_view(&report)?,
+            }
+            Ok(0)
+        }
+        Command::Analytics {
+            command: None,
+            output,
+        } => {
             let workspace = operations::Workspace::discover(crate::local_stores())?;
             let analytics = operations::quality_analytics(&workspace)?;
             match output {
