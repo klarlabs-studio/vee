@@ -1999,7 +1999,8 @@ pub(crate) fn query_gopls_references(
     const MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
     const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
     // A language server's first answer includes loading the project, which
-    // takes seconds on a cold or busy machine; the total still bounds it.
+    // takes seconds on a cold or busy machine, so it may use the whole
+    // remaining total; later answers get at most this.
     const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
     let root = root.canonical().map_err(|error| error.to_string())?;
@@ -2166,6 +2167,19 @@ pub(crate) fn query_gopls_references(
         }
 
         let deadline = std::time::Instant::now() + TOTAL_TIMEOUT;
+        // Until gopls has answered once it may still be loading the project,
+        // and every later request waits behind that load. The first answer
+        // gets the whole remaining budget; each one after it at most
+        // REQUEST_TIMEOUT.
+        let mut loaded = false;
+        let request_timeout = |loaded: bool| {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if loaded {
+                remaining.min(REQUEST_TIMEOUT)
+            } else {
+                remaining
+            }
+        };
         let mut edges = Vec::new();
         let mut resolved_symbols = std::collections::BTreeSet::new();
         let mut failures = false;
@@ -2184,11 +2198,9 @@ pub(crate) fn query_gopls_references(
                     "params":{"textDocument":{"uri":uri.as_str()}}
                 }),
             )?;
-            let timeout = deadline
-                .saturating_duration_since(std::time::Instant::now())
-                .min(REQUEST_TIMEOUT);
-            if receive_response(&receiver, query_id, timeout).is_err() {
-                failures = true;
+            match receive_response(&receiver, query_id, request_timeout(loaded)) {
+                Ok(_) => loaded = true,
+                Err(_) => failures = true,
             }
             query_id += 1;
         }
@@ -2239,10 +2251,9 @@ pub(crate) fn query_gopls_references(
                             "params":{"textDocument":{"uri":query_uri.as_str()},"position":position,"context":{"includeDeclaration":true}}
                         }),
                     )?;
-                    let timeout = deadline
-                        .saturating_duration_since(std::time::Instant::now())
-                        .min(REQUEST_TIMEOUT);
-                    match receive_response(&receiver, query_id, timeout) {
+                    let response = receive_response(&receiver, query_id, request_timeout(loaded));
+                    loaded |= response.is_ok();
+                    match response {
                         Ok(result) => match result.as_array() {
                             Some(result_locations) => {
                                 let target_found = result_locations.iter().any(|location| {
