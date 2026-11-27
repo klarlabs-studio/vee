@@ -207,11 +207,7 @@ impl ToView for TeamAnalytics {
                 Cell::plain(format!("Skipped {}: {}", skipped.path, skipped.reason)),
             );
         }
-        view.section("Limitations").list(
-            self.limitations
-                .iter()
-                .map(Cell::muted)
-                .collect(),
-        )
+        view.section("Limitations")
+            .list(self.limitations.iter().map(Cell::muted).collect())
     }
 }
