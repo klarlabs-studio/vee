@@ -1201,7 +1201,13 @@ fn change_package_refresh_routes_through_all_other_hosting_adapters() {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
-    for provider in ["gitlab", "bitbucket", "azure-devops", "gerrit"] {
+    for provider in [
+        "gitlab",
+        "bitbucket",
+        "bitbucket-data-center",
+        "azure-devops",
+        "gerrit",
+    ] {
         let workspace = tempfile::tempdir().unwrap();
         let repo = workspace.path().join("service");
         fs::create_dir_all(&repo).unwrap();
@@ -1245,6 +1251,12 @@ fn change_package_refresh_routes_through_all_other_hosting_adapters() {
                 "destination": { "commit": { "hash": base.clone() } }
             })
             .to_string(),
+            "bitbucket-data-center" => serde_json::json!({
+                "id": 42, "version": 1, "title": "Review", "state": "OPEN",
+                "fromRef": { "id": "refs/heads/feature", "latestCommit": head.clone() },
+                "toRef": { "id": "refs/heads/main", "latestCommit": base.clone() }
+            })
+            .to_string(),
             "azure-devops" => serde_json::json!({
                 "pullRequestId": 42, "status": "active", "title": "Review",
                 "lastMergeSourceCommit": { "commitId": head.clone() },
@@ -1264,6 +1276,7 @@ fn change_package_refresh_routes_through_all_other_hosting_adapters() {
         let expected_path = match provider {
             "gitlab" => "/api/v4/projects/acme%2Fservice/merge_requests/42",
             "bitbucket" => "/2.0/repositories/acme/service/pullrequests/42",
+            "bitbucket-data-center" => "/rest/api/1.0/projects/acme/repos/service/pull-requests/42",
             "azure-devops" => {
                 "/org/project/_apis/git/repositories/service/pullRequests/42?api-version=7.1"
             }

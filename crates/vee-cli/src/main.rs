@@ -1249,7 +1249,7 @@ enum HostingCommand {
         #[arg(long)]
         number: u64,
         /// Git hosting provider (defaults to .vee.yaml).
-        #[arg(long, value_parser = ["github", "gitlab", "bitbucket", "azure-devops", "gerrit"])]
+        #[arg(long, value_parser = ["github", "gitlab", "bitbucket", "bitbucket-data-center", "azure-devops", "gerrit"])]
         provider: Option<String>,
         /// Hosting server host name (for self-hosted instances).
         #[arg(long)]
@@ -1279,7 +1279,7 @@ enum HostingCommand {
         #[arg(long)]
         number: u64,
         /// Git hosting provider (defaults to .vee.yaml).
-        #[arg(long, value_parser = ["github", "gitlab", "bitbucket", "azure-devops", "gerrit"])]
+        #[arg(long, value_parser = ["github", "gitlab", "bitbucket", "bitbucket-data-center", "azure-devops", "gerrit"])]
         provider: Option<String>,
         /// Hosting server host name (for self-hosted instances).
         #[arg(long)]
@@ -1333,7 +1333,7 @@ enum HostingCommand {
         #[arg(long)]
         number: u64,
         /// Git hosting provider (defaults to .vee.yaml).
-        #[arg(long, value_parser = ["github", "gitlab", "bitbucket", "azure-devops", "gerrit"])]
+        #[arg(long, value_parser = ["github", "gitlab", "bitbucket", "bitbucket-data-center", "azure-devops", "gerrit"])]
         provider: Option<String>,
         /// Hosting server host name (for self-hosted instances).
         #[arg(long)]
@@ -1371,7 +1371,7 @@ enum HostingCommand {
         #[arg(long, value_name = "PATH")]
         repository: String,
         /// Git hosting provider (defaults to .vee.yaml).
-        #[arg(long, value_parser = ["github", "gitlab", "bitbucket", "azure-devops", "gerrit"])]
+        #[arg(long, value_parser = ["github", "gitlab", "bitbucket", "bitbucket-data-center", "azure-devops", "gerrit"])]
         provider: Option<String>,
         /// Hosting server host name (for self-hosted instances).
         #[arg(long)]
@@ -3878,6 +3878,7 @@ fn run() -> Result<u8> {
                     match provider_id.as_str() {
                         "gitlab" => "GL_TOKEN",
                         "bitbucket" => "BB_TOKEN",
+                        "bitbucket-data-center" => "BITBUCKET_DC_TOKEN",
                         "azure-devops" => "AZURE_DEVOPS_EXT_PAT",
                         "gerrit" => "GERRIT_TOKEN",
                         _ => "GH_TOKEN",
@@ -3900,6 +3901,10 @@ fn run() -> Result<u8> {
                     && provider_id == "bitbucket"
                 {
                     "VEE_BITBUCKET_WEBHOOK_SECRET"
+                } else if webhook_secret_env == "VEE_GITHUB_WEBHOOK_SECRET"
+                    && provider_id == "bitbucket-data-center"
+                {
+                    "VEE_BITBUCKET_DC_WEBHOOK_SECRET"
                 } else if webhook_secret_env == "VEE_GITHUB_WEBHOOK_SECRET"
                     && provider_id == "gerrit"
                 {
@@ -3943,6 +3948,16 @@ fn run() -> Result<u8> {
                                 vee_hosting::bitbucket::BitbucketConfig::new(&api_base, token)
                                     .map_err(anyhow::Error::msg)?
                                     .with_webhook_secret(secret),
+                            )
+                            .map_err(anyhow::Error::msg)?,
+                        ),
+                        "bitbucket-data-center" => std::sync::Arc::new(
+                            vee_hosting::bitbucket_data_center::BitbucketDataCenterAdapter::new(
+                                vee_hosting::bitbucket_data_center::BitbucketDataCenterConfig::new(
+                                    &api_base, token,
+                                )
+                                .map_err(anyhow::Error::msg)?
+                                .with_webhook_secret(secret),
                             )
                             .map_err(anyhow::Error::msg)?,
                         ),

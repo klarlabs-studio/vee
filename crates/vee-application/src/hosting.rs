@@ -46,6 +46,20 @@ pub fn resolve_hosting_setting(
         .unwrap_or_else(|| fallback.to_owned())
 }
 
+/// The Bitbucket Data Center adapter for the server at `base_url` (ADR 0047).
+fn bitbucket_data_center_adapter(
+    base_url: &str,
+    token: String,
+    webhook_secret: String,
+) -> Result<vee_hosting::bitbucket_data_center::BitbucketDataCenterAdapter> {
+    vee_hosting::bitbucket_data_center::BitbucketDataCenterAdapter::new(
+        vee_hosting::bitbucket_data_center::BitbucketDataCenterConfig::new(base_url, token)
+            .map_err(configuration_failure)?
+            .with_webhook_secret(webhook_secret),
+    )
+    .map_err(configuration_failure)
+}
+
 fn read_token(token_env: &str) -> Result<String> {
     std::env::var(token_env)
         .with_context(|| format!("required credential environment variable {token_env} is not set"))
@@ -82,6 +96,11 @@ pub fn pull_request_context_provider(
             )
             .map_err(configuration_failure)?,
         ),
+        "bitbucket-data-center" => Box::new(bitbucket_data_center_adapter(
+            api_base,
+            token,
+            String::new(),
+        )?),
         "azure-devops" => Box::new(
             vee_hosting::azure_devops::AzureDevOpsAdapter::new(
                 vee_hosting::azure_devops::AzureDevOpsConfig::new(api_base, token)
@@ -190,6 +209,11 @@ fn review_issues_provider(
             )
             .map_err(configuration_failure)?,
         ),
+        "bitbucket-data-center" => Box::new(bitbucket_data_center_adapter(
+            api_base,
+            token,
+            String::new(),
+        )?),
         "azure-devops" => Box::new(
             vee_hosting::azure_devops::AzureDevOpsAdapter::new(
                 vee_hosting::azure_devops::AzureDevOpsConfig::new(api_base, token)
@@ -250,7 +274,7 @@ pub fn pull_request_issues(
     let provider_id = resolve_hosting_setting(flags.provider, hosting.provider, "github");
     if !matches!(
         provider_id.as_str(),
-        "github" | "gitlab" | "bitbucket" | "azure-devops" | "gerrit"
+        "github" | "gitlab" | "bitbucket" | "bitbucket-data-center" | "azure-devops" | "gerrit"
     ) {
         return Err(configuration_failure(format!(
             "unsupported hosting provider `{provider_id}`"
@@ -331,6 +355,7 @@ pub fn pull_request_context(
         "github" if token_env == "AZURE_DEVOPS_EXT_PAT" => "GH_TOKEN",
         "gitlab" if token_env == "AZURE_DEVOPS_EXT_PAT" => "GL_TOKEN",
         "bitbucket" if token_env == "AZURE_DEVOPS_EXT_PAT" => "BB_TOKEN",
+        "bitbucket-data-center" if token_env == "AZURE_DEVOPS_EXT_PAT" => "BITBUCKET_DC_TOKEN",
         "gerrit" if token_env == "AZURE_DEVOPS_EXT_PAT" => "GERRIT_TOKEN",
         _ => &token_env,
     };
@@ -368,6 +393,7 @@ pub fn pull_request_context(
     let limitations = match provider_id.as_str() {
         "azure-devops" => vec!["Azure DevOps diff metadata does not include line-level patches; file records are context only, not line evidence.".into()],
         "bitbucket" => vec!["Bitbucket unified diffs are bounded to 5 MiB; quoted or unsupported paths may lack line-level patch evidence.".into()],
+        "bitbucket-data-center" => vec!["Bitbucket Data Center raw diffs are bounded to 5 MiB; quoted paths lack line-level patch evidence.".into()],
         _ => vec![],
     };
     Ok(vee_hosting::PullRequestContextReport {
@@ -531,7 +557,12 @@ impl HostApproval {
 }
 
 /// Hosts where publishing with `--approval` gives Vee's own approval.
-const OWN_APPROVAL_PROVIDERS: [&str; 3] = ["bitbucket", "azure-devops", "gerrit"];
+const OWN_APPROVAL_PROVIDERS: [&str; 4] = [
+    "bitbucket",
+    "bitbucket-data-center",
+    "azure-devops",
+    "gerrit",
+];
 
 /// The provider state of each linked pull request, keyed by repository ID,
 /// read through each linked checkout's own hosting configuration.
@@ -561,6 +592,7 @@ pub fn refresh_linked_pull_requests(
             match provider_id.as_str() {
                 "gitlab" => "GL_TOKEN",
                 "bitbucket" => "BB_TOKEN",
+                "bitbucket-data-center" => "BITBUCKET_DC_TOKEN",
                 "azure-devops" => "AZURE_DEVOPS_EXT_PAT",
                 "gerrit" => "GERRIT_TOKEN",
                 _ => "GH_TOKEN",
@@ -649,6 +681,7 @@ fn default_publish_token_env(provider_id: &str) -> &'static str {
     match provider_id {
         "gitlab" => "GL_TOKEN",
         "bitbucket" => "BB_TOKEN",
+        "bitbucket-data-center" => "BITBUCKET_DC_TOKEN",
         "azure-devops" => "AZURE_DEVOPS_EXT_PAT",
         "gerrit" => "GERRIT_TOKEN",
         _ => "GH_TOKEN",
@@ -660,6 +693,7 @@ fn default_publish_token_env(provider_id: &str) -> &'static str {
 fn webhook_secret(provider_id: &str, configured_env: &str) -> String {
     let env = match (configured_env, provider_id) {
         (DEFAULT_WEBHOOK_SECRET_ENV, "bitbucket") => "VEE_BITBUCKET_WEBHOOK_SECRET",
+        (DEFAULT_WEBHOOK_SECRET_ENV, "bitbucket-data-center") => "VEE_BITBUCKET_DC_WEBHOOK_SECRET",
         (DEFAULT_WEBHOOK_SECRET_ENV, "gitlab") => "VEE_GITLAB_WEBHOOK_SECRET",
         (env, _) => env,
     };
@@ -1045,6 +1079,11 @@ fn own_approval_provider(
             )
             .map_err(anyhow::Error::msg)?,
         ),
+        "bitbucket-data-center" => Box::new(bitbucket_data_center_adapter(
+            &settings.api_base,
+            token,
+            String::new(),
+        )?),
         "gerrit" => {
             let mut config = vee_hosting::gerrit::GerritConfig::new(&settings.api_base, token)
                 .map_err(anyhow::Error::msg)?;
@@ -1194,6 +1233,11 @@ fn settings_provider(
             )
             .map_err(anyhow::Error::msg)?,
         ),
+        "bitbucket-data-center" => Box::new(bitbucket_data_center_adapter(
+            &settings.api_base,
+            token,
+            webhook_secret,
+        )?),
         "gerrit" => {
             let mut config = vee_hosting::gerrit::GerritConfig::new(&settings.api_base, token)
                 .map_err(anyhow::Error::msg)?;

@@ -503,6 +503,7 @@
             "github",
             "gitlab",
             "bitbucket",
+            "bitbucket-data-center",
             "azure-devops",
             "gerrit"
           ]
