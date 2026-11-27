@@ -4088,6 +4088,7 @@ pub const HOSTING_CREDENTIAL_NAMES: &[&str] = &[
     "CI_JOB_TOKEN",
     "BB_TOKEN",
     "BITBUCKET_TOKEN",
+    "BITBUCKET_DC_TOKEN",
     "AZURE_DEVOPS_EXT_PAT",
     "SYSTEM_ACCESSTOKEN",
     "GERRIT_TOKEN",
@@ -4416,7 +4417,12 @@ impl RepositoryConfig {
         if let Some(provider) = config.hosting.provider.as_deref() {
             if !matches!(
                 provider,
-                "github" | "gitlab" | "bitbucket" | "azure-devops" | "gerrit"
+                "github"
+                    | "gitlab"
+                    | "bitbucket"
+                    | "bitbucket-data-center"
+                    | "azure-devops"
+                    | "gerrit"
             ) {
                 return Err(format!("unsupported hosting provider {provider}"));
             }

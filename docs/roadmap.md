@@ -182,7 +182,7 @@ and `CLAUDE.md`. Teams keep standards elsewhere too.
 
 ### 16. Bitbucket Data Center (M)
 
-- [ ] A Bitbucket Data Center and Server adapter for context, publication and webhooks; the current adapter covers Bitbucket Cloud only
+- [x] A Bitbucket Data Center and Server adapter for context, publication, approval and webhooks ([ADR 0047](adr/0047-bitbucket-data-center.md))
 
 ## Review quality
 

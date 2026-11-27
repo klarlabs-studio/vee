@@ -213,6 +213,7 @@ These hosts have no `vee ci run` integration yet. There,
 | Host | Vee's approval |
 | --- | --- |
 | Bitbucket Cloud | An approval from the token's account |
+| Bitbucket Data Center | The token's user approves as a participant ([below](#bitbucket-data-center)) |
 | Azure DevOps | A reviewer vote of 10 ("approved") |
 | Gerrit | A `Code-Review` vote at the highest value the account may give, so the project's access rules decide between +1 and +2 |
 
@@ -226,7 +227,9 @@ These hosts have no `vee ci run` integration yet. There,
   there and a person approves.
 - These approvals carry no commit. A later push leaves them standing until
   Vee publishes again, unless the host resets approvals on a push:
-  - **Bitbucket:** turn on resetting approvals when the source branch changes;
+  - **Bitbucket:** turn on resetting approvals when the source branch changes
+    (on Data Center, the pull request setting that resets approvals when
+    the source branch is modified);
   - **Azure DevOps:** turn on the branch policy that resets votes on new pushes;
   - **Gerrit:** don't copy `Code-Review` votes to new patch sets.
 - Bitbucket and Azure DevOps still get the separate "Vee approval" check.
@@ -318,6 +321,66 @@ Revert buttons open, and in `git revert` commits on the checked-out branch
 when you run it in a clone. Use a full clone (`fetch-depth: 0`) in CI so
 the history is there
 ([ADR 0037](../adr/0037-detecting-reverted-merges.md)).
+
+## Bitbucket Data Center
+
+Vee talks to a Bitbucket Data Center (or Server) instance as the
+`bitbucket-data-center` provider
+([ADR 0047](../adr/0047-bitbucket-data-center.md)). It needs Data Center
+8.9 or later.
+
+1. Create an HTTP access token for the repository or project, or a
+   personal access token for a bot user, with write access to the
+   repository. Store it as `BITBUCKET_DC_TOKEN`.
+2. Name the server. Vee sends the token only to a host named with
+   `--host`/`--api-base` or listed in `VEE_HOSTING_HOSTS`:
+
+   ```sh
+   export VEE_HOSTING_HOSTS=git.example.com
+   vee hosting publish --provider bitbucket-data-center --host git.example.com \
+     --repository PROJ/service --number 42 --review <review-id> --approval
+   ```
+
+   The repository is `PROJECT/repo-slug`. A server on a non-standard
+   port includes it in the host (`--host git.example.com:7990`). When the
+   server runs under a context path, pass it:
+   `--api-base https://example.com/bitbucket/`. HTTPS is required.
+3. Optionally, set the provider and host in `.vee.yaml`:
+
+   ```yaml
+   hosting:
+     provider: bitbucket-data-center
+     host: git.example.com
+   ```
+
+A publication writes:
+
+- a build status named "Vee" on the head commit: successful, failed, or
+  unknown for a neutral result;
+- one summary comment with the gate's reasons;
+- an inline comment on each finding's added line.
+
+Publishing again edits these comments rather than adding new ones. A fixed
+finding's thread is resolved, and reopened if the finding returns. Vee only
+touches comments its own user wrote.
+
+`vee hosting pr-context` and `vee hosting pr-issues` read the pull request
+and its comments the same way.
+
+### Webhooks
+
+Run `vee hosting webhook-serve --provider bitbucket-data-center --host
+git.example.com --repository PROJ/service`, with the secret in
+`VEE_BITBUCKET_DC_WEBHOOK_SECRET`. In the repository's webhook settings:
+
+- set the URL to `https://<your-proxy>/api/webhooks/bitbucket-data-center`;
+- set the same secret, so Data Center signs each request (`X-Hub-Signature`);
+- choose the pull request events **Opened**, **Source branch updated** and
+  **Modified**.
+
+Vee reviews an opened pull request, a push to its source branch, and a
+change of its target branch. It acknowledges other events without
+reviewing.
 
 ## Commands in comments
 

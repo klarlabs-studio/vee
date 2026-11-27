@@ -56,7 +56,12 @@ pub fn effective_work_item_host(provider: &str, host: &str) -> anyhow::Result<St
         "gerrit" if host == "github.com" => {
             Err(configuration_failure("Gerrit requires an explicit --host"))
         }
-        "github" | "gitlab" | "azure-devops" | "bitbucket" | "gerrit" => Ok(host.into()),
+        "bitbucket-data-center" if host == "github.com" => Err(configuration_failure(
+            "Bitbucket Data Center requires an explicit --host",
+        )),
+        "github" | "gitlab" | "azure-devops" | "bitbucket" | "bitbucket-data-center" | "gerrit" => {
+            Ok(host.into())
+        }
         _ => Err(configuration_failure(format!(
             "unsupported work item provider `{provider}`"
         ))),
@@ -73,7 +78,7 @@ pub fn work_item_api_base(provider: &str, host: &str, configured: &str) -> anyho
         "gitlab" => Ok(format!("https://{host}/api/v4/")),
         "azure-devops" => Ok(format!("https://{host}/")),
         "bitbucket" => Ok("https://api.bitbucket.org/2.0/".into()),
-        "gerrit" => Ok(format!("https://{host}/")),
+        "gerrit" | "bitbucket-data-center" => Ok(format!("https://{host}/")),
         _ => Err(configuration_failure(format!(
             "unsupported work item provider `{provider}`"
         ))),
@@ -318,6 +323,7 @@ pub fn effective_work_item_token_env<'a>(provider: &str, configured: &'a str) ->
         "gitlab" => "GL_TOKEN",
         "azure-devops" => "AZURE_DEVOPS_EXT_PAT",
         "bitbucket" => "BB_TOKEN",
+        "bitbucket-data-center" => "BITBUCKET_DC_TOKEN",
         "gerrit" => "GERRIT_TOKEN",
         _ => configured,
     }
@@ -366,6 +372,36 @@ pub fn get_work_item(
 #[cfg(test)]
 mod credential_destination_tests {
     use super::*;
+
+    #[test]
+    fn bitbucket_data_center_needs_a_named_host_and_its_own_token() {
+        assert!(effective_work_item_host("bitbucket-data-center", "github.com").is_err());
+        assert_eq!(
+            work_item_api_base("bitbucket-data-center", "git.example.invalid", "").unwrap(),
+            "https://git.example.invalid/"
+        );
+        assert_eq!(
+            effective_work_item_token_env("bitbucket-data-center", "GH_TOKEN"),
+            "BITBUCKET_DC_TOKEN"
+        );
+        // A server named only in the repository configuration gets no token.
+        assert!(ensure_credential_destination(
+            "bitbucket-data-center",
+            "git.example.invalid",
+            "https://git.example.invalid/",
+            false,
+            &[]
+        )
+        .is_err());
+        assert!(ensure_credential_destination(
+            "bitbucket-data-center",
+            "git.example.invalid",
+            "https://git.example.invalid/",
+            false,
+            &["git.example.invalid".into()]
+        )
+        .is_ok());
+    }
 
     #[test]
     fn credentials_go_to_public_apis_or_hosts_the_user_named() {
