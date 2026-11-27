@@ -492,6 +492,10 @@ pub struct ReviewPublication {
     /// approval verdict was published too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_check_id: Option<String>,
+    /// What publication did to Vee's own approval on Bitbucket, Azure DevOps
+    /// and Gerrit. GitHub and GitLab approve through `vee ci run` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<HostApproval>,
     /// The pull request revision after publication.
     pub revision: String,
     /// The gate status as published, after waivers recorded since the review.
@@ -500,6 +504,34 @@ pub struct ReviewPublication {
     #[serde(skip)]
     pub destination: Option<PublicationDestination>,
 }
+
+/// What `vee hosting publish --approval` did to Vee's own approval.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostApproval {
+    /// Vee approved the pull request.
+    Given,
+    /// Vee's approval already stood and still holds.
+    Kept,
+    /// Vee withdrew its approval.
+    Withdrawn,
+    /// Vee did not approve, and had no approval standing.
+    NotGiven,
+}
+
+impl HostApproval {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Given => "given",
+            Self::Kept => "kept",
+            Self::Withdrawn => "withdrawn",
+            Self::NotGiven => "not_given",
+        }
+    }
+}
+
+/// Hosts where publishing with `--approval` gives Vee's own approval.
+const OWN_APPROVAL_PROVIDERS: [&str; 3] = ["bitbucket", "azure-devops", "gerrit"];
 
 /// The provider state of each linked pull request, keyed by repository ID,
 /// read through each linked checkout's own hosting configuration.
@@ -663,12 +695,6 @@ pub fn publish_review(
     );
     let actor_login = resolve_hosting_setting(flags.actor_login, hosting.actor_login, "");
 
-    anyhow::ensure!(
-        !(request.approval && provider_id == "gerrit"),
-        usage_failure(
-            "Gerrit has no separate check to carry an approval verdict; publish without --approval"
-        )
-    );
     // The same re-evaluation as `vee gate check`, so a published decision is the
     // one the gate would make now.
     let reevaluated = crate::operations::reevaluate_gate(workspace, request.review_id, None)?;
@@ -742,16 +768,31 @@ pub fn publish_review(
             &reviewed,
         )?
     };
+    // Gerrit has no separate check; its vote and message carry the verdict.
     let approval_check_id = approval
+        .as_ref()
+        .filter(|_| settings.provider_id != "gerrit")
         .map(|eligibility| {
             let check = crate::publication::approval_check_run(
-                &eligibility,
+                eligibility,
                 &pull_request,
                 &reviewed.snapshot_id,
             );
             publish_approval_check(&settings, &pull_request, &revision, check)
         })
         .transpose()?;
+    let own_approval = match &approval {
+        Some(eligibility) if OWN_APPROVAL_PROVIDERS.contains(&settings.provider_id.as_str()) => {
+            Some(sync_own_approval(
+                workspace,
+                &settings,
+                &pull_request,
+                &reviewed,
+                eligibility,
+            )?)
+        }
+        _ => None,
+    };
     Ok(ReviewPublication {
         schema_version: REVIEW_PUBLICATION_SCHEMA_VERSION,
         review_id: reviewed.review_id,
@@ -759,6 +800,7 @@ pub fn publish_review(
         provider_check_id,
         thread_ids,
         approval_check_id,
+        approval: own_approval,
         revision,
         gate: Some(reviewed.gate.status),
         destination: Some(PublicationDestination {
@@ -987,6 +1029,112 @@ fn azure_devops_adapter(
         .map_err(anyhow::Error::msg)?,
     )
     .map_err(anyhow::Error::msg)
+}
+
+/// The adapter that gives Vee's own approval on `settings`' host.
+fn own_approval_provider(
+    settings: &PublishSettings,
+) -> Result<Box<dyn vee_hosting::PullRequestApprovalProvider>> {
+    let token = settings.token.clone();
+    Ok(match settings.provider_id.as_str() {
+        "azure-devops" => Box::new(azure_devops_adapter(settings)?),
+        "bitbucket" => Box::new(
+            vee_hosting::bitbucket::BitbucketAdapter::new(
+                vee_hosting::bitbucket::BitbucketConfig::new(&settings.api_base, token)
+                    .map_err(anyhow::Error::msg)?,
+            )
+            .map_err(anyhow::Error::msg)?,
+        ),
+        "gerrit" => {
+            let mut config = vee_hosting::gerrit::GerritConfig::new(&settings.api_base, token)
+                .map_err(anyhow::Error::msg)?;
+            if !settings.username.is_empty() {
+                config = config.with_username(settings.username.clone());
+            }
+            Box::new(vee_hosting::gerrit::GerritAdapter::new(config).map_err(anyhow::Error::msg)?)
+        }
+        other => {
+            return Err(configuration_failure(format!(
+                "Vee does not approve on `{other}` through publication"
+            )))
+        }
+    })
+}
+
+/// The approval guards a host without Vee's conversation adapter cannot
+/// evaluate: owner approvals need the host's reviews and team membership, and
+/// the daily limit needs Vee's approvals across pull requests.
+fn unsupported_approval_guards(guards: &vee_core::ApprovalConfig) -> Vec<&'static str> {
+    let mut unsupported = Vec::new();
+    if guards.require_owner_approval {
+        unsupported.push("approval.require_owner_approval");
+    }
+    if guards.max_per_day.is_some() {
+        unsupported.push("approval.max_per_day");
+    }
+    unsupported
+}
+
+/// Give, keep or withdraw Vee's own approval so that it stands exactly when
+/// `approval.mode` is `enforce` and the reviewed head is eligible (ADR 0041).
+/// A guard the host cannot evaluate fails closed: Vee approves nothing.
+fn sync_own_approval(
+    workspace: &Workspace,
+    settings: &PublishSettings,
+    pull_request: &vee_hosting::PullRequestRef,
+    reviewed: &crate::ReviewResult,
+    eligibility: &crate::ApprovalEligibility,
+) -> Result<HostApproval> {
+    let guards = workspace.effective_config(None)?.approval;
+    let unsupported = unsupported_approval_guards(&guards);
+    let head = reviewed
+        .change_set
+        .head_oid
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("the review has no head commit to approve"))?;
+    let host = own_approval_provider(settings)?;
+    let host_error = |error: vee_hosting::HostingError| anyhow::anyhow!("{error}");
+    let stands = host.own_approval_stands(pull_request).map_err(host_error)?;
+    let approve = guards.enforces() && eligibility.eligible && unsupported.is_empty();
+    if approve {
+        if stands {
+            return Ok(HostApproval::Kept);
+        }
+        let stages = eligibility
+            .stages
+            .iter()
+            .map(|stage| format!("- {}: {}", stage.id, stage.detail))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let message = format!(
+            "Vee approves this change without a person: every approval stage passed for `{}` (review `{}`).\n\n{stages}",
+            head.chars().take(12).collect::<String>(),
+            reviewed.review_id
+        );
+        host.approve_head(pull_request, &head, &message)
+            .map_err(host_error)?;
+        return Ok(HostApproval::Given);
+    }
+    if !unsupported.is_empty() && guards.enforces() && eligibility.eligible {
+        eprintln!(
+            "warning: Vee did not approve: {} cannot be evaluated on {}; a person approves",
+            unsupported.join(" and "),
+            settings.provider_id
+        );
+    }
+    if !stands {
+        return Ok(HostApproval::NotGiven);
+    }
+    let why = if !guards.enforces() {
+        "Vee withdrew its approval: approval.mode is observe, so Vee approves nothing."
+    } else if !unsupported.is_empty() {
+        "Vee withdrew its approval: an approval guard cannot be evaluated on this host."
+    } else {
+        "Vee withdrew its approval: the change no longer qualifies for approval without a person."
+    };
+    host.withdraw_approval(pull_request, why)
+        .map_err(host_error)?;
+    Ok(HostApproval::Withdrawn)
 }
 
 /// Publish the approval verdict as its own check at the revision the gate

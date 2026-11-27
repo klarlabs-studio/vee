@@ -46,6 +46,7 @@
         "provider_check_id": { "type": "string" },
         "thread_ids": { "type": "object", "additionalProperties": { "type": "string" } },
         "approval_check_id": { "type": "string" },
+        "approval": { "enum": ["given", "kept", "withdrawn", "not_given"] },
         "revision": { "type": "string" }
       }
     }
