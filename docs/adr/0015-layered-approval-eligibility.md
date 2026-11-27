@@ -65,16 +65,33 @@ auto-merge can require it independently of the gate's `Vee` check:
   successful.
 - The check lists every stage with its detail.
 - Eligibility is evaluated before anything is written.
-- Gerrit, which publishes one tagged review message rather than separate
-  checks, is refused.
+- Gerrit publishes one tagged review message rather than separate checks.
+  It was refused at first, and has voted `Code-Review` instead since
+  [ADR 0041](0041-approval-on-bitbucket-azure-devops-and-gerrit.md).
 
 Vee publishes a check rather than a native approval or a label. A check
 carries the reasons and stays read-only toward the review itself; whether a
 passing check approves or merges is the repository's own policy.
 
-**Not yet done:**
-- **Anti-rubber-stamp signals.** Rate limits on automated approvals, and
-  tracking of override and dismissal rates, are not built.
-- **Carrying approval across trivial deltas.** Carrying an approval across
-  a verified-trivial delta (whitespace, comments) is not supported. Any
-  move withdraws it.
+**Follow-up (updated 2026-11-27):**
+- **Anti-rubber-stamp signals: done.**
+  - `approval.max_per_day` caps automatic approvals
+    ([ADR 0026](0026-owner-guards-and-a-daily-limit-for-approvals.md)).
+  - `vee ci approvals` tracks agreement and override rates against what
+    happened to each pull request, reverts included
+    ([ADR 0025](0025-observe-mode-for-approvals.md),
+    [ADR 0037](0037-detecting-reverted-merges.md)).
+  - Dismissal rates retire noisy rules
+    ([ADR 0031](0031-learning-from-pull-request-feedback.md)), and
+    `vee analytics aggregate` reports these rates across repositories
+    ([ADR 0044](0044-team-analytics-without-a-server.md)).
+- **Carrying approval across trivial deltas: not planned.** Every new head
+  is reviewed and its eligibility evaluated again. Incremental review
+  ([ADR 0022](0022-incremental-review-after-a-push.md),
+  [ADR 0036](0036-carry-findings-on-unchanged-hunks.md)) already makes an
+  unchanged file free. A whitespace or comment change alters a file's
+  content, and Vee cannot prove in general that it leaves behaviour alone:
+  a comment can be a directive, and whitespace is syntax in some
+  languages. Keeping an approval across such a delta without a review
+  would break the rule above that a missing stage keeps a person in the
+  loop.
