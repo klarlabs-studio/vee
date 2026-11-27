@@ -36,7 +36,32 @@ Pushing a version tag publishes a release, so tag only a tested commit.
    - pushes `ghcr.io/klarlabs-studio/vee:<tag>` and attests the image.
 
    A prerelease does not move `:latest`.
-3. **Check the release.** Download an archive and run `gh attestation verify <archive> --repo klarlabs-studio/vee`, then install it with the shell installer and with `brew install klarlabs-studio/tap/vee`.
+3. **Sign the release** on your own machine, with an SSH key listed in `.github/release-signers` ([ADR 0039](adr/0039-releases-signed-with-a-maintainer-key.md)):
+
+   ```sh
+   python3 scripts/release-signature.py sign --tag vX.Y.Z --key ~/.ssh/id_ed25519
+   ```
+
+   The script:
+   - downloads `sha256.sum` and every archive it lists;
+   - checks each archive's digest and build provenance;
+   - signs `sha256.sum` with the namespace `vee-release`;
+   - checks the signature against `.github/release-signers`;
+   - uploads `sha256.sum.sig` to the release.
+
+   `--no-upload` writes the signature to the current directory instead. A hardware-backed key (`ed25519-sk`) works and asks for a touch.
+4. **Check the release.** Download an archive and run `python3 scripts/release-signature.py verify --tag vX.Y.Z <archive>` and `gh attestation verify <archive> --repo klarlabs-studio/vee`. Then install it with the shell installer and with `brew install klarlabs-studio/tap/vee`.
+
+### Release signing keys
+
+`.github/release-signers` lists the keys that may sign releases, in `ssh-keygen`'s allowed-signers format, each for the principal and namespace `vee-release`:
+
+```
+vee-release namespaces="vee-release" ssh-ed25519 AAAA... maintainer
+```
+
+- **Adding a key:** add it in a reviewed commit before the key signs anything.
+- **Removing a key:** remove one that is lost or retired. Releases it signed then no longer verify against the file, so sign those releases again with a current key.
 
 Pull requests run `dist plan`, which checks the release configuration without building.
 
@@ -45,7 +70,7 @@ The installers check each archive against the checksum built into them. `VEE_DOW
 ## Release boundary
 
 - **Do not advertise a registry package or an installer for Windows** until it is configured and tested.
-- **Releases are not signed with a maintainer key.** Their integrity rests on GitHub's provenance attestations and the published checksums.
+- **Signatures:** a release is signed with a maintainer key once `sha256.sum.sig` is attached to it. Until a maintainer signs it, its integrity rests on GitHub's provenance attestations and the published checksums. The installers check checksums, not the signature.
 - **Hosted acceptance is still open.** Hosted CI runs on Linux, macOS and Windows; the GitHub lifecycle acceptance runbook has not yet been run against a real repository.
 
 ## Latest clean-source acceptance

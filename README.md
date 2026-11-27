@@ -47,7 +47,7 @@ On Windows (PowerShell):
 irm https://github.com/klarlabs-studio/vee/releases/latest/download/vee-installer.ps1 | iex
 ```
 
-The installers put `vee` in `~/.local/bin` (set `VEE_INSTALL_DIR` to change it) and refuse an archive whose checksum does not match. To check where an archive was built, run `gh attestation verify <archive> --repo klarlabs-studio/vee`. The Linux binaries need glibc 2.35 or later; on musl systems such as Alpine, build from source or use the container image. For CI runners there is a container image, `ghcr.io/klarlabs-studio/vee`, built from the same release binaries. It runs as a non-root user and holds Vee and Git, which suits API providers; a reviewer that uses an agent CLI needs that CLI added in a derived image.
+The installers put `vee` in `~/.local/bin` (set `VEE_INSTALL_DIR` to change it) and refuse an archive whose checksum does not match. To check where an archive was built, run `gh attestation verify <archive> --repo klarlabs-studio/vee`. To check that a maintainer signed the release, run `python3 scripts/release-signature.py verify --tag vX.Y.Z <archive>` from a checkout: it checks the release's `sha256.sum.sig` against the keys in `.github/release-signers` with `ssh-keygen`, then the archive's digest. The Linux binaries need glibc 2.35 or later; on musl systems such as Alpine, build from source or use the container image. For CI runners there is a container image, `ghcr.io/klarlabs-studio/vee`, built from the same release binaries. It runs as a non-root user and holds Vee and Git, which suits API providers; a reviewer that uses an agent CLI needs that CLI added in a derived image.
 
 ## Reviews on pull requests
 

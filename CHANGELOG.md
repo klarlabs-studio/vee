@@ -6,6 +6,14 @@ change configuration and output contracts.
 
 ## Unreleased
 
+### Releases signed with a maintainer key
+
+- `scripts/release-signature.py sign` signs a published release's
+  `sha256.sum` with a maintainer's SSH key, on the maintainer's machine,
+  after checking every archive's digest and build provenance, and uploads
+  `sha256.sum.sig`. `verify` checks the signature against
+  `.github/release-signers` and then the archives' digests (ADR 0039).
+
 ### HTTPS for the webhook server
 
 - `vee hosting webhook-serve --tls-cert --tls-key` serves HTTPS, and with
