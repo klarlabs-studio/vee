@@ -141,6 +141,7 @@ pub fn run_provider_task(
         context_window_tokens: provider.context_window_tokens,
         max_output_tokens: provider.max_output_tokens,
         environment,
+        reasoning_effort: provider.reasoning_effort,
         sample: None,
         exploration: None,
     };
@@ -421,6 +422,11 @@ pub(crate) struct PreparedReviewer {
     pub(crate) request: ProviderRequest,
 }
 
+/// The Codex CLI configuration override for a reasoning effort.
+fn codex_reasoning_effort(effort: vee_core::ReasoningEffort) -> String {
+    format!("model_reasoning_effort=\"{}\"", effort.as_str())
+}
+
 pub(crate) fn provider_cache_key(
     request: &ProviderRequest,
     provider_version: &str,
@@ -470,6 +476,10 @@ pub(crate) fn provider_cache_key(
     // Unsampled keys keep their earlier shape, so existing cache entries stay valid.
     if let Some(sample) = request.sample {
         key_material["sample"] = serde_json::json!(sample);
+    }
+    // So are keys of requests without a reasoning-effort setting.
+    if let Some(effort) = request.reasoning_effort {
+        key_material["reasoning_effort"] = serde_json::json!(effort.as_str());
     }
     let key_material = serde_json::to_vec(&key_material).map_err(|error| error.to_string())?;
     Ok(Some(digest(&key_material)))
@@ -696,6 +706,10 @@ pub(crate) fn execute_openai_compatible(
         ],
         "response_format": {"type":"json_schema","json_schema":{"name":"vee_findings","strict":true,"schema":schema}}
     });
+    let mut payload = payload;
+    if let Some(effort) = request.reasoning_effort {
+        payload["reasoning_effort"] = serde_json::json!(effort.as_str());
+    }
     let token = request
         .environment
         .iter()
@@ -890,6 +904,9 @@ pub(crate) fn execute_ollama_native(
         });
         if let Some(format) = format {
             payload["format"] = format.clone();
+        }
+        if let Some(effort) = request.reasoning_effort {
+            payload["think"] = serde_json::json!(effort.as_str());
         }
         runtime.block_on(ollama_chat(
             &client,
@@ -1127,6 +1144,7 @@ pub(crate) fn execute_claude_cli(
         context_window_tokens: request.context_window_tokens,
         max_output_tokens: request.max_output_tokens,
         environment: with_cli_login_environment(&request.environment),
+        reasoning_effort: None,
         sample: None,
         exploration: None,
     };
@@ -1288,6 +1306,7 @@ pub(crate) fn execute_antigravity_cli(
         context_window_tokens: request.context_window_tokens,
         max_output_tokens: request.max_output_tokens,
         environment: with_cli_login_environment(&request.environment),
+        reasoning_effort: None,
         sample: None,
         exploration: None,
     };
@@ -1407,6 +1426,7 @@ pub(crate) fn execute_gemini_cli(
             .cloned()
             .chain([("NO_BROWSER".to_string(), "true".to_string())])
             .collect(),
+        reasoning_effort: None,
         sample: None,
         exploration: None,
     };
@@ -1552,6 +1572,10 @@ pub(crate) fn execute_codex_cli(
         args.push("--model".into());
         args.push(model.clone());
     }
+    if let Some(effort) = request.reasoning_effort {
+        args.push("-c".into());
+        args.push(codex_reasoning_effort(effort));
+    }
     args.push("-".into());
     let prompt = provider_request_prompt(&input, CODEX_REVIEW_PROMPT, "task request")?;
     let codex_request = ProviderRequest {
@@ -1566,6 +1590,7 @@ pub(crate) fn execute_codex_cli(
         context_window_tokens: request.context_window_tokens,
         max_output_tokens: request.max_output_tokens,
         environment: request.environment.clone(),
+        reasoning_effort: None,
         sample: None,
         exploration: None,
     };
@@ -1706,6 +1731,7 @@ pub(crate) fn probe_provider_version(
             context_window_tokens: None,
             max_output_tokens: None,
             environment: environment.to_vec(),
+            reasoning_effort: None,
             sample: None,
             exploration: None,
         },

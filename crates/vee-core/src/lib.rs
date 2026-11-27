@@ -3162,6 +3162,29 @@ policy_profiles:
     }
 
     #[test]
+    fn reasoning_effort_is_only_accepted_by_providers_that_have_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join(".vee.yaml");
+        let load = |provider: &str| {
+            std::fs::write(&file, format!("version: 1\nproviders:\n  p: {provider}\n")).unwrap();
+            RepositoryConfig::load(&file)
+        };
+        for accepted in [
+            "{ kind: codex_cli, executable: codex, reasoning_effort: high }",
+            "{ kind: openai_compatible, egress: network, endpoint: https://api.example.invalid/v1/chat/completions, model: m, reasoning_effort: low }",
+        ] {
+            let loaded = load(accepted);
+            assert!(loaded.is_ok(), "{accepted}: {:?}", loaded.err());
+        }
+        let refused = load("{ kind: claude_cli, executable: claude, reasoning_effort: high }");
+        assert!(refused
+            .err()
+            .unwrap()
+            .contains("reasoning_effort is only valid"));
+        assert!(load("{ kind: codex_cli, executable: codex, reasoning_effort: extreme }").is_err());
+    }
+
+    #[test]
     fn forced_offline_mode_cannot_be_weakened_by_repository_configuration() {
         let directory = tempfile::tempdir().unwrap();
         let config_path = directory.path().join(".vee.yaml");
@@ -3746,6 +3769,11 @@ pub struct ProviderConfig {
     /// use a smaller server default than the model's advertised capacity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window_tokens: Option<usize>,
+    /// How hard a reasoning model thinks before it answers, for providers
+    /// with such a setting: `codex_cli`, `openai_compatible` and
+    /// `ollama_native`. Unset, the provider's default applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
     #[serde(default)]
     pub env_allowlist: Vec<String>,
     #[serde(default = "default_timeout")]
@@ -3850,6 +3878,26 @@ impl ReviewStrategy {
         *self == ReviewStrategy::WholeChange
     }
 }
+/// A reasoning model's effort setting. Distinct from [`ReviewEffort`], which
+/// is how many times Vee asks.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    Low,
+    Medium,
+    High,
+}
+
+impl ReasoningEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
 /// How much work a reviewer spends on a change. Higher effort sends the review
 /// request more times and merges the runs by agreement (see `samples`).
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -4306,6 +4354,18 @@ impl RepositoryConfig {
             if provider.max_output_tokens.is_some() && provider.kind != ProviderKind::OllamaNative {
                 return Err(format!(
                     "provider {id} max_output_tokens is only valid for ollama_native"
+                ));
+            }
+            if provider.reasoning_effort.is_some()
+                && !matches!(
+                    provider.kind,
+                    ProviderKind::CodexCli
+                        | ProviderKind::OpenAiCompatible
+                        | ProviderKind::OllamaNative
+                )
+            {
+                return Err(format!(
+                    "provider {id} reasoning_effort is only valid for codex_cli, openai_compatible and ollama_native"
                 ));
             }
         }
@@ -4906,6 +4966,8 @@ pub struct ProviderRequest {
     pub context_window_tokens: Option<usize>,
     pub max_output_tokens: Option<usize>,
     pub environment: Vec<(String, String)>,
+    /// The provider's reasoning-effort setting, when configured.
+    pub reasoning_effort: Option<ReasoningEffort>,
     /// Which run of a sampled reviewer this request is; absent for an unsampled reviewer.
     pub sample: Option<ProviderSample>,
     /// The snapshot tool server a CLI reviewer may start (ADR 0017); absent

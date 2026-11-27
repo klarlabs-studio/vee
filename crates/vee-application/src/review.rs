@@ -1040,6 +1040,7 @@ pub fn run_review_with_provider_and_selection_context(
                     1_048_576
                 },
                 environment,
+                reasoning_effort: provider.reasoning_effort,
                 sample: None,
                 exploration: exploration_launch,
             },

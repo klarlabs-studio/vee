@@ -102,6 +102,10 @@
           "maximum": 131072,
           "description": "Required for ollama_native; sent as Ollama's native options.num_ctx."
         },
+        "reasoning_effort": {
+          "enum": ["low", "medium", "high"],
+          "description": "How hard a reasoning model thinks before it answers: codex_cli's model_reasoning_effort, openai_compatible's reasoning_effort, or ollama_native's think level. Refused for other kinds. Unset, the provider's default applies."
+        },
         "env_allowlist": {
           "type": "array",
           "items": {
