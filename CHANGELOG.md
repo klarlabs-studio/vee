@@ -20,6 +20,12 @@ change configuration and output contracts.
   a participant. Webhooks are verified with `X-Hub-Signature` at
   `/api/webhooks/bitbucket-data-center` (ADR 0047).
 
+### The agent Stop hook in Codex
+
+- The plugin's `SessionStart` and `Stop` hooks now run in Codex as well as
+  Claude Code. `vee hooks run agent-stop` always prints a JSON object, `{}`
+  when it has nothing to say, as Codex requires.
+
 ### Grouping sampled findings by meaning
 
 - `sample_grouping: meaning` on a sampled reviewer matches its runs'

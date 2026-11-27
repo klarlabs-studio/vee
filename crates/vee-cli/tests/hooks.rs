@@ -100,6 +100,23 @@ impl Fixture {
         session: &str,
         env: &[(&str, &str)],
     ) -> Option<serde_json::Value> {
+        let input = serde_json::json!({
+            "session_id": session,
+            "transcript_path": "/dev/null",
+            "cwd": self.root(),
+            "hook_event_name": hook,
+            "stop_hook_active": false,
+        });
+        self.agent_hook_with(hook, &input, env)
+    }
+
+    /// Run an agent hook with the given stdin document.
+    fn agent_hook_with(
+        &self,
+        hook: &str,
+        input: &serde_json::Value,
+        env: &[(&str, &str)],
+    ) -> Option<serde_json::Value> {
         let mut command = vee();
         command
             .args(["hooks", "run", hook])
@@ -111,13 +128,6 @@ impl Fixture {
             command.env(name, value);
         }
         let mut child = command.spawn().unwrap();
-        let input = serde_json::json!({
-            "session_id": session,
-            "transcript_path": "/dev/null",
-            "cwd": self.root(),
-            "hook_event_name": hook,
-            "stop_hook_active": false,
-        });
         child
             .stdin
             .take()
@@ -131,6 +141,13 @@ impl Fixture {
             String::from_utf8_lossy(&output.stderr)
         );
         let stdout = String::from_utf8(output.stdout).unwrap();
+        if hook == "agent-stop" {
+            // Codex requires a JSON object from a Stop hook that exits 0.
+            let answer: serde_json::Value =
+                serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("{error}: {stdout:?}"));
+            assert!(answer.is_object(), "{stdout}");
+            return (answer != serde_json::json!({})).then_some(answer);
+        }
         (!stdout.trim().is_empty()).then(|| {
             serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("{error}: {stdout}"))
         })
@@ -190,6 +207,43 @@ fn the_stop_hook_keeps_the_agent_working_until_the_changes_pass() {
         .unwrap();
     let shown = String::from_utf8_lossy(&shown.stdout);
     assert!(shown.contains("src/other.rs"), "{shown}");
+}
+
+#[test]
+fn the_stop_hook_reads_codex_hook_input_and_answers_in_its_shape() {
+    let fixture = Fixture::new();
+    // Codex's Stop input: its own extensions, a UUID session ID and no transcript.
+    let codex = |event: &str| {
+        serde_json::json!({
+            "session_id": "0199a213-81c0-7800-8aa1-bbab2a035a53",
+            "transcript_path": null,
+            "cwd": fixture.root(),
+            "hook_event_name": event,
+            "model": "a-model",
+            "permission_mode": "default",
+            "turn_id": "turn-1",
+            "stop_hook_active": false,
+            "last_assistant_message": "Done.",
+            "source": "startup",
+        })
+    };
+    assert_eq!(
+        fixture.agent_hook_with("agent-session-start", &codex("SessionStart"), &[]),
+        None
+    );
+    // Nothing to review: still a JSON object, which Codex requires.
+    assert_eq!(
+        fixture.agent_hook_with("agent-stop", &codex("Stop"), &[]),
+        None
+    );
+    fixture.write("pub fn initial() { BUG }\n");
+    let blocked = fixture
+        .agent_hook_with("agent-stop", &codex("Stop"), &[])
+        .unwrap();
+    assert_eq!(blocked["decision"], "block", "{blocked:#}");
+    assert!(blocked["reason"]
+        .as_str()
+        .is_some_and(|reason| !reason.trim().is_empty()));
 }
 
 #[test]
