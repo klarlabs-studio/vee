@@ -292,6 +292,7 @@ Write the command on its own line:
 | `@vee status` | Replies with its findings on the pull request and the waivers and dismissals in effect. |
 | `@vee explain` | Replies in the finding's thread with an explanation from the configured model. |
 | `@vee fix all` | Fixes up to five open findings in turn, keeps each fix the review accepts, and pushes the kept fixes together ([ADR 0027](../adr/0027-fixing-every-open-finding.md)). |
+| `@vee steward` | Runs the steward on the head ([ADR 0042](../adr/0042-the-steward.md)). It takes on a conflict with the base, failing required verifications, blocking findings, and review comments on lines from people with write access. It keeps each fix a new review accepts and pushes the kept fixes together. A conflict is resolved only when a required verification passes on the result. Each addressed comment gets a reply with the commit and how to undo it; whether the change does what was asked is for the commenter to judge. `steward.max_fixes` (default 5) bounds a run. |
 | `@vee fix` | Asks the configured model for a fix to the finding's file, reviews the result, and pushes it as one commit only if the finding is gone and nothing new blocks ([ADR 0023](../adr/0023-fixes-from-pull-request-comments.md)). |
 | `@vee dismiss <reason>` | Records the finding as a false positive and resolves its thread. A finding that blocks keeps blocking. |
 | `@vee waive <days>d <reason>` | Waives the finding on the current head, for 1 to 90 days, and reviews again so the check shows the new verdict. |

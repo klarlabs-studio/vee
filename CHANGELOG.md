@@ -21,6 +21,10 @@ change configuration and output contracts.
 - `steward.max_fixes` (default 5) bounds a run. The MCP tool `run_steward`
   needs `steward.agents: true`. JSON output follows `steward-run-v1`
   (ADR 0042).
+- `@vee steward` on GitHub and GitLab runs the steward on the pull
+  request's head. It also addresses review comments on lines from people
+  with write access, pushes the fixes the reviews accept, and answers in
+  each addressed thread with how to undo the commit.
 
 ### Approval on Bitbucket, Azure DevOps and Gerrit
 

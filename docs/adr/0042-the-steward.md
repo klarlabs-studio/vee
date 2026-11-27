@@ -84,6 +84,13 @@ Every commit names who asked for it and how to undo it, and the report
 - A change to a person's review comment can be checked only for not making
   the gate worse; whether it does what the person asked stays theirs to
   judge.
-- `@vee steward` on pull requests, which adds review comments from people
-  with write access and pushes the kept fixes, builds on this engine
-  separately.
+- On a pull request, `@vee steward` from a person with write access runs
+  the same engine on the head. It adds the review comments on lines that
+  people with write access started and the steward has not answered yet.
+  The comment text goes to the model as untrusted data, so this is the one
+  place a person's comment reaches a model, and only when another person
+  with write access asks for it. Commands, bots and Vee's own threads are
+  left out. It pushes the kept fixes in one push and publishes the review
+  of the new head. It answers in each addressed comment's thread with the
+  commit and how to undo it, marked so a later run skips that thread.
+  Forks are refused, as for `@vee fix`.
