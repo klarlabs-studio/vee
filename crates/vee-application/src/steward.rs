@@ -103,6 +103,12 @@ impl HeadReview for crate::ReviewResult {
     }
 }
 
+impl HeadReview for crate::ci::Reviewed {
+    fn result(&self) -> &crate::ReviewResult {
+        &self.review
+    }
+}
+
 /// A review comment a person left, for `@vee steward` to address.
 #[derive(Clone, Debug)]
 pub(crate) struct CommentTask {

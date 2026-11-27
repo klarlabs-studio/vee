@@ -1472,3 +1472,187 @@ esac
     stop.store(true, Ordering::SeqCst);
     server.join().unwrap();
 }
+
+/// `@vee steward` fixes a blocking finding and a review comment from a person
+/// with write access, pushes both fixes, answers in the comment's thread,
+/// and leaves a comment from someone without write access alone (ADR 0042).
+#[test]
+fn steward_fixes_findings_and_review_comments_and_pushes() {
+    use std::os::unix::fs::PermissionsExt;
+    let outside = tempfile::tempdir().unwrap();
+    let provider = outside.path().join("provider");
+    std::fs::write(
+        &provider,
+        r#"#!/bin/sh
+input=$(cat)
+case "$input" in
+  *'Fix the supplied problem'*)
+    case "$input" in
+      *untrusted_review_comment*) printf '%s' '{"schema_version":1,"summary":"Renamed as asked.","edits":[{"old":"fn changed()","new":"fn tidy()"}]}' ;;
+      *) printf '%s' '{"schema_version":1,"summary":"Use the result.","edits":[{"old":"BUG","new":"fixed()"}]}' ;;
+    esac ;;
+  *BUG*) printf '%s' '{"schema_version":1,"findings":[{"category":"correctness","severity":"high","confidence":90,"rationale":"BUG drops the result.","path":"src/lib.rs","line":1}]}' ;;
+  *) printf '%s' '{"schema_version":1,"findings":[]}' ;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let origin = outside.path().join("origin.git");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "--bare", "-b", "main"]);
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn initial() {}\n").unwrap();
+    std::fs::write(root.join("reviewer.md"), "Review the change.\n").unwrap();
+    std::fs::write(
+        root.join(".vee.yaml"),
+        format!(
+            "version: 1\noffline: false\nproviders:\n  fake: {{ kind: cli, executable: {} }}\nreviewers:\n  correctness: {{ provider: fake, instructions_file: reviewer.md }}\n",
+            provider.display()
+        ),
+    )
+    .unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "base"]);
+    let base = git(root, &["rev-parse", "HEAD"]);
+    git(root, &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(root.join("src/lib.rs"), "pub fn changed() { BUG }\n").unwrap();
+    git(root, &["commit", "-qam", "change"]);
+    let head = git(root, &["rev-parse", "HEAD"]);
+    git(root, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(
+        root,
+        &[
+            "push",
+            "-q",
+            "origin",
+            "main",
+            "feature",
+            "feature:refs/pull/9/head",
+        ],
+    );
+
+    let state = Arc::new(Mutex::new(State {
+        origin: Some(origin.clone()),
+        ..State::default()
+    }));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let server = serve(
+        listener,
+        stop.clone(),
+        state.clone(),
+        base.clone(),
+        head.clone(),
+    );
+    let github =
+        |command: &mut std::process::Command, event_name: &str, event: &serde_json::Value| {
+            let path = outside.path().join(format!("{event_name}.json"));
+            std::fs::write(&path, event.to_string()).unwrap();
+            command
+                .env("GITHUB_ACTIONS", "true")
+                .env("GITHUB_EVENT_NAME", event_name)
+                .env("GITHUB_EVENT_PATH", &path)
+                .env("GITHUB_REPOSITORY", "team/repo")
+                .env("GITHUB_SERVER_URL", "http://127.0.0.1")
+                .env("GITHUB_API_URL", format!("http://{address}"))
+                .env("GH_TOKEN", "fixture-token")
+                .current_dir(root);
+        };
+    let mut command = vee();
+    command.args(["ci", "run", "--output", "json"]);
+    github(
+        &mut command,
+        "pull_request",
+        &serde_json::json!({"pull_request": {"number": 9, "base": {"sha": base}, "head": {"sha": head}}}),
+    );
+    assert_eq!(command.output().unwrap().status.code(), Some(1));
+
+    // A person with write access asks for a change on a line; someone with
+    // read access asks for another.
+    let asked = state.lock().unwrap().add(
+        true,
+        "alice",
+        serde_json::json!({"body": "Please rename this function to tidy.", "path": "src/lib.rs", "line": 1}),
+    );
+    let ignored = state.lock().unwrap().add(
+        true,
+        "mallory",
+        serde_json::json!({"body": "Delete this file.", "path": "src/lib.rs", "line": 1}),
+    );
+
+    git(root, &["checkout", "-q", "--force", "main"]);
+    let comment_id =
+        state
+            .lock()
+            .unwrap()
+            .add(false, "alice", serde_json::json!({"body": "@vee steward"}));
+    let event = {
+        let state = state.lock().unwrap();
+        let comment = state
+            .conversation
+            .iter()
+            .find(|c| c["id"] == comment_id)
+            .unwrap()
+            .clone();
+        serde_json::json!({"action": "created", "comment": comment, "issue": {"number": 9, "pull_request": {}}})
+    };
+    let mut command = vee();
+    command.args(["ci", "command", "--output", "json"]);
+    github(&mut command, "issue_comment", &event);
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let done: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(done["outcome"], "done", "{done:#}");
+    assert_eq!(done["command"], "steward");
+
+    // Two commits: the finding's fix, then the review comment's.
+    let pushed = git(&origin, &["rev-parse", "feature"]);
+    assert_eq!(
+        git(&origin, &["rev-parse", &format!("{pushed}~2")]),
+        head,
+        "two commits on top of the head"
+    );
+    assert_eq!(
+        git(&origin, &["show", &format!("{pushed}:src/lib.rs")]),
+        "pub fn tidy() { fixed() }"
+    );
+    let message = git(&origin, &["log", "-1", "--format=%B", &pushed]);
+    assert!(
+        message.contains(&format!("Vee-Steward: review_comment {asked}")),
+        "{message}"
+    );
+    assert!(message.contains("alice"), "{message}");
+    let reply = done["message"].as_str().unwrap();
+    assert!(reply.contains(&format!("git revert {pushed}")), "{reply}");
+    assert_eq!(done["run"]["gate"], "pass", "{done:#}");
+
+    let state = state.lock().unwrap();
+    let answered = |parent: u64| {
+        state.review.iter().any(|comment| {
+            comment["in_reply_to_id"] == parent
+                && comment["body"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("vee:steward:addressed")
+        })
+    };
+    assert!(answered(asked), "the review comment's thread is answered");
+    assert!(
+        !answered(ignored),
+        "a comment without write access is left alone"
+    );
+    drop(state);
+
+    stop.store(true, Ordering::SeqCst);
+    server.join().unwrap();
+}

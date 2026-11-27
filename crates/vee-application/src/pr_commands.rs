@@ -30,6 +30,7 @@ pub const HELP: &str = "Vee commands, one per comment, on the first line that st
 - `@vee explain [finding]`: explain a finding.\n\
 - `@vee fix [finding]`: ask the reviewer's model for a fix to a finding. Vee pushes it to the pull request's branch only if a new review no longer reports the finding and finds nothing new that blocks.\n\
 - `@vee fix all`: fix up to five open findings in turn, each reviewed on its own; Vee pushes the fixes the reviews accept.\n\
+- `@vee steward`: fix what keeps the pull request from passing: a conflict with the base, failing required checks, blocking findings, and review comments on lines from people with write access. Vee pushes each fix a new review accepts, with how to undo it.\n\
 - `@vee dismiss [finding] <reason>`: record a finding as a false positive. It does not change the gate.\n\
 - `@vee waive [finding] <days>d <reason>`: waive a finding on the current head, for at most 90 days. Needs code ownership of its file.\n\n\
 In a finding's thread, the finding is implied. Elsewhere, name it by its ID, such as `find_0123456789ab`. Commands need write access to the repository.";
@@ -48,6 +49,8 @@ pub enum Command {
     },
     /// Fix each open finding in turn, up to [`MAX_FIX_ALL`].
     FixAll,
+    /// Run the steward on the pull request (ADR 0042).
+    Steward,
     Dismiss {
         finding: Option<String>,
         reason: String,
@@ -67,6 +70,7 @@ impl Command {
             Self::Help => "help",
             Self::Explain { .. } => "explain",
             Self::Fix { .. } | Self::FixAll => "fix",
+            Self::Steward => "steward",
             Self::Dismiss { .. } => "dismiss",
             Self::Waive { .. } => "waive",
         }
@@ -131,6 +135,7 @@ pub fn parse(body: &str) -> Parsed {
             Parsed::Command(Command::FixAll)
         }
         "fix" => Parsed::Command(Command::Fix { finding }),
+        "steward" if finding.is_none() => Parsed::Command(Command::Steward),
         "dismiss" => {
             let reason = rest(tokens);
             if reason.is_empty() {
@@ -856,6 +861,7 @@ pub fn handle(
             | Command::Explain { .. }
             | Command::Fix { .. }
             | Command::FixAll
+            | Command::Steward
             | Command::Waive { .. }
     );
     if needs_head && origin.is_fork() {
@@ -864,7 +870,7 @@ pub fn handle(
             &pull_request,
             &comment,
             &command,
-            "Vee does not run `review`, `explain`, `fix` or `waive` on pull requests from forks, because they would load the fork's configuration with this repository's secrets.",
+            "Vee does not run `review`, `explain`, `fix`, `steward` or `waive` on pull requests from forks, because they would load the fork's configuration with this repository's secrets.",
         );
     }
     if needs_head && !origin.open {
@@ -1117,6 +1123,34 @@ pub fn handle(
                 comment: &comment,
                 reply_to,
                 threads: targets,
+                branch: &branch,
+                ci_pull_request,
+                run_options,
+            })
+        }
+        Command::Steward => {
+            let Some(branch) = origin
+                .head_ref
+                .clone()
+                .filter(|branch| valid_branch(root, branch))
+            else {
+                return refuse(
+                    host,
+                    &pull_request,
+                    &comment,
+                    &command,
+                    "Vee cannot tell which branch to push the fixes to.",
+                );
+            };
+            let tasks = review_comment_tasks(&comments, &event.actor_login, &mut authorizer)?;
+            check_out_head(root, &event.provider, event.number, &origin.head_oid)?;
+            steward(StewardCommand {
+                workspace,
+                host,
+                pull_request: &pull_request,
+                command: &command,
+                comment: &comment,
+                tasks,
                 branch: &branch,
                 ci_pull_request,
                 run_options,
@@ -1648,22 +1682,13 @@ fn fix(request: FixRequest<'_>) -> Result<CommandOutcome> {
         .expect("one fix was accepted");
     // A push with the workflow's token starts no workflow, so Vee publishes
     // the review of the new head itself, once the host shows that head.
-    let mut attempts = 0;
-    while host
-        .pull_request_origin(pull_request)
-        .map(|origin| origin.head_oid != tip)
-        .unwrap_or(true)
-    {
-        attempts += 1;
-        if attempts >= HEAD_UPDATE_ATTEMPTS {
-            return answer(
-                "done",
-                format!(
-                    "Pushed to `{branch}`, each fix reviewed before it was kept:\n{pushed}\n\nThe pull request did not show the new head in time to publish its review. Comment `@vee review` to publish it.{not_kept_text}"
-                ),
-            );
-        }
-        std::thread::sleep(std::time::Duration::from_secs(2));
+    if !head_shown(host, pull_request, &tip) {
+        return answer(
+            "done",
+            format!(
+                "Pushed to `{branch}`, each fix reviewed before it was kept:\n{pushed}\n\nThe pull request did not show the new head in time to publish its review. Comment `@vee review` to publish it.{not_kept_text}"
+            ),
+        );
     }
     let mut fixed_pull_request = ci_pull_request;
     fixed_pull_request.head_oid = tip;
@@ -1672,6 +1697,233 @@ fn fix(request: FixRequest<'_>) -> Result<CommandOutcome> {
         "done",
         format!(
             "Pushed to `{branch}`, each fix reviewed before it was kept:\n{pushed}\n\nThe gate on the new head is **{}**.{not_kept_text}",
+            gate_word(run.gate)
+        ),
+    )?;
+    done.run = Some(run);
+    Ok(done)
+}
+
+/// Whether the host shows `tip` as the pull request's head, asking a few
+/// times after a push.
+fn head_shown(
+    host: &dyn PullRequestConversationProvider,
+    pull_request: &PullRequestRef,
+    tip: &str,
+) -> bool {
+    for attempt in 0..HEAD_UPDATE_ATTEMPTS {
+        if host
+            .pull_request_origin(pull_request)
+            .is_ok_and(|origin| origin.head_oid == tip)
+        {
+            return true;
+        }
+        if attempt + 1 < HEAD_UPDATE_ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    }
+    false
+}
+
+/// Marks Vee's reply in a review comment's thread that the steward
+/// addressed it, so a later run does not take it on again.
+const STEWARD_ADDRESSED: &str = "<!-- vee:steward:addressed -->";
+/// The most text of a review comment sent to the model.
+const MAX_COMMENT_TASK_CHARS: usize = 4000;
+
+/// Review comments on lines that people with write access started and the
+/// steward has not addressed yet. Commands, bots and Vee's own threads are
+/// left out.
+fn review_comment_tasks(
+    comments: &[ConversationComment],
+    actor_login: &str,
+    authorizer: &mut Authorizer<'_>,
+) -> Result<Vec<crate::steward::CommentTask>> {
+    let addressed: BTreeSet<&str> = comments
+        .iter()
+        .filter(|comment| {
+            is_actor(comment, actor_login) && comment.body.contains(STEWARD_ADDRESSED)
+        })
+        .filter_map(|comment| comment.in_reply_to.as_deref())
+        .collect();
+    let mut tasks = Vec::new();
+    for comment in comments {
+        let (Some(path), true) = (
+            comment.path.clone(),
+            comment.kind == ConversationKind::Review && comment.in_reply_to.is_none(),
+        ) else {
+            continue;
+        };
+        if comment.author_is_bot
+            || is_actor(comment, actor_login)
+            || addressed.contains(comment.id.as_str())
+            || !matches!(parse(&comment.body), Parsed::None)
+            || !authorizer.may_write(&comment.author)?
+        {
+            continue;
+        }
+        tasks.push(crate::steward::CommentTask {
+            comment_id: comment.id.clone(),
+            fix: crate::pr_fix::FixTask {
+                classification: "untrusted_review_comment",
+                id: comment.id.clone(),
+                path,
+                line: comment.line,
+                text: comment.body.chars().take(MAX_COMMENT_TASK_CHARS).collect(),
+            },
+        });
+    }
+    Ok(tasks)
+}
+
+struct StewardCommand<'a> {
+    workspace: &'a Workspace,
+    host: &'a dyn PullRequestConversationProvider,
+    pull_request: &'a PullRequestRef,
+    command: &'a Command,
+    comment: &'a ConversationComment,
+    tasks: Vec<crate::steward::CommentTask>,
+    branch: &'a str,
+    ci_pull_request: CiPullRequest,
+    run_options: CiRunOptions,
+}
+
+fn steward_step_line(step: &crate::steward::StewardStep) -> String {
+    let what = format!(
+        "{} `{}`",
+        step.kind.as_str().replace('_', " "),
+        short(&step.subject)
+    );
+    match (&step.commit, &step.undo) {
+        (Some(commit), Some(undo)) => format!(
+            "- `{}` fixes the {what}{}: {} Undo: `{undo}`",
+            short(commit),
+            step.by
+                .as_deref()
+                .map(|by| format!(", proposed by {by}"))
+                .unwrap_or_default(),
+            neutralize(&step.summary)
+        ),
+        _ => format!("- The {what}: {}", neutralize(&step.summary)),
+    }
+}
+
+/// `@vee steward`: run the steward on the pull request's head, push the
+/// fixes it kept, publish the review of the new head, and answer in each
+/// review comment's thread it addressed (ADR 0042).
+fn steward(request: StewardCommand<'_>) -> Result<CommandOutcome> {
+    let StewardCommand {
+        workspace,
+        host,
+        pull_request,
+        command,
+        comment,
+        tasks,
+        branch,
+        ci_pull_request,
+        run_options,
+    } = request;
+    let root = workspace.root();
+    let start = ci_pull_request.head_oid.clone();
+    let answer = |status: &str, text: String| -> Result<CommandOutcome> {
+        let mut done = outcome(Some(command), status, text.clone());
+        done.reply_id = Some(reply(host, pull_request, comment, &text)?);
+        Ok(done)
+    };
+    let config = workspace.effective_config(None)?;
+    let review = || -> Result<crate::ci::Reviewed> {
+        let mut at_head = ci_pull_request.clone();
+        at_head.head_oid = git(root, &["rev-parse", "HEAD"])?;
+        crate::ci::review(workspace, &at_head, &run_options)
+    };
+    let engine = crate::steward::Steward {
+        workspace,
+        base: ci_pull_request.base_oid.clone(),
+        identity: Some(commit_identity(&ci_pull_request)),
+        requested_by: comment.author.clone(),
+        max_fixes: config.steward.max_fixes() as usize,
+        review: &review,
+    };
+    let (mut report, reviewed) = engine.run(tasks)?;
+    let lines = report
+        .steps
+        .iter()
+        .map(steward_step_line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if report.kept() == 0 {
+        let text = if report.steps.is_empty() {
+            "Vee's steward found nothing to fix: no conflict with the base, no failing required check, no blocking finding and no review comment to address.".to_owned()
+        } else {
+            format!("Vee's steward pushed nothing:\n{lines}")
+        };
+        return answer("refused", text);
+    }
+    if let Err(error) = git(
+        root,
+        &[
+            "push",
+            "--quiet",
+            "origin",
+            &format!("HEAD:refs/heads/{branch}"),
+        ],
+    ) {
+        git(
+            root,
+            &["checkout", "--quiet", "--force", "--detach", &start],
+        )?;
+        return answer(
+            "refused",
+            format!(
+                "The review accepted {} fix(es), but the push to `{branch}` failed: {}. The branch may be protected, have moved, or the workflow's token may lack `contents: write`.\n\n{lines}",
+                report.kept(),
+                neutralize(&format!("{error:#}"))
+            ),
+        );
+    }
+    report.pushed = true;
+    for step in &report.steps {
+        let (crate::steward::StewardTaskKind::ReviewComment, true, Some(commit)) =
+            (step.kind, step.kept, step.commit.as_deref())
+        else {
+            continue;
+        };
+        let text = format!(
+            "Vee's steward changed this in `{}`, proposed by {}: {} Vee reviewed it before pushing; whether it does what you asked is yours to judge. Undo: `git revert {commit}`\n\n{STEWARD_ADDRESSED}",
+            short(commit),
+            step.by.as_deref().unwrap_or("the reviewer"),
+            neutralize(&step.summary)
+        );
+        if let Err(error) = host.reply(
+            pull_request,
+            &ReplyTarget::Thread {
+                comment_id: step.subject.clone(),
+            },
+            &text,
+        ) {
+            eprintln!(
+                "warning: answering review comment {}: {error}",
+                step.subject
+            );
+        }
+    }
+    let pushed = format!(
+        "Vee's steward pushed {} fix(es) to `{branch}`, each reviewed before it was kept:\n{lines}",
+        report.kept()
+    );
+    if !head_shown(host, pull_request, &report.head) {
+        return answer(
+            "done",
+            format!("{pushed}\n\nThe pull request did not show the new head in time to publish its review. Comment `@vee review` to publish it."),
+        );
+    }
+    let mut at_tip = ci_pull_request;
+    at_tip.head_oid = report.head.clone();
+    let run = crate::ci::publish(workspace, at_tip, &run_options, reviewed)?;
+    let mut done = answer(
+        "done",
+        format!(
+            "{pushed}\n\nThe gate on the new head is **{}**.",
             gate_word(run.gate)
         ),
     )?;
@@ -1755,6 +2007,11 @@ mod tests {
         );
         assert_eq!(command("@vee fix"), Command::Fix { finding: None });
         assert_eq!(command("@vee fix all"), Command::FixAll);
+        assert_eq!(command("@vee steward"), Command::Steward);
+        assert!(matches!(
+            parse("@vee steward find_0123456789ab"),
+            Parsed::Invalid(_)
+        ));
         assert_eq!(command("@vee fix ALL"), Command::FixAll);
         assert_eq!(
             command("@vee fix find_0123456789ab"),
