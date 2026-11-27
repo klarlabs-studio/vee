@@ -57,6 +57,22 @@ The installers put `vee` in `~/.local/bin` (set `VEE_INSTALL_DIR` to change it) 
 
 The Claude Code plugin reviews an agent's changes before the agent finishes its turn, and keeps the agent working on blocking findings (`VEE_AGENT_REVIEW=off` turns this off). `vee hooks install` adds an optional `pre-push` hook that stops a push the gate blocks. Both act only in repositories with a `.vee.yaml`. See [using Vee day to day](docs/guides/daily-use.md) and [ADR 0021](docs/adr/0021-reviews-at-hand-off-points.md).
 
+## The steward
+
+`vee steward --base main` fixes what keeps the current branch from passing its gate, one problem at a time:
+
+- a merge conflict with the base;
+- required verifications that fail;
+- blocking findings.
+
+The configured reviewer's model proposes each fix, and Vee commits it. Vee keeps the commit only when a new review is complete, finds nothing new that blocks, breaks no verification that passed, and shows the problem solved. Otherwise it resets the branch to before the fix.
+
+- **Merge conflicts:** a resolution is kept only when a required verification passes on the merged result. Without one, a person resolves the conflict.
+- **Kept fixes:** each stays on the branch as its own commit, unpushed, with how to undo it.
+- **Limits:** `steward.max_fixes` (default 5) bounds a run. Coding agents can run it through the MCP tool `run_steward` only when `.vee.yaml` sets `steward.agents: true`.
+
+The exit code follows the final gate (0 pass, 1 block, 2 incomplete). JSON output follows [steward-run-v1](schemas/steward-run-v1.schema.json). See [using Vee day to day](docs/guides/daily-use.md#the-steward) and [ADR 0042](docs/adr/0042-the-steward.md).
+
 ## Build
 
 Building the complete workspace requires Rust 1.89 or later (stable) and a Git executable. The checked-in `web/dist` bundle is embedded in the CLI at compile time; Node.js 22 and npm are needed only to rebuild the UI or run browser tests. Install Vee from a source checkout with:
