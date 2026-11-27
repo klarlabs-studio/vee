@@ -383,6 +383,25 @@ enum Command {
         #[command(subcommand)]
         command: HooksCommand,
     },
+    /// Fix what keeps the current branch from passing its gate: a merge
+    /// conflict with the base, failing required verifications and blocking
+    /// findings. The configured reviewer's model proposes each fix; Vee
+    /// commits it and keeps it only when a new review is complete, adds no
+    /// blocking finding, breaks no verification that passed, and solves the
+    /// problem. Kept fixes stay on the branch, unpushed, each with how to
+    /// undo it. Exit 0 when the gate passes at the end, 1 when it blocks, 2
+    /// when it is incomplete.
+    Steward {
+        /// The branch or commit the change is reviewed and merged against.
+        #[arg(long, value_name = "REF")]
+        base: String,
+        /// The most fixes to attempt, 1 to 10 (default `steward.max_fixes`, or 5).
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=10))]
+        max_fixes: Option<u32>,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
     /// Publish a saved local review to a Git hosting pull request.
     Hosting {
         #[command(subcommand)]
@@ -3399,6 +3418,30 @@ fn run() -> Result<u8> {
             }
         },
         Command::Hooks { command } => run_hooks(command),
+        Command::Steward {
+            base,
+            max_fixes,
+            output,
+        } => {
+            let workspace = operations::Workspace::discover(crate::local_stores())?;
+            let report = operations::steward(
+                &workspace,
+                vee_application::steward::StewardRequest {
+                    base: &base,
+                    max_fixes,
+                    by_agent: false,
+                },
+            )?;
+            match output {
+                Output::Json => emit_json(&report)?,
+                Output::Text => print_view(&report)?,
+            }
+            Ok(match report.gate {
+                GateStatus::Pass => 0,
+                GateStatus::Block => 1,
+                GateStatus::Incomplete => 2,
+            })
+        }
         Command::Ci {
             command:
                 CiCommand::Approvals {

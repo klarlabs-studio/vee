@@ -301,7 +301,11 @@ pub(crate) fn review(
         .clone()
         .filter(|_| !options.full)
         .map(|record| crate::incremental::CarriedReview { record });
-    run_required_verifications(workspace, pull_request, options.policy_profile.as_deref())?;
+    run_required_verifications(
+        workspace,
+        &pull_request.base_oid,
+        options.policy_profile.as_deref(),
+    )?;
     let review = crate::operations::review(
         workspace,
         crate::operations::ReviewRequest {
@@ -331,9 +335,9 @@ pub(crate) fn review(
 /// the gate has their runs: CI keeps no earlier ones. A profile that cannot
 /// run leaves the gate incomplete; the error is reported and the review
 /// goes on.
-fn run_required_verifications(
+pub(crate) fn run_required_verifications(
     workspace: &Workspace,
-    pull_request: &CiPullRequest,
+    base_oid: &str,
     policy_profile: Option<&str>,
 ) -> Result<()> {
     let config = workspace.effective_config(policy_profile)?;
@@ -343,7 +347,7 @@ fn run_required_verifications(
             crate::operations::VerifyRequest {
                 target: crate::operations::VerifyTarget::Scope(
                     crate::operations::ScopeRequest::BaseAndWorktree {
-                        base: Some(pull_request.base_oid.clone()),
+                        base: Some(base_oid.to_owned()),
                     },
                 ),
                 profile_id,
@@ -1029,7 +1033,7 @@ fn ensure_checkout_is_head(root: &Path, pull_request: &CiPullRequest) -> Result<
 /// untracked and would make the worktree look changed, which publication
 /// refuses. The local exclude file hides only untracked files, so committed
 /// reviewer instructions and policy still count.
-fn exclude_vee_runtime_files(root: &Path) -> Result<()> {
+pub(crate) fn exclude_vee_runtime_files(root: &Path) -> Result<()> {
     let output = std::process::Command::new("git")
         .args(["rev-parse", "--git-path", "info/exclude"])
         .current_dir(root)

@@ -46,6 +46,7 @@ pub mod setup;
 pub mod signing;
 mod source;
 pub mod standards;
+pub mod steward;
 pub mod test_effectiveness;
 pub mod test_generation;
 pub mod test_proposals;

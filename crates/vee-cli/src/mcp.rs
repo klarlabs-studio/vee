@@ -399,6 +399,15 @@ struct FindingFeedbackListInput {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct StewardInput {
+    /// The branch or commit the change is reviewed and merged against, such as `main`.
+    base: String,
+    /// The most fixes to attempt, 1 to 10 (default `steward.max_fixes`, or 5).
+    max_fixes: Option<u32>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ProposePatchInput {
     /// Saved review ID whose current snapshot the patch targets (working-tree, staged, or base scope).
     review_id: String,
@@ -822,6 +831,18 @@ fn build_server(workspace: Workspace) -> Result<Server, mcp_rs::RegistrationErro
         "doctor-report-v1",
         "Report whether this repository's reviewers can run on this machine, which AI backends (local models, agent CLIs, API keys) are available, and what to do next. Same document as `vee doctor --output json`.",
         |ws, _input: EmptyInput| operations::doctor(&ws));
+
+    viewed_tool!(server, workspace, "run_steward", "Run steward", write_tool(false, false, true),
+        "steward-run-v1",
+        "Fix what keeps the current branch from passing its gate (a merge conflict with the base, failing required verifications, blocking findings) with the configured reviewer's model, committing each fix to the branch only when a new review accepts it. Never pushes. Runs only when the repository sets `steward.agents: true`. Same document as `vee steward --output json`.",
+        |ws, input: StewardInput| operations::steward(
+            &ws,
+            vee_application::steward::StewardRequest {
+                base: &input.base,
+                max_fixes: input.max_fixes,
+                by_agent: true,
+            },
+        ));
 
     viewed_tool!(server, workspace, "propose_patch", "Propose patch", write_tool(false, false, false),
         "patch-proposal-v1",

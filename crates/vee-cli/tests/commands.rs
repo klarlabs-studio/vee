@@ -918,7 +918,7 @@ fn a_fix_is_pushed_only_when_the_review_accepts_it() {
     std::fs::write(
         &provider,
         format!(
-            "#!/bin/sh\ninput=$(cat)\ncase \"$input\" in\n  *'Fix the supplied code review finding'*)\n    if [ -f '{good}' ]; then old=BUG; new='fixed()'; else old=changed; new=renamed; fi\n    printf '{{\"schema_version\":1,\"summary\":\"Use the result.\",\"edits\":[{{\"old\":\"%s\",\"new\":\"%s\"}}]}}' \"$old\" \"$new\" ;;\n  *BUG*) printf '%s' '{{\"schema_version\":1,\"findings\":[{{\"category\":\"correctness\",\"severity\":\"high\",\"confidence\":90,\"rationale\":\"BUG drops the result.\",\"path\":\"src/lib.rs\",\"line\":1}}]}}' ;;\n  *) printf '%s' '{{\"schema_version\":1,\"findings\":[]}}' ;;\nesac\n",
+            "#!/bin/sh\ninput=$(cat)\ncase \"$input\" in\n  *'Fix the supplied problem'*)\n    if [ -f '{good}' ]; then old=BUG; new='fixed()'; else old=changed; new=renamed; fi\n    printf '{{\"schema_version\":1,\"summary\":\"Use the result.\",\"edits\":[{{\"old\":\"%s\",\"new\":\"%s\"}}]}}' \"$old\" \"$new\" ;;\n  *BUG*) printf '%s' '{{\"schema_version\":1,\"findings\":[{{\"category\":\"correctness\",\"severity\":\"high\",\"confidence\":90,\"rationale\":\"BUG drops the result.\",\"path\":\"src/lib.rs\",\"line\":1}}]}}' ;;\n  *) printf '%s' '{{\"schema_version\":1,\"findings\":[]}}' ;;\nesac\n",
             good = good_fix.display()
         ),
     )
@@ -1318,7 +1318,7 @@ fn fix_all_pushes_the_fixes_the_review_accepts() {
         r#"#!/bin/sh
 input=$(cat)
 case "$input" in
-  *'Fix the supplied code review finding'*)
+  *'Fix the supplied problem'*)
     case "$input" in
       *'first bug'*) printf '%s' '{"schema_version":1,"summary":"Drop the marker.","edits":[{"old":"BUG_A","new":"fixed_a()"}]}' ;;
       *) printf '%s' '{"schema_version":1,"summary":"Rename.","edits":[{"old":"fn b()","new":"fn b2()"}]}' ;;

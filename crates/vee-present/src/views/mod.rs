@@ -14,6 +14,7 @@ mod records;
 mod repos;
 pub mod review;
 mod setup;
+mod steward;
 
 pub use setup::BEST_RESULTS_GUIDE;
 mod tests_gen;

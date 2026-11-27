@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vee.klarlabs.de/schemas/steward-run-v1.schema.json",
+  "title": "Vee Steward Run v1",
+  "description": "What one run of the steward did: each problem it took on, whether its fix was kept, and the gate on the resulting head. A fix is kept only when a new review is complete, adds no blocking finding, breaks no verification that passed, and solves its problem.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "base", "start_head", "head", "steps", "review_id", "gate", "pushed"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "base": { "type": "string", "description": "The commit the change is reviewed and merged against." },
+    "start_head": { "type": "string", "description": "The head before the steward ran." },
+    "head": { "type": "string", "description": "The head after the steward ran: the last kept fix, or the start." },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "subject", "kept", "summary"],
+        "properties": {
+          "kind": { "enum": ["merge_conflict", "failing_verification", "finding", "review_comment"] },
+          "subject": { "type": "string", "description": "The base commit, verification profile, finding ID or comment ID." },
+          "kept": { "type": "boolean" },
+          "commit": { "type": "string" },
+          "by": { "type": "string", "description": "The reviewer and model that proposed the fix." },
+          "summary": { "type": "string", "description": "What the fix changed, or why nothing was kept." },
+          "undo": { "type": "string", "description": "The command that undoes a kept step." }
+        }
+      }
+    },
+    "review_id": { "type": "string", "description": "The review of the final head." },
+    "gate": { "enum": ["pass", "block", "incomplete"] },
+    "pushed": { "type": "boolean", "description": "Whether the kept fixes were pushed to the pull request." }
+  }
+}
