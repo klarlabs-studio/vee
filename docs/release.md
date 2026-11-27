@@ -25,6 +25,7 @@ Pushing a version tag publishes a release, so tag only a tested commit.
 
 1. **Tag the commit.** Push a `vX.Y.Z` tag that matches the workspace version. A suffix such as `-rc.1` makes it a prerelease. The workflow then:
    - builds `vee` for Linux x86_64 and arm64, macOS arm64 and x86_64, and Windows x86_64, each on a native runner;
+   - signs the macOS binaries with the team's Developer ID and the hardened runtime, and notarizes them with Apple; the release fails if either is missing (see [macOS signing](#macos-signing));
    - writes a checksum for each archive and a combined `sha256.sum`;
    - attests build provenance;
    - creates shell and PowerShell installers and a Homebrew formula;
@@ -63,6 +64,21 @@ vee-release namespaces="vee-release" ssh-ed25519 AAAA... maintainer
 - **Adding a key:** add it in a reviewed commit before the key signs anything.
 - **Removing a key:** remove one that is lost or retired. Releases it signed then no longer verify against the file, so sign those releases again with a current key.
 
+### macOS signing
+
+dist signs each macOS binary with `codesign` before archiving it ([ADR 0040](adr/0040-signed-and-notarized-macos-binaries.md)). Then `scripts/notarize-macos.py` takes the binary from each macOS archive. It checks for a Developer ID signature, the hardened runtime and a secure timestamp, submits the binary to Apple's notary service, and fails the release unless Apple accepts it. A bare binary cannot hold a stapled ticket, so Gatekeeper looks the ticket up online the first time the binary runs. The workflow reads these repository secrets:
+
+| Secret | Contents |
+| --- | --- |
+| `CODESIGN_CERTIFICATE` | The "Developer ID Application" certificate and its private key, exported from Keychain Access as a `.p12` and base64-encoded (`base64 -i cert.p12`) |
+| `CODESIGN_CERTIFICATE_PASSWORD` | The password chosen when exporting the `.p12` |
+| `CODESIGN_IDENTITY` | The certificate's name, `Developer ID Application: <name> (<team ID>)`, or its SHA-1 hash from `security find-identity -v -p codesigning` |
+| `APPLE_NOTARY_KEY` | An App Store Connect API key (Users and Access, Integrations, Team Keys, with the Developer role), the downloaded `.p8` file base64-encoded |
+| `APPLE_NOTARY_KEY_ID` | That key's ID |
+| `APPLE_NOTARY_ISSUER` | The issuer ID shown above the team keys |
+
+Without them, dist only warns and builds unsigned binaries, so the notarization step fails the release instead. To check a downloaded binary: `codesign --verify --strict --verbose=2 vee` and `codesign -dv vee 2>&1 | grep Authority`. `python3 scripts/notarize-macos.py --check-only --directory <dir>` runs the same checks on archives without notarizing them.
+
 Pull requests run `dist plan`, which checks the release configuration without building.
 
 The installers check each archive against the checksum built into them. `VEE_DOWNLOAD_URL` points them at a mirror of the release files.
@@ -70,6 +86,7 @@ The installers check each archive against the checksum built into them. `VEE_DOW
 ## Release boundary
 
 - **Do not advertise a registry package or an installer for Windows** until it is configured and tested.
+- **macOS:** the binaries are signed with a Developer ID and notarized, so Gatekeeper accepts them when they were downloaded in a browser. Windows binaries are not code-signed, so SmartScreen may warn about them.
 - **Signatures:** a release is signed with a maintainer key once `sha256.sum.sig` is attached to it. Until a maintainer signs it, its integrity rests on GitHub's provenance attestations and the published checksums. The installers check checksums, not the signature.
 - **Hosted acceptance is still open.** Hosted CI runs on Linux, macOS and Windows; the GitHub lifecycle acceptance runbook has not yet been run against a real repository.
 

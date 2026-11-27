@@ -22,6 +22,9 @@ install-path = "~/.local/bin"
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
+# Sign the macOS binaries with the Developer ID certificate in the CODESIGN_*
+# secrets; scripts/notarize-macos.py then checks and notarizes them.
+macos-sign = true
 # Attest build provenance for every release artifact
 github-attestations = true
 # Publish the container image once the release is announced
