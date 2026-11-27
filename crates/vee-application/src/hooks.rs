@@ -32,8 +32,8 @@ const MAX_RATIONALE_CHARS: usize = 400;
 const STALE_LOCK: std::time::Duration = std::time::Duration::from_secs(2 * 60 * 60);
 const NO_COMMIT: &str = "0000000000000000000000000000000000000000";
 
-/// What an agent hook receives on stdin. Claude Code sends more fields;
-/// these are the ones Vee reads.
+/// What an agent hook receives on stdin. Claude Code and Codex send more
+/// fields; these are the ones Vee reads.
 #[derive(Clone, Debug, Deserialize)]
 pub struct AgentHookInput {
     pub session_id: String,
@@ -60,7 +60,8 @@ pub fn parse_agent_hook_input(bytes: &[u8]) -> Result<AgentHookInput> {
     Ok(input)
 }
 
-/// An agent hook's answer, in the shape Claude Code reads from stdout.
+/// An agent hook's answer, in the shape Claude Code and Codex read from
+/// stdout.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct AgentHookResponse {
     /// `block` keeps the agent working, with `reason` as its next instruction.

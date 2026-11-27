@@ -6,7 +6,7 @@ so a change that passes in one place passes in the next.
 
 | When | How | What happens on a block |
 |---|---|---|
-| A coding agent finishes its turn | The Claude Code plugin's Stop hook | The agent gets the blocking findings and keeps working |
+| A coding agent finishes its turn | The plugin's Stop hook, in Claude Code or Codex | The agent gets the blocking findings and keeps working |
 | You push | `vee hooks install` (optional) | The push stops; `git push --no-verify` skips the review |
 | A pull request opens or changes | `vee init --ci github` or `--ci gitlab` | The check fails and findings appear as threads |
 | You act on a finding in the pull request | `@vee explain`, `fix`, `dismiss`, `waive`, `review` | Vee replies in the thread; a reviewed fix is pushed as one commit; a waiver can pass the gate |
@@ -16,8 +16,11 @@ problems earlier, while the agent or the author still has the context.
 
 ## While an agent codes
 
-Install the plugin (see the README), and make sure `vee` is on `PATH`. In a
-repository with a `.vee.yaml`, Vee records where each agent session starts.
+Install the plugin (see the README), and make sure `vee` is on `PATH`. The
+hooks work in Claude Code and in Codex. Codex runs a new or changed hook
+only after you trust it, so open `/hooks` once after installing or updating
+the plugin. In a repository with a `.vee.yaml`, Vee records where each agent
+session starts.
 When the agent finishes a turn that changed code, Vee reviews everything
 since then: commits and uncommitted changes.
 

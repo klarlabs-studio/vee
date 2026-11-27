@@ -90,5 +90,13 @@ another review:
 - The push hook makes a push wait for a review. It is optional for that
   reason, and CI remains the gate that counts.
 - Codex and other agents with Stop hooks can call `vee hooks run agent-stop`
-  if their hook contract matches; only the Claude Code plugin ships the
-  hooks for now.
+  if their hook contract matches.
+
+**Update (2026-11-27): Codex.** Codex's hook contract matches. Its `Stop`
+input carries `session_id` and `cwd`, and `{"decision":"block","reason":…}`
+continues the session with the reason as the next prompt. Codex loads a
+plugin's `hooks/hooks.json`, so the same plugin ships the hooks to both
+agents. One difference: Codex treats a `Stop` hook that exits 0 without a
+JSON object as failed. `agent-stop` therefore always prints one, `{}` when
+it has nothing to say, which Claude Code also accepts. Codex runs a new or
+changed hook only after a person trusts it in `/hooks`.
