@@ -299,6 +299,7 @@ pub fn apply_packs(config: &mut RepositoryConfig, root: &Path) -> Result<(), Str
                     effort: None,
                     samples: None,
                     sample_quorum: None,
+                    sample_grouping: None,
                 },
             );
         }
