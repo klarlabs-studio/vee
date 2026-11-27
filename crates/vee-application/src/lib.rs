@@ -33,6 +33,7 @@ mod pr_fix;
 pub mod proposals;
 mod providers;
 pub mod publication;
+pub mod quorum;
 pub mod repository_map;
 mod review;
 pub mod review_progress;
