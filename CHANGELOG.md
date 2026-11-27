@@ -6,6 +6,14 @@ change configuration and output contracts.
 
 ## Unreleased
 
+### Signed and notarized macOS binaries
+
+- Release builds sign the macOS binaries with a Developer ID and the
+  hardened runtime, and notarize them with Apple, so Gatekeeper accepts a
+  binary downloaded in a browser. `scripts/notarize-macos.py` checks every
+  macOS archive's binary and fails the release when it is unsigned or Apple
+  rejects it (ADR 0040).
+
 ### Releases signed with a maintainer key
 
 - `scripts/release-signature.py sign` signs a published release's
