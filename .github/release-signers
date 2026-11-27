@@ -1,0 +1,10 @@
+# Keys that sign Vee releases (ADR 0039), in ssh-keygen's allowed signers
+# format. `scripts/release-signature.py verify` checks a release's
+# sha256.sum.sig against these keys.
+#
+# Add a maintainer key as one line:
+#
+#   vee-release namespaces="vee-release" ssh-ed25519 AAAA... maintainer
+#
+# Remove a key that is lost or retired; releases it signed then no longer
+# verify against this file.

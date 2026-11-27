@@ -153,6 +153,9 @@ jobs:
         run: python scripts/acceptance/installed_cli_smoke.py vee
       - name: Compare saved local-review reports
         run: python scripts/acceptance/compare_historical_reviews.py
+      - name: Sign and verify a disposable release
+        if: runner.os != 'Windows'
+        run: python scripts/acceptance/release_signature.py
       - name: Install acceptance script dependencies
         if: runner.os != 'Windows'
         run: python -m pip install -r scripts/acceptance/requirements.txt

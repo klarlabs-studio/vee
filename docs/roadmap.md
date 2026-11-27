@@ -26,7 +26,8 @@ sends nothing anywhere" has to be one block of YAML.
 
 - [x] Release binaries with checksums and build provenance, and shell and PowerShell installers ([release](release.md))
 - [x] A multi-stage, non-root container image, built from the release binaries
-- [ ] Release binaries signed with a maintainer key, beyond build provenance
+- [x] Signing and verifying releases with a maintainer's SSH key, beyond build provenance (`scripts/release-signature.py`, [ADR 0039](adr/0039-releases-signed-with-a-maintainer-key.md))
+- [ ] The first release signed with a key listed in `.github/release-signers`
 - [x] A GitHub Action and a GitLab CI template that run `vee ci run` ([guide](guides/pull-requests.md))
 - [x] `vee ci run`, which reads the CI environment, and `vee init --ci github|gitlab`, which writes the pipeline ([ADR 0019](adr/0019-reviews-on-pull-requests-run-in-the-teams-ci.md))
 - [ ] A first run of [the GitHub hosted acceptance runbook](acceptance/github-hosted.md)
