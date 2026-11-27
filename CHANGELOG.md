@@ -20,6 +20,19 @@ change configuration and output contracts.
   a participant. Webhooks are verified with `X-Hub-Signature` at
   `/api/webhooks/bitbucket-data-center` (ADR 0047).
 
+### Grouping sampled findings by meaning
+
+- `sample_grouping: meaning` on a sampled reviewer matches its runs'
+  reports by category and rationale wording as well as by location. It is
+  opt-in; the default stays `location`.
+
+### Measured agreement quorums
+
+- `vee analytics quorum` recommends each sampled reviewer's
+  `sample_quorum` from the findings people labelled. For every possible
+  quorum it shows how many confirmed and rejected findings would block.
+  It changes nothing, and gives no recommendation below 10 labels.
+
 ### Reasoning effort for providers
 
 - `providers.<id>.reasoning_effort: low|medium|high` sets a reasoning

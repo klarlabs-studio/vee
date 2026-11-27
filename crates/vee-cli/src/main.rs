@@ -1092,6 +1092,14 @@ enum AnalyticsCommand {
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
+    /// Recommend each sampled reviewer's agreement quorum from the findings
+    /// people labelled with `vee findings feedback`: how many confirmed and
+    /// rejected findings each quorum would let block. Changes nothing.
+    Quorum {
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3441,6 +3449,18 @@ fn run() -> Result<u8> {
             match output {
                 Output::Json => emit_json(&report)?,
                 Output::Text => print_view(&report)?,
+            }
+            Ok(0)
+        }
+        Command::Analytics {
+            command: Some(AnalyticsCommand::Quorum { output }),
+            ..
+        } => {
+            let workspace = operations::Workspace::discover(crate::local_stores())?;
+            let calibration = operations::quorum_calibration(&workspace)?;
+            match output {
+                Output::Json => emit_json(&calibration)?,
+                Output::Text => print_view(&calibration)?,
             }
             Ok(0)
         }

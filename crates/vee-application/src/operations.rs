@@ -1599,6 +1599,18 @@ pub fn applicable_standards(
     crate::standards::resolve(workspace.root(), path).map_err(configuration_failure)
 }
 
+/// Which agreement quorum each sampled reviewer should use, measured against
+/// the findings people have labelled (ADR 0045).
+pub fn quorum_calibration(workspace: &Workspace) -> Result<crate::quorum::QuorumCalibration> {
+    let config = workspace.effective_config(None)?;
+    let store = workspace.store()?;
+    let (records, _) = store
+        .list_findings_page(None, None, None, RULE_MINING_FINDING_LIMIT, 0)
+        .map_err(anyhow::Error::msg)?;
+    let feedback = store.list_finding_feedback().map_err(anyhow::Error::msg)?;
+    Ok(crate::quorum::calibrate(&config, &records, &feedback))
+}
+
 pub fn quality_analytics(workspace: &Workspace) -> Result<crate::analytics::QualityAnalytics> {
     let store = workspace.store()?;
     crate::analytics::summarize(workspace.root(), &*store).map_err(anyhow::Error::msg)

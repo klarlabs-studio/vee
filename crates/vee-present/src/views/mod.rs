@@ -10,6 +10,7 @@ mod hosting;
 mod insights;
 mod lists;
 mod patch;
+mod quorum;
 mod records;
 mod repos;
 pub mod review;

@@ -406,6 +406,10 @@
           "minimum": 1,
           "maximum": 5,
           "description": "How many runs must report a finding for it to block the gate; must not exceed samples. Defaults to a strict majority. Findings below the quorum are kept as advisory."
+        },
+        "sample_grouping": {
+          "enum": ["location", "meaning"],
+          "description": "How the runs' reports are matched into one defect. location (the default): same file, lines at most 3 apart. meaning: also same category with closely matching rationale up to 30 lines apart, and nearby reports that share neither category nor wording stay apart."
         }
       }
     },
