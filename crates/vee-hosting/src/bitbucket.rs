@@ -648,21 +648,7 @@ impl GitHostingProvider for BitbucketAdapter {
             ));
         }
 
-        #[derive(Deserialize)]
-        struct ApiUser {
-            uuid: String,
-        }
-        let user_url = self
-            .config
-            .api_base
-            .join("user")
-            .map_err(|error| HostingError::InvalidResponse(error.to_string()))?;
-        let user: ApiUser = Self::json(self.get(user_url)?)?;
-        if user.uuid.trim().is_empty() {
-            return Err(HostingError::InvalidResponse(
-                "Bitbucket authenticated user has no UUID".into(),
-            ));
-        }
+        let user_uuid = self.authenticated_uuid()?;
 
         // Bitbucket Cloud commit statuses are naturally idempotent: posting the
         // same key overwrites the status for this commit.
@@ -717,7 +703,7 @@ impl GitHostingProvider for BitbucketAdapter {
         for thread in &publication.threads {
             let marker = format!("<!-- vee:{} -->", thread.fingerprint);
             let prior = existing_comments.iter().find(|comment| {
-                comment.raw().contains(&marker) && comment.author_uuid() == user.uuid
+                comment.raw().contains(&marker) && comment.author_uuid() == user_uuid
             });
             // A recovered local intent may describe a thread whose remote
             // write never landed. Never create a new comment just to resolve
@@ -960,6 +946,64 @@ impl BitbucketAdapter {
         Err(HostingError::InvalidResponse(
             "pull request exceeds the 3000-comment API limit".into(),
         ))
+    }
+}
+
+/// Bitbucket approvals carry no text and no commit: an approval stands until
+/// it is withdrawn, or until a push resets it where the repository is set to
+/// reset approvals on changes.
+impl crate::PullRequestApprovalProvider for BitbucketAdapter {
+    fn own_approval_stands(&self, reference: &PullRequestRef) -> Result<bool, HostingError> {
+        #[derive(Deserialize)]
+        struct User {
+            uuid: String,
+        }
+        #[derive(Deserialize)]
+        struct Participant {
+            user: User,
+            #[serde(default)]
+            approved: bool,
+        }
+        #[derive(Deserialize)]
+        struct ApiPr {
+            #[serde(default)]
+            participants: Vec<Participant>,
+        }
+        let uuid = self.authenticated_uuid()?;
+        let pr: ApiPr = Self::json(self.get(self.url(reference, "")?)?)?;
+        Ok(pr
+            .participants
+            .iter()
+            .any(|participant| participant.approved && participant.user.uuid == uuid))
+    }
+
+    fn approve_head(
+        &self,
+        reference: &PullRequestRef,
+        head_oid: &str,
+        _message: &str,
+    ) -> Result<(), HostingError> {
+        let current = self.get_pull_request(reference)?;
+        if current.state != PullRequestState::Open || !crate::same_head(&current.head_oid, head_oid)
+        {
+            return Err(HostingError::StaleRevision {
+                expected: head_oid.to_owned(),
+                actual: current.head_oid,
+            });
+        }
+        self.send(Method::POST, self.url(reference, "/approve")?, None)?;
+        Ok(())
+    }
+
+    fn withdraw_approval(
+        &self,
+        reference: &PullRequestRef,
+        _message: &str,
+    ) -> Result<(), HostingError> {
+        match self.send(Method::DELETE, self.url(reference, "/approve")?, None) {
+            Ok(_) | Err(HostingError::NotFound) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 }
 

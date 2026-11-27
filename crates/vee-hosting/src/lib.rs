@@ -528,6 +528,39 @@ pub trait GitHostingProvider: Send + Sync {
     ) -> Result<WebhookEnvelope, HostingError>;
 }
 
+/// Vee's own approval of a pull request on hosts whose approval is a single
+/// standing mark per account: a Bitbucket approval, an Azure DevOps vote and
+/// a Gerrit label vote (ADR 0041). GitHub and GitLab approve through
+/// [`PullRequestConversationProvider`] instead.
+pub trait PullRequestApprovalProvider: Send + Sync {
+    /// Whether the authenticated account's approval stands on the pull request.
+    fn own_approval_stands(&self, reference: &PullRequestRef) -> Result<bool, HostingError>;
+    /// Approve the pull request, refusing with [`HostingError::StaleRevision`]
+    /// when its head is no longer `head_oid` or it is not open. Hosts whose
+    /// approvals carry no text ignore `message`.
+    fn approve_head(
+        &self,
+        reference: &PullRequestRef,
+        head_oid: &str,
+        message: &str,
+    ) -> Result<(), HostingError>;
+    /// Withdraw the authenticated account's approval.
+    fn withdraw_approval(
+        &self,
+        reference: &PullRequestRef,
+        message: &str,
+    ) -> Result<(), HostingError>;
+}
+
+/// Whether a head the host reports is `expected`. Some hosts abbreviate
+/// commit hashes, so a host hash of at least 12 digits that prefixes the
+/// expected one matches.
+pub(crate) fn same_head(host: &str, expected: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    let expected = expected.to_ascii_lowercase();
+    host == expected || (host.len() >= 12 && expected.starts_with(&host))
+}
+
 /// Read-only pull request context for agent investigation workflows. Providers
 /// can implement this before they support review publication or webhooks.
 pub trait PullRequestContextProvider: Send + Sync {

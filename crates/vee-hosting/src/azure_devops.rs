@@ -1333,6 +1333,80 @@ impl GitHostingProvider for AzureDevOpsAdapter {
     }
 }
 
+/// Azure DevOps' vote for "approved".
+const VOTE_APPROVED: i64 = 10;
+
+impl AzureDevOpsAdapter {
+    fn reviewer_url(&self, reference: &PullRequestRef) -> Result<Url, HostingError> {
+        let actor = self.authenticated_actor_id(reference)?;
+        if !actor
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(HostingError::InvalidResponse(
+                "Azure DevOps returned an invalid account ID".into(),
+            ));
+        }
+        self.pull_request_url(
+            reference,
+            &format!("pullRequests/{}/reviewers/{actor}", reference.number),
+        )
+    }
+
+    fn put_vote(&self, reference: &PullRequestRef, vote: i64) -> Result<(), HostingError> {
+        let response = self
+            .client
+            .put(self.reviewer_url(reference)?)
+            .basic_auth("", Some(&self.config.token))
+            .header(header::ACCEPT, "application/json")
+            .json(&serde_json::json!({ "vote": vote }))
+            .send()
+            .map_err(|error| {
+                HostingError::Transport(format!("voting on an Azure DevOps pull request: {error}"))
+            })?;
+        Self::checked(response)?;
+        Ok(())
+    }
+}
+
+/// An Azure DevOps approval is Vee's reviewer vote of 10. Votes carry no text
+/// and no commit; a branch policy can reset them when the source changes.
+impl PullRequestApprovalProvider for AzureDevOpsAdapter {
+    fn own_approval_stands(&self, reference: &PullRequestRef) -> Result<bool, HostingError> {
+        match self.get_json(self.reviewer_url(reference)?) {
+            Ok(reviewer) => Ok(reviewer.get("vote").and_then(Value::as_i64) == Some(VOTE_APPROVED)),
+            // Not a reviewer yet, so no vote.
+            Err(HostingError::NotFound) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn approve_head(
+        &self,
+        reference: &PullRequestRef,
+        head_oid: &str,
+        _message: &str,
+    ) -> Result<(), HostingError> {
+        let current = self.get_pull_request(reference)?;
+        if current.state != PullRequestState::Open || !crate::same_head(&current.head_oid, head_oid)
+        {
+            return Err(HostingError::StaleRevision {
+                expected: head_oid.to_owned(),
+                actual: current.head_oid,
+            });
+        }
+        self.put_vote(reference, VOTE_APPROVED)
+    }
+
+    fn withdraw_approval(
+        &self,
+        reference: &PullRequestRef,
+        _message: &str,
+    ) -> Result<(), HostingError> {
+        self.put_vote(reference, 0)
+    }
+}
+
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     let mut difference = left.len() ^ right.len();
     for index in 0..left.len().max(right.len()) {
