@@ -42,7 +42,7 @@ still has the context.
 - [x] An agent Stop hook in the Claude Code plugin that keeps the agent working on blocking findings ([ADR 0021](adr/0021-reviews-at-hand-off-points.md))
 - [x] An optional `pre-push` hook (`vee hooks install`)
 - [ ] The same Stop hook for Codex, once its hook contract is confirmed
-- [ ] Review once, reuse in CI: a signed local review of the exact head that CI verifies instead of reviewing again
+- [x] Review once, reuse in CI: a signed local review of the exact head that CI verifies instead of reviewing again (`vee reviews share`, [ADR 0043](adr/0043-review-once-reuse-in-ci.md))
 
 ### 2. Approval and risk visible on the pull request (S)
 

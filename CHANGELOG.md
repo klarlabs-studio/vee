@@ -6,6 +6,17 @@ change configuration and output contracts.
 
 ## Unreleased
 
+### Review once, reuse in CI
+
+- `vee reviews share <review> --private-key <key> --key-id <id>` signs a
+  complete local review of committed changes and stores it as a Git note
+  on its head (`refs/notes/vee-reviews`).
+- `vee ci run` reuses it when the base branch's new `review_signers` lists
+  the key. Files whose content is unchanged keep their findings with no
+  model call. CI still runs its required verifications and decides the
+  gate. The run's `reused_review` names the review and its signer
+  (ADR 0043).
+
 ### The steward
 
 - `vee steward --base <ref>` fixes what keeps the current branch from
