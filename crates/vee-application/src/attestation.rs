@@ -190,45 +190,58 @@ impl AttestationVerification {
     }
 }
 
-/// Verify a DSSE envelope with a raw 32-byte Ed25519 public key. The statement
-/// is returned only when a signature verifies.
-pub fn verify(envelope: &Value, public_key: &[u8]) -> AttestationVerification {
-    let invalid = AttestationVerification::invalid;
+/// The in-toto statement a DSSE envelope signs, and the signature's key ID,
+/// when a signature verifies with the raw 32-byte Ed25519 `public_key`.
+pub(crate) fn signed_statement(
+    envelope: &Value,
+    public_key: &[u8],
+) -> std::result::Result<(String, Value), String> {
     let standard = base64::engine::general_purpose::STANDARD;
     if envelope["payloadType"].as_str() != Some(PAYLOAD_TYPE) {
-        return invalid(format!("payloadType must be {PAYLOAD_TYPE}"));
+        return Err(format!("payloadType must be {PAYLOAD_TYPE}"));
     }
-    let Some(payload) = envelope["payload"]
+    let payload = envelope["payload"]
         .as_str()
         .and_then(|payload| standard.decode(payload).ok())
-    else {
-        return invalid("payload is not base64".into());
-    };
+        .ok_or("payload is not base64")?;
     let signatures = envelope["signatures"]
         .as_array()
         .cloned()
         .unwrap_or_default();
     if signatures.is_empty() {
-        return invalid("envelope has no signatures".into());
+        return Err("envelope has no signatures".into());
     }
     let verifier = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public_key);
     let message = pre_authentication_encoding(PAYLOAD_TYPE, &payload);
-    let key_id = signatures.iter().find_map(|signature| {
-        let bytes = signature["sig"]
-            .as_str()
-            .and_then(|sig| standard.decode(sig).ok())?;
-        verifier
-            .verify(&message, &bytes)
-            .ok()
-            .map(|()| signature["keyid"].as_str().unwrap_or_default().to_owned())
-    });
-    let Some(key_id) = key_id else {
-        return invalid("no signature verifies with the supplied public key".into());
+    let key_id = signatures
+        .iter()
+        .find_map(|signature| {
+            let bytes = signature["sig"]
+                .as_str()
+                .and_then(|sig| standard.decode(sig).ok())?;
+            verifier
+                .verify(&message, &bytes)
+                .ok()
+                .map(|()| signature["keyid"].as_str().unwrap_or_default().to_owned())
+        })
+        .ok_or("no signature verifies with the supplied public key")?;
+    let statement =
+        serde_json::from_slice::<Value>(&payload).map_err(|_| "signed payload is not JSON")?;
+    if statement["_type"] != STATEMENT_TYPE {
+        return Err(format!("signed payload is not a {STATEMENT_TYPE}"));
+    }
+    Ok((key_id, statement))
+}
+
+/// Verify a DSSE envelope with a raw 32-byte Ed25519 public key. The statement
+/// is returned only when a signature verifies.
+pub fn verify(envelope: &Value, public_key: &[u8]) -> AttestationVerification {
+    let invalid = AttestationVerification::invalid;
+    let (key_id, statement) = match signed_statement(envelope, public_key) {
+        Ok(signed) => signed,
+        Err(message) => return invalid(message),
     };
-    let Ok(statement) = serde_json::from_slice::<Value>(&payload) else {
-        return invalid("signed payload is not JSON".into());
-    };
-    if statement["_type"] != STATEMENT_TYPE || statement["predicateType"] != PREDICATE_TYPE {
+    if statement["predicateType"] != PREDICATE_TYPE {
         return invalid(format!(
             "signed payload is not a {STATEMENT_TYPE} with predicate {PREDICATE_TYPE}"
         ));

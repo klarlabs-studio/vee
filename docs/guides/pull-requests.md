@@ -165,6 +165,45 @@ have matching Action inputs, `labels` and `approve`.
     repository's Actions settings; branch protection decides whether the
     approval counts.
 
+### Reuse a review made before the push
+
+If you reviewed the change locally, CI can reuse that review instead of
+paying for it again ([ADR 0043](../adr/0043-review-once-reuse-in-ci.md)).
+
+1. Make a signing key once, and list its public key in `.vee.yaml` on the
+   base branch:
+
+   ```sh
+   vee reviews keygen --private-key ~/.config/vee/review.key --public-key review.pub
+   base64 < review.pub
+   ```
+
+   ```yaml
+   review_signers:
+     - id: alice-laptop
+       public_key: <the base64 output>
+   ```
+
+2. Review the committed change, share the review, and push the note with
+   the branch:
+
+   ```sh
+   vee review --base main
+   vee reviews share <review-id> --private-key ~/.config/vee/review.key --key-id alice-laptop
+   git push origin HEAD refs/notes/vee-reviews
+   ```
+
+`vee ci run` checks the signature against the base branch's
+`review_signers`, so a pull request cannot add its own key. It then reuses
+the findings on every file whose content is the same as in the signed
+review, and asks the reviewers about the rest. CI still runs its required
+verifications and decides the gate. The run's `reused_review` shows what
+was reused.
+
+Reuse needs the same effective configuration as CI: the same reviewers,
+providers, models and provider versions. Any difference gets a full
+review, with a warning.
+
 ### Bitbucket, Azure DevOps and Gerrit
 
 These hosts have no `vee ci run` integration yet. There,

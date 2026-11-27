@@ -3316,6 +3316,11 @@ pub struct RepositoryConfig {
     /// human. Absent when unset, so existing configuration digests stay the same.
     #[serde(default, skip_serializing_if = "ApprovalConfig::is_unset")]
     pub approval: ApprovalConfig,
+    /// The keys whose signed local reviews CI may reuse instead of reviewing
+    /// again (ADR 0043). CI reads them from the base branch, never from the
+    /// change under review.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_signers: Vec<ReviewSigner>,
     /// What the steward may do (ADR 0042). Absent when unset, so existing
     /// configuration digests stay the same.
     #[serde(default, skip_serializing_if = "StewardConfig::is_unset")]
@@ -3335,6 +3340,30 @@ pub struct RepositoryConfig {
     /// Approved rules contributed by packs; their pins are covered by `packs`.
     #[serde(skip)]
     pub pack_rules: Vec<RuleApproval>,
+}
+
+/// A key that may sign local reviews for CI to reuse (ADR 0043).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewSigner {
+    /// Names the key in CI's output, such as a person or a machine.
+    pub id: String,
+    /// The raw 32-byte Ed25519 public key, base64-encoded, as written by
+    /// `vee reviews keygen` and encoded with `base64`.
+    pub public_key: String,
+}
+
+pub const MAX_REVIEW_SIGNERS: usize = 50;
+
+impl ReviewSigner {
+    /// The decoded public key, when it is 32 bytes of standard base64.
+    pub fn key_bytes(&self) -> Option<Vec<u8>> {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(self.public_key.trim())
+            .ok()
+            .filter(|bytes| bytes.len() == 32)
+    }
 }
 
 /// The steward's limits (ADR 0042).
@@ -4393,6 +4422,34 @@ impl RepositoryConfig {
             .is_some_and(|limit| !(1..=1000).contains(&limit))
         {
             return Err("approval.max_per_day must be 1 to 1000".into());
+        }
+        if config.review_signers.len() > MAX_REVIEW_SIGNERS {
+            return Err(format!(
+                "review_signers allows at most {MAX_REVIEW_SIGNERS} keys"
+            ));
+        }
+        let mut signer_ids = std::collections::BTreeSet::new();
+        for signer in &config.review_signers {
+            let valid_id = (1..=64).contains(&signer.id.len())
+                && signer
+                    .id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.@".contains(&byte));
+            if !valid_id {
+                return Err(format!(
+                    "review_signers id `{}` must be 1 to 64 letters, digits, `-`, `_`, `.` or `@`",
+                    signer.id
+                ));
+            }
+            if !signer_ids.insert(signer.id.as_str()) {
+                return Err(format!("review_signers id `{}` appears twice", signer.id));
+            }
+            if signer.key_bytes().is_none() {
+                return Err(format!(
+                    "review_signers `{}` needs a base64-encoded 32-byte Ed25519 public key",
+                    signer.id
+                ));
+            }
         }
         if config
             .steward

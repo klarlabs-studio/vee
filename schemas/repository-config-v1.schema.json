@@ -135,6 +135,20 @@
         "acceptance_field": { "type": "string", "pattern": "^[A-Za-z0-9_]{1,64}$", "description": "Jira: the field holding acceptance criteria, such as customfield_10050." }
       }
     },
+    "review_signers": {
+      "type": "array",
+      "maxItems": 50,
+      "description": "Keys whose signed local reviews CI may reuse instead of reviewing again (vee reviews share). CI reads them from the base branch.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "public_key"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Za-z0-9._@-]{1,64}$" },
+          "public_key": { "type": "string", "description": "The raw 32-byte Ed25519 public key from vee reviews keygen, base64-encoded." }
+        }
+      }
+    },
     "steward": {
       "type": "object",
       "additionalProperties": false,

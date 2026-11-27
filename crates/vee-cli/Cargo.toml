@@ -48,5 +48,6 @@ clap_complete.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+base64.workspace = true
 klarlabs-mcp = { workspace = true, features = ["client-stdio"] }
 jsonschema.workspace = true

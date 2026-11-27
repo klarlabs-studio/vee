@@ -359,6 +359,18 @@ impl ToView for CiRun {
                     "Finding threads".into(),
                     Cell::plain(self.publication.thread_ids.len().to_string()),
                 ),
+                (
+                    "Reused".into(),
+                    self.reused_review
+                        .as_ref()
+                        .map(|reused| {
+                            Cell::plain(format!(
+                                "{} file(s) from review {}, signed by {}",
+                                reused.reused_files, reused.review_id, reused.signer
+                            ))
+                        })
+                        .unwrap_or_else(|| Cell::muted("nothing")),
+                ),
             ])
     }
 }
