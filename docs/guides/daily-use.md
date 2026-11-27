@@ -59,6 +59,48 @@ add this line to it; the line reads the same input:
 vee hooks run pre-push "$@" || exit 1
 ```
 
+## The steward
+
+When the gate blocks, let the steward take the routine fixes:
+
+```sh
+vee steward --base main
+```
+
+It works through the problems that keep the branch from passing, in order:
+
+1. a merge conflict with `main`;
+2. each required verification that fails and names a changed file;
+3. each blocking finding.
+
+For each one, the configured reviewer's model proposes a fix and Vee
+commits it. Then Vee reviews the branch again and keeps the commit only
+when:
+
+- the review is complete;
+- nothing new blocks;
+- every verification that passed still passes;
+- the problem is solved.
+
+Otherwise it resets the branch to before the fix and reports why. Read
+the report, then `git log` the kept commits. Each one says how to undo it,
+for example `git revert <commit>`. Nothing is pushed.
+
+- A merge conflict is resolved only when a required verification
+  (`policy.required_verifications`) passes on the result. Without one, it
+  stays yours.
+- Start from a clean branch: the steward refuses uncommitted changes to
+  tracked files, because it undoes a fix by resetting the branch.
+- `steward.max_fixes` (default 5, at most 10) or `--max-fixes` bounds the
+  model calls of a run.
+- A coding agent can run the steward through the MCP tool `run_steward`
+  once `.vee.yaml` allows it:
+
+  ```yaml
+  steward:
+    agents: true
+  ```
+
 ## On the pull request
 
 See [the pull request guide](pull-requests.md).

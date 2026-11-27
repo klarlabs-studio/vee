@@ -91,11 +91,12 @@ trail. Most of the parts exist:
 
 What is missing is the loop.
 
-- [ ] A `vee steward` operation, available in the CLI and MCP, that drives the configured agent CLI or local model
-- [ ] The gate must pass again after every fix
+- [x] A `vee steward` operation, available in the CLI and MCP, that drives the configured agent CLI or local model ([ADR 0042](adr/0042-the-steward.md))
+- [x] The gate must pass again after every fix: a fix is kept only when the review is complete, nothing new blocks, no passing verification breaks, and its problem is solved
+- [ ] `@vee steward` on pull requests: review comments from people with write access, and pushing the kept fixes
 - [x] After every push, a comment naming the commit and how to revert it (`@vee fix`, `@vee fix all`: [ADR 0023](adr/0023-fixes-from-pull-request-comments.md), [ADR 0027](adr/0027-fixing-every-open-finding.md))
-- [ ] Merge conflicts resolved only when the result can be verified; otherwise the change goes back to a person
-- [ ] Applying a patch stays approved by a person or permitted by policy
+- [x] Merge conflicts resolved only when the result can be verified; otherwise the change goes back to a person
+- [x] Applying a patch stays approved by a person or permitted by policy (`steward.agents`)
 
 ### 6. Commands in PR comments (M)
 

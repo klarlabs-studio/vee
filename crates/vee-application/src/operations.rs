@@ -1194,6 +1194,15 @@ fn run_verify(
     .map_err(anyhow::Error::msg)
 }
 
+/// `vee steward`: fix what keeps the checked-out branch from passing its
+/// gate, keeping each fix only when a new review accepts it (ADR 0042).
+pub fn steward(
+    workspace: &Workspace,
+    request: crate::steward::StewardRequest<'_>,
+) -> Result<crate::steward::StewardReport> {
+    crate::steward::run_local(workspace, request)
+}
+
 pub fn diagnose_verification(
     workspace: &Workspace,
     run_id: &str,

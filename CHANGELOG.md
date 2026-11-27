@@ -6,6 +6,22 @@ change configuration and output contracts.
 
 ## Unreleased
 
+### The steward
+
+- `vee steward --base <ref>` fixes what keeps the current branch from
+  passing its gate: a merge conflict with the base, required verifications
+  that fail, and blocking findings. The configured reviewer's model
+  proposes each fix. Vee commits it and keeps it only when a new review is
+  complete, adds no blocking finding, breaks no verification that passed,
+  and shows the problem solved; otherwise it resets the branch to before
+  the fix.
+- A merge resolution is kept only when a required verification passes on
+  the merged result. Kept fixes stay on the branch, unpushed, each with
+  how to undo it.
+- `steward.max_fixes` (default 5) bounds a run. The MCP tool `run_steward`
+  needs `steward.agents: true`. JSON output follows `steward-run-v1`
+  (ADR 0042).
+
 ### Approval on Bitbucket, Azure DevOps and Gerrit
 
 - `vee hosting publish --approval` with `approval.mode: enforce` gives

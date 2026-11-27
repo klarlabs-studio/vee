@@ -3316,6 +3316,10 @@ pub struct RepositoryConfig {
     /// human. Absent when unset, so existing configuration digests stay the same.
     #[serde(default, skip_serializing_if = "ApprovalConfig::is_unset")]
     pub approval: ApprovalConfig,
+    /// What the steward may do (ADR 0042). Absent when unset, so existing
+    /// configuration digests stay the same.
+    #[serde(default, skip_serializing_if = "StewardConfig::is_unset")]
+    pub steward: StewardConfig,
     #[serde(skip)]
     pub active_policy_profile: Option<String>,
     /// The effort a single review applied to every reviewer, if any.
@@ -3331,6 +3335,33 @@ pub struct RepositoryConfig {
     /// Approved rules contributed by packs; their pins are covered by `packs`.
     #[serde(skip)]
     pub pack_rules: Vec<RuleApproval>,
+}
+
+/// The steward's limits (ADR 0042).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StewardConfig {
+    /// The most fixes one steward run attempts, 1 to 10. Default 5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_fixes: Option<u32>,
+    /// Whether coding agents may run the steward through MCP. A person
+    /// running `vee steward` or commenting `@vee steward` needs no permission
+    /// here. Default false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub agents: bool,
+}
+
+pub const DEFAULT_STEWARD_FIXES: u32 = 5;
+pub const MAX_STEWARD_FIXES: u32 = 10;
+
+impl StewardConfig {
+    pub fn is_unset(&self) -> bool {
+        self == &Self::default()
+    }
+
+    pub fn max_fixes(&self) -> u32 {
+        self.max_fixes.unwrap_or(DEFAULT_STEWARD_FIXES)
+    }
 }
 
 /// When a change whose gate passes may be approved without a human: layered
@@ -4362,6 +4393,15 @@ impl RepositoryConfig {
             .is_some_and(|limit| !(1..=1000).contains(&limit))
         {
             return Err("approval.max_per_day must be 1 to 1000".into());
+        }
+        if config
+            .steward
+            .max_fixes
+            .is_some_and(|limit| !(1..=MAX_STEWARD_FIXES).contains(&limit))
+        {
+            return Err(format!(
+                "steward.max_fixes must be 1 to {MAX_STEWARD_FIXES}"
+            ));
         }
         for (field, patterns) in [
             ("approval.never_paths", &config.approval.never_paths),
