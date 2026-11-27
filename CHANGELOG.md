@@ -6,6 +6,20 @@ change configuration and output contracts.
 
 ## Unreleased
 
+### Bitbucket Data Center
+
+- `hosting.provider: bitbucket-data-center` (and `--provider
+  bitbucket-data-center`) connects Vee to a self-hosted Bitbucket Data
+  Center or Server, 8.9 or later. It needs `--host`; the token is read
+  from `BITBUCKET_DC_TOKEN`.
+- Pull request context, review issues, publication and webhooks work as
+  for Bitbucket Cloud. Publication writes a build status, a summary
+  comment and inline comments, and edits them in place when published
+  again.
+- `vee hosting publish --approval` gives and withdraws Vee's approval as
+  a participant. Webhooks are verified with `X-Hub-Signature` at
+  `/api/webhooks/bitbucket-data-center` (ADR 0047).
+
 ### Reasoning effort for providers
 
 - `providers.<id>.reasoning_effort: low|medium|high` sets a reasoning
