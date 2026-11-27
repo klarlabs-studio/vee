@@ -1237,10 +1237,11 @@ pub fn run_review_with_provider_and_selection_context(
     }
     for (index, samples) in sample_findings.into_iter().enumerate() {
         let reviewer = enabled_reviewers[index].1;
-        findings_by_reviewer[index].extend(vee_core::merge_sampled_findings(
+        findings_by_reviewer[index].extend(vee_core::merge_sampled_findings_by(
             samples,
             reviewer.sample_count(),
             reviewer.effective_sample_quorum(),
+            reviewer.sample_grouping.unwrap_or_default(),
         ));
     }
     let mut policy_findings = findings_by_reviewer

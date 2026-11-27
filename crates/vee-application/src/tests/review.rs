@@ -1477,6 +1477,7 @@ fn reviewer_scope_globs_match_and_exclude_paths() {
         effort: None,
         samples: None,
         sample_quorum: None,
+        sample_grouping: None,
     };
 
     assert!(reviewer_path_is_included("src/lib.rs", &reviewer));
@@ -1528,6 +1529,7 @@ fn reviewer_context_manifest_distinguishes_supplied_filtered_and_omitted_paths()
         effort: None,
         samples: None,
         sample_quorum: None,
+        sample_grouping: None,
     };
     let context_files = vec![
         serde_json::json!({"path":"src/full.rs","content":"source", "base_content":"base", "truncated":false}),

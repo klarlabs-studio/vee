@@ -189,10 +189,10 @@ and `CLAUDE.md`. Teams keep standards elsewhere too.
 Vee's review quality is measured on a public offline benchmark
 ([best results](guides/best-results.md)). Open work:
 
-- [ ] Per-reviewer agreement thresholds, so that each reviewer keeps findings at its own measured quorum
+- [x] Per-reviewer agreement thresholds, so that each reviewer keeps findings at its own measured quorum: `vee analytics quorum` recommends one from labelled findings ([ADR 0045](adr/0045-measured-agreement-quorums.md))
 - [ ] Security and line-by-line consistency reviewers as shipped defaults, once a fixed configuration is confirmed by a rerun
 - [x] A reasoning-effort setting for providers that support one (`providers.<id>.reasoning_effort` for `codex_cli`, `openai_compatible` and `ollama_native`); whether a higher setting improves the benchmark still needs a rerun
-- [ ] Group findings from sampled runs by meaning, rather than by nearby lines
+- [x] Group findings from sampled runs by meaning, rather than by nearby lines: opt-in `sample_grouping: meaning` ([ADR 0046](adr/0046-grouping-sampled-findings-by-meaning.md)); making it the default needs a rerun
 
 ## Not planned
 
