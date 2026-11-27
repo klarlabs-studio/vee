@@ -6,6 +6,20 @@ change configuration and output contracts.
 
 ## Unreleased
 
+### Team analytics without a server
+
+- `vee analytics aggregate <paths>` combines the JSON of `vee analytics`,
+  `vee ci approvals` and `vee rules effectiveness` from several repositories
+  into one report.
+  - It covers gate outcomes, finding accuracy and actionability, approval
+    agreement and override, cost, and rule effectiveness.
+  - Rates are recomputed from summed counts and shown with their
+    denominators.
+  - Per-pull-request cases are left out, so no person is named.
+- `--html <file>` writes the report as one self-contained page, with no
+  script or external resources. JSON follows `team-analytics-v1`
+  (ADR 0044).
+
 ### Review once, reuse in CI
 
 - `vee reviews share <review> --private-key <key> --key-id <id>` signs a

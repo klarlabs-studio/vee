@@ -161,13 +161,13 @@ and `CLAUDE.md`. Teams keep standards elsewhere too.
 
 ### 13. Team analytics without a server (M)
 
-- [ ] `vee analytics aggregate` over evidence bundles or analytics exports collected from CI across repositories
-- [ ] One static report:
+- [x] `vee analytics aggregate` over analytics exports collected across repositories: `vee analytics`, `vee ci approvals` and `vee rules effectiveness` JSON ([ADR 0044](adr/0044-team-analytics-without-a-server.md))
+- [x] One static report (`--html`):
   - gate outcomes;
   - approval override rate;
   - cost;
   - rule effectiveness, with denominators stated.
-- [ ] No server, no identity, and no per-person scores
+- [x] No server, no identity, and no per-person scores
 
 ### 14. Natural-language policy conditions (M)
 

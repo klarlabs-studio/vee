@@ -6,6 +6,7 @@
 //! [`markdown`]. This crate does no I/O.
 
 pub mod ansi;
+pub mod html;
 pub mod markdown;
 pub mod tone;
 pub mod view;
