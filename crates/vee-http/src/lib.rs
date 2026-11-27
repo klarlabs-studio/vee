@@ -1,3 +1,5 @@
+pub mod tls;
+
 use axum::{
     body::Bytes,
     extract::{DefaultBodyLimit, Path as RoutePath, Query, State},
@@ -337,6 +339,12 @@ fn api_error(error: impl ToString) -> ApiError {
     }
 }
 
+/// The webhook server's health check. It may be reached through a proxy or
+/// a DNS name, so it checks no host, and it names no local path.
+async fn webhook_health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
 async fn health(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -597,7 +605,7 @@ pub fn new_access_token() -> anyhow::Result<String> {
 fn build_webhook_router(root: PathBuf, address: SocketAddr, webhook: Arc<WebhookState>) -> Router {
     let path = format!("/api/webhooks/{}", webhook.provider.provider_id());
     Router::new()
-        .route("/api/health", get(health))
+        .route("/api/health", get(webhook_health))
         .route(
             &path,
             axum::routing::post(receive_hosting_webhook)
@@ -848,35 +856,53 @@ pub async fn serve(
     Ok(())
 }
 
-/// Run the application API with a hosting webhook adapter and event handler.
-/// Non-loopback binding is disabled until the server can terminate TLS itself.
+/// How the webhook server may listen.
+pub struct WebhookListen {
+    pub address: SocketAddr,
+    /// Bind beyond loopback; requires `tls`.
+    pub allow_network: bool,
+    pub tls: Option<Arc<tokio_rustls::rustls::ServerConfig>>,
+}
+
+/// Why `listen` is refused, if it is: an address beyond loopback, including
+/// a wildcard, needs both `allow_network` and TLS (ADR 0038).
+pub fn webhook_listen_refusal(listen: &WebhookListen) -> Option<&'static str> {
+    if listen.address.ip().is_loopback() {
+        return None;
+    }
+    if !listen.allow_network {
+        return Some("binding beyond loopback needs --allow-network, --tls-cert and --tls-key");
+    }
+    if listen.tls.is_none() {
+        return Some("binding beyond loopback needs --tls-cert and --tls-key: Vee does not accept webhooks in plaintext over the network");
+    }
+    None
+}
+
+/// Run the webhook server with a hosting webhook adapter and event handler.
+/// It serves HTTPS when `listen.tls` is set.
 pub async fn serve_with_webhooks(
     root: PathBuf,
-    address: SocketAddr,
-    allow_network: bool,
+    listen: WebhookListen,
     provider: Arc<dyn vee_hosting::GitHostingProvider>,
     handler: Arc<dyn WebhookEventHandler>,
 ) -> anyhow::Result<()> {
-    if address.ip().is_unspecified() {
-        anyhow::bail!("wildcard binding is not supported; bind to a specific interface address");
+    if let Some(refusal) = webhook_listen_refusal(&listen) {
+        anyhow::bail!(refusal);
     }
-    if !address.ip().is_loopback() {
-        anyhow::bail!(
-            "non-loopback webhook binding is disabled until Vee can serve TLS directly; use a secure local tunnel"
-        );
-    }
-    let _ = allow_network;
-    let listener = tokio::net::TcpListener::bind(address).await?;
+    let listener = tokio::net::TcpListener::bind(listen.address).await?;
     let actual_address = listener.local_addr()?;
-    axum::serve(
-        listener,
-        build_webhook_router(
-            root,
-            actual_address,
-            Arc::new(WebhookState { provider, handler }),
-        ),
-    )
-    .await?;
+    let router = build_webhook_router(
+        root,
+        actual_address,
+        Arc::new(WebhookState { provider, handler }),
+    );
+    match listen.tls {
+        Some(config) => {
+            axum::serve(tls::TlsListener::new(listener, config)?, router).await?;
+        }
+        None => axum::serve(listener, router).await?,
+    }
     Ok(())
 }
 
@@ -2469,9 +2495,8 @@ mod tests {
         assert!(error.to_string().contains("specific interface address"));
     }
 
-    #[test]
-    fn non_loopback_webhook_ui_binding_is_rejected_even_with_opt_in() {
-        let provider = Arc::new(
+    fn github_provider() -> Arc<vee_hosting::github::GitHubAdapter> {
+        Arc::new(
             vee_hosting::github::GitHubAdapter::new(
                 vee_hosting::github::GitHubConfig::new(
                     "https://api.github.com",
@@ -2481,17 +2506,150 @@ mod tests {
                 .unwrap(),
             )
             .unwrap(),
+        )
+    }
+
+    /// A self-signed certificate for 127.0.0.1, written with an owner-only key.
+    fn tls_files(directory: &std::path::Path) -> (tls::TlsFiles, String) {
+        let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+        let certificate = directory.join("cert.pem");
+        let private_key = directory.join("key.pem");
+        let pem = certified.cert.pem();
+        std::fs::write(&certificate, &pem).unwrap();
+        std::fs::write(&private_key, certified.key_pair.serialize_pem()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&private_key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        (
+            tls::TlsFiles {
+                certificate,
+                private_key,
+            },
+            pem,
+        )
+    }
+
+    #[test]
+    fn binding_beyond_loopback_needs_the_opt_in_and_tls() {
+        let directory = tempfile::tempdir().unwrap();
+        let (files, _) = tls_files(directory.path());
+        let config = tls::server_config(&files).unwrap();
+        let listen = |address: &str, allow_network, tls: bool| WebhookListen {
+            address: address.parse().unwrap(),
+            allow_network,
+            tls: tls.then(|| config.clone()),
+        };
+        assert_eq!(
+            webhook_listen_refusal(&listen("127.0.0.1:7878", false, false)),
+            None
+        );
+        assert_eq!(
+            webhook_listen_refusal(&listen("[::1]:7878", false, true)),
+            None
+        );
+        for (address, allow_network, tls) in [
+            ("192.0.2.1:7878", false, true),
+            ("192.0.2.1:7878", true, false),
+            ("0.0.0.0:7878", true, false),
+            ("0.0.0.0:7878", false, true),
+        ] {
+            assert!(
+                webhook_listen_refusal(&listen(address, allow_network, tls)).is_some(),
+                "{address} allow_network={allow_network} tls={tls}"
+            );
+        }
+        assert_eq!(
+            webhook_listen_refusal(&listen("0.0.0.0:7878", true, true)),
+            None
         );
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let error = runtime
             .block_on(serve_with_webhooks(
                 PathBuf::from("."),
-                "192.0.2.1:7878".parse().unwrap(),
-                true,
-                provider,
+                listen("192.0.2.1:7878", true, false),
+                github_provider(),
                 Arc::new(|_: &vee_hosting::WebhookEnvelope| Ok(())),
             ))
             .unwrap_err();
-        assert!(error.to_string().contains("serve TLS directly"));
+        assert!(error.to_string().contains("plaintext"), "{error}");
+    }
+
+    #[test]
+    fn a_private_key_others_can_read_or_a_wrong_pair_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let (files, _) = tls_files(directory.path());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&files.private_key, std::fs::Permissions::from_mode(0o644))
+                .unwrap();
+            let error = tls::server_config(&files).unwrap_err();
+            assert!(format!("{error:#}").contains("chmod 600"), "{error:#}");
+            std::fs::set_permissions(&files.private_key, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let other = tempfile::tempdir().unwrap();
+        let (other_files, _) = tls_files(other.path());
+        let mismatched = tls::TlsFiles {
+            certificate: files.certificate.clone(),
+            private_key: other_files.private_key,
+        };
+        let error = tls::server_config(&mismatched).unwrap_err();
+        assert!(format!("{error:#}").contains("does not match"), "{error:#}");
+        std::fs::write(&files.certificate, "not a certificate").unwrap();
+        assert!(tls::server_config(&files).is_err());
+    }
+
+    #[test]
+    fn the_webhook_server_serves_https_and_survives_a_stalled_client() {
+        let directory = tempfile::tempdir().unwrap();
+        let (files, pem) = tls_files(directory.path());
+        let config = tls::server_config(&files).unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let server = runtime.spawn(serve_with_webhooks(
+            directory.path().to_owned(),
+            WebhookListen {
+                address,
+                allow_network: false,
+                tls: Some(config),
+            },
+            github_provider(),
+            Arc::new(|_: &vee_hosting::WebhookEnvelope| Ok(())),
+        ));
+        // A client that connects and never starts its handshake.
+        let stalled = loop {
+            match std::net::TcpStream::connect(address) {
+                Ok(stream) => break stream,
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        };
+        let client = reqwest::blocking::Client::builder()
+            .add_root_certificate(reqwest::Certificate::from_pem(pem.as_bytes()).unwrap())
+            .https_only(true)
+            .build()
+            .unwrap();
+        let response = client
+            .get(format!("https://{address}/api/health"))
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.text().unwrap(), r#"{"status":"ok"}"#);
+        // Plain HTTP gets no answer from the TLS listener.
+        assert!(
+            reqwest::blocking::get(format!("http://{address}/api/health"))
+                .map(|response| !response.status().is_success())
+                .unwrap_or(true)
+        );
+        drop(stalled);
+        drop(client);
+        server.abort();
     }
 }
