@@ -165,6 +165,34 @@ have matching Action inputs, `labels` and `approve`.
     repository's Actions settings; branch protection decides whether the
     approval counts.
 
+### Bitbucket, Azure DevOps and Gerrit
+
+These hosts have no `vee ci run` integration yet. There,
+`vee hosting publish --approval` gives Vee's own approval
+([ADR 0041](../adr/0041-approval-on-bitbucket-azure-devops-and-gerrit.md)):
+
+| Host | Vee's approval |
+| --- | --- |
+| Bitbucket Cloud | An approval from the token's account |
+| Azure DevOps | A reviewer vote of 10 ("approved") |
+| Gerrit | A `Code-Review` vote at the highest value the account may give, so the project's access rules decide between +1 and +2 |
+
+- In enforce mode, Vee approves an eligible head, keeps an approval that
+  still holds, and withdraws one from a change that no longer qualifies.
+  In observe mode, it withdraws any approval it gave and gives none.
+- Each host refuses the approval when the pull request's head is no longer
+  the reviewed one.
+- `approval.require_owner_approval` and `approval.max_per_day` can't be
+  evaluated on these hosts yet. When either is set, Vee approves nothing
+  there and a person approves.
+- These approvals carry no commit. A later push leaves them standing until
+  Vee publishes again, unless the host resets approvals on a push:
+  - **Bitbucket:** turn on resetting approvals when the source branch changes;
+  - **Azure DevOps:** turn on the branch policy that resets votes on new pushes;
+  - **Gerrit:** don't copy `Code-Review` votes to new patch sets.
+- Bitbucket and Azure DevOps still get the separate "Vee approval" check.
+  On Gerrit, the vote's message carries the verdict.
+
 Two more guards apply ([ADR 0026](../adr/0026-owner-guards-and-a-daily-limit-for-approvals.md)):
 
 - `approval.never_owners: ["@acme/security"]` keeps every change to code

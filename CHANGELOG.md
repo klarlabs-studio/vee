@@ -6,6 +6,24 @@ change configuration and output contracts.
 
 ## Unreleased
 
+### Approval on Bitbucket, Azure DevOps and Gerrit
+
+- `vee hosting publish --approval` with `approval.mode: enforce` gives
+  Vee's own approval on Bitbucket Cloud (an approval), Azure DevOps (a
+  reviewer vote of 10) and Gerrit (a `Code-Review` vote at the highest
+  value its account may give). It withdraws that approval from a change
+  that no longer qualifies, and in observe mode. `--approval` is no longer
+  refused on Gerrit. The receipt's `approval` field reports `given`,
+  `kept`, `withdrawn` or `not_given`. `approval.require_owner_approval`
+  and `approval.max_per_day` can't be evaluated on these hosts, so either
+  one stops Vee from approving there (ADR 0041).
+
+### Fixes
+
+- Bitbucket pull requests report abbreviated commit hashes; Vee now
+  resolves them, so publishing to Bitbucket no longer fails because the
+  reviewed head never matches.
+
 ### Signed and notarized macOS binaries
 
 - Release builds sign the macOS binaries with a Developer ID and the

@@ -51,7 +51,7 @@ risk tier are only visible locally or in that check's text.
 
 - [x] Publish an eligible approval as an approving review on GitHub ([ADR 0024](adr/0024-approval-and-risk-on-the-pull-request.md))
 - [x] The same on GitLab: labels, and an approval given and withdrawn ([ADR 0030](adr/0030-gitlab-parity.md))
-- [ ] The same on Bitbucket (an approval), Azure DevOps (a vote) and Gerrit (a label vote)
+- [x] The same on Bitbucket (an approval), Azure DevOps (a vote) and Gerrit (a label vote), through `vee hosting publish --approval` ([ADR 0041](adr/0041-approval-on-bitbucket-azure-devops-and-gerrit.md))
 - [x] Risk-tier and gate labels on GitHub pull requests, so teams can filter and route by them
 - [x] Withdraw both when a new push makes the review stale
 
