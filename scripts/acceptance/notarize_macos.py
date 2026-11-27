@@ -43,6 +43,8 @@ def load_script():
     spec = importlib.util.spec_from_file_location("notarize_macos", SCRIPT)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
+    # dataclasses look the module up while the class is created.
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
