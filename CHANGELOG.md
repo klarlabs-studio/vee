@@ -6,6 +6,13 @@ change configuration and output contracts.
 
 ## Unreleased
 
+### Reasoning effort for providers
+
+- `providers.<id>.reasoning_effort: low|medium|high` sets a reasoning
+  model's effort: Codex CLI's `model_reasoning_effort`, the OpenAI-compatible
+  `reasoning_effort` field, or Ollama's `think` level. It is refused for
+  provider kinds without such a setting, and it keys the review cache.
+
 ### Team analytics without a server
 
 - `vee analytics aggregate <paths>` combines the JSON of `vee analytics`,
