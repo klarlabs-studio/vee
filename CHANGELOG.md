@@ -6,6 +6,15 @@ change configuration and output contracts.
 
 ## Unreleased
 
+### HTTPS for the webhook server
+
+- `vee hosting webhook-serve --tls-cert --tls-key` serves HTTPS, and with
+  `--allow-network` it may bind beyond loopback, including a wildcard
+  address. Plaintext beyond loopback stays refused. A private key that
+  other users can read is refused. The webhook server's `/api/health` now
+  answers `{"status":"ok"}` on any host name and no longer names the
+  repository path (ADR 0038).
+
 ### Reverted merges in the approval report
 
 - `vee ci approvals` counts a pull request merged at a head Vee called

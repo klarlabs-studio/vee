@@ -174,7 +174,7 @@ and `CLAUDE.md`. Teams keep standards elsewhere too.
 
 ### 15. A network webhook server, and acceptance on more hosts (M)
 
-- [ ] TLS for `vee webhook-serve` beyond loopback
+- [x] TLS for `vee webhook-serve` beyond loopback ([ADR 0038](adr/0038-tls-for-the-webhook-server.md))
 - [ ] Real-host acceptance runs for GitLab, Azure DevOps, Bitbucket and Gerrit
 
 ### 16. Bitbucket Data Center (M)
