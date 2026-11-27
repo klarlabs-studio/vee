@@ -2117,9 +2117,9 @@ fn run_hook(hook: HookRun) -> Result<u8> {
                     ..Default::default()
                 },
             };
-            if !response.is_empty() {
-                emit_json(&response)?;
-            }
+            // Always a JSON object, `{}` when there is nothing to say: Codex
+            // treats anything else from a Stop hook that exits 0 as invalid.
+            emit_json(&response)?;
             Ok(0)
         }
     }
