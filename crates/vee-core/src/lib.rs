@@ -9,7 +9,9 @@ pub mod ports;
 pub mod sampling;
 pub use lifecycle::{ActorName, FindingStatusChange, Reason, RuleApprovalStatus};
 pub use packs::{PackReference, PolicyPack};
-pub use sampling::{merge_sampled_findings, SampleAgreement};
+pub use sampling::{
+    merge_sampled_findings, merge_sampled_findings_by, SampleAgreement, SampleGrouping,
+};
 
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -3162,6 +3164,40 @@ policy_profiles:
     }
 
     #[test]
+    fn sample_grouping_parses_and_defaults_to_location() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join(".vee.yaml");
+        let load = |reviewer: &str| {
+            std::fs::write(
+                &file,
+                format!("version: 1\nproviders:\n  cli: {{ kind: cli, executable: reviewer }}\nreviewers:\n  r: {reviewer}\n"),
+            )
+            .unwrap();
+            RepositoryConfig::load(&file)
+        };
+        let meaning = load(
+            "{ provider: cli, instructions_file: r.md, samples: 3, sample_grouping: meaning }",
+        )
+        .unwrap();
+        assert_eq!(
+            meaning.reviewers["r"].sample_grouping,
+            Some(SampleGrouping::Meaning)
+        );
+        let unset = load("{ provider: cli, instructions_file: r.md, samples: 3 }").unwrap();
+        assert_eq!(
+            unset.reviewers["r"].sample_grouping.unwrap_or_default(),
+            SampleGrouping::Location
+        );
+        assert!(!serde_json::to_string(&unset.reviewers["r"])
+            .unwrap()
+            .contains("sample_grouping"));
+        assert!(load(
+            "{ provider: cli, instructions_file: r.md, samples: 3, sample_grouping: vibes }"
+        )
+        .is_err());
+    }
+
+    #[test]
     fn reasoning_effort_is_only_accepted_by_providers_that_have_one() {
         let directory = tempfile::tempdir().unwrap();
         let file = directory.path().join(".vee.yaml");
@@ -3848,6 +3884,11 @@ pub struct ReviewerConfig {
     /// How many samples must report a finding for it to block; defaults to a strict majority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sample_quorum: Option<u32>,
+    /// How the samples' reports are matched into one defect; by location
+    /// unless set. Left out of the configuration when unset, so existing
+    /// configurations keep their digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_grouping: Option<SampleGrouping>,
 }
 impl ReviewerConfig {
     pub fn sample_count(&self) -> u32 {

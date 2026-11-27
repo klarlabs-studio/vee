@@ -6,6 +6,12 @@ change configuration and output contracts.
 
 ## Unreleased
 
+### Grouping sampled findings by meaning
+
+- `sample_grouping: meaning` on a sampled reviewer matches its runs'
+  reports by category and rationale wording as well as by location. It is
+  opt-in; the default stays `location`.
+
 ### Measured agreement quorums
 
 - `vee analytics quorum` recommends each sampled reviewer's

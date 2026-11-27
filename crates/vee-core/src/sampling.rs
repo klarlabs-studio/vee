@@ -7,6 +7,27 @@ use crate::{Finding, Severity};
 /// Lines at most this far apart in the same file are treated as one reported defect.
 pub const SAMPLE_LINE_WINDOW: u32 = 3;
 
+/// How a sampled reviewer's runs are matched into one reported defect.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SampleGrouping {
+    /// Same file and lines at most [`SAMPLE_LINE_WINDOW`] apart.
+    #[default]
+    Location,
+    /// Location, refined by what each report says: reports with the same
+    /// category and closely matching rationale join across a wider window,
+    /// and nearby reports that share neither stay apart.
+    Meaning,
+}
+
+/// The widest line distance at which two reports can still be the same defect
+/// by meaning.
+pub const MEANING_LINE_WINDOW: u32 = 30;
+/// Rationale word overlap (Jaccard) from which two reports say the same thing.
+const SAME_MEANING: f64 = 0.5;
+/// Rationale word overlap below which two reports say different things.
+const DIFFERENT_MEANING: f64 = 0.15;
+
 /// The largest number of samples a reviewer may request.
 pub const MAX_REVIEWER_SAMPLES: u32 = 5;
 
@@ -40,6 +61,16 @@ pub fn merge_sampled_findings(
     sample_count: u32,
     quorum: u32,
 ) -> Vec<Finding> {
+    merge_sampled_findings_by(samples, sample_count, quorum, SampleGrouping::Location)
+}
+
+/// [`merge_sampled_findings`] with a chosen grouping.
+pub fn merge_sampled_findings_by(
+    samples: Vec<Vec<Finding>>,
+    sample_count: u32,
+    quorum: u32,
+    grouping: SampleGrouping,
+) -> Vec<Finding> {
     if sample_count <= 1 {
         return samples.into_iter().flatten().collect();
     }
@@ -53,7 +84,7 @@ pub fn merge_sampled_findings(
         let mut pairs = Vec::new();
         for (group_index, group) in groups.iter().enumerate() {
             for (finding_index, finding) in ordered.iter().enumerate() {
-                if let Some(distance) = group.distance(finding) {
+                if let Some(distance) = group.distance(finding, grouping) {
                     pairs.push((distance, group_index, finding_index));
                 }
             }
@@ -97,10 +128,13 @@ impl Group {
 
     /// The closest line distance to a report in this group that describes the same
     /// defect, or `None` when no report does. Fingerprint matches count as distance 0.
-    fn distance(&self, finding: &Finding) -> Option<u32> {
+    fn distance(&self, finding: &Finding, grouping: SampleGrouping) -> Option<u32> {
         self.reports
             .iter()
-            .filter_map(|report| reported_defect_distance(report, finding))
+            .filter_map(|report| match grouping {
+                SampleGrouping::Location => reported_defect_distance(report, finding),
+                SampleGrouping::Meaning => same_meaning_distance(report, finding),
+            })
             .min()
     }
 
@@ -138,6 +172,56 @@ fn reported_defect_distance(left: &Finding, right: &Finding) -> Option<u32> {
         }
         _ => (left.fingerprint == right.fingerprint).then_some(0),
     }
+}
+
+/// Distance by meaning: nearby reports join unless they differ in category
+/// and wording; reports up to [`MEANING_LINE_WINDOW`] lines apart, or without
+/// a line, join when category and rationale match.
+fn same_meaning_distance(left: &Finding, right: &Finding) -> Option<u32> {
+    if left.fingerprint == right.fingerprint {
+        return Some(0);
+    }
+    if left.path != right.path {
+        return None;
+    }
+    let similarity = rationale_similarity(&left.rationale, &right.rationale);
+    let same_category = left.category.eq_ignore_ascii_case(&right.category);
+    match (left.line, right.line) {
+        (Some(left_line), Some(right_line)) if left.path.is_some() => {
+            let distance = left_line.abs_diff(right_line);
+            let nearby = distance <= SAMPLE_LINE_WINDOW
+                && (same_category || similarity >= DIFFERENT_MEANING);
+            let alike =
+                distance <= MEANING_LINE_WINDOW && same_category && similarity >= SAME_MEANING;
+            (nearby || alike).then_some(distance)
+        }
+        _ => (same_category && similarity >= SAME_MEANING).then_some(MEANING_LINE_WINDOW),
+    }
+}
+
+/// Words too common in review rationales to say what a defect is.
+const COMMON_WORDS: &[&str] = &[
+    "the", "and", "for", "this", "that", "with", "when", "which", "from", "into", "are", "was",
+    "can", "may", "could", "would", "should", "will", "not", "but", "its", "has", "have", "been",
+    "than", "then", "there", "here", "also", "any", "all", "only", "line", "code", "function",
+];
+
+fn rationale_words(text: &str) -> std::collections::BTreeSet<String> {
+    text.split(|character: char| !(character.is_alphanumeric() || character == '_'))
+        .map(str::to_lowercase)
+        .filter(|word| word.chars().count() >= 3 && !COMMON_WORDS.contains(&word.as_str()))
+        .collect()
+}
+
+/// Word overlap of two rationales (Jaccard), from 0 to 1.
+fn rationale_similarity(left: &str, right: &str) -> f64 {
+    let left = rationale_words(left);
+    let right = rationale_words(right);
+    let union = left.union(&right).count();
+    if union == 0 {
+        return 0.0;
+    }
+    left.intersection(&right).count() as f64 / union as f64
 }
 
 /// Prefer a located report, then higher severity, then higher confidence, then fingerprint.
@@ -183,6 +267,119 @@ mod tests {
             sample_agreement: None,
             advisory: false,
         }
+    }
+
+    fn said(fingerprint: &str, line: u32, category: &str, rationale: &str) -> Finding {
+        Finding {
+            category: category.into(),
+            rationale: rationale.into(),
+            ..finding(fingerprint, "src/lib.rs", Some(line), Severity::High)
+        }
+    }
+
+    #[test]
+    fn meaning_joins_one_defect_reported_on_distant_lines() {
+        let samples = || {
+            vec![
+                vec![said(
+                    "a",
+                    10,
+                    "concurrency",
+                    "The cache map is read without holding the lock, a data race",
+                )],
+                vec![said(
+                    "b",
+                    24,
+                    "concurrency",
+                    "Data race: the cache map is read without the lock held",
+                )],
+            ]
+        };
+        assert_eq!(
+            merge_sampled_findings(samples(), 2, 2).len(),
+            2,
+            "location keeps them apart"
+        );
+        let merged = merge_sampled_findings_by(samples(), 2, 2, SampleGrouping::Meaning);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].sample_agreement.unwrap().reported, 2);
+    }
+
+    #[test]
+    fn meaning_keeps_two_different_defects_on_adjacent_lines_apart() {
+        let samples = || {
+            vec![
+                vec![said(
+                    "a",
+                    10,
+                    "security",
+                    "User input reaches the SQL query unescaped",
+                )],
+                vec![said(
+                    "b",
+                    11,
+                    "performance",
+                    "Allocates a vector on every iteration of the loop",
+                )],
+            ]
+        };
+        assert_eq!(
+            merge_sampled_findings(samples(), 2, 2).len(),
+            1,
+            "location merges them"
+        );
+        assert_eq!(
+            merge_sampled_findings_by(samples(), 2, 2, SampleGrouping::Meaning).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn meaning_does_not_join_alike_reports_beyond_its_window_or_in_other_files() {
+        let far = vec![
+            vec![said(
+                "a",
+                10,
+                "concurrency",
+                "The cache map is read without holding the lock",
+            )],
+            vec![said(
+                "b",
+                10 + MEANING_LINE_WINDOW + 1,
+                "concurrency",
+                "The cache map is read without holding the lock",
+            )],
+        ];
+        assert_eq!(
+            merge_sampled_findings_by(far, 2, 2, SampleGrouping::Meaning).len(),
+            2
+        );
+        let mut other = said(
+            "b",
+            10,
+            "concurrency",
+            "The cache map is read without holding the lock",
+        );
+        other.path = Some("src/other.rs".into());
+        let files = vec![
+            vec![said(
+                "a",
+                10,
+                "concurrency",
+                "The cache map is read without holding the lock",
+            )],
+            vec![other],
+        ];
+        assert_eq!(
+            merge_sampled_findings_by(files, 2, 2, SampleGrouping::Meaning).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn rationale_similarity_ignores_case_punctuation_and_common_words() {
+        assert!(rationale_similarity("The Lock is NOT held.", "lock held") > 0.99);
+        assert_eq!(rationale_similarity("", "lock"), 0.0);
     }
 
     #[test]
