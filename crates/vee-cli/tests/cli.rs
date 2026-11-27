@@ -88,8 +88,12 @@ fn impacted_test_plan_emits_snapshot_bound_argv_without_execution() {
 }
 
 fn publish_fixture_config_digest(root: &std::path::Path) -> String {
+    publish_fixture_config_digest_with(root, "version: 1\n")
+}
+
+fn publish_fixture_config_digest_with(root: &std::path::Path, config: &str) -> String {
     support::isolate_process_environment();
-    fs::write(root.join(".vee.yaml"), "version: 1\n").unwrap();
+    fs::write(root.join(".vee.yaml"), config).unwrap();
     let config = vee_application::load_repository_config(root).unwrap();
     vee_application::effective_review_config_digest_with_work_item(&config, root, &[], &[], None)
         .unwrap()
@@ -3416,9 +3420,15 @@ fn hosting_publish_rejects_changed_base_before_fetching_diff_or_publishing() {
     assert!(!request.contains("/check-runs"));
 }
 
+/// Publish a passing review to a fake Gerrit change 17 with `config` as the
+/// repository configuration and `labels` merged into the change detail.
+/// Returns every request, the receipt and the head commit.
 #[cfg(unix)]
-#[test]
-fn gerrit_publish_command_emits_revision_bound_tagged_gate_summary() {
+fn gerrit_publish_fixture(
+    extra_args: &[&str],
+    config: &str,
+    labels: serde_json::Value,
+) -> (Vec<String>, serde_json::Value, String) {
     use std::{
         io::{Read, Write},
         net::TcpListener,
@@ -3476,7 +3486,7 @@ fn gerrit_publish_command_emits_revision_bound_tagged_gate_summary() {
     )
     .unwrap();
     fs::create_dir_all(root.join(".vee")).unwrap();
-    let config_digest = publish_fixture_config_digest(root);
+    let config_digest = publish_fixture_config_digest_with(root, config);
     let mut store = vee_store_sqlite::ReviewStore::open(&root.join(".vee/vee.sqlite")).unwrap();
     let review = serde_json::json!({
         "schema_version": 2,
@@ -3524,18 +3534,16 @@ fn gerrit_publish_command_emits_revision_bound_tagged_gate_summary() {
     let address = listener.local_addr().unwrap();
     let expected_head = head_oid.clone();
     let expected_base = base_oid.clone();
+    // The server answers until the command has exited.
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let finished = std::sync::Arc::clone(&done);
     let server = thread::spawn(move || {
         let mut requests = Vec::new();
-        let mut idle_since = None;
         loop {
             let (mut stream, _) = match listener.accept() {
-                Ok(connection) => {
-                    idle_since = None;
-                    connection
-                }
+                Ok(connection) => connection,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    let idle = idle_since.get_or_insert_with(std::time::Instant::now);
-                    if idle.elapsed() > std::time::Duration::from_secs(3) {
+                    if finished.load(std::sync::atomic::Ordering::SeqCst) {
                         break;
                     }
                     thread::sleep(std::time::Duration::from_millis(5));
@@ -3568,25 +3576,26 @@ fn gerrit_publish_command_emits_revision_bound_tagged_gate_summary() {
             requests.push(String::from_utf8_lossy(&request).to_string());
             let request_line = String::from_utf8_lossy(&request[..header_end]);
             let body = if request_line.starts_with("GET ") && request_line.contains("/detail?") {
-                format!(
-                    ")]}}'\n{}",
-                    serde_json::json!({
-                        "_number": 17,
-                        "project": "team/repo",
-                        "status": "NEW",
-                        "subject": "Review",
-                        "current_revision": &expected_head,
-                        "current_revision_number": 2,
-                        "revisions": {
-                            expected_head.clone(): {
-                                "commit": {
-                                    "parents": [{"commit": &expected_base}],
-                                    "message": "Review\n"
-                                }
+                let mut detail = serde_json::json!({
+                    "_number": 17,
+                    "project": "team/repo",
+                    "status": "NEW",
+                    "subject": "Review",
+                    "current_revision": &expected_head,
+                    "current_revision_number": 2,
+                    "revisions": {
+                        expected_head.clone(): {
+                            "commit": {
+                                "parents": [{"commit": &expected_base}],
+                                "message": "Review\n"
                             }
                         }
-                    })
-                )
+                    }
+                });
+                for (key, value) in labels.as_object().unwrap() {
+                    detail[key] = value.clone();
+                }
+                format!(")]}}'\n{detail}")
             } else if request_line.contains("/files/") {
                 ")]}'\n{\"src/lib.rs\":{\"status\":\"M\",\"lines_inserted\":1,\"lines_deleted\":1}}"
                     .to_owned()
@@ -3631,10 +3640,12 @@ fn gerrit_publish_command_emits_revision_bound_tagged_gate_summary() {
             "--output",
             "json",
         ])
+        .args(extra_args)
         .env("VEE_FIXTURE_GERRIT_TOKEN", "fixture-token")
         .current_dir(root)
         .output()
         .unwrap();
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
     assert!(
         output.status.success(),
         "exit={:?}\nstdout={}\nstderr={}",
@@ -3643,10 +3654,17 @@ fn gerrit_publish_command_emits_revision_bound_tagged_gate_summary() {
         String::from_utf8_lossy(&output.stderr),
     );
     let receipt: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    (server.join().unwrap(), receipt, head_oid)
+}
+
+#[cfg(unix)]
+#[test]
+fn gerrit_publish_command_emits_revision_bound_tagged_gate_summary() {
+    let (requests, receipt, head_oid) =
+        gerrit_publish_fixture(&[], "version: 1\n", serde_json::json!({}));
     assert_eq!(receipt["review_id"], "review-gerrit-publish");
     assert_eq!(receipt["revision"], head_oid);
     assert_eq!(receipt["provider_check_id"], head_oid);
-    let requests = server.join().unwrap();
     assert!(requests.len() >= 11);
     assert!(requests
         .iter()
@@ -3664,6 +3682,69 @@ fn gerrit_publish_command_emits_revision_bound_tagged_gate_summary() {
         .expect("Gerrit review publication request");
     assert!(publication.contains("Vee gate: PASS"));
     assert!(publication.contains("autogenerated:vee:"));
+}
+
+/// With `approval.mode: enforce`, `--approval` on Gerrit votes Code-Review at
+/// the highest permitted value on the reviewed patch set, and publishes no
+/// separate check.
+#[cfg(unix)]
+#[test]
+fn gerrit_publish_with_approval_votes_code_review() {
+    let (requests, receipt, head_oid) = gerrit_publish_fixture(
+        &["--approval"],
+        "version: 1\napproval:\n  mode: enforce\n  max_risk: elevated\n",
+        serde_json::json!({
+            "labels": {"Code-Review": {"all": []}},
+            "permitted_labels": {"Code-Review": ["-1", " 0", "+1"]}
+        }),
+    );
+    assert_eq!(receipt["approval"], "given", "{receipt:#}");
+    assert!(receipt.get("approval_check_id").is_none());
+    let vote = requests
+        .iter()
+        .find(|request| request.contains("autogenerated:vee:approval"))
+        .expect("a Code-Review vote");
+    assert!(vote.starts_with(&format!("POST /changes/17/revisions/{head_oid}/review?")));
+    assert!(vote.contains(r#""Code-Review":1"#), "{vote}");
+}
+
+/// In observe mode Vee withdraws a vote it gave and gives none.
+#[cfg(unix)]
+#[test]
+fn gerrit_publish_with_approval_in_observe_mode_withdraws_the_vote() {
+    let (requests, receipt, _) = gerrit_publish_fixture(
+        &["--approval"],
+        "version: 1\napproval:\n  mode: observe\n",
+        serde_json::json!({
+            "labels": {"Code-Review": {"all": [{"_account_id": 100, "value": 1}]}},
+            "permitted_labels": {"Code-Review": [" 0", "+1"]}
+        }),
+    );
+    assert_eq!(receipt["approval"], "withdrawn", "{receipt:#}");
+    let vote = requests
+        .iter()
+        .find(|request| request.contains("autogenerated:vee:approval"))
+        .expect("a withdrawing vote");
+    assert!(vote.contains(r#""Code-Review":0"#), "{vote}");
+    assert!(vote.contains("approval.mode is observe"));
+}
+
+/// A guard Gerrit cannot evaluate fails closed: Vee gives no vote.
+#[cfg(unix)]
+#[test]
+fn gerrit_publish_with_approval_fails_closed_on_an_unsupported_guard() {
+    let (requests, receipt, _) = gerrit_publish_fixture(
+        &["--approval"],
+        "version: 1\napproval:\n  mode: enforce\n  max_risk: elevated\n  max_per_day: 5\n",
+        serde_json::json!({
+            "labels": {"Code-Review": {"all": []}},
+            "permitted_labels": {"Code-Review": [" 0", "+2"]}
+        }),
+    );
+    assert_eq!(receipt["approval"], "not_given", "{receipt:#}");
+    assert!(requests
+        .iter()
+        .all(|request| !request.contains("autogenerated:vee:approval")));
 }
 
 #[cfg(unix)]
@@ -11693,44 +11774,6 @@ fn mcp_review_changes_reports_progress_notifications() {
         progress.last().unwrap()["message"],
         "2 of 2 reviewer runs finished"
     );
-}
-
-#[test]
-fn hosting_publish_refuses_an_approval_check_on_gerrit() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path();
-    assert!(Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["init", "-q"])
-        .status()
-        .unwrap()
-        .success());
-    fs::write(root.join(".vee.yaml"), "version: 1\n").unwrap();
-    let output = vee()
-        .args([
-            "hosting",
-            "publish",
-            "--provider",
-            "gerrit",
-            "--review",
-            "rev_missing",
-            "--repository",
-            "team/repo",
-            "--number",
-            "1",
-            "--approval",
-        ])
-        .current_dir(root)
-        .output()
-        .unwrap();
-    assert_eq!(
-        output.status.code(),
-        Some(3),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("publish without --approval"));
 }
 
 /// A session can combine reviews from several repositories: `REPO:REVIEW_ID`

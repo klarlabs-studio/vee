@@ -1296,7 +1296,10 @@ enum HostingCommand {
         actor_login: Option<String>,
         /// Also publish the approval verdict (`vee gate approval`) as a separate
         /// "Vee approval" check: success when eligible, neutral when a person is
-        /// needed. Not available for Gerrit.
+        /// needed. On Bitbucket, Azure DevOps and Gerrit, with
+        /// `approval.mode: enforce`, Vee also approves an eligible change (a
+        /// Gerrit Code-Review vote instead of a check) and withdraws its
+        /// approval from one that is not.
         #[arg(long)]
         approval: bool,
         /// Output format.

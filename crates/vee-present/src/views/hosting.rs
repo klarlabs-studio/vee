@@ -253,6 +253,12 @@ impl ToView for ReviewPublication {
                         .map(Cell::id)
                         .unwrap_or_else(|| Cell::muted("not published")),
                 ),
+                (
+                    "Vee's approval".into(),
+                    self.approval
+                        .map(|approval| Cell::plain(approval.as_str().replace('_', " ")))
+                        .unwrap_or_else(|| Cell::muted("not changed")),
+                ),
                 ("Revision".into(), Cell::code(&self.revision)),
             ])
             .section(format!("Finding threads ({})", self.thread_ids.len()));
