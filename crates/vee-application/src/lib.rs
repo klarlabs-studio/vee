@@ -43,6 +43,7 @@ pub mod sarif;
 pub mod security_presets;
 mod session;
 pub mod setup;
+pub mod shared_review;
 pub mod signing;
 mod source;
 pub mod standards;

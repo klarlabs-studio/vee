@@ -1,6 +1,7 @@
-//! The view of a steward run.
+//! The views of a steward run and of a review shared for CI.
 
 use crate::view::{Cell, ToView, Tone, View};
+use vee_application::shared_review::SharedReview;
 use vee_application::steward::StewardReport;
 use vee_core::GateStatus;
 
@@ -69,5 +70,25 @@ impl ToView for StewardReport {
         view.paragraph(Cell::muted(
             "Each kept fix is its own commit on the branch; nothing was pushed unless shown above.",
         ))
+    }
+}
+
+impl ToView for SharedReview {
+    fn to_view(&self) -> View {
+        View::new()
+            .title(
+                format!("Shared review {}", self.review_id),
+                Some(Cell::badge(Tone::Success, "signed")),
+            )
+            .fields(vec![
+                ("Head".into(), Cell::code(&self.head_oid)),
+                ("Base".into(), Cell::code(&self.base_oid)),
+                ("Key".into(), Cell::id(&self.key_id)),
+                ("Stored in".into(), Cell::code(&self.notes_ref)),
+            ])
+            .paragraph(Cell::plain(format!(
+                "Push the note so CI can reuse this review: {}",
+                self.push_command
+            )))
     }
 }

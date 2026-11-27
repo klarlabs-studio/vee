@@ -226,6 +226,9 @@ pub struct CiRun {
     pub labels: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval_review_id: Option<String>,
+    /// The signed local review whose findings this run reused (ADR 0043).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reused_review: Option<crate::shared_review::ReusedReview>,
 }
 
 /// Review the pull request CI runs for and publish the result to it.
@@ -246,6 +249,8 @@ pub(crate) struct Reviewed {
     conversation: Option<Conversation>,
     summary: Option<vee_hosting::ConversationComment>,
     actor_login: Option<String>,
+    /// The signed local review this review reused (ADR 0043).
+    pub(crate) reused: Option<crate::shared_review::ReusedReview>,
 }
 
 /// Review the checked-out head of `pull_request`, building on the last
@@ -297,10 +302,36 @@ pub(crate) fn review(
         .filter(|record| {
             record.repository == pull_request.repository && record.number == pull_request.number
         });
-    let carried = earlier
-        .clone()
-        .filter(|_| !options.full)
-        .map(|record| crate::incremental::CarriedReview { record });
+    // A signed local review of this head stands in for the earlier review,
+    // unless Vee already reviewed this head on the pull request (ADR 0043).
+    let signed = if options.full
+        || earlier
+            .as_ref()
+            .is_some_and(|record| record.head_oid == pull_request.head_oid)
+    {
+        None
+    } else {
+        crate::shared_review::reusable(
+            root,
+            &pull_request.repository,
+            pull_request.number,
+            &pull_request.base_oid,
+            &pull_request.head_oid,
+        )
+        .unwrap_or_else(|why| {
+            eprintln!("warning: the signed local review of this head was not reused: {why}");
+            None
+        })
+    };
+    let carried = match &signed {
+        Some((_, record)) => Some(crate::incremental::CarriedReview {
+            record: record.clone(),
+        }),
+        None => earlier
+            .clone()
+            .filter(|_| !options.full)
+            .map(|record| crate::incremental::CarriedReview { record }),
+    };
     run_required_verifications(
         workspace,
         &pull_request.base_oid,
@@ -322,12 +353,33 @@ pub(crate) fn review(
         },
         None,
     )?;
+    let reused = signed.and_then(|(signer, record)| {
+        let carried = review
+            .carried
+            .as_ref()
+            .filter(|carried| carried.from_review == record.review_id);
+        match carried {
+            Some(carried) => Some(crate::shared_review::ReusedReview {
+                review_id: record.review_id,
+                signer,
+                reused_files: carried.paths.len(),
+            }),
+            None => {
+                eprintln!(
+                    "warning: the signed local review {} was verified but nothing was reused: it was made under another configuration or of other content",
+                    record.review_id
+                );
+                None
+            }
+        }
+    });
     Ok(Reviewed {
         review,
         earlier,
         conversation,
         summary,
         actor_login,
+        reused,
     })
 }
 
@@ -377,6 +429,7 @@ pub(crate) fn publish(
         conversation,
         summary,
         actor_login,
+        reused,
     } = reviewed;
     let hosting_flags = crate::hosting::HostingFlags {
         provider: Some(pull_request.provider.clone()),
@@ -520,6 +573,7 @@ pub(crate) fn publish(
         publication,
         labels,
         approval_review_id,
+        reused_review: reused,
     })
 }
 

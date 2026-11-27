@@ -32,6 +32,17 @@
       "description": "The `vee:` labels the pull request carries after this run, with `--labels`.",
       "items": { "type": "string", "pattern": "^vee:[a-z0-9:-]+$" }
     },
+    "reused_review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["review_id", "signer", "reused_files"],
+      "description": "The signed local review whose findings this run reused instead of asking the reviewers again (vee reviews share).",
+      "properties": {
+        "review_id": { "type": "string" },
+        "signer": { "type": "string", "description": "The review_signers entry whose key verified the signature." },
+        "reused_files": { "type": "integer", "minimum": 0 }
+      }
+    },
     "approval_review_id": {
       "type": "string",
       "description": "The approving review Vee gave on this head, with `--approve`, when the change is eligible."

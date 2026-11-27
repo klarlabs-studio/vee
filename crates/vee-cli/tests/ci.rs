@@ -503,3 +503,159 @@ fn ci_run_posts_a_reviewers_fix_as_a_committable_suggestion() {
         "one line needs no range: {comment}"
     );
 }
+
+/// A local review signed with a key the base branch trusts is reused in CI:
+/// the reviewers are not asked again, and the run says whose review it
+/// reused (ADR 0043). A key the base does not list is not trusted.
+#[cfg(unix)]
+#[test]
+fn ci_run_reuses_a_signed_local_review_of_the_same_head() {
+    use base64::Engine;
+    use std::os::unix::fs::PermissionsExt;
+    let keys = tempfile::tempdir().unwrap();
+    let key = |name: &str| {
+        let (private, public) = (
+            keys.path().join(name),
+            keys.path().join(format!("{name}.pub")),
+        );
+        let output = vee()
+            .args(["reviews", "keygen", "--private-key"])
+            .arg(&private)
+            .arg("--public-key")
+            .arg(&public)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(std::fs::read(&public).unwrap());
+        (private, encoded)
+    };
+    let (trusted_key, trusted_public) = key("alice");
+    let (untrusted_key, _) = key("mallory");
+    let repository = pull_request_repository_with(
+        "[]",
+        &format!("review_signers:\n  - {{ id: alice, public_key: {trusted_public} }}\n"),
+    );
+    let (root, outside) = (repository.directory.path(), &repository.outside);
+    let (head, base_tip) = (repository.head.clone(), repository.base_tip.clone());
+    // The reviewer records every call.
+    let calls = outside.path().join("calls");
+    std::fs::write(
+        outside.path().join("provider"),
+        format!(
+            "#!/bin/sh\ncat >/dev/null\necho call >> '{}'\nprintf '%s' '{{\"schema_version\":1,\"findings\":[]}}'\n",
+            calls.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        outside.path().join("provider"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+
+    // The developer reviews the head and shares the review.
+    let local = vee()
+        .args(["review", "--base", "main", "--output", "json"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        local.status.success(),
+        "{}",
+        String::from_utf8_lossy(&local.stderr)
+    );
+    let review_id = serde_json::from_slice::<serde_json::Value>(&local.stdout).unwrap()
+        ["review_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let share = |private_key: &Path| {
+        let output = vee()
+            .args([
+                "reviews", "share", &review_id, "--key-id", "laptop", "--output", "json",
+            ])
+            .arg("--private-key")
+            .arg(private_key)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+
+    let ci_run = || {
+        let _ = std::fs::remove_file(&calls);
+        let event = outside.path().join("event.json");
+        std::fs::write(
+            &event,
+            serde_json::json!({"pull_request": {"number": 9, "base": {"sha": base_tip}, "head": {"sha": head}}})
+                .to_string(),
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server = fake_github(listener, stop.clone(), base_tip.clone(), head.clone());
+        let output = vee()
+            .args(["ci", "run", "--output", "json"])
+            .env("GITHUB_ACTIONS", "true")
+            .env("GITHUB_EVENT_NAME", "pull_request")
+            .env("GITHUB_EVENT_PATH", &event)
+            .env("GITHUB_REPOSITORY", "team/repo")
+            .env("GITHUB_SERVER_URL", "http://127.0.0.1")
+            .env("GITHUB_API_URL", format!("http://{address}"))
+            .env("GH_TOKEN", "fixture-token")
+            .current_dir(root)
+            .output()
+            .unwrap();
+        stop.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+        assert!(
+            output.status.success(),
+            "stdout={}\nstderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let run: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let reviewer_calls = std::fs::read_to_string(&calls)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        (
+            run,
+            reviewer_calls,
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+
+    // Signed with a key the base does not list: reviewed again.
+    let shared = share(&untrusted_key);
+    assert_eq!(shared["head_oid"], head);
+    let (run, reviewer_calls, stderr) = ci_run();
+    assert!(run.get("reused_review").is_none(), "{run:#}");
+    assert!(reviewer_calls > 0);
+    assert!(stderr.contains("was not reused"), "{stderr}");
+
+    // Signed with alice's key: reused, without asking the reviewer.
+    share(&trusted_key);
+    let (run, reviewer_calls, stderr) = ci_run();
+    assert_eq!(run["reused_review"]["signer"], "alice", "{run:#}\n{stderr}");
+    assert_eq!(run["reused_review"]["review_id"], review_id.as_str());
+    assert_eq!(run["reused_review"]["reused_files"], 1);
+    assert_eq!(reviewer_calls, 0, "{stderr}");
+    assert_eq!(run["gate"], "pass");
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../../schemas/ci-run-v1.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let errors: Vec<String> = validator.iter_errors(&run).map(|e| e.to_string()).collect();
+    assert!(errors.is_empty(), "{errors:?}\n{run:#}");
+}

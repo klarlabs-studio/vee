@@ -992,6 +992,24 @@ enum ReviewsCommand {
         #[arg(long, required_if_eq("format", "dsse"))]
         key_id: Option<String>,
     },
+    /// Sign a saved review of committed changes and store it as a Git note
+    /// on its head, so CI can reuse it instead of reviewing again. CI reuses
+    /// it only when the base branch's `review_signers` lists the key and the
+    /// configuration and file contents are the same; push the note with
+    /// `git push origin refs/notes/vee-reviews`.
+    Share {
+        /// Saved review ID.
+        id: String,
+        /// Ed25519 PKCS#8 private key (from `vee reviews keygen`).
+        #[arg(long)]
+        private_key: std::path::PathBuf,
+        /// Key identifier recorded in the signature.
+        #[arg(long)]
+        key_id: String,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        output: Output,
+    },
     /// Verify a DSSE-signed Vee attestation with an Ed25519 public key.
     VerifyAttestation {
         /// Path to the DSSE envelope.
@@ -3216,6 +3234,28 @@ fn run() -> Result<u8> {
                     let document =
                         attestation::attest(&workspace, &id, decision_id.as_deref(), format)?;
                     emit_json(&document)?;
+                    Ok(0)
+                }
+                ReviewsCommand::Share {
+                    id,
+                    private_key,
+                    key_id,
+                    output,
+                } => {
+                    let workspace = operations::Workspace::new(
+                        std::path::PathBuf::from(&top),
+                        crate::local_stores(),
+                    );
+                    let shared = vee_application::shared_review::share(
+                        &workspace,
+                        &id,
+                        &private_key,
+                        &key_id,
+                    )?;
+                    match output {
+                        Output::Json => emit_json(&shared)?,
+                        Output::Text => print_view(&shared)?,
+                    }
                     Ok(0)
                 }
                 ReviewsCommand::VerifyAttestation {
