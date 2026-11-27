@@ -438,10 +438,10 @@ Every tool declares a title and MCP safety annotations so clients can auto-appro
 
 ### Plugins for Claude Code and Codex
 
-`plugins/vee/` packages Vee's MCP server and its six skills as one plugin for both agents. The plugin starts `vee mcp serve --transport stdio`, so install the `vee` binary on `PATH` first. For Claude Code, the plugin also has `SessionStart` and `Stop` hooks that review the agent's changes before it finishes ([daily use](docs/guides/daily-use.md)).
+`plugins/vee/` packages Vee's MCP server and its six skills as one plugin for both agents. The plugin starts `vee mcp serve --transport stdio`, so install the `vee` binary on `PATH` first. The plugin also has `SessionStart` and `Stop` hooks that review the agent's changes before it finishes, in Claude Code and in Codex ([daily use](docs/guides/daily-use.md)).
 
 - **Claude Code:** `/plugin marketplace add klarlabs-studio/vee`, then `/plugin install vee@vee`. The skills run as `/vee:<skill>`, and the tools appear as `mcp__plugin_vee_vee__<tool>`.
-- **Codex:** the repository marketplace at `.agents/plugins/marketplace.json` lists the plugin under Developer Tools. Its root `plugin.json` and `mcp.json` follow the portable Agent Plugins 1.0 format.
+- **Codex:** the repository marketplace at `.agents/plugins/marketplace.json` lists the plugin under Developer Tools. Its root `plugin.json` and `mcp.json` follow the portable Agent Plugins 1.0 format, and Codex loads the same `hooks/hooks.json`. Codex runs a new or changed hook only after you trust it: open `/hooks` once after installing or updating the plugin.
 
 A test keeps the plugin's skills identical to the ones bundled in the binary, and its version equal to the crate version. `claude plugin validate .` checks the Claude Code marketplace.
 
