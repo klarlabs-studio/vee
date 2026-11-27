@@ -244,6 +244,7 @@ printf '%s\n' '{{"type":"item.completed","item":{{"type":"agent_message","text":
         context_window_tokens: None,
         max_output_tokens: None,
         environment: Vec::new(),
+        reasoning_effort: Some(vee_core::ReasoningEffort::Low),
         sample: None,
         exploration: None,
     };
@@ -276,6 +277,9 @@ printf '%s\n' '{{"type":"item.completed","item":{{"type":"agent_message","text":
     assert!(args
         .windows(2)
         .any(|pair| pair[0] == "--model" && pair[1] == "test-model"));
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["-c", "model_reasoning_effort=\"low\""]));
     let codex_schema: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&schema_log).unwrap()).unwrap();
     let item_required = codex_schema["properties"]["findings"]["items"]["required"]
@@ -387,6 +391,7 @@ fn gemini_cli_adapter_uses_headless_json_and_extracts_only_response() {
         context_window_tokens: None,
         max_output_tokens: None,
         environment: vec![],
+        reasoning_effort: None,
         sample: None,
         exploration: None,
     };
@@ -471,6 +476,7 @@ fn claude_cli_adapter_uses_restricted_schema_validated_json_contract() {
         context_window_tokens: None,
         max_output_tokens: None,
         environment: vec![],
+        reasoning_effort: None,
         sample: None,
         exploration: None,
     };
@@ -586,6 +592,7 @@ fn openai_compatible_adapter_sends_schema_and_extracts_content() {
         let body: serde_json::Value = serde_json::from_slice(&request[body_at..]).unwrap();
         assert_eq!(body["model"], "test-model");
         assert_eq!(body["response_format"]["type"], "json_schema");
+        assert_eq!(body["reasoning_effort"], "high");
         assert!(body["messages"][1]["content"]
             .as_str()
             .unwrap()
@@ -621,6 +628,7 @@ fn openai_compatible_adapter_sends_schema_and_extracts_content() {
                 context_window_tokens: None,
             max_output_tokens: None,
                 environment: vec![("OPENAI_API_KEY".into(), "local-secret".into())],
+                reasoning_effort: Some(vee_core::ReasoningEffort::High),
                 sample: None,
                 exploration: None,
             },
@@ -680,6 +688,7 @@ fn ollama_native_adapter_sets_context_window_schema_and_extracts_usage() {
         assert_eq!(body["options"]["seed"], OLLAMA_SEED);
         assert_eq!(body["format"]["type"], "object");
         assert_eq!(body["stream"], false);
+        assert_eq!(body["think"], "medium");
         let response_body = br#"{"message":{"content":"{\"schema_version\":1,\"findings\":[]}"},"prompt_eval_count":12401,"eval_count":33,"done":true}"#;
         write!(
             stream,
@@ -702,6 +711,7 @@ fn ollama_native_adapter_sets_context_window_schema_and_extracts_usage() {
                 context_window_tokens: Some(32768),
                 max_output_tokens: Some(4096),
                 environment: vec![],
+                reasoning_effort: Some(vee_core::ReasoningEffort::Medium),
                 sample: None,
                 exploration: None,
             },
@@ -748,6 +758,7 @@ fn openai_compatible_adapter_rejects_http_errors_and_oversized_response() {
         context_window_tokens: None,
         max_output_tokens: None,
         environment: vec![],
+        reasoning_effort: None,
         sample: None,
         exploration: None,
     };
@@ -832,6 +843,7 @@ fn openai_compatible_adapter_does_not_forward_credentials_or_context_across_redi
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![("OPENAI_API_KEY".into(), "do-not-forward".into())],
+            reasoning_effort: None,
             sample: None,
             exploration: None,
         },
@@ -914,6 +926,7 @@ fn openai_compatible_adapter_honors_cancellation_while_waiting_for_response() {
         context_window_tokens: None,
         max_output_tokens: None,
         environment: vec![],
+        reasoning_effort: None,
         sample: None,
         exploration: None,
     };
@@ -939,6 +952,7 @@ fn codex_version_probe_is_bounded_and_rejects_failure_or_multiline_output() {
         model: None,
         max_input_tokens: None,
         context_window_tokens: None,
+        reasoning_effort: None,
         max_output_tokens: None,
         env_allowlist: Vec::new(),
         timeout_seconds: 2,
@@ -1039,6 +1053,7 @@ fn ollama_native_focused_strategy_reasons_then_structures_each_changed_file() {
             context_window_tokens: Some(32768),
             max_output_tokens: Some(4096),
             environment: vec![],
+            reasoning_effort: None,
             sample: None,
             exploration: None,
         },
@@ -1115,6 +1130,7 @@ fn provider_cache_keys_distinguish_samples_and_keep_unsampled_keys() {
         context_window_tokens: None,
         max_output_tokens: None,
         environment: vec![],
+        reasoning_effort: None,
         sample,
         exploration: None,
     };
@@ -1124,6 +1140,15 @@ fn provider_cache_keys_distinguish_samples_and_keep_unsampled_keys() {
             .unwrap()
     };
     let sample = |index| Some(vee_core::ProviderSample { index, count: 3 });
+    let mut effortful = request(None);
+    effortful.reasoning_effort = Some(vee_core::ReasoningEffort::High);
+    assert_ne!(
+        key(None),
+        provider_cache_key(&effortful, "1.0", &mut Default::default())
+            .unwrap()
+            .unwrap(),
+        "a reasoning effort keys the cache"
+    );
     assert_ne!(key(sample(0)), key(sample(1)));
     assert_ne!(key(None), key(sample(0)));
     assert_eq!(key(sample(1)), key(sample(1)));
@@ -1161,6 +1186,7 @@ fn exploration_keys_the_cache_by_its_contract_not_its_per_run_paths() {
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![],
+            reasoning_effort: None,
             sample: None,
             exploration,
         };
@@ -1231,6 +1257,7 @@ fn failing_cli_request(
         context_window_tokens: None,
         max_output_tokens: None,
         environment: vec![],
+        reasoning_effort: None,
         sample: None,
         exploration: None,
     }
@@ -1473,6 +1500,7 @@ fn a_cli_provider_that_exits_on_a_usage_limit_is_reported_as_rate_limited() {
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![],
+            reasoning_effort: None,
             sample: None,
             exploration: None,
         };

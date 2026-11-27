@@ -191,7 +191,7 @@ Vee's review quality is measured on a public offline benchmark
 
 - [ ] Per-reviewer agreement thresholds, so that each reviewer keeps findings at its own measured quorum
 - [ ] Security and line-by-line consistency reviewers as shipped defaults, once a fixed configuration is confirmed by a rerun
-- [ ] A reasoning-effort setting for providers that support one
+- [x] A reasoning-effort setting for providers that support one (`providers.<id>.reasoning_effort` for `codex_cli`, `openai_compatible` and `ollama_native`); whether a higher setting improves the benchmark still needs a rerun
 - [ ] Group findings from sampled runs by meaning, rather than by nearby lines
 
 ## Not planned

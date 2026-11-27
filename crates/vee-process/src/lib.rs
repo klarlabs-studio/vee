@@ -766,6 +766,7 @@ mod tests {
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![("VEE_TEST_ALLOWED".into(), "present".into())],
+            reasoning_effort: None,
             sample: None,
             exploration: None,
         };
@@ -783,6 +784,7 @@ mod tests {
             max_output_tokens: None,
             environment: vec![],
             timeout_seconds: 2,
+            reasoning_effort: None,
             sample: None,
             exploration: None,
         };
@@ -808,6 +810,7 @@ mod tests {
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![("PWD".into(), "/not/the/working/directory".into())],
+            reasoning_effort: None,
             sample: None,
             exploration: None,
         };
@@ -852,6 +855,7 @@ mod tests {
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![],
+            reasoning_effort: None,
             sample: None,
             exploration: None,
         })
@@ -888,6 +892,7 @@ mod tests {
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![("API_TOKEN".into(), "secret-value".into())],
+            reasoning_effort: None,
             sample: None,
             exploration: None,
         })
@@ -919,6 +924,7 @@ mod tests {
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![],
+            reasoning_effort: None,
             sample: None,
             exploration: None,
         };
@@ -950,6 +956,7 @@ mod tests {
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![],
+            reasoning_effort: None,
             sample: None,
             exploration: None,
         };
@@ -992,6 +999,7 @@ mod tests {
             context_window_tokens: None,
             max_output_tokens: None,
             environment: vec![],
+            reasoning_effort: None,
             sample: None,
             exploration: None,
         };

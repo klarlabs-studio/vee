@@ -603,6 +603,7 @@ fn base_provider(
         max_input_tokens: None,
         max_output_tokens: None,
         context_window_tokens: None,
+        reasoning_effort: None,
         env_allowlist: Vec::new(),
         timeout_seconds,
         pricing: Default::default(),
