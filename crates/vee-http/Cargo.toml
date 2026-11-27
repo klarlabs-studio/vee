@@ -18,9 +18,12 @@ vee-store-sqlite = { path = "../vee-store-sqlite" }
 vee-application = { path = "../vee-application" }
 vee-hosting = { path = "../vee-hosting" }
 tokio.workspace = true
+tokio-rustls.workspace = true
 tower = { version = "0.5", features = ["util"] }
 
 [dev-dependencies]
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
+reqwest.workspace = true
 serde_yaml.workspace = true
 tempfile.workspace = true
 jsonschema.workspace = true

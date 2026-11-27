@@ -1335,9 +1335,15 @@ enum HostingCommand {
         /// Hosting account that owns Vee's published threads.
         #[arg(long, value_name = "LOGIN")]
         actor_login: Option<String>,
-        /// Reserved; non-loopback binding requires native TLS support.
+        /// Allow binding beyond loopback; requires --tls-cert and --tls-key.
         #[arg(long, default_value_t = false)]
         allow_network: bool,
+        /// PEM certificate chain; serves HTTPS.
+        #[arg(long, value_name = "PATH", requires = "tls_key")]
+        tls_cert: Option<std::path::PathBuf>,
+        /// PEM private key for --tls-cert, readable only by its owner.
+        #[arg(long, value_name = "PATH", requires = "tls_cert")]
+        tls_key: Option<std::path::PathBuf>,
     },
     /// Preview or delete completed webhook receipts older than the selected retention period.
     PruneWebhooks {
@@ -3688,16 +3694,26 @@ fn run() -> Result<u8> {
                 webhook_secret_env,
                 actor_login,
                 allow_network,
+                tls_cert,
+                tls_key,
             } => {
-                if bind.is_unspecified() {
-                    return Err(configuration_failure(
-                        "wildcard webhook binding is not supported; bind to a specific interface",
-                    ));
-                }
-                if !bind.is_loopback() {
-                    return Err(configuration_failure(
-                        "non-loopback webhook binding is disabled until Vee can serve TLS directly; use a secure local tunnel",
-                    ));
+                let tls = match (tls_cert, tls_key) {
+                    (Some(certificate), Some(private_key)) => Some(
+                        vee_http::tls::server_config(&vee_http::tls::TlsFiles {
+                            certificate,
+                            private_key,
+                        })
+                        .map_err(|error| configuration_failure(format!("{error:#}")))?,
+                    ),
+                    _ => None,
+                };
+                let listen = vee_http::WebhookListen {
+                    address: std::net::SocketAddr::new(bind, port),
+                    allow_network,
+                    tls,
+                };
+                if let Some(refusal) = vee_http::webhook_listen_refusal(&listen) {
+                    return Err(configuration_failure(refusal));
                 }
                 let cwd = std::env::current_dir()?;
                 let root = vee_git::repository_root(&cwd).map_err(anyhow::Error::msg)?;
@@ -3825,14 +3841,17 @@ fn run() -> Result<u8> {
                     provider: provider.clone(),
                     lock: std::sync::Mutex::new(()),
                 });
-                let address = std::net::SocketAddr::new(bind, port);
-                eprintln!("Vee {provider_id} webhook listener: http://{address}/api/webhooks/{provider_id}");
+                let scheme = if listen.tls.is_some() {
+                    "https"
+                } else {
+                    "http"
+                };
+                eprintln!(
+                    "Vee {provider_id} webhook listener: {scheme}://{}/api/webhooks/{provider_id}",
+                    listen.address
+                );
                 tokio::runtime::Runtime::new()?.block_on(vee_http::serve_with_webhooks(
-                    root,
-                    address,
-                    allow_network,
-                    provider,
-                    handler,
+                    root, listen, provider, handler,
                 ))?;
                 Ok(0)
             }

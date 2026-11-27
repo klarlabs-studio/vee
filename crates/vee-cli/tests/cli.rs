@@ -2375,6 +2375,35 @@ fn hosting_pr_context_documents_provider_options() {
     assert!(help.contains("--username <USERNAME>"));
 }
 
+/// Beyond loopback the webhook server needs `--allow-network` and TLS, and
+/// a certificate needs its key (ADR 0038).
+#[test]
+fn hosting_webhook_serve_refuses_plaintext_beyond_loopback() {
+    let cases: &[(&[&str], &str)] = &[
+        (&["--bind", "192.0.2.1"], "--allow-network"),
+        (&["--bind", "192.0.2.1", "--allow-network"], "plaintext"),
+        (&["--bind", "0.0.0.0", "--allow-network"], "plaintext"),
+        (&["--tls-cert", "cert.pem"], "--tls-key"),
+    ];
+    for (extra, expected) in cases {
+        let output = vee()
+            .args([
+                "hosting",
+                "webhook-serve",
+                "--repository",
+                ".",
+                "--port",
+                "0",
+            ])
+            .args(*extra)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{extra:?} unexpectedly succeeded");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "{extra:?}: {stderr}");
+    }
+}
+
 #[test]
 fn hosting_pr_issues_documents_provider_options() {
     let output = vee()
@@ -5153,6 +5182,8 @@ fn hosting_webhook_serve_documents_repository_and_network_binding() {
     assert!(help.contains("--webhook-secret-env"));
     assert!(help.contains("--allow-network"));
     assert!(help.contains("--username <USERNAME>"));
+    assert!(help.contains("--tls-cert <PATH>"));
+    assert!(help.contains("--tls-key <PATH>"));
 }
 
 fn assert_matches_schema(value: &serde_json::Value, schema_json: &str, contract: &str) {
