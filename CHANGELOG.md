@@ -42,8 +42,9 @@ change configuration and output contracts.
 ### Reasoning effort for providers
 
 - `providers.<id>.reasoning_effort: low|medium|high` sets a reasoning
-  model's effort: Codex CLI's `model_reasoning_effort`, the OpenAI-compatible
-  `reasoning_effort` field, or Ollama's `think` level. It is refused for
+  model's effort: Claude CLI's `--effort`, Codex CLI's
+  `model_reasoning_effort`, the OpenAI-compatible `reasoning_effort` field,
+  or Ollama's `think` level. It is refused for
   provider kinds without such a setting, and it keys the review cache.
 
 ### Team analytics without a server

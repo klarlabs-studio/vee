@@ -3208,11 +3208,12 @@ policy_profiles:
         for accepted in [
             "{ kind: codex_cli, executable: codex, reasoning_effort: high }",
             "{ kind: openai_compatible, egress: network, endpoint: https://api.example.invalid/v1/chat/completions, model: m, reasoning_effort: low }",
+            "{ kind: claude_cli, executable: claude, reasoning_effort: low }",
         ] {
             let loaded = load(accepted);
             assert!(loaded.is_ok(), "{accepted}: {:?}", loaded.err());
         }
-        let refused = load("{ kind: claude_cli, executable: claude, reasoning_effort: high }");
+        let refused = load("{ kind: gemini_cli, executable: gemini, reasoning_effort: high }");
         assert!(refused
             .err()
             .unwrap()
@@ -3806,8 +3807,8 @@ pub struct ProviderConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window_tokens: Option<usize>,
     /// How hard a reasoning model thinks before it answers, for providers
-    /// with such a setting: `codex_cli`, `openai_compatible` and
-    /// `ollama_native`. Unset, the provider's default applies.
+    /// with such a setting: `claude_cli`, `codex_cli`, `openai_compatible`
+    /// and `ollama_native`. Unset, the provider's default applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
     #[serde(default)]
@@ -4401,13 +4402,14 @@ impl RepositoryConfig {
             if provider.reasoning_effort.is_some()
                 && !matches!(
                     provider.kind,
-                    ProviderKind::CodexCli
+                    ProviderKind::ClaudeCli
+                        | ProviderKind::CodexCli
                         | ProviderKind::OpenAiCompatible
                         | ProviderKind::OllamaNative
                 )
             {
                 return Err(format!(
-                    "provider {id} reasoning_effort is only valid for codex_cli, openai_compatible and ollama_native"
+                    "provider {id} reasoning_effort is only valid for claude_cli, codex_cli, openai_compatible and ollama_native"
                 ));
             }
         }
