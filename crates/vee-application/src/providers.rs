@@ -1126,6 +1126,10 @@ pub(crate) fn execute_claude_cli(
         args.push("--model".into());
         args.push(model.clone());
     }
+    if let Some(effort) = request.reasoning_effort {
+        args.push("--effort".into());
+        args.push(effort.as_str().into());
+    }
     if let Some(exploration) = &request.exploration {
         args.extend(claude_exploration_args(exploration));
     }

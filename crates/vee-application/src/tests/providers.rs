@@ -476,7 +476,7 @@ fn claude_cli_adapter_uses_restricted_schema_validated_json_contract() {
         context_window_tokens: None,
         max_output_tokens: None,
         environment: vec![],
-        reasoning_effort: None,
+        reasoning_effort: Some(vee_core::ReasoningEffort::Low),
         sample: None,
         exploration: None,
     };
@@ -517,6 +517,10 @@ fn claude_cli_adapter_uses_restricted_schema_validated_json_contract() {
     assert!(args
         .windows(2)
         .any(|pair| pair == ["--model", "test-model"]));
+    assert!(
+        args.windows(2).any(|pair| pair == ["--effort", "low"]),
+        "reasoning_effort becomes the CLI's --effort"
+    );
     let schema_at = args.iter().position(|arg| arg == "--json-schema").unwrap();
     let schema: serde_json::Value = serde_json::from_str(&args[schema_at + 1]).unwrap();
     assert_eq!(
